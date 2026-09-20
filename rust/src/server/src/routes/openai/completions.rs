@@ -23,7 +23,7 @@ use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
-    DecodedPromptLogprobs, DecodedTextEvent, FinishReason, TextOutputStream,
+    DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
     TextOutputStreamExt as _, TextRequest,
 };
 
@@ -317,11 +317,15 @@ async fn completion_chunk_stream(
                 }
             }
             Ok(DecodedTextEvent::TextDelta {
-                delta,
-                token_ids,
-                logprobs,
+                decoded,
+                sampled:
+                    SampledDelta {
+                        token_ids,
+                        logprobs,
+                    },
                 finished,
             }) => {
+                let delta = decoded.text;
                 // Prompt-only streaming already emitted the echoed prompt in the Start chunk.
                 // The one generated token is only used to drive the engine to a finished event,
                 // so hide its delta and forward only the terminal finish/usage metadata.
@@ -561,14 +565,30 @@ mod tests {
     use itertools::Itertools as _;
     use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{
-        DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTextEvent,
-        DecodedTokenLogprob, FinishReason, Finished,
+        DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedText,
+        DecodedTextEvent, DecodedTokenLogprob, FinishReason, Finished, SampledDelta,
     };
 
     use super::{
         ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
         StreamResponseEnvelope, completion_chunk_stream, final_chunk,
     };
+
+    fn decoded_delta(
+        text: impl Into<String>,
+        token_ids: Vec<u32>,
+        logprobs: Option<DecodedLogprobs>,
+        finished: Option<Finished>,
+    ) -> DecodedTextEvent {
+        DecodedTextEvent::TextDelta {
+            decoded: DecodedText::unattributed(text),
+            sampled: SampledDelta {
+                token_ids,
+                logprobs,
+            },
+            finished: finished.map(Box::new),
+        }
+    }
 
     fn stream_envelope() -> Arc<StreamResponseEnvelope> {
         Arc::new(StreamResponseEnvelope::new(
@@ -619,10 +639,10 @@ mod tests {
                 prompt_token_ids: vec![1, 2, 3, 4, 5].into(),
                 prompt_logprobs: None,
             }),
-            Ok(DecodedTextEvent::TextDelta {
-                delta: "h".to_string(),
-                token_ids: vec![b'h' as u32],
-                logprobs: Some(DecodedLogprobs {
+            Ok(decoded_delta(
+                "h",
+                vec![b'h' as u32],
+                Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![
                             DecodedTokenLogprob {
@@ -640,12 +660,12 @@ mod tests {
                         ],
                     }],
                 }),
-                finished: None,
-            }),
-            Ok(DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: vec![b'!' as u32],
-                logprobs: Some(DecodedLogprobs {
+                None,
+            )),
+            Ok(decoded_delta(
+                "",
+                vec![b'!' as u32],
+                Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![
                             DecodedTokenLogprob {
@@ -663,7 +683,7 @@ mod tests {
                         ],
                     }],
                 }),
-                finished: Some(Finished {
+                Some(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 5,
                         output_token_count: 2,
@@ -674,8 +694,9 @@ mod tests {
                     ))),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 }),
-            }),
+            )),
         ]);
 
         let chunks = completion_chunk_stream(
@@ -773,11 +794,11 @@ mod tests {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
             }),
-            Ok(DecodedTextEvent::TextDelta {
-                delta: " leaked".to_string(),
-                token_ids: vec![3],
-                logprobs: None,
-                finished: Some(Finished {
+            Ok(decoded_delta(
+                " leaked",
+                vec![3],
+                None,
+                Some(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
@@ -786,8 +807,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 }),
-            }),
+            )),
         ]);
 
         let response = super::collect_completion(
@@ -825,11 +847,11 @@ mod tests {
                 prompt_token_ids: vec![9707].into(),
                 prompt_logprobs: None,
             }),
-            Ok(DecodedTextEvent::TextDelta {
-                delta: " leaked".to_string(),
-                token_ids: vec![3],
-                logprobs: None,
-                finished: Some(Finished {
+            Ok(decoded_delta(
+                " leaked",
+                vec![3],
+                None,
+                Some(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 1,
@@ -838,8 +860,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 }),
-            }),
+            )),
         ]);
 
         let response = super::collect_completion(
@@ -880,11 +903,11 @@ mod tests {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
             }),
-            Ok(DecodedTextEvent::TextDelta {
-                delta: " leaked".to_string(),
-                token_ids: vec![3],
-                logprobs: None,
-                finished: Some(Finished {
+            Ok(decoded_delta(
+                " leaked",
+                vec![3],
+                None,
+                Some(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
@@ -893,8 +916,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 }),
-            }),
+            )),
         ]);
 
         let chunks = completion_chunk_stream(
@@ -952,11 +976,11 @@ mod tests {
                 prompt_token_ids: vec![9707].into(),
                 prompt_logprobs: None,
             }),
-            Ok(DecodedTextEvent::TextDelta {
-                delta: " leaked".to_string(),
-                token_ids: vec![3],
-                logprobs: None,
-                finished: Some(Finished {
+            Ok(decoded_delta(
+                " leaked",
+                vec![3],
+                None,
+                Some(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 1,
@@ -965,8 +989,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 }),
-            }),
+            )),
         ]);
 
         let chunks = completion_chunk_stream(
@@ -1026,11 +1051,11 @@ mod tests {
                     }],
                 }),
             }),
-            Ok(DecodedTextEvent::TextDelta {
-                delta: " leaked".to_string(),
-                token_ids: vec![3],
-                logprobs: None,
-                finished: Some(Finished {
+            Ok(decoded_delta(
+                " leaked",
+                vec![3],
+                None,
+                Some(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
@@ -1039,8 +1064,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 }),
-            }),
+            )),
         ]);
 
         let chunks = completion_chunk_stream(

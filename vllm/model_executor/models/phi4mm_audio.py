@@ -7,6 +7,7 @@
 #!/usr/bin/env python3
 import abc
 import math
+import typing
 from typing import Any, Literal
 
 import numpy as np
@@ -135,6 +136,7 @@ class ConformerEncoderLayer(nn.Module):
             1 = typical Multi-Head Attention,
             1 < attn_group_sizes < attention_heads = Grouped-Query Attention
             attn_group_sizes = attention_heads = Multi-Query Attention
+
     """
 
     def __init__(
@@ -152,7 +154,7 @@ class ConformerEncoderLayer(nn.Module):
         batch_norm: bool = False,
         activation: str = "relu",
         chunk_se: int = 0,
-        chunk_size: int = 18,
+        chunk_size: int | list[int] = 18,
         conv_activation: str = "relu",
         conv_glu_type: str = "sigmoid",
         bias_in_glu: bool = True,
@@ -231,6 +233,7 @@ class ConformerEncoderLayer(nn.Module):
             mask: mask for x (batch, max_time_in)
             relative_attention_bias: bias added to attention logits w.r.t.
                 relative positions (1, n_head, time1, time2)
+
         """
         x = x + 0.5 * self.feed_forward_in(x)
         norm_x = self.layer_norm_att(x)
@@ -253,7 +256,7 @@ class ConformerEncoderLayer(nn.Module):
 
 
 class TransformerEncoderBase(abc.ABC, nn.Module):
-    """The Base class for Transformer based encoders
+    """The Base class for Transformer based encoders.
 
     Please set causal = True in streaming model
     Args:
@@ -392,6 +395,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             else None
         )
         if self.relative_attention_bias_type == "t5":
+            assert relative_attention_bias_args is not None
             assert self.num_heads % self.attention_group_size == 0, (
                 "attention_group_size must divide n_head"
             )
@@ -405,6 +409,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         else:
             raise NotImplementedError
 
+        assert self.encoder_embedding_config is not None
         self.encoder_embedding = MeanVarianceNormLayer(
             self.encoder_embedding_config["input_size"]
         )
@@ -421,6 +426,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         the cases and return one of them.  Torchscript does support that.
         """
         if self.input_layer == "nemo_conv":
+            assert self.nemo_conv_settings is not None
             # Handle the special causal case
             subsampling_causal_cond = self.nemo_conv_settings.get(
                 "subsampling", "dw_striding"
@@ -431,19 +437,19 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             ]
             is_causal = self.nemo_conv_settings.get("is_causal", False)
             if is_causal and subsampling_causal_cond:
-                lens_change = (
-                    torch.ceil(feature_lens / self.time_reduction).long()
-                    if isinstance(feature_lens, Tensor)
-                    else math.ceil(feature_lens / self.time_reduction)
-                )
                 feature_lens_remainder = feature_lens % self.time_reduction
                 if isinstance(feature_lens, Tensor):
+                    lens_change = torch.ceil(feature_lens / self.time_reduction).long()
                     lens_change[feature_lens_remainder != 1] += 1
-                elif feature_lens_remainder != 1:
+                    return lens_change
+
+                lens_change = math.ceil(feature_lens / self.time_reduction)
+                if feature_lens_remainder != 1:
                     lens_change += 1
                 return lens_change
             ceil_func = math.ceil if isinstance(feature_lens, int) else torch.ceil
             return ceil_func(feature_lens / self.time_reduction)
+        raise ValueError("unknown input_layer: " + self.input_layer)
 
     @abc.abstractmethod
     def forward(self) -> Any:
@@ -455,7 +461,6 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         left_chunk: int | list[int] | None = None,
     ) -> tuple[int, int]:
         """If chunk size is a list, we will randomly select a chunk size."""
-
         if chunk_size is None:
             chunk_size = self.chunk_size
         if left_chunk is None:
@@ -476,6 +481,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 )
             left_chunk_train_eff = left_chunk[chunk_size_index]
         else:
+            assert chunk_size is not None
+            assert isinstance(left_chunk, int)
             chunk_size_train_eff = chunk_size
             left_chunk_train_eff = left_chunk
 
@@ -516,7 +523,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         seq_len: int,
         batch_size: int,
         chunk_size: int | list[int],
-        left_chunk: int | list[int],
+        left_chunk: int | list[int] | None,
     ) -> torch.Tensor:
         chunk_size_train_eff, left_chunk_train_eff = self._chunk_size_selection(
             chunk_size, left_chunk
@@ -534,6 +541,37 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             .expand([batch_size, -1, -1])
         )
         return enc_streaming_mask
+
+    @typing.overload
+    def forward_embeddings(
+        self,
+        xs_pad: torch.Tensor,
+        masks: torch.Tensor,
+        chunk_size_nc: None = None,
+        left_chunk_nc: int | list[int] | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor,
+        torch.Tensor,
+    ]: ...
+
+    @typing.overload
+    def forward_embeddings(
+        self,
+        xs_pad: torch.Tensor,
+        masks: torch.Tensor,
+        chunk_size_nc: int | list[int],
+        left_chunk_nc: int | list[int] | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]: ...
 
     def forward_embeddings(
         self,
@@ -558,7 +596,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             torch.Tensor,
         ]
     ):
-        """Forwarding the inputs through the top embedding layers
+        """Forwarding the inputs through the top embedding layers.
 
         Args:
             xs_pad: torch.Tensor
@@ -569,6 +607,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                             non-causal layers
             left_chunk_nc: (optional, default is None) # of left chunks for
                             non-causal layers
+
         """
         # pylint: disable=R0915
         # get new lens.
@@ -606,8 +645,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 seq_len, batch_size, chunk_size_nc, left_chunk_nc
             )
             if device.type != "cpu":
-                enc_streaming_mask_nc = enc_streaming_mask_nc.contiguous().to(
-                    device, non_blocking=True
+                enc_streaming_mask_nc = async_tensor_h2d(
+                    enc_streaming_mask_nc.contiguous(), device
                 )
             if masks is not None:
                 hs_mask_nc = masks & enc_streaming_mask_nc
@@ -911,6 +950,7 @@ class ConformerEncoder(TransformerEncoderBase):
     ) -> torch.Tensor | None:
         if self.relative_attention_bias_layer:
             return self.relative_attention_bias_layer(input_tensor)
+        return None
 
     def calculate_hs_mask(
         self, xs_pad: torch.Tensor, device: torch.device, mask: torch.Tensor | None
@@ -937,13 +977,14 @@ class ConformerEncoder(TransformerEncoderBase):
     def forward(
         self, xs_pad: torch.Tensor, masks: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Conformer Forward function
+        """Conformer Forward function.
 
         Args:
             xs_pad: torch.Tensor
                 input tensor
             masks: torch.Tensor
                 post-embedding input lengths
+
         """
         xs_pad = self.encoder_embedding(xs_pad)
         input_tensor, pos_k, pos_v, hs_mask, masks = self.forward_embeddings(
@@ -1027,7 +1068,7 @@ class ConformerEncoder(TransformerEncoderBase):
 
 
 class WindowQformer(nn.Module):
-    """Window-level Qformer"""
+    """Window-level Qformer."""
 
     def __init__(
         self,
@@ -1069,7 +1110,7 @@ class WindowQformer(nn.Module):
         mask: torch.Tensor | None,
         embed_len: int | None = None,
     ) -> tuple[torch.Tensor, int | None]:
-        """forward decoder"""
+        """Forward decoder."""
         # audio_embed: N x T x D => N x D x T
 
         audio_embed = audio_embed.transpose(1, 2)
@@ -1148,7 +1189,7 @@ class AudioEmbedding(nn.Module):
         if kwargs.get("use_qformer", False):
             qformer_config = kwargs.get("qformer_config", {})
             qformer_config["attention_dim"] = audio_dim_out
-            self.qformer = WindowQformer(**qformer_config)
+            self.qformer: WindowQformer | None = WindowQformer(**qformer_config)
         else:
             self.qformer = None
 
@@ -1175,7 +1216,7 @@ class AudioEmbedding(nn.Module):
                         "{i} should be specified outside of the NeMo dictionary"
                     )
 
-            self.conv_ds = NemoConvSubsampling(
+            self.conv_ds: NemoConvSubsampling | None = NemoConvSubsampling(
                 **default_nemo_conv_settings,
             )
         else:
@@ -1227,9 +1268,9 @@ class AudioEmbedding(nn.Module):
         audio_attention_mask: torch.Tensor | None = None,
         audio_projection_mode: str = "speech",
     ) -> torch.Tensor:
-        """
-        arguments:
-            input_embeds: audio features (B, T, D)  B: num audios in a sequence
+        """arguments:
+        input_embeds: audio features (B, T, D)  B: num audios in a sequence
+
         """
         if self.freeze_audio_processor:
             with torch.no_grad():
@@ -1281,12 +1322,12 @@ class AudioEmbedding(nn.Module):
         audio_attention_mask: torch.Tensor | None = None,
         audio_projection_mode: str = "speech",
     ) -> torch.Tensor:
-        """
-        arguments:
+        """arguments:
             audio_features: audio features (T, D)
 
-        returns:
+        Returns:
             audio_embeds: audio embeddings (num_audio_tokens, hidden_dim)
+
         """
         audio_embeds = self.get_audio_features(
             audio_features.unsqueeze(0),

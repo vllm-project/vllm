@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from weakref import WeakValueDictionary
 
 import torch
@@ -112,6 +114,7 @@ class All2AllManagerBase:
         Returns:
             An int32 device tensor where 0 marks a live rank and 1 marks a
             masked (dead/unreachable) rank.
+
         """
         raise NotImplementedError
 
@@ -157,10 +160,19 @@ class All2AllManagerBase:
     def destroy(self):
         pass
 
+    def stage_ep_size(self) -> None:
+        pass
+
+    def commit_ep_size(self) -> None:
+        pass
+
+    @contextmanager
+    def mask_remote_ranks(self) -> Iterator[None]:
+        yield
+
 
 class DeviceCommunicatorBase:
-    """
-    Base class for device-specific communicator.
+    """Base class for device-specific communicator.
     It can use the `cpu_group` to initialize the communicator.
     If the device has PyTorch integration (PyTorch can recognize its
     communication backend), the `device_group` will also be given.
@@ -225,6 +237,12 @@ class DeviceCommunicatorBase:
 
     def checkpoint_restore(self) -> None:
         """Restore communicator state after checkpoint (default: no-op)."""
+
+    def suspend(self) -> None:
+        """Release reclaimable communicator memory (default: no-op)."""
+
+    def resume(self) -> None:
+        """Restore memory released by ``suspend`` (default: no-op)."""
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
@@ -300,8 +318,7 @@ class DeviceCommunicatorBase:
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
     ) -> torch.Tensor | None:
-        """
-        NOTE: We assume that the input tensor is on the same device across
+        """NOTE: We assume that the input tensor is on the same device across
         all the ranks.
         NOTE: `dst` is the local rank of the destination rank.
         """
@@ -329,7 +346,7 @@ class DeviceCommunicatorBase:
         return output_tensor
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
-        """Sends a tensor to the destination rank in a blocking way"""
+        """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
@@ -367,8 +384,7 @@ class DeviceCommunicatorBase:
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and router logits to the appropriate device.
+        """Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
         if extra_tensors is not None:
@@ -386,8 +402,7 @@ class DeviceCommunicatorBase:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        """Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         if extra_tensors is not None:
@@ -397,8 +412,7 @@ class DeviceCommunicatorBase:
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Combine the hidden states and router logits from the appropriate device.
+        """Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
         return hidden_states

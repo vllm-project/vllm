@@ -18,6 +18,21 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
+# Legacy guided-decoding fields are treated like any other extra field since
+# their removal, so requests still using them get HTTP 200 with unconstrained
+# output and no visible signal (see #53975). Warn instead of burying the
+# only breadcrumb at DEBUG level.
+_REMOVED_GUIDED_FIELDS = frozenset(
+    {
+        "guided_json",
+        "guided_regex",
+        "guided_choice",
+        "guided_grammar",
+        "guided_decoding_backend",
+        "guided_whitespace_pattern",
+    }
+)
+
 
 class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
@@ -43,10 +58,20 @@ class OpenAIBaseModel(BaseModel):
             cls.field_names = field_names
 
         # Compare against both field names and aliases
-        if any(k not in field_names for k in data):
+        extra_keys = data.keys() - field_names
+        if extra_keys:
+            removed = extra_keys & _REMOVED_GUIDED_FIELDS
+            if removed:
+                logger.warning_once(
+                    "Request contains the removed guided-decoding field(s) "
+                    "%s, which are ignored; output will NOT be constrained. "
+                    "Use `structured_outputs` (or `response_format`) "
+                    "instead; see docs/features/structured_outputs.md.",
+                    str(sorted(removed)),
+                )
             logger.debug(
                 "The following fields were present in the request but ignored: %s",
-                data.keys() - field_names,
+                extra_keys,
             )
         return result
 

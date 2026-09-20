@@ -96,7 +96,6 @@ def _make_batch(
         num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
         is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
         has_prefill=False,
-        max_seq_len_np=None,
         input_ids=torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE),
         positions=torch.arange(num_tokens, dtype=torch.int64, device=DEVICE),
         is_padding=torch.zeros(num_tokens, dtype=torch.bool, device=DEVICE),
@@ -184,6 +183,12 @@ def test_local_batch_partition(tp_size: int, seed: int):
         ).all()
         assert (_np(local.logits_indices) == _np(batch.logits_indices)[rows]).all()
         assert (_np(local.seq_lens) == _np(batch.seq_lens)[owned]).all()
+        # Indexed by batch position, like seq_lens: a consumer holding local row
+        # indices reads another request's length if this is not localised too.
+        assert (
+            _np(local.seq_lens_cpu_upper_bound)
+            == _np(batch.seq_lens_cpu_upper_bound)[owned]
+        ).all()
         assert batch.num_draft_tokens_per_req is not None
         assert local.num_draft_tokens_per_req is not None
         assert (

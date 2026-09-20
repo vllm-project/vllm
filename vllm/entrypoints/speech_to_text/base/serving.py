@@ -358,8 +358,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         segment_class: type[SpeechToTextSegment],
         start_time: float = 0,
     ) -> list[SpeechToTextSegment]:
-        """
-        Convert tokens to verbose segments.
+        """Convert tokens to verbose segments.
 
         This method expects the model to produce
         timestamps as tokens (similar to Whisper).
@@ -440,11 +439,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if not request.model:
             request.model = self.models.model_name()
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         if request.response_format not in [
             "text",

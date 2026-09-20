@@ -9,7 +9,17 @@ fi
 REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
-IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64"
+
+# When TORCH_NIGHTLY=1, build against torch nightly and tag it with the
+# -torch-nightly-arm64 suffix the DGX Spark test steps pull on the nightly lane
+# (ci-infra get_image(arm64=True) appends -torch-nightly before -arm64).
+PYTORCH_NIGHTLY_ARGS=()
+if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
+  IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-torch-nightly-arm64"
+  PYTORCH_NIGHTLY_ARGS=(--build-arg PYTORCH_NIGHTLY=1)
+else
+  IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64"
+fi
 
 # authenticate with AWS ECR
 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY" || true
@@ -30,6 +40,7 @@ else
     --build-arg torch_cuda_arch_list="9.0 10.0 11.0 12.0" \
     --build-arg USE_SCCACHE=1 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
+    "${PYTORCH_NIGHTLY_ARGS[@]}" \
     --tag "$IMAGE" \
     --target test \
     --progress plain .
