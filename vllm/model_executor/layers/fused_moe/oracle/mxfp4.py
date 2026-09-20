@@ -711,6 +711,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
         priority_backends = _get_priority_backends()
 
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
+    unsupported_reasons: list[tuple[Mxfp4MoeBackend, str, str | None]] = []
     for backend in priority_backends:
         activation_key = _backend_activation_key(backend)
         for k_cls in backend_to_kernel_cls(backend):
@@ -722,9 +723,20 @@ def select_deepseek_v4_mxfp4_moe_backend(
                 return backend, k_cls
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+                # A backend can offer several kernel classes (TRTLLM returns a
+                # monolithic and a modular one), and they refuse for different
+                # reasons, so the class has to be named too.
+                unsupported_reasons.append((backend, k_cls.__name__, reason))
 
+    unsupported_log = "; ".join(
+        f"backend: {backend.value}, kernel: {kernel}, reason: {reason}"
+        for backend, kernel, reason in unsupported_reasons
+    )
     raise NotImplementedError(
-        "No MXFP4 MoE backend supports the deployment configuration."
+        "No MXFP4 MoE backend supports the deployment configuration. "
+        f"Candidate backends were: "
+        f"{[backend.value for backend in priority_backends]}. "
+        f"Unsupported reasons: {unsupported_log}."
     )
 
 
