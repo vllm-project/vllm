@@ -112,16 +112,15 @@ def test_audio_processing_cache_is_batch_independent(asr_processor, cached_indic
     processor, _ = asr_processor
     config = processor.info.ctx.model_config
     config.get_multimodal_config().mm_processor_cache_gb = 1
-    cached_processor = MULTIMODAL_REGISTRY.create_processor(
-        config, cache=MultiModalProcessorOnlyCache(config)
-    )
+    cache = MultiModalProcessorOnlyCache(config)
     rng = np.random.RandomState(42)
     audios = [rng.randn(samples).astype(np.float32) for samples in (16001, 32000)]
     for index in cached_indices:
-        cached_processor(
+        processor(
             _AUDIO_PROMPT,
             mm_items=processor.info.parse_mm_data({"audio": audios[index]}),
             hf_processor_mm_kwargs={},
+            cache=cache,
         )
 
     for batch in (audios, audios[::-1]):
@@ -131,7 +130,7 @@ def test_audio_processing_cache_is_batch_independent(asr_processor, cached_indic
         )
         _assert_inputs_equal(
             processor(_AUDIO_PROMPT * 2, **kwargs),
-            cached_processor(_AUDIO_PROMPT * 2, **kwargs),
+            processor(_AUDIO_PROMPT * 2, **kwargs, cache=cache),
         )
 
 
