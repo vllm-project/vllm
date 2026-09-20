@@ -495,8 +495,9 @@ class ServingTokens(GenerateBaseServing):
                                 routed_experts=routed_experts_b64,
                             )
                         ],
-                        request_spec_decode_stats=spec_stats,
                     )
+                    if spec_stats is not None:
+                        chunk.request_spec_decode_stats = spec_stats
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids
                         chunk.mm_placeholders = request._response_mm_placeholders
