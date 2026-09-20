@@ -272,7 +272,10 @@ def test_deepseek_v41_mhc_pre_delayed(
 )
 @pytest.mark.parametrize("num_tokens", [0, 1, 8, 9, 32, 128, 256])
 @pytest.mark.parametrize("entry", ["broadcast", "identity", "carried"])
-def test_deepseek_v41_mhc_overlap_preserves_outputs_on_replay(num_tokens, entry):
+@pytest.mark.parametrize("hidden_size,hc_mult", [(4096, 2), (5120, 4), (7168, 4)])
+def test_deepseek_v41_mhc_overlap_preserves_outputs_on_replay(
+    num_tokens, entry, hidden_size, hc_mult
+):
     """The input is usable before joining; coefficients stay exact on graph replay."""
     from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_pre_delayed_overlap
     from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -280,21 +283,26 @@ def test_deepseek_v41_mhc_overlap_preserves_outputs_on_replay(num_tokens, entry)
     if not is_deep_gemm_supported():
         pytest.skip("DeepGEMM required")
     set_random_seed(42)
-    residual = torch.randn(num_tokens, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
-    fn = torch.randn(24, 4, 5120, device=DEVICE) * 0.02
+    mix_size = hc_mult * (hc_mult + 2)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    fn = torch.randn(mix_size, hc_mult, hidden_size, device=DEVICE) * 0.02
     x = None
     pre_mix = None
     if entry == "broadcast":
         x = residual[:, 0].contiguous()
-        residual = x.unsqueeze(1).expand(-1, 4, -1).contiguous()
+        residual = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
         fn = fn.sum(1)
     else:
         fn = fn.flatten(1)
         if entry == "carried":
-            pre_mix = torch.rand(num_tokens, 4, device=DEVICE)
+            pre_mix = torch.rand(num_tokens, hc_mult, device=DEVICE)
     scale = torch.tensor([0.5, 0.25, 1.0], device=DEVICE)
-    base = torch.randn(24, device=DEVICE)
-    weight = torch.empty(5120, dtype=torch.bfloat16, device=DEVICE).uniform_(0.5, 1.5)
+    base = torch.randn(mix_size, device=DEVICE)
+    weight = torch.empty(hidden_size, dtype=torch.bfloat16, device=DEVICE).uniform_(
+        0.5, 1.5
+    )
     args = (residual, fn, scale, base, 1e-20, 1e-6, 1e-6, 2.0, 20)
     kwargs = dict(pre_mix=pre_mix, x=x, norm_weight=weight, norm_eps=1e-20)
     side = torch.cuda.Stream()

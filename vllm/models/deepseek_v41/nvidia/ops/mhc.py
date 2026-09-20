@@ -17,11 +17,14 @@ MHC_OVERLAP_MAX_TOKENS = 16
 def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
     """Check kernel requirements and safety of sharing the coefficient stream."""
     config = vllm_config.model_config.hf_config
+    # DeepGEMM's prenorm kernel requires K % 64 == 0, N % 8 == 0, and N <= 32.
+    mix_size = config.hc_mult * (config.hc_mult + 2)
     return (
         current_platform.is_device_capability_family(100)
         and is_deep_gemm_supported()
-        and config.hidden_size == 5120
-        and config.hc_mult == 4
+        and config.hidden_size % 64 == 0
+        and 0 < mix_size <= 32
+        and mix_size % 8 == 0
         and not vllm_config.parallel_config.use_ubatching
     )
 
@@ -55,7 +58,6 @@ def mhc_pre_delayed_overlap(
     from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
 
     n, hc, hidden = residual.shape
-    assert hc == 4 and hidden == 5120
     assert residual.is_contiguous() and residual.dtype == torch.bfloat16
     assert norm_weight is not None
     if x is None:
