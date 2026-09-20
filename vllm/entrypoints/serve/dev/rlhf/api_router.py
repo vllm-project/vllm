@@ -275,12 +275,9 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
 
     client = engine_client(raw_request)
 
-    # Sleeping discards or offloads the weight storage, and a paused engine is
-    # not serving, so hashing or rewriting the weights is meaningless: digests
-    # would describe freed memory and reset would write to it. Callers wake up
-    # and resume before checking, which is what a weight-update cycle does.
-    # Checked before the per-action request validation so that every action
-    # reports the engine state rather than a missing argument.
+    # A pause or sleep drops the weight storage, so hashing it or rewriting it
+    # is meaningless. Checked before the per-action arguments so that every
+    # action reports the engine state rather than a missing argument.
     if await client.is_paused():
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT.value,

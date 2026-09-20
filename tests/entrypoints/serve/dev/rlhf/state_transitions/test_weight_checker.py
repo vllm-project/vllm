@@ -125,7 +125,11 @@ class TestWeightCheckerAPI:
         assert health(url) == 200
 
     def test_paused_server_is_conflict(self, wc_server):
-        """A paused or sleeping engine cannot hash or rewrite its weights."""
+        """A paused or sleeping engine cannot hash or rewrite its weights.
+
+        ``compare`` is sent without a baseline, so 409 must win over the 400
+        that a missing baseline would otherwise produce.
+        """
         mode, url = wc_server
         assert pause(url) == 200
         try:
@@ -137,8 +141,7 @@ class TestWeightCheckerAPI:
                 )
             assert health(url) == 200
         finally:
-            # resume is idempotent, and the class fixture has no autouse
-            # cleanup, so leave the shared server unpaused for later tests.
+            # Leave the shared class-scoped server unpaused for later tests.
             assert requests.post(f"{url}/resume", timeout=10).status_code == 200
 
     def test_checksum_is_stable_and_stateless(self, wc_server):
@@ -158,8 +161,8 @@ class TestWeightCheckerAPI:
             f"[{mode['name']}] checksum changed while weights were unchanged"
         )
 
-        # A repeated comparison must keep working: the endpoint stores no
-        # baseline, so every request is routed independently.
+        # Statelessness means a comparison can be repeated, and any API
+        # process can serve it.
         for _ in range(2):
             comparison = weight_checker(url, "compare", checksums)
             assert comparison.status_code == 200, comparison.text

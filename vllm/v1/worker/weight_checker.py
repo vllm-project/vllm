@@ -32,16 +32,13 @@ def compute_weight_checksums(
     """Return one SHA-256 digest per checksum-covered tensor on this worker.
 
     Hashing needs host bytes, so each tensor is moved to CPU as one uint8
-    array and passed to hashlib as a buffer. Non-persistent buffers (RoPE
-    sin/cos caches recomputed from config) are skipped because they vary
-    across restarts even when weights are unchanged.
+    array and passed to hashlib as a buffer.
     """
     prefix = _rank_prefix(vllm_config, dp_rank)
     checksums: dict[str, str] = {}
     for name, tensor in _iter_checksum_targets(model):
         cpu_uint8 = tensor.data.contiguous().cpu().view(torch.uint8).numpy()
-        # memoryview hashes the array in place: .tobytes() would copy the
-        # whole tensor again on top of the host copy made above.
+        # Hash the array in place; .tobytes() would copy it a second time.
         raw = memoryview(cpu_uint8)
         checksums[f"{prefix}{name}"] = hashlib.sha256(raw).hexdigest()
     return checksums
@@ -50,7 +47,7 @@ def compute_weight_checksums(
 def reset_weights(model: nn.Module) -> None:
     """Randomize exactly the tensors covered by ``compute_weight_checksums``."""
     for _, tensor in _iter_checksum_targets(model):
-        # Chunk so the float32 staging buffer stays bounded for large weights.
+        # Chunk so the staging buffer stays bounded for large weights.
         if tensor.numel() == 0:
             continue
         if tensor.is_contiguous():
