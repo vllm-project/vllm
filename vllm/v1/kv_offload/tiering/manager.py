@@ -575,6 +575,13 @@ class TieringOffloadingManager(OffloadingManager):
             tier.touch(keys, req_context)
 
     @override
+    def record_access(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        """Record a request-scoped access in the primary tier."""
+        self.primary_tier.record_access(keys, req_context)
+
+    @override
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """Mark chunks as done loading from primary tier to GPU.
 
