@@ -374,6 +374,11 @@ class ServingTokens(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
+        spec_stats = (
+            build_spec_decoding_metrics(final_res)
+            if request.sampling_params.n == 1
+            else None
+        )
         response = GenerateResponse(
             request_id=request_id,
             created=created_time,
@@ -385,11 +390,7 @@ class ServingTokens(GenerateBaseServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             mm_placeholders=request._response_mm_placeholders,
-            request_spec_decode_stats=(
-                build_spec_decoding_metrics(final_res)
-                if request.sampling_params.n == 1
-                else None
-            ),
+            request_spec_decode_stats=spec_stats,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
@@ -447,6 +448,9 @@ class ServingTokens(GenerateBaseServing):
                     num_generated_tokens = [0] * len(res.outputs)
                     first_iteration = False
 
+                spec_stats = (
+                    build_spec_decoding_metrics(res) if sampling_params.n == 1 else None
+                )
                 for output in res.outputs:
                     i = output.index
                     delta_token_ids = output.token_ids
@@ -459,10 +463,7 @@ class ServingTokens(GenerateBaseServing):
                     # or request metrics are pending.
                     if not delta_token_ids and (
                         finish_reason is None
-                        or (
-                            prompt_token_ids is None
-                            and output.spec_decode_metrics is None
-                        )
+                        or (prompt_token_ids is None and spec_stats is None)
                     ):
                         continue
 
@@ -494,12 +495,7 @@ class ServingTokens(GenerateBaseServing):
                                 routed_experts=routed_experts_b64,
                             )
                         ],
-                        request_spec_decode_stats=(
-                            None
-                            if sampling_params.n != 1
-                            or output.spec_decode_metrics is None
-                            else output.spec_decode_metrics.to_dict()
-                        ),
+                        request_spec_decode_stats=spec_stats,
                     )
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids
