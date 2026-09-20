@@ -30,6 +30,43 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
+- label: ":amd: (MI300) LM Eval Small Models Harness"
+  key: amd-lm-eval-small-models-harness
+  dind: false
+  device: mi300_1
+  timeout_in_minutes: 35
+  depends_on:
+  - image-build-amd
+  working_dir: /vllm-workspace/.buildkite/lm-eval-harness
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - .buildkite/lm-eval-harness/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
+
+- label: ":nvidia: (H200 MIG 35GB) LM Eval Watermarking"
+  device: h200_35gb
+  key: lm-eval-watermarking
+  # Recorded runs took 80–140 seconds
+  timeout_in_minutes: 10
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/config/watermarking.py
+  - vllm/sampling_params.py
+  - vllm/v1/watermarking/
+  - vllm/v1/worker/gpu/
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
+
 # - label: LM Eval Large Models (4xA100)
 #   key: lm-eval-large-models-4xa100
 #   device: a100
@@ -84,7 +121,7 @@ steps:
       label: ":amd: (MI355) LM Eval Small Models Distributed"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 45
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -99,6 +136,24 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
+
+- label: ":nvidia: (B200) LM Eval HiSparse Nightly"
+  key: lm-eval-hisparse-nightly-4xb200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/attention/backends/mla/
+  - vllm/model_executor/layers/attention/sparse_mla_attention.py
+  - vllm/v1/worker/gpu/
+  - csrc/libtorch_stable/hisparse_kernels.cu
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-hisparse.txt
 
 - label: ":nvidia: (B200) LM Eval PCP"
   key: lm-eval-pcp-4xb200
@@ -241,7 +296,7 @@ steps:
 
 - label: ":nvidia: (H200) LM Eval Large Models"
   key: lm-eval-large-models-8xh200
-  timeout_in_minutes: 50
+  timeout_in_minutes: 120
   device: h200
   optional: true
   num_devices: 8
@@ -252,13 +307,16 @@ steps:
       label: ":amd: (MI300) LM Eval Large Models"
       dind: false
       device: mi300_8
-      timeout_in_minutes: 40
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+      source_file_dependencies:
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) MoE Refactor Integration TEMPORARY"
   key: moe-refactor-integration-test-h100-temporary

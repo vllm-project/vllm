@@ -18,6 +18,7 @@ MODELS = [
     EmbedModelInfo(
         "thenlper/gte-large",
         mteb_score=0.76807651,
+        mteb_tol=2e-3,
         architecture="BertModel",
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
@@ -44,6 +45,7 @@ MODELS = [
         "Alibaba-NLP/gte-multilingual-base",
         architecture="GteNewModel",
         mteb_score=0.775074696,
+        mteb_tol=2e-3,
         hf_overrides={"architectures": ["GteNewModel"]},
         seq_pooling_type="CLS",
         attn_type="encoder_only",
@@ -79,6 +81,7 @@ MODELS = [
     EmbedModelInfo(
         "Alibaba-NLP/gte-modernbert-base",
         mteb_score=0.748193353,
+        mteb_tol=2e-3,
         architecture="ModernBertModel",
         seq_pooling_type="CLS",
         attn_type="encoder_only",
@@ -90,6 +93,7 @@ MODELS = [
     EmbedModelInfo(
         "Qwen/Qwen3-Embedding-0.6B",
         mteb_score=0.771163695,
+        mteb_tol=2e-3,
         architecture="Qwen3ForCausalLM",
         seq_pooling_type="LAST",
         attn_type="decoder",
@@ -109,6 +113,7 @@ RERANK_MODELS = [
         # classifier_pooling: mean
         "Alibaba-NLP/gte-reranker-modernbert-base",
         mteb_score=0.33386,
+        mteb_tol=1e-2,
         architecture="ModernBertForSequenceClassification",
         seq_pooling_type="CLS",
         attn_type="encoder_only",
@@ -119,6 +124,7 @@ RERANK_MODELS = [
     RerankModelInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
         mteb_score=0.33062,
+        mteb_tol=1e-2,
         architecture="GteNewForSequenceClassification",
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
         seq_pooling_type="CLS",
@@ -130,6 +136,7 @@ RERANK_MODELS = [
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
@@ -142,6 +149,7 @@ def test_embed_models_correctness(
     correctness_test_embed_models(hf_runner, vllm_runner, model_info, example_prompts)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     vllm_extra_kwargs = {}

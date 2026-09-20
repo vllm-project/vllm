@@ -33,8 +33,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class KVCacheBlocks:
-    """
-    The allocation result of KVCacheManager, work as the interface between
+    """The allocation result of KVCacheManager, work as the interface between
     Scheduler and KVCacheManager, to hide KVCacheManager's internal data
     structure from the Scheduler.
     """
@@ -85,8 +84,7 @@ class KVCacheBlocks:
         *,
         group_ids: Sequence[int] | None = None,
     ) -> tuple[list[int], ...] | None:
-        """
-        Converts the KVCacheBlocks instance to block_ids.
+        """Converts the KVCacheBlocks instance to block_ids.
 
         Args:
             allow_none: Return None when every selected group is empty.
@@ -97,6 +95,7 @@ class KVCacheBlocks:
                 - the outer tuple corresponds to KV cache groups
                 - each inner list contains the block_ids of the blocks in that
                   group
+
         """
         groups = (
             self.blocks
@@ -125,9 +124,7 @@ class KVCacheBlocks:
         ]
 
     def new_empty(self) -> "KVCacheBlocks":
-        """
-        Creates a new KVCacheBlocks instance with no blocks.
-        """
+        """Creates a new KVCacheBlocks instance with no blocks."""
         return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
 
 
@@ -232,6 +229,7 @@ class KVCacheManager:
 
         Returns:
             The KV cache usage (between 0.0 and 1.0).
+
         """
         return self.block_pool.get_usage()
 
@@ -240,6 +238,7 @@ class KVCacheManager:
 
         Returns:
             The current prefix caching stats, or None if logging is disabled.
+
         """
         if not self.log_stats:
             return None
@@ -278,6 +277,7 @@ class KVCacheManager:
                   window) has not cached yet (Marconi-style APC), or 0 if none.
                   Pinned so sparse prefix-cache retention does not drop
                   the junction and defeat cross-request reuse.
+
         """
         # We skip finding the prefix cache hit when prefix caching is
         # disabled or the request is marked as skipping kv cache read
@@ -340,6 +340,7 @@ class KVCacheManager:
         Returns:
             The ``get_computed_blocks`` triple (blocks, number of local computed
             tokens, shared-prefix boundary) plus ``hit_diverged``.
+
         """
         coordinator = self.coordinator
         if not (
@@ -462,13 +463,19 @@ class KVCacheManager:
 
         Returns:
             A list of new allocated blocks.
+
         """
-        # When loading KV data asynchronously, we may have zero new tokens to
-        # compute while still allocating slots for externally computed tokens.
-        if num_new_tokens == 0 and num_external_computed_tokens == 0:
+        # A step may need no slots of its own while still adopting computed
+        # tokens: an async KV load, or a chunk that ends inside the replayed
+        # range of a hit (SWA bounded replay).
+        if (
+            num_new_tokens == 0
+            and num_external_computed_tokens == 0
+            and num_new_computed_tokens == 0
+        ):
             raise ValueError(
                 "num_new_tokens must be greater than 0 when there are no "
-                "external computed tokens"
+                "computed tokens to adopt"
             )
 
         if new_computed_blocks is not None:
@@ -607,6 +614,7 @@ class KVCacheManager:
 
         Args:
             request: The request to free the blocks.
+
         """
         self.coordinator.free(request.request_id)
 
@@ -624,6 +632,7 @@ class KVCacheManager:
             processed_computed_tokens: Computed-token prefix length covering
                 fully processed and committed tokens only (safe to free).
             num_prompt_tokens: Optional prompt length for R-SWA gap eviction.
+
         """
         self.coordinator.remove_skipped_blocks(
             request_id, processed_computed_tokens, num_prompt_tokens
@@ -639,14 +648,16 @@ class KVCacheManager:
 
         Returns:
             The request's blocks in allocation order.
+
         """
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
-        """evict blocks from the prefix cache by their block IDs.
+        """Evict blocks from the prefix cache by their block IDs.
 
         Args:
             block_ids: Set of block IDs to evict from cache.
+
         """
         self.block_pool.evict_blocks(block_ids)
 
@@ -658,6 +669,7 @@ class KVCacheManager:
         Returns:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
+
         """
         if not self.coordinator.reset_prefix_cache():
             return False
@@ -697,6 +709,7 @@ class KVCacheManager:
         Returns:
             list[int]: The number of common prefix blocks for each kv cache
             group.
+
         """
         return self.coordinator.get_num_common_prefix_blocks(running_request_id)
 
@@ -705,6 +718,7 @@ class KVCacheManager:
 
         Returns:
             A list of KV cache events.
+
         """
         events = self.block_pool.take_events()
         for event in events:
@@ -792,6 +806,7 @@ class KVCacheManager:
             request: The request to cache the blocks.
             num_computed_tokens: The number of computed tokens, including tokens
                 that are already cached and tokens to be cached.
+
         """
         if self.enable_caching:
             self.coordinator.cache_blocks(request, num_computed_tokens)

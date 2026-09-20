@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This test file includes some cases where it is inappropriate to
+"""This test file includes some cases where it is inappropriate to
 only get the `eos_token_id` from the tokenizer as defined by
 `BaseRenderer.get_eos_token_id`.
 """
@@ -29,6 +28,7 @@ from vllm.transformers_utils.configs.glm5_next import (
     Glm5NextTextConfig,
     Glm5NextVisionConfig,
 )
+from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
 
 def test_patch_legacy_rope_type_preserves_nope_layers():
@@ -76,6 +76,57 @@ def test_patch_legacy_rope_type_normalizes_telechat3_yarn():
         "original_max_position_embeddings": 8192,
         "attention_factor": pytest.approx(0.07 * math.log(4.0) + 1.0),
     }
+
+
+def test_mistral_yarn_apply_scale_false_disables_yarn_magnitude_scaling():
+    """`yarn.apply_scale: false` must reach the DeepSeek-style attentions.
+
+    Transformers spells it `attention_factor = 1.0`, which DeepseekV2Attention
+    and its siblings read to select `deepseek_llama_scaling` over
+    `deepseek_yarn`; without it Mistral-Large-3 runs with a spurious
+    yarn_get_mscale(factor)^2 attention scaling.
+    """
+    params = {
+        "dim": 7168,
+        "n_layers": 61,
+        "head_dim": 192,
+        "hidden_dim": 16384,
+        "n_heads": 128,
+        "n_kv_heads": 128,
+        "norm_eps": 1e-5,
+        "vocab_size": 131072,
+        "rope_theta": 10000.0,
+        "max_position_embeddings": 294912,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "moe": {
+            "num_experts": 128,
+            "num_experts_per_tok": 4,
+            "num_shared_experts": 1,
+            "expert_hidden_dim": 4096,
+            "first_k_dense_replace": 3,
+            "route_every_n": 1,
+            "routed_scale": 1.0,
+            "num_expert_groups": 1,
+            "num_expert_groups_per_tok": 1,
+        },
+        "llama_4_scaling": {"beta": 0.1, "original_max_position_embeddings": 8192},
+        "yarn": {
+            "alpha": 1,
+            "apply_scale": False,
+            "beta": 32,
+            "factor": 36,
+            "original_max_position_embeddings": 8192,
+        },
+    }
+
+    config = adapt_config_dict(params, defaults={})
+
+    assert config.architectures == ["MistralLarge3ForCausalLM"]
+    assert config.rope_parameters["attention_factor"] == 1.0
 
 
 def test_glm5_next_accepts_deepseek_sparse_attention_layers():
