@@ -50,6 +50,7 @@ def mhc_pre_delayed_overlap(
 
     Returns post mix, residual mix, normalized input, and next pre-mix. Only the
     input is ready on the caller stream; join stream before using coefficients.
+    The caller must retain the weights and coefficient outputs until the join.
     """
     from vllm.model_executor.kernels.mhc.warmup import (
         MHC_PRE_NORM_KERNEL,
@@ -109,7 +110,7 @@ def mhc_pre_delayed_overlap(
     with torch.cuda.stream(stream):
         tf32_hc_prenorm_gemm(x, fn, mix, sqr, splits)
         epilogue(split_mode="stats")
-    for tensor in (x, fn, hc_scale, hc_base, mix, sqr, post, comb, next_pre):
+    for tensor in (x, mix, sqr):
         tensor.record_stream(stream)
     if n > 8:
         epilogue(split_mode="input")
