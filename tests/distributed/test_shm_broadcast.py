@@ -1141,7 +1141,9 @@ def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
     assert param.numel() * param.element_size() >= shm_tensor_arena._ARENA_MIN_BYTES
 
     data, buffers, written = _dumps_arena(param, writer)
-    # The inner data tensor is a legitimate, separate diversion.
+    # The Parameter itself is diverted directly (_ARENA_REBUILD_FNS routes
+    # it to _rebuild_arena_parameter) -- Parameter.__reduce_ex__ never runs,
+    # so there's no separate "inner" tensor diversion to speak of.
     assert written != []
     out = pickle.loads(data, buffers=buffers)
     # The outer Parameter's type identity survives.
