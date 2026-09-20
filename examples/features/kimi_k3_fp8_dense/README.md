@@ -26,6 +26,8 @@ for MTP, and ~12 GB of free disk.
 checkpoint servable; you build the checkpoint yourself in step 1.
 
 ```bash
+cd examples/features/kimi_k3_fp8_dense
+
 # 1. build the overlay (CPU only, ~12 GB, under an hour)
 python build_overlay.py --src /path/to/Kimi-K3 \
                         --dst /path/to/Kimi-K3-fp8se \
@@ -116,8 +118,10 @@ activations are a different scheme from the one validated here.
 
 One command, no chaining:
 
+Run from the repository root:
+
 ```bash
-python build_overlay.py \
+python examples/features/kimi_k3_fp8_dense/build_overlay.py \
     --src /path/to/Kimi-K3 \
     --dst /path/to/Kimi-K3-fp8se \
     --target shared_experts
@@ -141,7 +145,8 @@ stay on disk, simply unreferenced.
 ## Verify before trusting a number
 
 ```bash
-python verify_overlay.py --overlay /path/to/Kimi-K3-fp8se --target shared_experts
+python examples/features/kimi_k3_fp8_dense/verify_overlay.py \
+    --overlay /path/to/Kimi-K3-fp8se --target shared_experts
 ```
 
 Expect:
