@@ -1005,6 +1005,20 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "cross-attention."
             )
 
+    def _get_kv_cache_descales(
+        self,
+        layer: AttentionLayer,
+        num_decodes: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        # AITER treats non-null descales as an instruction to dequantize.
+        if not is_quantized_kv_cache(self.kv_cache_dtype):
+            return None, None
+        descale_shape = (num_decodes, self.num_kv_heads)
+        return (
+            layer._k_scale.expand(descale_shape),
+            layer._v_scale.expand(descale_shape),
+        )
+
     def extend_for_sliding_window(
         self,
         attn_metadata: AiterFlashAttentionMetadata,
@@ -1380,6 +1394,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     or decode_max_query_len > 1
                     or self.sinks is not None
                 ):
+                    k_descale, v_descale = self._get_kv_cache_descales(
+                        layer, num_decodes
+                    )
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
                         "Shuffle KV cache layout is not supported with sliding "
                         "window, sinks, or speculative decoding (multi-token decode)."
@@ -1389,7 +1406,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             flash_attn_with_kvcache,
                         )
 
-                        descale_shape = (num_decodes, key_cache.shape[2])
                         decode_query = query[:num_decode_tokens].reshape(
                             num_decodes,
                             decode_max_query_len,
@@ -1406,8 +1422,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             window_size=self.sliding_window,
                             softcap=self.logits_soft_cap,
                             q_descale=None,
-                            k_descale=layer._k_scale.expand(descale_shape),
-                            v_descale=layer._v_scale.expand(descale_shape),
+                            k_descale=k_descale,
+                            v_descale=v_descale,
                             page_table=attn_metadata.block_table[:num_decodes],
                         )
                         output[:num_decode_tokens].copy_(
@@ -1425,10 +1441,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             unified_attention,
                         )
 
-                        descale_shape = (
-                            num_decodes,
-                            key_cache.shape[2],
-                        )
                         unified_attention(
                             q=query[:num_decode_tokens],
                             k=key_cache,
@@ -1447,8 +1459,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             block_table=attn_metadata.block_table[:num_decodes],
                             softcap=self.logits_soft_cap,
                             q_descale=None,
-                            k_descale=layer._k_scale.expand(descale_shape),
-                            v_descale=layer._v_scale.expand(descale_shape),
+                            k_descale=k_descale,
+                            v_descale=v_descale,
                             sinks=self.sinks,
                         )
                     return
@@ -1462,6 +1474,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 use_unified_attention = self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
 
                 if use_unified_attention:
+                    k_descale, v_descale = self._get_kv_cache_descales(
+                        layer, num_decodes
+                    )
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
                         "unified_attention fallback with shuffle layout "
                         "is not supported yet."
@@ -1473,10 +1488,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     decode_cu_seqlens_q = attn_metadata.query_start_loc[
                         : num_decodes + 1
                     ]
-                    descale_shape = (
-                        num_decodes,
-                        key_cache.shape[2],
-                    )
                     unified_attention(
                         q=query[:num_decode_tokens],
                         k=key_cache,
@@ -1493,8 +1504,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         block_table=attn_metadata.block_table[:num_decodes],
                         softcap=self.logits_soft_cap,
                         q_descale=None,
-                        k_descale=layer._k_scale.expand(descale_shape),
-                        v_descale=layer._v_scale.expand(descale_shape),
+                        k_descale=k_descale,
+                        v_descale=v_descale,
                     )
                 elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     _, num_heads, head_size = query.shape
