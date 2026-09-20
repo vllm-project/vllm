@@ -2151,9 +2151,12 @@ class MooncakeStoreWorker:
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(req_id)
 
+        step_save_req_ids = {r.req_id for r in meta.requests if r.can_save}
         for req_id in finished_req_ids | self.finished_store_req:
-            if self.kv_send_thread.stored_requests.get(req_id):
-                # Queued jobs still need the resume offset; retire on a later step.
+            if req_id in step_save_req_ids or self.kv_send_thread.stored_requests.get(
+                req_id
+            ):
+                # Finalization may not have queued this step's stores yet.
                 self.finished_store_req.add(req_id)
             else:
                 self.finished_store_req.discard(req_id)

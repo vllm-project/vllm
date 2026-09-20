@@ -4162,6 +4162,45 @@ def test_start_load_kv_queues_async_load():
     assert w.recv_request_queue.get_nowait() is req
 
 
+@pytest.mark.parametrize("defer_finalize", [False, True])
+def test_finished_request_retires_after_final_store(defer_finalize):
+    """Polling before save submission must retain state until the job drains."""
+    w = _make_bare_worker()
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256]
+    sender = _make_store_sending_thread(store)
+    w.kv_send_thread = sender
+    sender._saved_offset["req-a"] = 16
+    req = _make_store_req("req-a", [b"h0", b"h1"])
+    req.store_job_id = 1
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    meta.add_request(req)
+    empty_meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+
+    with patch.object(torch.cuda, "Event"):
+        if defer_finalize:
+            w.get_finished({"req-a"}, meta)
+        w.wait_for_save(meta)
+        if not defer_finalize:
+            w.get_finished({"req-a"}, meta)
+
+    assert sender._saved_offset["req-a"] == 16
+    w.get_finished(set(), empty_meta)
+    assert sender.is_live_store_job(req)
+
+    sender._handle_request(sender.request_queue.get_nowait())
+    assert sender._saved_offset["req-a"] == 32
+    completed = w.build_connector_worker_meta()
+    assert completed is not None
+    assert completed.completed_saves == {1: 1}
+
+    w.get_finished(set(), empty_meta)
+    assert "req-a" not in sender.stored_requests
+    assert "req-a" not in sender._saved_offset
+    assert not w.finished_store_req
+
+
 def test_putting_consumer_queues_decode_save():
     w = _make_bare_worker(kv_role="kv_consumer", save_decode_cache=True)
     send_thread = MagicMock()
