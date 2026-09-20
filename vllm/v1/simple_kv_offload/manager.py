@@ -99,6 +99,7 @@ class StoreRequestState:
     num_stored_blocks: list[int]
     store_events: set[int] = field(default_factory=set)
     finished: bool = False
+    needs_block_table_reset: bool = False
 
 
 class _StoreAdmission(Enum):
@@ -724,14 +725,23 @@ class SimpleCPUOffloadScheduler:
             if scheduled_for_req:
                 req_ids.append(req_id)
 
+        # MRV2 represents a resumed request as NewRequestData, whose
+        # yield_req_data entry is not marked preempted. Remember to replace,
+        # rather than append, its full block table.
+        for req_id in preempted_req_ids:
+            state = self._reqs_to_store.get(req_id)
+            if state is not None:
+                state.needs_block_table_reset = True
+
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
             if state is None or state.finished:
                 continue
 
-            if preempted:
+            if preempted or state.needs_block_table_reset:
                 state.block_ids = tuple([] for _ in range(num_groups))
                 state.num_stored_blocks = [0] * num_groups
+                state.needs_block_table_reset = False
             if new_block_id_groups:
                 for g in range(min(num_groups, len(new_block_id_groups))):
                     if new_block_id_groups[g] is not None:

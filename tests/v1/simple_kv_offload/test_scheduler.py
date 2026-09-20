@@ -1551,6 +1551,53 @@ def test_chunked_prefill_reads_live_block_ids() -> None:
     assert len(meta2.store_gpu_blocks) == 2
 
 
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+@pytest.mark.parametrize("same_output", [False, True])
+def test_eager_store_resets_block_cursor_after_preemption(
+    use_v2_model_runner: bool,
+    same_output: bool,
+) -> None:
+    """A resumed request stores its confirmed tail after preemption."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=False)
+    sched = fix.scheduler
+    req = make_request(num_blocks=3)
+
+    initial_blocks = _alloc_and_register(fix, req, num_blocks=2)
+    sched.update_state_after_alloc(req, initial_blocks, num_external_tokens=0)
+    initial_output = make_scheduler_output(
+        {req.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req.request_id: initial_blocks.get_block_ids()},
+    )
+    initial_meta = sched.build_connector_meta(initial_output)
+    assert len(initial_meta.store_gpu_blocks) == 2
+    simulate_store_completion(sched, initial_meta.store_event)
+
+    if not same_output:
+        preemption_output = make_scheduler_output({})
+        preemption_output.preempted_req_ids.add(req.request_id)
+        sched.build_connector_meta(preemption_output)
+    fix.gpu_block_pool.free_blocks(initial_blocks.blocks[0])
+
+    resumed_blocks = _alloc_and_register(fix, req, num_blocks=3)
+    sched.update_state_after_alloc(req, resumed_blocks, num_external_tokens=0)
+    if use_v2_model_runner:
+        resumed_output = make_scheduler_output(
+            {req.request_id: 3 * BLOCK_SIZE},
+            new_reqs={req.request_id: resumed_blocks.get_block_ids()},
+        )
+    else:
+        resumed_output = make_scheduler_output(
+            {req.request_id: 3 * BLOCK_SIZE},
+            cached_req_new_blocks={req.request_id: resumed_blocks.get_block_ids()},
+        )
+        resumed_output.scheduled_cached_reqs.resumed_req_ids.add(req.request_id)
+    if same_output:
+        resumed_output.preempted_req_ids.add(req.request_id)
+
+    resumed_meta = sched.build_connector_meta(resumed_output)
+    assert resumed_meta.store_gpu_blocks == [resumed_blocks.blocks[0][2].block_id]
+
+
 # ---------------------------------------------------------------------------
 # Test 10: Partial GPU prefix hit + CPU load + new compute blocks
 # ---------------------------------------------------------------------------
