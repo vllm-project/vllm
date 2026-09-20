@@ -124,6 +124,8 @@ class InstanceRegistry:
         key = record.url
         previous = self._live.get(key) or self._evicted.get(key)
         if previous is not None:
+            if previous == record:
+                return False
             if previous.role is not record.role:
                 raise ValueError("Unregister the instance before changing its role")
             target = self._live if key in self._live else self._evicted

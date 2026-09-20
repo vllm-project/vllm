@@ -51,6 +51,7 @@ class TestRegistration:
 
     def test_transfer_addresses_stay_with_the_registered_consumer(self, registry):
         """Roster updates must not shift a consumer's transfer addresses."""
+        registry.register(InstanceRecord(DECODE, "http://d0:8000"))
         registry.register(
             InstanceRecord(
                 DECODE,
@@ -80,6 +81,28 @@ class TestRegistration:
 
 
 class TestLiveness:
+    @pytest.mark.asyncio
+    async def test_identical_reregistration_preserves_inflight_probe_results(
+        self, registry
+    ):
+        """Repeated registrations must not suppress eviction or recovery."""
+        url = "http://e0:8000"
+        registry.register(InstanceRecord(ENCODE, url))
+        healthy = False
+
+        async def probe(self, session, url):
+            registry.register(InstanceRecord(ENCODE, url))
+            return healthy
+
+        with patch.object(InstanceRegistry, "_probe", probe):
+            for _ in range(registry._fail_threshold):
+                await registry._probe_once(None)
+            assert registry.status()["encode"] == {"live": [], "evicted": [url]}
+
+            healthy = True
+            await registry._probe_once(None)
+            assert registry.status()["encode"] == {"live": [url], "evicted": []}
+
     @pytest.mark.asyncio
     async def test_consecutive_failures_stop_routing(self, registry):
         registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
