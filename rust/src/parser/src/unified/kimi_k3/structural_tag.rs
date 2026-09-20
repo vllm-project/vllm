@@ -8,13 +8,14 @@ use xgrammar_structural_tag::Result;
 use xgrammar_structural_tag::builders::{
     ReasoningMode, StructuralTagBuilder, StructuralTagContext, StructuralTagOptions,
 };
-use xgrammar_structural_tag::format::{Format, JsonSchemaFormat, StructuralTag, TagFormat};
+use xgrammar_structural_tag::format::{Format, StructuralTag, TagFormat};
 use xgrammar_structural_tag::tool::{BuilderToolChoice, FunctionToolParam, function_parameters};
 
 use super::{
     ARG_CLOSE, CALL_CLOSE, CLOSE, END_OF_MSG, JSON_CLOSE, JSON_OPEN, MESSAGE_CLOSE, OPEN,
     RESPONSE_CLOSE, RESPONSE_OPEN, SEP, THINK_CLOSE, THINK_OPEN, TOOLS_CLOSE, TOOLS_OPEN,
 };
+use crate::tool::json_schema;
 
 pub(super) static KIMI_K3_STRUCTURAL_TAG_BUILDER: KimiK3StructuralTagBuilder =
     KimiK3StructuralTagBuilder;
@@ -322,14 +323,6 @@ fn permissive_argument() -> Format {
         format!("{OPEN}argument key=\""),
         Format::or(alternatives),
         ARG_CLOSE,
-    )
-}
-
-fn json_schema(schema: Value, options: StructuralTagOptions) -> Format {
-    Format::JsonSchema(
-        JsonSchemaFormat::new(schema)
-            .with_any_order(options.any_order)
-            .with_max_whitespace_cnt(options.max_whitespace_cnt),
     )
 }
 

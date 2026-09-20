@@ -425,7 +425,7 @@ mod tests {
 
     use super::{CONTENT_TEXT, CONTENT_THINKING, END_MESSAGE, InklingUnifiedParser, MESSAGE_MODEL};
     use crate::tool::Tool;
-    use crate::unified::test_utils::{UnifiedOutputTestExt, UnifiedParserTestExt};
+    use crate::unified::test_utils::{UnifiedOutputTestExt, UnifiedParserTestExt, collect_stream};
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
     use thiserror_ext::AsReport;
     use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution, Tokenizer};
@@ -508,23 +508,16 @@ mod tests {
         InklingUnifiedParser::new(&test_tools(), Arc::new(FakeTokenizer)).unwrap()
     }
 
-    fn collect_stream(chunks: &[&str]) -> UnifiedParserOutput {
-        let mut parser = test_parser();
-        let mut output = UnifiedParserOutput::default();
-        for chunk in chunks {
-            output.append(parser.parse_chunk(chunk).unwrap());
-        }
-        output.append(parser.finish().unwrap());
-        output
-    }
-
     #[test]
     fn inkling_streaming_emits_reasoning_then_text() {
-        let output = collect_stream(&[concat!(
-            "<|content_thinking|>reason<|end_message|>",
-            "<|message_model|><|content_text|>answer<|end_message|>",
-            "<|content_model_end_sampling|>"
-        )]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[concat!(
+                "<|content_thinking|>reason<|end_message|>",
+                "<|message_model|><|content_text|>answer<|end_message|>",
+                "<|content_model_end_sampling|>"
+            )],
+        );
 
         assert_eq!(output.reasoning_text(), "reason");
         assert_eq!(output.normal_text(), "answer");
@@ -577,14 +570,17 @@ mod tests {
 
     #[test]
     fn inkling_streaming_holds_split_markers() {
-        let output = collect_stream(&[
-            "<|content_thin",
-            "king|>rea",
-            "son<|end_mes",
-            "sage|><|message_",
-            "model|><|content_text|>answer",
-            "<|end_message|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|content_thin",
+                "king|>rea",
+                "son<|end_mes",
+                "sage|><|message_",
+                "model|><|content_text|>answer",
+                "<|end_message|>",
+            ],
+        );
 
         assert_eq!(output.reasoning_text(), "reason");
         assert_eq!(output.normal_text(), "answer");
@@ -592,10 +588,13 @@ mod tests {
 
     #[test]
     fn inkling_streaming_accepts_content_blocks_without_message_start() {
-        let output = collect_stream(&[concat!(
-            "<|content_thinking|>reason<|end_message|>",
-            "<|content_text|>answer<|end_message|>",
-        )]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[concat!(
+                "<|content_thinking|>reason<|end_message|>",
+                "<|content_text|>answer<|end_message|>",
+            )],
+        );
 
         assert_eq!(output.reasoning_text(), "reason");
         assert_eq!(output.normal_text(), "answer");
@@ -637,10 +636,13 @@ mod tests {
 
     #[test]
     fn inkling_discards_tool_name_from_message_header() {
-        let output = collect_stream(&[concat!(
-            "<|message_model|>get_weather<|content_invoke_tool_json|>",
-            "{\"name\":\"get_weather\",\"args\":{}}<|end_message|>"
-        )]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[concat!(
+                "<|message_model|>get_weather<|content_invoke_tool_json|>",
+                "{\"name\":\"get_weather\",\"args\":{}}<|end_message|>"
+            )],
+        );
 
         assert!(output.normal_text().is_empty());
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
@@ -648,10 +650,13 @@ mod tests {
 
     #[test]
     fn inkling_streaming_handles_multiple_tool_blocks() {
-        let output = collect_stream(&[concat!(
-            "<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"SF\"}}<|end_message|>",
-            "<|message_model|><|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"NYC\"}}<|end_message|>"
-        )]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[concat!(
+                "<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"SF\"}}<|end_message|>",
+                "<|message_model|><|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"NYC\"}}<|end_message|>"
+            )],
+        );
 
         let calls = output.calls();
         assert_eq!(calls.iter().filter(|call| call.name.is_some()).count(), 2);
@@ -742,7 +747,7 @@ mod tests {
 
     #[test]
     fn inkling_plain_text_falls_through_as_text() {
-        let output = collect_stream(&["plain ", "answer"]);
+        let output = collect_stream(&mut test_parser(), &["plain ", "answer"]);
 
         assert_eq!(output.normal_text(), "plain answer");
         assert!(output.reasoning_text().is_empty());
@@ -750,10 +755,13 @@ mod tests {
 
     #[test]
     fn inkling_raw_tool_text_and_tool_error_are_visible_text() {
-        let output = collect_stream(&[concat!(
-            "<|content_invoke_tool_text|>search SF<|end_message|>",
-            "<|content_tool_error|>failed<|end_message|>"
-        )]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[concat!(
+                "<|content_invoke_tool_text|>search SF<|end_message|>",
+                "<|content_tool_error|>failed<|end_message|>"
+            )],
+        );
 
         assert_eq!(output.normal_text(), "search SFfailed");
         assert!(output.calls().is_empty());

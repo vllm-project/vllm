@@ -37,8 +37,19 @@ pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
+use xgrammar_structural_tag::builders::StructuralTagOptions;
+use xgrammar_structural_tag::format::{Format, JsonSchemaFormat};
 
 use crate::utils;
+
+/// A JSON body honoring the request's key-order and whitespace options.
+pub(crate) fn json_schema(schema: Value, options: StructuralTagOptions) -> Format {
+    Format::JsonSchema(
+        JsonSchemaFormat::new(schema)
+            .with_any_order(options.any_order)
+            .with_max_whitespace_cnt(options.max_whitespace_cnt),
+    )
+}
 
 /// One function-style tool made available to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

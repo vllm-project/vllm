@@ -580,8 +580,9 @@ mod tests {
         END_OF_MSG, KimiK3UnifiedParser, OPEN, RESPONSE_CLOSE, RESPONSE_OPEN, SEP, THINK_CLOSE,
         THINK_OPEN, TOOLS_CLOSE, TOOLS_OPEN,
     };
+    use crate::tool::test_utils::split_by_chars;
     use crate::unified::test_utils::{
-        UnifiedOutputTestExt, UnifiedParserTestExt, char_chunks, collect_stream, first_call,
+        UnifiedOutputTestExt, UnifiedParserTestExt, collect_stream, first_call,
     };
     use crate::unified::{UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 
@@ -699,9 +700,7 @@ mod tests {
         );
 
         for size in [1, 3, 7] {
-            let chunks = char_chunks(&text, size);
-            let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
-            let output = collect_stream(&mut test_parser(), &chunk_refs);
+            let output = collect_stream(&mut test_parser(), &split_by_chars(&text, size));
 
             assert_eq!(output.reasoning_text(), "step by step", "chunk size {size}");
             assert_eq!(output.normal_text(), "the answer", "chunk size {size}");

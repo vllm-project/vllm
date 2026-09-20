@@ -138,6 +138,7 @@ mod tests {
     use super::CombinedParser;
     use crate::reasoning::{Qwen3ReasoningParser, ReasoningDelta, ReasoningParser};
     use crate::tool::{Qwen3XmlToolParser, Tool, ToolParser};
+    use crate::unified::test_utils::collect_stream;
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
 
     fn tokenizer() -> TestTokenizer {
@@ -158,15 +159,6 @@ mod tests {
             }),
             strict: None,
         }]
-    }
-
-    fn collect(parser: &mut dyn UnifiedParser, chunks: &[&str]) -> UnifiedParserOutput {
-        let mut output = UnifiedParserOutput::default();
-        for chunk in chunks {
-            parser.parse_into(DecodedText::unattributed(*chunk), &mut output).unwrap();
-        }
-        output.append(parser.finish().unwrap());
-        output
     }
 
     struct PreserveReasoningParser;
@@ -261,7 +253,7 @@ mod tests {
         let reasoning = Qwen3ReasoningParser::create(tokenizer).unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), None);
 
-        let output = collect(&mut parser, &["<think>work</think>answer"]);
+        let output = collect_stream(&mut parser, &["<think>work</think>answer"]);
 
         assert_eq!(
             output.events,
@@ -334,7 +326,7 @@ mod tests {
         let mut parser = CombinedParser::new(None, Some(tool));
         assert!(parser.structural_tag_builder().is_some());
 
-        let output = collect(
+        let output = collect_stream(
             &mut parser,
             &[r#"<tool_call>
 {"name":"get_weather","arguments":{"location":"Paris"}}

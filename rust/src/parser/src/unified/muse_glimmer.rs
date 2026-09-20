@@ -29,10 +29,10 @@
 
 mod structural_tag;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::combinator::{alt, delimited, eof, not, opt, peek, preceded, seq, terminated};
-use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
+use winnow::error::{ContextError, ErrMode, ModalResult};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
 use winnow::token::{literal, rest, take_until, take_while};
@@ -42,8 +42,8 @@ use super::{Result, ScopedStructuralTagBuilder, UnifiedParser, UnifiedParserOutp
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
-    MarkerScanState, incomplete, max_partial_prefix_len, parse_buffered_event, partial_prefix_len,
-    take_until_marker_mul,
+    MarkerScanState, find_slice_mul, incomplete, max_partial_prefix_len, parse_buffered_event,
+    partial_prefix_len, take_until_marker_mul,
 };
 
 const START: &str = "<|start|>";
@@ -94,6 +94,10 @@ const TOOL_NOISE_MARKERS: &[&str] = &[
 const INVOKE_BODY_STOP_MARKERS: &[&str] = &[INVOKE_CLOSE, EOM, EOT, START];
 
 type MuseGlimmerInput<'i> = Partial<&'i str>;
+
+/// Number of prompt tokens decoded to decide whether the tail after the last
+/// `<|start|>` can be an assistant header at all.
+const HEADER_PROBE_TOKENS: usize = 8;
 
 /// Maximum length in bytes of a header-candidate run held across deltas: a
 /// recipient name, the whitespace inside a header, or an ATEM attribute run.
@@ -253,6 +257,17 @@ enum BareHeaderAnchor {
     None,
 }
 
+impl BareHeaderAnchor {
+    /// The bare-header position left by committed body text.
+    fn after_body_text(text: &str) -> Self {
+        if text.ends_with(char::is_whitespace) {
+            Self::AfterWhitespace
+        } else {
+            Self::None
+        }
+    }
+}
+
 impl MuseGlimmerUnifiedParser {
     /// Create a Muse Glimmer parser.
     pub fn new(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
@@ -274,7 +289,9 @@ impl MuseGlimmerUnifiedParser {
         })
     }
 
-    /// Detect the prefilled generation channel from the prompt tail.
+    /// Detect the prefilled generation channel from the prompt tail. Runs on
+    /// freshly reset state: Idle at a structural bare-header position, which
+    /// is where anything but an open prefilled channel body leaves the prompt.
     ///
     /// `add_generation_prompt` ends the prompt with `<|start|>assistant` (or,
     /// with `continue_final_message`, a partial channel), so generation may
@@ -286,21 +303,23 @@ impl MuseGlimmerUnifiedParser {
     /// that stops mid-tool-call parses nothing, matching the Python parser's
     /// documented limitation.
     fn initialize_mode(&mut self, prompt_token_ids: &[u32]) {
-        self.mode = MuseGlimmerMode::Idle;
-        self.prefilled_kind = None;
-        self.header_seen = false;
-        // Anything but an open prefilled channel body ends the prompt at a
-        // header boundary: a legal bare-header position.
-        self.bare_header_anchor = BareHeaderAnchor::Structural;
-
         let Some(start_pos) = prompt_token_ids.iter().rposition(|&id| id == self.start_token_id)
         else {
             return;
         };
-        let Ok(tail) = self.tokenizer.decode(
-            &prompt_token_ids[start_pos + 1..],
-            /* skip_special_tokens */ false,
-        ) else {
+        let tail_ids = &prompt_token_ids[start_pos + 1..];
+        // Probe the first few tokens before decoding the whole tail: without a
+        // generation prompt the last `<|start|>` opens the final user turn,
+        // whose body may be arbitrarily long and is never a header.
+        let probe_ids = &tail_ids[..tail_ids.len().min(HEADER_PROBE_TOKENS)];
+        let Ok(probe) = self.tokenizer.decode(probe_ids, /* skip_special_tokens */ false) else {
+            return;
+        };
+        let probe = probe.trim_start().trim_end_matches('\u{FFFD}');
+        if !probe.is_empty() && !probe.starts_with(ASSISTANT) && !ASSISTANT.starts_with(probe) {
+            return;
+        }
+        let Ok(tail) = self.tokenizer.decode(tail_ids, /* skip_special_tokens */ false) else {
             return;
         };
 
@@ -338,12 +357,7 @@ impl MuseGlimmerUnifiedParser {
             Some(c) if c.is_whitespace() => BareHeaderAnchor::AfterWhitespace,
             Some(_) => BareHeaderAnchor::None,
         };
-        self.header_seen = true;
-        self.mode = match classify_recipient(recipient.as_deref()) {
-            ChannelKind::Reasoning => MuseGlimmerMode::Reasoning,
-            ChannelKind::Content { reclassify } => MuseGlimmerMode::Content { reclassify },
-            ChannelKind::Tool => MuseGlimmerMode::Tool { strict: true },
-        };
+        self.open_channel(classify_recipient(recipient.as_deref()));
     }
 
     fn apply_event(
@@ -351,29 +365,26 @@ impl MuseGlimmerUnifiedParser {
         event: MuseGlimmerEvent,
         piece: DecodedText,
         output: &mut UnifiedParserOutput,
-    ) -> Result<()> {
+    ) {
         // Only the turn's first event can complete a recipient-only prefill.
         let prefilled_kind = self.prefilled_kind.take();
         // The next event's bare-header position depends on what this event
         // committed: marker/header/call spans are structural; body text leaves
         // a position only when it ends in whitespace.
-        match &event {
-            MuseGlimmerEvent::Text | MuseGlimmerEvent::Reasoning => {
-                if let Some(last) = piece.text.chars().next_back() {
-                    self.bare_header_anchor = if last.is_whitespace() {
-                        BareHeaderAnchor::AfterWhitespace
-                    } else {
-                        BareHeaderAnchor::None
-                    };
-                }
-            }
-            _ => self.bare_header_anchor = BareHeaderAnchor::Structural,
-        }
+        self.bare_header_anchor = BareHeaderAnchor::Structural;
         match event {
             // Between channels of a framed turn, stray text is noise.
-            MuseGlimmerEvent::Text if self.mode == MuseGlimmerMode::Idle && self.header_seen => {}
-            MuseGlimmerEvent::Text => output.push_text(piece.text),
-            MuseGlimmerEvent::Reasoning => self.push_reasoning_text(piece, output),
+            MuseGlimmerEvent::Text if self.mode == MuseGlimmerMode::Idle && self.header_seen => {
+                self.bare_header_anchor = BareHeaderAnchor::after_body_text(&piece.text);
+            }
+            MuseGlimmerEvent::Text => {
+                self.bare_header_anchor = BareHeaderAnchor::after_body_text(&piece.text);
+                output.push_text(piece.text);
+            }
+            MuseGlimmerEvent::Reasoning => {
+                self.bare_header_anchor = BareHeaderAnchor::after_body_text(&piece.text);
+                self.push_reasoning_text(piece, output);
+            }
             // Marker and noise spans are drained and dropped with their tokens.
             MuseGlimmerEvent::Skip => {}
             MuseGlimmerEvent::ChannelOpen(kind) => {
@@ -398,7 +409,6 @@ impl MuseGlimmerUnifiedParser {
                 self.emit_invoke(name, arguments, output);
             }
         }
-        Ok(())
     }
 
     /// Open a channel, arming the lazy `"\n"` separator between repeated
@@ -475,11 +485,7 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.buffer.clear();
-        self.invoke_scan.reset();
-        self.emitted_call_count = 0;
-        self.reasoning_emitted = false;
-        self.pending_reasoning_sep = false;
+        self.reset_state();
         self.initialize_mode(prompt_token_ids);
         Ok(())
     }
@@ -516,7 +522,7 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
         })? {
             let piece = self.buffer.drain_prefix(consumed_len);
             self.invoke_scan.reset();
-            self.apply_event(event, piece, output)?;
+            self.apply_event(event, piece, output);
         }
 
         Ok(())
@@ -527,33 +533,29 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
 
         match self.mode {
             // Stray text after the last channel of a framed turn is noise.
-            MuseGlimmerMode::Idle if self.header_seen => self.buffer.clear(),
-            MuseGlimmerMode::Idle | MuseGlimmerMode::Content { .. } => {
+            MuseGlimmerMode::Idle if self.header_seen => {}
+            MuseGlimmerMode::Idle
+            | MuseGlimmerMode::Content { .. }
+            | MuseGlimmerMode::Reasoning => {
                 // The stream ended: a trailing ` to=…` fragment can no longer
                 // grow into a header, so it is flushed; a trailing COMPLETE
                 // anchored bare header (a channel that never got a body) and
                 // trailing truncated framing stay dropped.
-                let text = strip_complete_bare_header(
-                    strip_trailing_truncated_framing(&self.buffer.text),
-                    self.bare_header_anchor,
-                )
-                .to_string();
-                self.buffer.clear();
-                output.push_text(text);
-            }
-            MuseGlimmerMode::Reasoning => {
                 let len = strip_complete_bare_header(
                     strip_trailing_truncated_framing(&self.buffer.text),
                     self.bare_header_anchor,
                 )
                 .len();
                 let piece = self.buffer.drain_prefix(len);
-                self.buffer.clear();
-                self.push_reasoning_text(piece, &mut output);
+                if self.mode == MuseGlimmerMode::Reasoning {
+                    self.push_reasoning_text(piece, &mut output);
+                } else {
+                    output.push_text(piece.text);
+                }
             }
             // A tool channel truncated between complete calls loses only its
-            // closing markers — possibly cut mid-marker; keep the calls
-            // already emitted. Anything more is an incomplete call.
+            // closing markers — possibly cut mid-marker or mid-header; keep the
+            // calls already emitted. Anything more is an incomplete call.
             MuseGlimmerMode::Tool { strict: true } => {
                 let text = strip_trailing_truncated_framing(&self.buffer.text);
                 let held = max_partial_prefix_len(text, TOOL_NOISE_MARKERS)
@@ -561,12 +563,10 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
                 if !text[..text.len() - held].trim().is_empty() {
                     return Err(parsing_failed!("incomplete Muse Glimmer tool call"));
                 }
-                self.buffer.clear();
             }
             // A reclassified channel scans like a tool channel: leftover text
             // after the last complete invoke is dropped, as it is mid-stream.
-            MuseGlimmerMode::Tool { strict: false } => self.buffer.clear(),
-            MuseGlimmerMode::Done => self.buffer.clear(),
+            MuseGlimmerMode::Tool { strict: false } | MuseGlimmerMode::Done => {}
         }
 
         self.reset_state();
@@ -587,9 +587,14 @@ fn parse_next_muse_glimmer_event(
 ) -> ModalResult<MuseGlimmerEvent> {
     match mode {
         MuseGlimmerMode::Idle => parse_idle_event(input, bare_header_anchor),
-        MuseGlimmerMode::Reasoning => parse_reasoning_event(input, bare_header_anchor),
-        MuseGlimmerMode::Content { reclassify } => {
-            parse_content_event(input, *reclassify, invoke_scan, bare_header_anchor)
+        MuseGlimmerMode::Reasoning => {
+            parse_plain_body_event(input, bare_header_anchor, MuseGlimmerEvent::Reasoning)
+        }
+        MuseGlimmerMode::Content { reclassify: false } => {
+            parse_plain_body_event(input, bare_header_anchor, MuseGlimmerEvent::Text)
+        }
+        MuseGlimmerMode::Content { reclassify: true } => {
+            parse_untagged_content_event(input, invoke_scan, bare_header_anchor)
         }
         MuseGlimmerMode::Tool { .. } => parse_tool_event(input, invoke_scan),
         MuseGlimmerMode::Done => parse_done_event(input),
@@ -630,47 +635,38 @@ fn parse_idle_event(
     .parse_next(input)
 }
 
-/// Parse an event inside a reasoning (`to=self`) channel.
-fn parse_reasoning_event(
+/// Parse an event inside a reasoning (`to=self`) or `to=user` content
+/// channel, committing body text as `text_event`. Neither reclassifies ATEM
+/// markup: quoted markup stays body text.
+fn parse_plain_body_event(
     input: &mut MuseGlimmerInput<'_>,
     bare_header_anchor: BareHeaderAnchor,
+    text_event: MuseGlimmerEvent,
 ) -> ModalResult<MuseGlimmerEvent> {
     alt((
         framed_header_event,
         at_bare_header_position(bare_header_anchor, bare_channel_switch_event),
         literal(EOM).value(MuseGlimmerEvent::ChannelClose),
         literal(EOT).value(MuseGlimmerEvent::TurnEnd),
-        at_bare_header_position(bare_header_anchor, |input: &mut MuseGlimmerInput<'_>| {
-            failed_bare_header_text(input).map(|_| MuseGlimmerEvent::Reasoning)
-        }),
-        literal(START).value(MuseGlimmerEvent::Reasoning),
-        safe_reasoning_text_event,
+        at_bare_header_position(bare_header_anchor, failed_bare_header_text)
+            .value(text_event.clone()),
+        literal(START).value(text_event.clone()),
+        |input: &mut MuseGlimmerInput<'_>| {
+            safe_body_text_len(input, BODY_STOP_MARKERS, FRAMING_MARKERS)
+                .map(|_| text_event.clone())
+        },
     ))
     .parse_next(input)
 }
 
-/// Parse an event inside a content (`to=user` or untagged) channel. Only an
-/// untagged channel reclassifies ATEM blocks (see [`ChannelKind::Content`]).
-fn parse_content_event(
+/// Parse an event inside an untagged content channel, which additionally
+/// reclassifies a complete ATEM block into a tool channel (see
+/// [`ChannelKind::Content`]).
+fn parse_untagged_content_event(
     input: &mut MuseGlimmerInput<'_>,
-    reclassify: bool,
     invoke_scan: &mut MarkerScanState,
     bare_header_anchor: BareHeaderAnchor,
 ) -> ModalResult<MuseGlimmerEvent> {
-    if !reclassify {
-        return alt((
-            framed_header_event,
-            at_bare_header_position(bare_header_anchor, bare_channel_switch_event),
-            literal(EOM).value(MuseGlimmerEvent::ChannelClose),
-            literal(EOT).value(MuseGlimmerEvent::TurnEnd),
-            at_bare_header_position(bare_header_anchor, |input: &mut MuseGlimmerInput<'_>| {
-                failed_bare_header_text(input).map(|_| MuseGlimmerEvent::Text)
-            }),
-            literal(START).value(MuseGlimmerEvent::Text),
-            safe_tagged_content_text_event,
-        ))
-        .parse_next(input);
-    }
     alt((
         framed_header_event,
         at_bare_header_position(bare_header_anchor, bare_channel_switch_event),
@@ -679,9 +675,8 @@ fn parse_content_event(
         |input: &mut MuseGlimmerInput<'_>| atem_tool_channel_event(input, invoke_scan),
         // The ATEM opener is literal content when no complete invoke follows.
         alt((literal(FUNCTION_CALLS_OPEN), literal(INVOKE_OPEN))).value(MuseGlimmerEvent::Text),
-        at_bare_header_position(bare_header_anchor, |input: &mut MuseGlimmerInput<'_>| {
-            failed_bare_header_text(input).map(|_| MuseGlimmerEvent::Text)
-        }),
+        at_bare_header_position(bare_header_anchor, failed_bare_header_text)
+            .value(MuseGlimmerEvent::Text),
         literal(START).value(MuseGlimmerEvent::Text),
         safe_content_text_event,
     ))
@@ -882,7 +877,7 @@ fn invoke_block(
         _: literal(INVOKE_CLOSE),
     )
     .parse_next(input)?;
-    Ok((atem_name_attr(attrs), parse_invoke_arguments(body)?))
+    Ok((atem_name_attr(attrs), parse_invoke_arguments(body)))
 }
 
 /// Parse an ATEM opener tag's attributes up to `>`, rejecting `<` so a framing
@@ -896,26 +891,11 @@ fn safe_idle_text_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGli
     safe_body_text_len(input, FRAMING_MARKERS, FRAMING_MARKERS).map(|_| MuseGlimmerEvent::Text)
 }
 
-/// Parse safe reasoning text before the next channel marker. Reasoning bodies
-/// never reclassify: quoted ATEM markup stays reasoning text.
-fn safe_reasoning_text_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    safe_body_text_len(input, BODY_STOP_MARKERS, FRAMING_MARKERS)
-        .map(|_| MuseGlimmerEvent::Reasoning)
-}
-
 /// Parse safe content text, additionally stopping at ATEM openers so they can
 /// be reclassified into a tool channel.
 fn safe_content_text_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
     safe_body_text_len(input, CONTENT_STOP_MARKERS, CONTENT_HOLD_BACK_MARKERS)
         .map(|_| MuseGlimmerEvent::Text)
-}
-
-/// Parse safe `to=user` content text: ATEM markup never reclassifies here, so
-/// it streams as plain content.
-fn safe_tagged_content_text_event(
-    input: &mut MuseGlimmerInput<'_>,
-) -> ModalResult<MuseGlimmerEvent> {
-    safe_body_text_len(input, BODY_STOP_MARKERS, FRAMING_MARKERS).map(|_| MuseGlimmerEvent::Text)
 }
 
 /// Skip non-content noise between invokes in a tool channel, stopping ahead
@@ -944,12 +924,7 @@ fn safe_body_text_len(
         return incomplete();
     }
 
-    let mut stop = text.len();
-    for marker in stop_markers {
-        if let Some(index) = text.find(marker) {
-            stop = stop.min(index);
-        }
-    }
+    let mut stop = find_slice_mul(text, stop_markers).unwrap_or(text.len());
     for (index, _) in text.match_indices("to=") {
         if index >= stop {
             break;
@@ -1133,7 +1108,7 @@ fn parameter_pair(input: &mut &str) -> ModalResult<(String, Value)> {
 /// Parse all parameter blocks in one invoke body into a JSON object string,
 /// preserving emission order. Non-parameter text is skipped (Python findall
 /// parity), so whitespace between blocks and stray noise are dropped.
-fn parse_invoke_arguments(body: &str) -> ModalResult<String> {
+fn parse_invoke_arguments(body: &str) -> String {
     let mut pairs: Vec<(String, Value)> = Vec::new();
     let mut rest = body;
     while let Some(start) = rest.find(PARAMETER_OPEN) {
@@ -1147,8 +1122,7 @@ fn parse_invoke_arguments(body: &str) -> ModalResult<String> {
             Err(_) => rest = &attempt[PARAMETER_OPEN.len()..],
         }
     }
-    let arguments = pairs.into_iter().collect::<Map<String, Value>>();
-    serde_json::to_string(&arguments).map_err(|_| atem_error("Muse Glimmer tool arguments"))
+    Value::Object(pairs.into_iter().collect()).to_string()
 }
 
 /// Decode one parameter value: JSON when possible, else the raw string
@@ -1184,13 +1158,6 @@ fn normalize_name(emitted: &str, registered_names: &[String]) -> String {
     emitted.to_string()
 }
 
-/// Build a cut error for determinably malformed ATEM structure.
-fn atem_error(label: &'static str) -> ErrMode<ContextError> {
-    let mut error = ContextError::new();
-    error.push(StrContext::Label(label));
-    ErrMode::Cut(error)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1202,8 +1169,9 @@ mod tests {
 
     use super::{ATEM_PREFIX, EOT, MuseGlimmerUnifiedParser, START};
     use crate::tool::Tool;
+    use crate::tool::test_utils::split_by_chars;
     use crate::unified::test_utils::{
-        UnifiedOutputTestExt, UnifiedParserTestExt, char_chunks, collect_stream, first_call,
+        UnifiedOutputTestExt, UnifiedParserTestExt, collect_stream, first_call,
     };
     use crate::unified::{UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 
@@ -1243,9 +1211,7 @@ mod tests {
     fn assert_chunking_invariant(text: &str) -> UnifiedParserOutput {
         let whole = collect_stream(&mut test_parser(), &[text]);
         for size in [1, 3, 7] {
-            let chunks = char_chunks(text, size);
-            let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
-            let streamed = collect_stream(&mut test_parser(), &chunk_refs);
+            let streamed = collect_stream(&mut test_parser(), &split_by_chars(text, size));
             assert_eq!(streamed, whole, "chunk size {size}");
         }
         whole
@@ -1450,9 +1416,7 @@ mod tests {
             " to=user<|message|>a{}<|eom|>tail<|eot|>",
             "<|".repeat(2048)
         );
-        let chunks = char_chunks(&text, 1);
-        let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
-        let streamed = collect_stream(&mut test_parser(), &chunk_refs);
+        let streamed = collect_stream(&mut test_parser(), &split_by_chars(&text, 1));
         let whole = collect_stream(&mut test_parser(), &[&text]);
 
         assert_eq!(streamed, whole);
@@ -2437,5 +2401,28 @@ mod tests {
             .unwrap();
         assert_eq!(output.calls().len(), 1);
         assert!(parser.finish().unwrap().events.is_empty());
+    }
+
+    #[test]
+    fn muse_glimmer_initialize_without_generation_prompt_stays_idle() {
+        // Without a generation prompt the last `<|start|>` opens the final
+        // user turn; the parser stays Idle and a framed turn parses normally.
+        let prompt = tokenizer()
+            .encode(
+                &format!(
+                    "<|start|>user<|message|>{}<|eot|>",
+                    "long question ".repeat(64)
+                ),
+                false,
+            )
+            .unwrap();
+        let mut parser = test_parser();
+        parser.initialize(&prompt).unwrap();
+        let output = parser
+            .parse_complete("<|start|>assistant to=self<|message|>t<|eom|><|start|>assistant to=user<|message|>a<|eot|>")
+            .unwrap();
+
+        assert_eq!(output.reasoning_text(), "t");
+        assert_eq!(output.normal_text(), "a");
     }
 }

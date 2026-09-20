@@ -514,11 +514,13 @@ mod tests {
     use winnow::prelude::*;
 
     use super::{
-        CHANNEL_END, CHANNEL_START, Gemma4UnifiedParser, ToolCallDelta, UnifiedParser,
-        UnifiedParserOutput, gemma4_array_content, parse_gemma4_args,
+        CHANNEL_END, CHANNEL_START, Gemma4UnifiedParser, UnifiedParser, UnifiedParserOutput,
+        gemma4_array_content, parse_gemma4_args,
     };
     use crate::tool::Tool;
-    use crate::unified::test_utils::UnifiedParserTestExt;
+    use crate::unified::test_utils::{
+        UnifiedOutputTestExt, UnifiedParserTestExt, collect_stream, first_call,
+    };
     use crate::unified::{UnifiedParserError, UnifiedParserEvent, parsing_failed};
     use crate::utils::recursion::MAX_PARSER_RECURSION_DEPTH;
 
@@ -531,49 +533,6 @@ mod tests {
             .with_special_token(CHANNEL_START, CHANNEL_START_ID)
             .with_special_token(CHANNEL_END, CHANNEL_END_ID)
             .with_special_token("<turn-boundary>", TURN_BOUNDARY_ID)
-    }
-
-    trait UnifiedOutputTestExt {
-        fn normal_text(&self) -> String;
-        fn reasoning_text(&self) -> String;
-        fn calls(&self) -> Vec<&ToolCallDelta>;
-        fn coalesce(self) -> Self;
-    }
-
-    impl UnifiedOutputTestExt for UnifiedParserOutput {
-        fn normal_text(&self) -> String {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(text) => Some(text.as_str()),
-                    UnifiedParserEvent::Reasoning(_) | UnifiedParserEvent::ToolCall(_) => None,
-                })
-                .collect()
-        }
-
-        fn reasoning_text(&self) -> String {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::Reasoning(text) => Some(text.text.as_str()),
-                    UnifiedParserEvent::Text(_) | UnifiedParserEvent::ToolCall(_) => None,
-                })
-                .collect()
-        }
-
-        fn calls(&self) -> Vec<&ToolCallDelta> {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(_) | UnifiedParserEvent::Reasoning(_) => None,
-                    UnifiedParserEvent::ToolCall(call) => Some(call),
-                })
-                .collect()
-        }
-
-        fn coalesce(self) -> Self {
-            self
-        }
     }
 
     fn parse_gemma4_array(array: &str) -> super::Result<Vec<Value>> {
@@ -657,30 +616,16 @@ mod tests {
         ));
     }
 
-    fn collect_stream(chunks: &[&str]) -> UnifiedParserOutput {
-        let mut parser = test_parser();
-        let mut output = UnifiedParserOutput::default();
-        for chunk in chunks {
-            output.append(parser.parse_chunk(chunk).unwrap());
-        }
-        output.append(parser.finish().unwrap());
-        output.coalesce()
-    }
-
     #[test]
     fn gemma4_reasoning_framing_preserves_extra_newlines_at_every_split() {
         let wire = "<|channel>thought\n\n  reason\n\n<channel|>    answer\n";
         for split in 0..=wire.len() {
-            let output = collect_stream(&[&wire[..split], &wire[split..]]);
+            let output = collect_stream(&mut test_parser(), &[&wire[..split], &wire[split..]]);
             assert_eq!(output.reasoning_text(), "\n  reason\n", "split {split}");
             assert_eq!(output.normal_text(), "    answer\n", "split {split}");
         }
-        let output = collect_stream(&["<|channel>thought\nreason\n<channel"]);
+        let output = collect_stream(&mut test_parser(), &["<|channel>thought\nreason\n<channel"]);
         assert_eq!(output.reasoning_text(), "reason\n<channel");
-    }
-
-    fn first_call(output: &UnifiedParserOutput) -> ToolCallDelta {
-        (*output.calls().first().expect("expected one tool call")).clone()
     }
 
     #[test]
@@ -755,14 +700,17 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_basic_single_tool_call() {
-        let output = collect_stream(&[
-            "<|tool_call>",
-            "call:get_weather{",
-            "location:<|\"|>Paris",
-            ", France",
-            "<|\"|>}",
-            "<tool_call|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|tool_call>",
+                "call:get_weather{",
+                "location:<|\"|>Paris",
+                ", France",
+                "<|\"|>}",
+                "<tool_call|>",
+            ],
+        );
 
         assert!(output.normal_text().is_empty());
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
@@ -774,15 +722,18 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_text_before_and_after_tool_call() {
-        let output = collect_stream(&[
-            "Let me check ",
-            "the weather. ",
-            "<|tool_call>",
-            "call:get_weather{",
-            "location:<|\"|>London<|\"|>}",
-            "<tool_call|><",
-            "div>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "Let me check ",
+                "the weather. ",
+                "<|tool_call>",
+                "call:get_weather{",
+                "location:<|\"|>London<|\"|>}",
+                "<tool_call|><",
+                "div>",
+            ],
+        );
 
         assert_eq!(output.normal_text(), "Let me check the weather. <div>");
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
@@ -807,7 +758,6 @@ mod tests {
         }
 
         output.append(parser.parse_chunk("<tool_call|>").unwrap());
-        let output = output.coalesce();
 
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
@@ -818,12 +768,15 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_handles_boolean_split_across_chunks() {
-        let output = collect_stream(&[
-            "<|tool_call>",
-            "call:search{input:{all:tru",
-            "e}}",
-            "<tool_call|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|tool_call>",
+                "call:search{input:{all:tru",
+                "e}}",
+                "<tool_call|>",
+            ],
+        );
 
         assert_eq!(first_call(&output).name.as_deref(), Some("search"));
         assert_eq!(
@@ -834,7 +787,10 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_handles_false_split_across_chunks() {
-        let output = collect_stream(&["<|tool_call>", "call:set{flag:fals", "e}", "<tool_call|>"]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &["<|tool_call>", "call:set{flag:fals", "e}", "<tool_call|>"],
+        );
 
         assert_eq!(first_call(&output).name.as_deref(), Some("set"));
         assert_eq!(
@@ -845,7 +801,10 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_handles_number_split_across_chunks() {
-        let output = collect_stream(&["<|tool_call>", "call:set{count:4", "2}", "<tool_call|>"]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &["<|tool_call>", "call:set{count:4", "2}", "<tool_call|>"],
+        );
 
         assert_eq!(first_call(&output).name.as_deref(), Some("set"));
         assert_eq!(
@@ -856,13 +815,16 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_handles_split_string_delimiter() {
-        let output = collect_stream(&[
-            "<|tool_call>",
-            "call:todowrite{",
-            "content:<|\"|>Buy milk<|",
-            "\"|>}",
-            "<tool_call|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|tool_call>",
+                "call:todowrite{",
+                "content:<|\"|>Buy milk<|",
+                "\"|>}",
+                "<tool_call|>",
+            ],
+        );
 
         assert_eq!(first_call(&output).name.as_deref(), Some("todowrite"));
         assert_eq!(
@@ -874,11 +836,14 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_handles_split_tool_call_end_marker() {
-        let output = collect_stream(&[
-            "<|tool_call>",
-            "call:get_weather{location:<|\"|>Paris<|\"|>}<tool",
-            "_call|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|tool_call>",
+                "call:get_weather{location:<|\"|>Paris<|\"|>}<tool",
+                "_call|>",
+            ],
+        );
 
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
@@ -889,13 +854,16 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_handles_end_marker_literal_inside_string() {
-        let output = collect_stream(&[
-            "<|tool_call>",
-            "call:todowrite{",
-            "content:<|\"|>literal }<tool_call|> inside",
-            "<|\"|>}",
-            "<tool_call|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|tool_call>",
+                "call:todowrite{",
+                "content:<|\"|>literal }<tool_call|> inside",
+                "<|\"|>}",
+                "<tool_call|>",
+            ],
+        );
 
         assert_eq!(first_call(&output).name.as_deref(), Some("todowrite"));
         assert_eq!(
@@ -906,18 +874,21 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_handles_html_argument_without_duplication() {
-        let output = collect_stream(&[
-            "<|tool_call>",
-            "call:write_file{",
-            "path:<|\"|>index.html<|\"|>,",
-            "content:<|\"|><!DOCTYPE html>\n<",
-            "html lang=\"zh-CN\">\n<",
-            "head>\n    <",
-            "meta charset=\"UTF-8\">\n    <",
-            "meta name=\"viewport\" content=\"width=device-width\">\n",
-            "<|\"|>}",
-            "<tool_call|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|tool_call>",
+                "call:write_file{",
+                "path:<|\"|>index.html<|\"|>,",
+                "content:<|\"|><!DOCTYPE html>\n<",
+                "html lang=\"zh-CN\">\n<",
+                "head>\n    <",
+                "meta charset=\"UTF-8\">\n    <",
+                "meta name=\"viewport\" content=\"width=device-width\">\n",
+                "<|\"|>}",
+                "<tool_call|>",
+            ],
+        );
 
         assert_eq!(first_call(&output).name.as_deref(), Some("write_file"));
         assert_eq!(
@@ -931,16 +902,19 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_trailing_bare_bool_is_not_duplicated() {
-        let output = collect_stream(&[
-            "<|tool_call>",
-            "call:Edit{",
-            "file_path:<|\"|>src/env.py<|\"|>,",
-            "old_string:<|\"|>old_val<|\"|>,",
-            "new_string:<|\"|>new_val<|\"|>,",
-            "replace_all:",
-            "false}",
-            "<tool_call|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|tool_call>",
+                "call:Edit{",
+                "file_path:<|\"|>src/env.py<|\"|>,",
+                "old_string:<|\"|>old_val<|\"|>,",
+                "new_string:<|\"|>new_val<|\"|>,",
+                "replace_all:",
+                "false}",
+                "<tool_call|>",
+            ],
+        );
 
         assert_eq!(first_call(&output).name.as_deref(), Some("Edit"));
         assert_eq!(
@@ -970,7 +944,10 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_emits_reasoning_then_text() {
-        let output = collect_stream(&["<|channel>thought\nreason<channel|>answer"]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &["<|channel>thought\nreason<channel|>answer"],
+        );
 
         assert_eq!(output.reasoning_text(), "reason");
         assert_eq!(output.normal_text(), "answer");
@@ -1038,12 +1015,15 @@ mod tests {
 
     #[test]
     fn gemma4_reasoning_tool_call_implicitly_ends_reasoning() {
-        let output = collect_stream(&[
-            "<|channel>thought\nNeed weather.",
-            "<|tool_call>",
-            "call:get_weather{location:<|\"|>Paris<|\"|>}",
-            "<tool_call|>",
-        ]);
+        let output = collect_stream(
+            &mut test_parser(),
+            &[
+                "<|channel>thought\nNeed weather.",
+                "<|tool_call>",
+                "call:get_weather{location:<|\"|>Paris<|\"|>}",
+                "<tool_call|>",
+            ],
+        );
 
         assert_eq!(output.reasoning_text(), "Need weather.");
         assert!(output.normal_text().is_empty());
@@ -1056,7 +1036,7 @@ mod tests {
 
     #[test]
     fn gemma4_bare_channel_start_is_plain_text() {
-        let output = collect_stream(&["<|channel>plain"]);
+        let output = collect_stream(&mut test_parser(), &["<|channel>plain"]);
 
         assert_eq!(output.normal_text(), "<|channel>plain");
         assert!(output.reasoning_text().is_empty());

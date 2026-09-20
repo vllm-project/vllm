@@ -22,9 +22,7 @@
 
 use serde_json::{Map, Value};
 use xgrammar_structural_tag::builders::StructuralTagOptions;
-use xgrammar_structural_tag::format::{
-    Format, GrammarFormat, JsonSchemaFormat, StructuralTag, TagFormat,
-};
+use xgrammar_structural_tag::format::{Format, GrammarFormat, StructuralTag, TagFormat};
 use xgrammar_structural_tag::{Error as XgrammarError, Result as XgrammarResult};
 
 use super::super::{ScopedCallerConstraint, ScopedStructuralTagBuilder, ScopedToolChoice};
@@ -33,7 +31,7 @@ use super::{
     INVOKE_CLOSE, INVOKE_OPEN, MAX_CANDIDATE_LEN, MESSAGE, PARAMETER_CLOSE, PARAMETER_OPEN, START,
     classify_recipient, is_recipient_char,
 };
-use crate::tool::Tool;
+use crate::tool::{Tool, json_schema};
 
 pub(super) static MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER: MuseGlimmerStructuralTagBuilder =
     MuseGlimmerStructuralTagBuilder;
@@ -212,7 +210,7 @@ fn answer_tag(
 ) -> TagFormat {
     let content = match caller {
         None => Format::any_text_excluding(FRAMING_MARKERS),
-        Some(ScopedCallerConstraint::JsonSchema(schema)) => json_schema(schema.clone(), options),
+        Some(ScopedCallerConstraint::JsonSchema(schema)) => json_schema(schema.clone(), *options),
         Some(ScopedCallerConstraint::Regex(pattern)) => Format::regex(pattern),
         Some(ScopedCallerConstraint::Choice(choices)) => {
             one_of(choices.iter().map(Format::const_string).collect())
@@ -392,7 +390,7 @@ fn parameter_value(schema: &Value, options: &StructuralTagOptions) -> Format {
     }
     match schema.get("type").and_then(Value::as_str) {
         Some(ty @ ("integer" | "number" | "boolean" | "null")) => {
-            json_schema(scalar_schema(schema, ty), options)
+            json_schema(scalar_schema(schema, ty), *options)
         }
         // Framing markers and the invoke close stay excluded: the streaming
         // parser cuts the invoke body at the first `</atem:invoke>` and treats
@@ -478,15 +476,6 @@ fn compilable_bound(bound: &Value, integer: bool) -> bool {
         || number.as_f64().is_some_and(|float| {
             float.fract() == 0.0 && float > i64::MIN as f64 && float < i64::MAX as f64
         })
-}
-
-/// A JSON body honoring the request's key-order and whitespace options.
-fn json_schema(schema: Value, options: &StructuralTagOptions) -> Format {
-    Format::JsonSchema(
-        JsonSchemaFormat::new(schema)
-            .with_any_order(options.any_order)
-            .with_max_whitespace_cnt(options.max_whitespace_cnt),
-    )
 }
 
 fn required_names(parameters: &Value) -> Vec<&str> {

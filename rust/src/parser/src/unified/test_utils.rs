@@ -77,12 +77,6 @@ pub(crate) fn collect_stream<P: UnifiedParser + ?Sized>(
     output
 }
 
-/// Split `text` into small chunks to stress marker-split handling.
-pub(crate) fn char_chunks(text: &str, size: usize) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    chars.chunks(size).map(|chunk| chunk.iter().collect()).collect()
-}
-
 pub(crate) fn first_call(output: &UnifiedParserOutput) -> ToolCallDelta {
     output.calls().first().expect("expected one tool call").clone()
 }

@@ -110,8 +110,9 @@ pub fn safe_text_len_mul(input: &mut Partial<&str>, markers: &[&str]) -> ModalRe
     Ok(emit_len)
 }
 
+/// Return the byte offset of the earliest occurrence of any of `markers`.
 #[inline(always)]
-fn find_slice_mul(text: &str, markers: &[&str]) -> Option<usize> {
+pub(crate) fn find_slice_mul(text: &str, markers: &[&str]) -> Option<usize> {
     let range = match markers {
         // Use the fast specialized `winnow::stream::FindSlice` impl for 1-3 markers.
         [first] => text.find_slice(*first),
