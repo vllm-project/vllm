@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
+import enum
 import heapq
 import math
 from abc import ABC, abstractmethod
@@ -11,6 +12,19 @@ from typing import Any
 
 from vllm.v1.kv_offload.base import Locality
 from vllm.v1.kv_offload.tiering.base import JobId
+
+
+class ThreadMode(enum.Enum):
+    """Operating mode for a pool worker thread."""
+
+    READ = "read"
+    """Load-priority: serve load jobs first, steal store jobs when idle."""
+
+    WRITE = "write"
+    """Store-priority: serve store jobs first, steal load jobs when idle."""
+
+    WRITE_EXCL = "write_excl"
+    """Store-exclusive: serve store jobs only, never steal from the load queue."""
 
 
 class JobQueue(ABC):
@@ -286,9 +300,11 @@ class Scheduler:
         # TODO(varun): unfortunate! - wake selectively
         return self._n_read_threads + self._n_write_threads
 
-    def has_work(self, load_priority: bool):
+    def has_work(self, mode: ThreadMode) -> bool:
         has_load_work = bool(self._load_q or self._load_job_q.maybe_has_work())
         has_store_work = bool(self._store_q or self._store_job_q.maybe_has_work())
+        if mode is ThreadMode.WRITE_EXCL:
+            return has_store_work
         return has_load_work or has_store_work
 
     def _batch_tasks(
@@ -372,24 +388,27 @@ class Scheduler:
         )
         return steal_fn, quanta, state
 
-    def fetch_work(self, load_priority: bool):
-        is_read_thread = load_priority
-        if is_read_thread:
+    def fetch_work(self, mode: ThreadMode):
+        if mode is ThreadMode.READ:
             self._maybe_populate_work_q(self._load_q, self._load_job_q)
             if self._load_q:
                 return self._unpack(self._load_q.popleft())
-            if self._read_threads_can_write:
-                self._maybe_populate_work_q(self._store_q, self._store_job_q)
-                if self._store_q:
-                    return self._unpack(self._store_q.popleft())
+            self._maybe_populate_work_q(self._store_q, self._store_job_q)
+            if self._store_q:
+                return self._unpack(self._store_q.popleft())
             return None
-        else:
+        elif mode is ThreadMode.WRITE:
             self._maybe_populate_work_q(self._store_q, self._store_job_q)
             if self._store_q:
                 return self._unpack(self._store_q.popleft())
             self._maybe_populate_work_q(self._load_q, self._load_job_q)
             if self._load_q:
                 return self._steal_from_load_q()
+            return None
+        else:  # WRITE_EXCL
+            self._maybe_populate_work_q(self._store_q, self._store_job_q)
+            if self._store_q:
+                return self._unpack(self._store_q.popleft())
             return None
 
     def clear(

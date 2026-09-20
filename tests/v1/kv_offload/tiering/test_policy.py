@@ -19,6 +19,7 @@ from vllm.v1.kv_offload.tiering.fs.policy import (
     Scheduler,
     SJFBucketQueue,
     StoreQueue,
+    ThreadMode,
 )
 
 # ---------------------------------------------------------------------------
@@ -80,10 +81,10 @@ def _submit_store(
 
 
 def _drain_load(scheduler: Scheduler) -> list[tuple[Any, int, Any]]:
-    """Fetch all available work for a load-priority (read) thread."""
+    """Fetch all available work for a READ thread."""
     results = []
     while True:
-        work = scheduler.fetch_work(load_priority=True)
+        work = scheduler.fetch_work(ThreadMode.READ)
         if work is None:
             break
         results.append(work)
@@ -91,10 +92,10 @@ def _drain_load(scheduler: Scheduler) -> list[tuple[Any, int, Any]]:
 
 
 def _drain_store(scheduler: Scheduler) -> list[tuple[Any, int, Any]]:
-    """Fetch all available work for a store-priority (write) thread."""
+    """Fetch all available work for a WRITE thread."""
     results = []
     while True:
-        work = scheduler.fetch_work(load_priority=False)
+        work = scheduler.fetch_work(ThreadMode.WRITE)
         if work is None:
             break
         results.append(work)
@@ -395,29 +396,30 @@ class TestSchedulerSubmit:
     def test_submit_load_registers_has_work_for_read_thread(self):
         s = _make_scheduler()
         _submit_load(s, 1, list(range(4)))
-        assert s.has_work(load_priority=True)
+        assert s.has_work(ThreadMode.READ)
 
     def test_submit_store_registers_has_work_for_write_thread(self):
         s = _make_scheduler()
         _submit_store(s, 1, list(range(4)))
-        assert s.has_work(load_priority=False)
+        assert s.has_work(ThreadMode.WRITE)
 
     def test_submit_store_visible_to_read_thread(self):
         """Read threads can steal store jobs."""
         s = _make_scheduler()
         _submit_store(s, 1, list(range(4)))
-        assert s.has_work(load_priority=True)
+        assert s.has_work(ThreadMode.READ)
 
-    def test_submit_load_not_visible_to_write_thread(self):
-        """Write threads cannot steal load jobs."""
+    def test_submit_load_not_visible_to_write_excl_thread(self):
+        """WRITE_EXCL threads never see load jobs."""
         s = _make_scheduler(n_read=4, n_write=2)
         _submit_load(s, 1, list(range(4)))
-        assert not s.has_work(load_priority=False)
+        assert not s.has_work(ThreadMode.WRITE_EXCL)
 
     def test_no_work_initially(self):
         s = _make_scheduler()
-        assert not s.has_work(load_priority=True)
-        assert not s.has_work(load_priority=False)
+        assert not s.has_work(ThreadMode.READ)
+        assert not s.has_work(ThreadMode.WRITE)
+        assert not s.has_work(ThreadMode.WRITE_EXCL)
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +432,7 @@ class TestSchedulerFetchWork:
         s = _make_scheduler(n_read=1, n_write=1)
         tasks = list(range(10))
         _submit_load(s, job_id=1, tasks=tasks)
-        work = s.fetch_work(load_priority=True)
+        work = s.fetch_work(ThreadMode.READ)
         assert work is not None
         fn, batch_size, state = work
         assert batch_size == 10  # 1 read thread → 1 batch with all tasks
@@ -439,7 +441,7 @@ class TestSchedulerFetchWork:
         s = _make_scheduler(Locality.REMOTE, n_read=1, n_write=1)
         tasks = list(range(6))
         _submit_store(s, job_id=1, tasks=tasks)
-        work = s.fetch_work(load_priority=False)
+        work = s.fetch_work(ThreadMode.WRITE)
         assert work is not None
         _, batch_size, _ = work
         assert batch_size == 6  # 1 write thread → 1 batch
@@ -448,19 +450,21 @@ class TestSchedulerFetchWork:
         s = _make_scheduler(n_read=1, n_write=1)
         _submit_store(s, job_id=1, tasks=list(range(4)))
         # No load work; read thread should fall back to store queue.
-        work = s.fetch_work(load_priority=True)
+        work = s.fetch_work(ThreadMode.READ)
         assert work is not None
 
-    def test_write_thread_cannot_steal_load_job(self):
+    def test_write_excl_thread_cannot_steal_load_job(self):
+        """WRITE_EXCL threads never steal from the load queue."""
         s = _make_scheduler(n_read=4, n_write=2)
         _submit_load(s, job_id=1, tasks=list(range(4)))
-        work = s.fetch_work(load_priority=False)
+        work = s.fetch_work(ThreadMode.WRITE_EXCL)
         assert work is None
 
     def test_fetch_returns_none_when_empty(self):
         s = _make_scheduler()
-        assert s.fetch_work(load_priority=True) is None
-        assert s.fetch_work(load_priority=False) is None
+        assert s.fetch_work(ThreadMode.READ) is None
+        assert s.fetch_work(ThreadMode.WRITE) is None
+        assert s.fetch_work(ThreadMode.WRITE_EXCL) is None
 
     def test_batching_splits_tasks_across_read_threads(self):
         """With n_read=4 and 8 tasks, expect 4 batches of 2."""
@@ -510,7 +514,7 @@ class TestSchedulerFetchWork:
         _submit_store(s, job_id=10, tasks=[0])
         _submit_load(s, job_id=20, tasks=[1])
         # First fetch should give a load work item.
-        work = s.fetch_work(load_priority=True)
+        work = s.fetch_work(ThreadMode.READ)
         assert work is not None
         _, _, state = work
         # The load job (id=20) should be first.
@@ -550,10 +554,12 @@ class TestSchedulerClear:
         _submit_load(s, 1, list(range(8)))
         _submit_store(s, 2, list(range(4)))
         s.clear()
-        assert not s.has_work(load_priority=True)
-        assert not s.has_work(load_priority=False)
-        assert s.fetch_work(load_priority=True) is None
-        assert s.fetch_work(load_priority=False) is None
+        assert not s.has_work(ThreadMode.READ)
+        assert not s.has_work(ThreadMode.WRITE)
+        assert not s.has_work(ThreadMode.WRITE_EXCL)
+        assert s.fetch_work(ThreadMode.READ) is None
+        assert s.fetch_work(ThreadMode.WRITE) is None
+        assert s.fetch_work(ThreadMode.WRITE_EXCL) is None
 
     def test_clear_removes_pending_job_metadata(self):
         s = _make_scheduler()
@@ -566,8 +572,8 @@ class TestSchedulerClear:
         _submit_load(s, 1, list(range(4)))
         s.clear()
         _submit_load(s, 2, list(range(6)))
-        assert s.has_work(load_priority=True)
-        work = s.fetch_work(load_priority=True)
+        assert s.has_work(ThreadMode.READ)
+        work = s.fetch_work(ThreadMode.READ)
         assert work is not None
         _, batch_size, _ = work
         assert batch_size == 6
@@ -584,8 +590,8 @@ class TestSchedulerNoReadThreads:
         s = _make_scheduler(Locality.REMOTE, n_read=0, n_write=2)
         assert s._write_threads_can_read is True
         _submit_load(s, 1, list(range(4)))
-        assert s.has_work(load_priority=False)
-        work = s.fetch_work(load_priority=False)
+        assert s.has_work(ThreadMode.WRITE)
+        work = s.fetch_work(ThreadMode.WRITE)
         assert work is not None
 
     def test_all_tasks_served_with_no_read_threads(self):
@@ -595,3 +601,30 @@ class TestSchedulerNoReadThreads:
         batches = _drain_store(s)
         total = sum(bs for _, bs, _ in batches)
         assert total == len(tasks)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler — WRITE_EXCL thread behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestSchedulerWriteExcl:
+    def test_write_excl_sees_only_store_work(self):
+        s = _make_scheduler(n_read=2, n_write=2)
+        _submit_load(s, 1, list(range(4)))
+        assert not s.has_work(ThreadMode.WRITE_EXCL)
+        _submit_store(s, 2, list(range(4)))
+        assert s.has_work(ThreadMode.WRITE_EXCL)
+
+    def test_write_excl_fetch_ignores_load_queue(self):
+        s = _make_scheduler(n_read=2, n_write=2)
+        _submit_load(s, 1, list(range(4)))
+        assert s.fetch_work(ThreadMode.WRITE_EXCL) is None
+
+    def test_write_excl_fetch_serves_store(self):
+        s = _make_scheduler(Locality.REMOTE, n_read=1, n_write=0)
+        _submit_store(s, 1, list(range(4)))
+        work = s.fetch_work(ThreadMode.WRITE_EXCL)
+        assert work is not None
+        _, batch_size, _ = work
+        assert batch_size == 4

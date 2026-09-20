@@ -17,7 +17,12 @@ from dataclasses import dataclass
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import Locality, OffloadKey
 from vllm.v1.kv_offload.tiering.base import JobId
-from vllm.v1.kv_offload.tiering.fs.policy import LoadQueue, Scheduler, StoreQueue
+from vllm.v1.kv_offload.tiering.fs.policy import (
+    LoadQueue,
+    Scheduler,
+    StoreQueue,
+    ThreadMode,
+)
 
 logger = init_logger(__name__)
 
@@ -75,23 +80,27 @@ class JobState:
 
 class DualQueueThreadPool:
     """
-    Thread pool with two task queues (load and store) and two thread groups.
+    Thread pool with two task queues (load and store) and three thread groups.
 
-    Load-priority threads drain the load queue first, then fall back to the
-    store queue.  Store-priority threads do the reverse.  Both queues share
-    a single condition variable.
+    - READ threads  (ThreadMode.READ):       load first, steal stores when idle.
+    - WRITE threads (ThreadMode.WRITE):      store first, steal loads when idle.
+    - WRITE_EXCL threads (ThreadMode.WRITE_EXCL): store only, never steal loads.
+
+    All groups share a single condition variable.
     """
 
     def __init__(
         self,
         n_read_threads: int,
         n_write_threads: int,
-        block_size: int,
-        locality: Locality,
+        n_write_excl_threads: int = 0,
+        block_size: int = 0,
+        locality: Locality = Locality.REMOTE,
         thread_name_prefix: str = "fs_secondary_tier",
     ) -> None:
         self._n_read_threads = n_read_threads
         self._n_write_threads = n_write_threads
+        self._n_write_excl_threads = n_write_excl_threads
         self._condition = threading.Condition(threading.Lock())
         self._stop = False
         self._threads: list[threading.Thread] = []
@@ -111,7 +120,7 @@ class DualQueueThreadPool:
         for i in range(self._n_read_threads):
             t = threading.Thread(
                 target=self._worker,
-                args=(True,),
+                args=(ThreadMode.READ,),
                 name=f"{thread_name_prefix}_l{i}",
                 daemon=True,
             )
@@ -121,8 +130,18 @@ class DualQueueThreadPool:
         for i in range(self._n_write_threads):
             t = threading.Thread(
                 target=self._worker,
-                args=(False,),
+                args=(ThreadMode.WRITE,),
                 name=f"{thread_name_prefix}_s{i}",
+                daemon=True,
+            )
+            t.start()
+            self._threads.append(t)
+
+        for i in range(self._n_write_excl_threads):
+            t = threading.Thread(
+                target=self._worker,
+                args=(ThreadMode.WRITE_EXCL,),
+                name=f"{thread_name_prefix}_se{i}",
                 daemon=True,
             )
             t.start()
@@ -130,7 +149,7 @@ class DualQueueThreadPool:
 
     @property
     def total_threads(self) -> int:
-        return self._n_read_threads + self._n_write_threads
+        return self._n_read_threads + self._n_write_threads + self._n_write_excl_threads
 
     def _enqueue(
         self,
@@ -217,16 +236,16 @@ class DualQueueThreadPool:
             for t in self._threads:
                 t.join()
 
-    def _worker(self, load_priority: bool) -> None:
+    def _worker(self, mode: ThreadMode) -> None:
         # Wait for tasks, process from primary queue first, fall back to secondary.
         while True:
             with self._condition:
                 self._condition.wait_for(
-                    lambda: self._stop or self._scheduler.has_work(load_priority)
+                    lambda: self._stop or self._scheduler.has_work(mode)
                 )
                 if self._stop:
                     return
-                work = self._scheduler.fetch_work(load_priority)
+                work = self._scheduler.fetch_work(mode)
                 if work is None:
                     continue
                 fn, batch_size, state = work
