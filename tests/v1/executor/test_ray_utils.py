@@ -4,7 +4,7 @@
 import numpy as np
 
 from vllm.distributed.aux_output_connector.connector import (
-    AuxOutputRequestOutput,
+    AuxRequestOutput,
 )
 from vllm.v1.executor.ray_utils import detach_zero_copy_from_model_runner_output
 from vllm.v1.outputs import (
@@ -66,7 +66,7 @@ def test_detach_zero_copy_aux_output_without_logprobs():
     output = ModelRunnerOutput(
         req_ids=["req-0"],
         req_id_to_index={"req-0": 0},
-        aux_output_connector_output={"req-0": AuxOutputRequestOutput(0, rows)},
+        aux_output_connector_output={"req-0": AuxRequestOutput(0, rows)},
     )
 
     detach_zero_copy_from_model_runner_output(output)

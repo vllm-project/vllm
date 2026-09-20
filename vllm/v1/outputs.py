@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.distributed.aux_output_connector.connector import AuxOutputRequestOutput
+    from vllm.distributed.aux_output_connector.connector import AuxRequestOutput
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
     from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
     from vllm.distributed.kv_events import KVConnectorKVEvents
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
-    AuxOutputRequestOutput = object
+    AuxRequestOutput = object
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
@@ -296,7 +296,7 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    aux_output_connector_output: dict[str, AuxOutputRequestOutput] | None = None
+    aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None

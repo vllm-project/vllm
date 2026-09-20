@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -12,8 +13,8 @@ import torch
 
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
-    AuxOutputRequestOutput,
     AuxOutputSchedulerConnector,
+    AuxRequestOutput,
     PackedBlockHashes,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
@@ -28,8 +29,13 @@ from vllm.distributed.aux_output_connector.store import (
     BlockObjectStore,
     BlockObjectStoreError,
 )
-from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
+from vllm.distributed.aux_output_connector.worker import (
+    AuxOutputWorkerConnector,
+)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.worker.gpu import async_utils
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 pytestmark = pytest.mark.cpu_test
 
@@ -175,7 +181,11 @@ def _make_worker(
     )
     worker._requests = {}
     worker._generation = 0
-    worker._pending_output = None
+    worker._step_metadata = None
+    worker._pendings = []
+    worker._outstanding = {}
+    worker._lock = threading.Lock()
+    worker._max_concurrent_batches = max_concurrent_batches
     return worker
 
 
@@ -204,13 +214,21 @@ def test_worker_rejects_run_and_finish_in_one_step():
     worker.close()
 
 
+def _input_batch(request_ids, token_starts, query_start_loc):
+    return SimpleNamespace(
+        req_ids=request_ids,
+        num_computed_tokens_np=token_starts,
+        query_start_loc_np=query_start_loc,
+    )
+
+
 def test_non_output_rank_skips_capture_snapshot():
     worker = object.__new__(AuxOutputWorkerConnector)
     worker._store = None
     worker._buffer = None
     worker._capturer = Mock()
     worker._step_metadata = Mock()
-    assert worker.prepare_output([], np.array([]), np.array([])) is None
+    assert worker.prepare_output(_input_batch([], np.array([]), np.array([]))) is None
     worker._capturer.snapshot_routing_data.assert_not_called()
 
 
@@ -220,32 +238,105 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
 
     worker.begin_step(None)
 
-    assert worker.prepare_output([], np.array([]), np.array([])) is None
+    assert worker.prepare_output(_input_batch([], np.array([]), np.array([]))) is None
     worker._capturer.snapshot_routing_data.assert_not_called()
     worker.close()
 
 
-def test_worker_waits_for_previous_aux_output_before_next_step():
+def test_next_step_does_not_consume_pending_output(monkeypatch):
+    """begin_step must not wait for or consume an unconsumed step output."""
+    event = Mock()
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
+    monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
+    monkeypatch.setattr(
+        async_utils, "async_copy_to_np", lambda tensor: tensor.numpy().copy()
+    )
     worker = _make_worker(1)
-    finished = threading.Event()
-    worker._pending_output = SimpleNamespace(finished=finished)
-    entered = threading.Event()
-    returned = threading.Event()
+    worker.begin_step(
+        _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
+    )
+    rows = torch.ones((1, *_SHAPE), dtype=torch.uint8)
+    worker._capturer = Mock()
+    worker._capturer.snapshot_routing_data.return_value = rows
+    process_output = Mock(wraps=worker.process_output)
+    monkeypatch.setattr(worker, "process_output", process_output)
+    pending = worker.prepare_output(
+        _input_batch(["request"], np.array([0]), np.array([0, 1]))
+    )
+    assert pending is not None
+    output = async_utils.AsyncOutput(
+        ModelRunnerOutput(["request"], {"request": 0}),
+        SamplerOutput(
+            torch.tensor([[7]]), None, None, None, num_rejected=torch.tensor([0])
+        ),
+        torch.tensor([1]),
+        Mock(),
+        Mock(),
+        check_ep_fault=False,
+        pending_aux_output=pending,
+    )
+    event.record.assert_called_once()
+    assert worker._pendings == [pending]
 
-    def begin_step():
-        entered.set()
-        worker.begin_step(_metadata(0, [], {}).metadata)
-        returned.set()
+    worker.begin_step(_metadata(0, [], {}).metadata)
+    process_output.assert_not_called()
+    assert worker._pendings == [pending]
 
-    thread = threading.Thread(target=begin_step)
-    thread.start()
-    assert entered.wait(1)
-    assert not returned.wait(0.05)
-    worker._pending_output = None
-    finished.set()
-    assert returned.wait(1)
-    thread.join()
-    assert worker._pending_output is None
+    result = output.get_output()
+
+    assert result.sampled_token_ids == [[7]]
+    np.testing.assert_array_equal(
+        result.aux_output_connector_output["request"].rows, rows.numpy()
+    )
+    process_output.assert_called_once()
+    assert worker._pendings == []
+    worker.close()
+
+
+def test_finished_request_teardown_waits_for_pending_output():
+    """A request finished while its step output is unconsumed still commits."""
+    worker = _make_worker(1)
+    worker.begin_step(
+        _metadata(0, [_request_metadata("request", 0, 4, 0, [b"aaaa"])], {}).metadata
+    )
+    rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, *_SHAPE)
+    worker._capturer = Mock()
+    worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    pending = worker.prepare_output(
+        _input_batch(["request"], np.array([0]), np.array([0, 4]))
+    )
+    assert pending is not None
+    pending.enqueue_cpu_copy(np.array([1]), np.array([0]))
+
+    # The next step finishes the request while its output is unconsumed.
+    worker.begin_step(_metadata(0, [], {"request": []}).metadata)
+    assert "request" in worker._requests
+
+    output = worker.process_output(pending)
+
+    np.testing.assert_array_equal(output["request"].rows, rows)
+    assert "request" not in worker._requests
+    # The finished request's store keys must be released after commit.
+    assert not worker._store._references
+    worker.close()
+
+
+def test_pending_outputs_bounded_by_max_concurrent_batches():
+    worker = _make_worker(1, max_concurrent_batches=2)
+    worker._capturer = Mock()
+    worker._capturer.snapshot_routing_data.side_effect = lambda num_rows: (
+        torch.zeros((num_rows, *_SHAPE), dtype=torch.uint8)
+    )
+    metadata = _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
+    batch = _input_batch(["request"], np.array([0]), np.array([0, 1]))
+    for _ in range(2):
+        worker.begin_step(metadata)
+        assert worker.prepare_output(batch) is not None
+
+    worker.begin_step(metadata)
+    with pytest.raises(AssertionError, match="not consumed in order"):
+        worker.prepare_output(batch)
+
     worker.close()
 
 
@@ -266,6 +357,7 @@ def test_worker_rejects_invalid_rejected_token_count():
             token_starts=(0,),
             num_tokens=(1,),
         )
+    assert worker._pendings == []
 
     worker.close()
 
@@ -296,22 +388,11 @@ def _process_output(
             (np.zeros(1, dtype=np.int32), np.cumsum(num_tokens, dtype=np.int32))
         )
     pending = worker.prepare_output(
-        request_ids,
-        np.asarray(token_starts),
-        query_start_loc,
+        _input_batch(request_ids, np.asarray(token_starts), query_start_loc)
     )
     assert pending is not None
-    try:
-        return worker.process_output(
-            request_ids,
-            pending.token_starts,
-            pending.query_start_loc,
-            pending.routed_experts.cpu().numpy(),
-            num_sampled,
-            num_rejected,
-        )
-    finally:
-        pending.complete()
+    pending.enqueue_cpu_copy(num_sampled, num_rejected)
+    return worker.process_output(pending)
 
 
 def test_worker_ignores_cudagraph_query_padding():
@@ -1331,7 +1412,7 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
 
     routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
-    output = {"request": AuxOutputRequestOutput(0, routing)}
+    output = {"request": AuxRequestOutput(0, routing)}
     request.num_computed_tokens = 4
     np.testing.assert_array_equal(connector.take_output(request, output), routing)
 
@@ -1573,8 +1654,8 @@ def test_scheduler_consumes_ordered_stale_aux_outputs():
     )
     first_rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     second_rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2) + 40
-    first = {"request": AuxOutputRequestOutput(0, first_rows)}
-    second = {"request": AuxOutputRequestOutput(4, second_rows)}
+    first = {"request": AuxRequestOutput(0, first_rows)}
+    second = {"request": AuxRequestOutput(4, second_rows)}
     connector.request_finished(request)
 
     request.num_tokens = 5
@@ -1610,7 +1691,7 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
         {request.request_id: request},
     )
     output = {
-        "request": AuxOutputRequestOutput(
+        "request": AuxRequestOutput(
             0,
             np.empty((0, *_SHAPE), dtype=_DTYPE),
         )
@@ -1629,7 +1710,7 @@ def test_scheduler_rejects_empty_aux_output_when_request_is_finished():
         {request.request_id: request},
     )
     output = {
-        "request": AuxOutputRequestOutput(
+        "request": AuxRequestOutput(
             0,
             np.empty((0, *_SHAPE), dtype=_DTYPE),
         )

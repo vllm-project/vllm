@@ -20,8 +20,8 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.aux_output_connector.connector import (
-    AuxOutputRequestOutput,
     AuxOutputSchedulerConnector,
+    AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
@@ -161,7 +161,7 @@ def test_routed_experts_prompt_start_at_prompt_end():
             prompt_logprobs_dict={},
             pooler_output=[],
             aux_output_connector_output={
-                request.request_id: AuxOutputRequestOutput(
+                request.request_id: AuxRequestOutput(
                     request.num_prompt_tokens,
                     np.empty((0, 1, 1), dtype=np.uint8),
                 )

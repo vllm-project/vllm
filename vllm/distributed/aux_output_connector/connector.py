@@ -36,7 +36,7 @@ class AuxOutputConnectorMetadata:
 
 
 @dataclass
-class AuxOutputRequestOutput:
+class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
 
@@ -101,7 +101,7 @@ class AuxOutputSchedulerConnector:
     def take_output(
         self,
         request: Request,
-        output: dict[str, AuxOutputRequestOutput] | None,
+        output: dict[str, AuxRequestOutput] | None,
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
         request_id = request.request_id

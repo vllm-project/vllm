@@ -761,11 +761,6 @@ class Worker(WorkerBase):
             ),
         )
 
-        if self.vllm_config.aux_output_config.enabled:
-            self.model_runner.init_aux_output_connector(  # type: ignore[attr-defined]
-                kv_cache_config
-            )
-
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.

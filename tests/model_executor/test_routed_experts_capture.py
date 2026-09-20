@@ -4,7 +4,6 @@ import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import numpy as np
 import pytest
 import torch
 
@@ -358,29 +357,27 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     assert capturer.device_buffer[0, 0, 0].item() == -1
 
 
-def test_model_runner_initializes_capture(monkeypatch):
-    pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
-    import vllm.v1.worker.gpu.model_runner as model_runner
+def test_get_aux_output_connector_uses_scheduler_batch_size(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     connector = Mock()
     constructor = Mock(return_value=connector)
-    monkeypatch.setattr(model_runner, "AuxOutputWorkerConnector", constructor)
-
-    runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
-    runner.max_num_tokens = 32
-    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=0))
-    runner.model = Mock()
+    monkeypatch.setattr(aux_output_worker, "AuxOutputWorkerConnector", constructor)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32)
+    )
+    model = Mock()
     kv_cache_config = Mock()
 
-    runner.init_aux_output_connector(kv_cache_config)
+    result = aux_output_worker.get_aux_output_connector(model, config, kv_cache_config)
 
     constructor.assert_called_once_with(
-        model=runner.model,
+        model=model,
         kv_cache_config=kv_cache_config,
         max_num_batched_tokens=32,
-        vllm_config=runner.vllm_config,
+        vllm_config=config,
     )
-    assert runner.aux_output_connector is connector
+    assert result is connector
 
 
 def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
@@ -400,6 +397,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     config = SimpleNamespace(
         aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
         kv_transfer_config=None,
+        max_concurrent_batches=2,
     )
     model = Mock()
     connector = aux_output_worker.AuxOutputWorkerConnector(
@@ -415,7 +413,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     )
     bind.assert_called_once_with(model, capturer)
     connector.begin_step(Mock())
-    assert connector.prepare_output([], np.array([]), np.array([])) is None
+    assert connector.prepare_output(Mock()) is None
     capturer.snapshot_routing_data.assert_not_called()
 
 

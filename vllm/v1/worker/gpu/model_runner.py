@@ -32,7 +32,10 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
+from vllm.distributed.aux_output_connector.worker import (
+    AuxOutputWorkerConnector,
+    get_aux_output_connector,
+)
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -352,15 +355,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
-
-    def init_aux_output_connector(self, kv_cache_config: KVCacheConfig) -> None:
-        # KV cache initialization determines the block granularity shared by R3.
-        self.aux_output_connector = AuxOutputWorkerConnector(
-            model=self.model,
-            kv_cache_config=kv_cache_config,
-            max_num_batched_tokens=self.max_num_tokens,
-            vllm_config=self.vllm_config,
-        )
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -752,6 +746,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+            # AuxOutput connector requires resolved kv_cache_config.
+            if self.vllm_config.aux_output_config.enabled:
+                self.aux_output_connector = get_aux_output_connector(
+                    self.model, self.vllm_config, kv_cache_config
+                )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -2080,11 +2080,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
-            pending_aux_output = self.aux_output_connector.prepare_output(
-                model_runner_output.req_ids,
-                input_batch.num_computed_tokens_np,
-                input_batch.query_start_loc_np,
-            )
+            pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
+
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,

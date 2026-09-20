@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from threading import Event
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -15,7 +15,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
-    AuxOutputRequestOutput,
+    AuxRequestOutput,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -36,6 +36,7 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 @dataclass
@@ -45,6 +46,8 @@ class _WorkerRequestState:
     capture_cursor: int | None = None
     scheduled_cursor: int = 0
     emit_cursor: int = 0
+    # Terminal event received; teardown waits for in-flight step outputs.
+    finished: bool = False
 
 
 @dataclass
@@ -52,14 +55,28 @@ class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
     connector: AuxOutputWorkerConnector
+    request_ids: list[str]
     token_starts: np.ndarray
     query_start_loc: np.ndarray
-    routed_experts: torch.Tensor
-    finished: Event = field(default_factory=Event)
+    # GPU snapshot taken on the main stream.
+    routed_experts_gpu: torch.Tensor
+    # Filled by enqueue_cpu_copy on the output copy stream.
+    routed_experts: np.ndarray | None = None
+    num_sampled: np.ndarray | None = None
+    num_rejected: np.ndarray | None = None
 
-    def complete(self) -> None:
-        self.connector._pending_output = None
-        self.finished.set()
+    def enqueue_cpu_copy(
+        self, num_sampled: np.ndarray, num_rejected: np.ndarray
+    ) -> None:
+        """Enqueue asynchronous D2H copies; call on the output copy stream."""
+        self.num_sampled = num_sampled
+        self.num_rejected = num_rejected
+        self.routed_experts = self.routed_experts_gpu.to(
+            "cpu", non_blocking=True
+        ).numpy()
+
+    def process_output(self) -> dict[str, AuxRequestOutput]:
+        return self.connector.process_output(self)
 
 
 class AuxOutputWorkerConnector:
@@ -74,8 +91,7 @@ class AuxOutputWorkerConnector:
         max_num_batched_tokens: int,
     ) -> None:
         capturer = RoutedExpertsCapturer(
-            max_num_batched_tokens=max_num_batched_tokens,
-            vllm_config=vllm_config,
+            max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
         )
         bind_routed_experts_capturer(model, capturer)
         self._capturer = capturer
@@ -84,7 +100,13 @@ class AuxOutputWorkerConnector:
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
-        self._pending_output: PendingAuxOutput | None = None
+        # Steps whose asynchronous copy has not been consumed yet. The engine
+        # consumes step outputs in order, so at most max_concurrent_batches
+        # are outstanding; guarded by _lock against the output thread.
+        self._pendings: list[PendingAuxOutput] = []
+        self._outstanding: dict[str, int] = {}
+        self._lock = Lock()
+        self._max_concurrent_batches = vllm_config.max_concurrent_batches
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
@@ -101,10 +123,7 @@ class AuxOutputWorkerConnector:
         if max_bytes is None:
             max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
         self._store = BackgroundBlockObjectStore(
-            BlockObjectStore(
-                max_bytes=max_bytes,
-                object_nbytes=block_nbytes,
-            ),
+            BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
         self._buffer = RoutedExpertsBuffer(
@@ -116,55 +135,86 @@ class AuxOutputWorkerConnector:
             vllm_config.max_concurrent_batches,
         )
 
-    def prepare_output(
-        self,
-        request_ids: list[str],
-        token_starts: np.ndarray,
-        query_start_loc: np.ndarray,
-    ) -> PendingAuxOutput | None:
+    def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
         buffer = self._buffer
         if buffer is None or self._step_metadata is None:
             return None
-        assert self._pending_output is None
 
-        query_start_loc = query_start_loc[: len(request_ids) + 1]
+        request_ids = list(input_batch.req_ids)
+        query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
         pending_output = PendingAuxOutput(
-            self,
-            token_starts,
-            query_start_loc,
-            self._capturer.snapshot_routing_data(num_rows),
+            connector=self,
+            request_ids=request_ids,
+            token_starts=input_batch.num_computed_tokens_np,
+            query_start_loc=query_start_loc,
+            routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
         )
-        self._pending_output = pending_output
+        with self._lock:
+            assert len(self._pendings) < self._max_concurrent_batches, (
+                "auxiliary output step outputs are not consumed in order"
+            )
+            self._pendings.append(pending_output)
+            for request_id in pending_output.request_ids:
+                count = self._outstanding.get(request_id, 0)
+                self._outstanding[request_id] = count + 1
         return pending_output
 
-    def process_output(
-        self,
-        request_ids: list[str],
-        token_starts: np.ndarray,
-        query_start_loc: np.ndarray,
-        routed_experts: np.ndarray,
-        num_sampled: np.ndarray,
-        num_rejected: np.ndarray,
-    ) -> dict[str, AuxOutputRequestOutput]:
-        """Commit one completed R3 snapshot and build request outputs."""
+    def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
+        """Commit one consumed R3 snapshot and build request outputs.
+
+        Request teardown deferred by begin_step is completed here once no
+        in-flight step covers the request.
+        """
+        with self._lock:
+            try:
+                outputs = self._commit_output(pending)
+            finally:
+                self._pendings.remove(pending)
+                for request_id in pending.request_ids:
+                    remaining = self._outstanding[request_id] - 1
+                    if remaining:
+                        self._outstanding[request_id] = remaining
+                    else:
+                        del self._outstanding[request_id]
+            teardown = [
+                request_id
+                for request_id in pending.request_ids
+                if request_id not in self._outstanding
+                and (state := self._requests.get(request_id)) is not None
+                and state.finished
+            ]
+            if teardown:
+                self._teardown(teardown)
+            return outputs
+
+    def _commit_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
         buffer = self._buffer
         store = self._store
         assert buffer is not None and store is not None
         block_size = buffer.block_size
 
+        routed_experts = pending.routed_experts
+        num_sampled = pending.num_sampled
+        num_rejected = pending.num_rejected
+        assert (
+            routed_experts is not None
+            and num_sampled is not None
+            and num_rejected is not None
+        ), "auxiliary output CPU copy was not enqueued"
+
         # Publish the whole batch before materializing any consumer output.
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
-        outputs: dict[str, AuxOutputRequestOutput] = {}
+        outputs: dict[str, AuxRequestOutput] = {}
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
         for request_id, token_start, start, end, sampled, rejected in zip(
-            request_ids,
-            token_starts,
-            query_start_loc[:-1],
-            query_start_loc[1:],
+            pending.request_ids,
+            pending.token_starts,
+            pending.query_start_loc[:-1],
+            pending.query_start_loc[1:],
             num_sampled,
             num_rejected,
             strict=True,
@@ -208,9 +258,8 @@ class AuxOutputWorkerConnector:
             token_end = capture_start + len(rows)
             if sampled > 0 and emit_start < token_end:
                 if emit_start >= capture_start:
-                    outputs[request_id] = AuxOutputRequestOutput(
-                        emit_start,
-                        rows[emit_start - capture_start :],
+                    outputs[request_id] = AuxRequestOutput(
+                        emit_start, rows[emit_start - capture_start :]
                     )
                     state.emit_cursor = token_end
                 else:
@@ -240,7 +289,7 @@ class AuxOutputWorkerConnector:
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            outputs[request_id] = AuxOutputRequestOutput(emit_start, rows)
+            outputs[request_id] = AuxRequestOutput(emit_start, rows)
             state.emit_cursor = token_end
         return outputs
 
@@ -277,10 +326,29 @@ class AuxOutputWorkerConnector:
             for _, rows in blocks:
                 buffer.release_block(rows)
 
+    def _teardown(self, request_ids: Iterable[str]) -> None:
+        """Drop finished requests' temporary state and release store keys."""
+        buffer = self._buffer
+        assert buffer is not None
+        release_keys = [
+            key
+            for request_id in request_ids
+            for key in reversed(self._requests[request_id].aux_output_keys)
+        ]
+        if release_keys:
+            self._publish_blocks([], release_keys=release_keys)
+        for request_id in request_ids:
+            state = self._requests.pop(request_id)
+            for _, rows in state.pending_blocks:
+                buffer.release_block(rows)
+            buffer.discard(request_id)
+
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
-        """Apply one scheduler step's request and block-hash updates."""
-        if pending_output := self._pending_output:
-            pending_output.finished.wait()
+        """Apply one scheduler step's request and block-hash updates.
+
+        While an unconsumed step covers a finished request, its teardown is
+        deferred to that step's process_output.
+        """
         self._step_metadata = metadata
         if self._buffer is None or metadata is None:
             return
@@ -290,45 +358,74 @@ class AuxOutputWorkerConnector:
         assert metadata.generation >= self._generation, (
             "auxiliary output metadata generation moved backwards"
         )
-        release_keys: list[str] = []
-        if metadata.generation > self._generation:
-            release_keys.extend(
-                key
-                for state in self._requests.values()
-                for key in reversed(state.aux_output_keys)
-            )
-            self._buffer.reset()
-            self._requests.clear()
-            self._generation = metadata.generation
-        for request_id, emit_start in metadata.requests.items():
-            state = self._requests.setdefault(
-                request_id, _WorkerRequestState(emit_cursor=emit_start)
-            )
-            assert emit_start <= state.emit_cursor, (
-                "auxiliary output Scheduler emit cursor moved ahead"
-            )
-        block_batches: list[
-            tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
-        ] = []
-        retained_keys: list[str] = []
-        for request_id, block_hashes in metadata.block_hashes.items():
-            state = self._requests[request_id]
-            keys = routed_experts_keys(block_hashes, str(self._generation))
-            state.aux_output_keys.extend(keys)
-            retained_keys.extend(keys)
-            block_batches.append((state, []))
-        release_keys.extend(
-            key
-            for request_id in metadata.finished_requests
-            for key in reversed(self._requests[request_id].aux_output_keys)
-        )
-        self._publish_blocks(block_batches, retained_keys, release_keys)
-        for request_id in metadata.finished_requests:
-            state = self._requests.pop(request_id)
-            for _, rows in state.pending_blocks:
-                self._buffer.release_block(rows)
-            self._buffer.discard(request_id)
+        with self._lock:
+            release_keys: list[str] = []
+            if metadata.generation > self._generation:
+                # A generation change follows a prefix-cache reset, which the
+                # scheduler only performs once all model output is consumed.
+                assert not self._pendings, (
+                    "auxiliary output generation changed with output in flight"
+                )
+                release_keys.extend(
+                    key
+                    for state in self._requests.values()
+                    for key in reversed(state.aux_output_keys)
+                )
+                self._buffer.reset()
+                self._requests.clear()
+                self._generation = metadata.generation
+            for request_id, emit_start in metadata.requests.items():
+                state = self._requests.setdefault(
+                    request_id, _WorkerRequestState(emit_cursor=emit_start)
+                )
+                if request_id not in self._outstanding:
+                    # In-flight steps leave the worker cursor behind the
+                    # scheduler's optimistic view; only check settled requests.
+                    assert emit_start <= state.emit_cursor, (
+                        "auxiliary output Scheduler emit cursor moved ahead"
+                    )
+            block_batches: list[
+                tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
+            ] = []
+            retained_keys: list[str] = []
+            for request_id, block_hashes in metadata.block_hashes.items():
+                state = self._requests[request_id]
+                keys = routed_experts_keys(block_hashes, str(self._generation))
+                state.aux_output_keys.extend(keys)
+                retained_keys.extend(keys)
+                block_batches.append((state, []))
+            finished_now: list[str] = []
+            for request_id in metadata.finished_requests:
+                state = self._requests[request_id]
+                state.finished = True
+                if request_id in self._outstanding:
+                    continue
+                finished_now.append(request_id)
+                release_keys.extend(reversed(state.aux_output_keys))
+            self._publish_blocks(block_batches, retained_keys, release_keys)
+            for request_id in finished_now:
+                state = self._requests.pop(request_id)
+                for _, rows in state.pending_blocks:
+                    self._buffer.release_block(rows)
+                self._buffer.discard(request_id)
 
     def close(self) -> None:
-        if self._store is not None:
-            self._store.close()
+        with self._lock:
+            self._pendings.clear()
+            self._outstanding.clear()
+            if self._store is not None:
+                try:
+                    self._store.close()
+                finally:
+                    self._store = None
+
+
+def get_aux_output_connector(
+    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> AuxOutputWorkerConnector:
+    return AuxOutputWorkerConnector(
+        model=model,
+        kv_cache_config=kv_cache_config,
+        max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        vllm_config=vllm_config,
+    )
