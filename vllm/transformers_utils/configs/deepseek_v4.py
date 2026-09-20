@@ -5,6 +5,25 @@ from typing import Any
 from transformers import PretrainedConfig
 
 
+def missing_config_field_error(model_type: str, name: str) -> AttributeError:
+    """Explain a missing config attribute in terms of the checkpoint.
+
+    The model code reads architecture fields straight off the config while
+    building layers, with no default in the read, so the failure otherwise
+    surfaces deep inside layer construction as a bare attribute name with no
+    hint that the fix is a config.json key. Curating a list of "required"
+    fields would be worse than no list: the set differs by architecture,
+    platform and enabled feature, so any fixed list is both incomplete and
+    partly wrong.
+    """
+    return AttributeError(
+        f"'{name}' is not set on this {model_type} config. vLLM reads "
+        "architecture fields straight off the config while building the "
+        "model, so this usually means config.json for the checkpoint does "
+        "not define it."
+    )
+
+
 class DeepseekV4Config(PretrainedConfig):
     model_type = "deepseek_v4"
 
@@ -50,3 +69,8 @@ class DeepseekV4Config(PretrainedConfig):
         # compressor-alignment pad (see mm_preprocess.COMPRESS_PAD_TO).
         self.mm_prefix_span_leading_pad_modulus = 4 if vision_n_layers > 0 else 0
         super().__init__(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached when normal lookup fails, so a complete checkpoint pays
+        # nothing, and getattr(..., default) and hasattr() are unaffected.
+        raise missing_config_field_error(self.model_type, name)
