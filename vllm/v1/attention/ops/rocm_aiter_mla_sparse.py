@@ -3717,8 +3717,13 @@ def _rocm_sparse_attn_decode_triton(
         extra_token_to_req=extra_token_to_req,
         extra_block_table=extra_block_table,
         out=out,
-        extra_cache_nan_free=extra_cache_nan_free,
-        adaptive_splits=adaptive_splits,
+        extra_cache_nan_free=extra_cache_nan_free
+        and direct_extra
+        or (
+            extra_cache_nan_free
+            and extra_ragged_indices is not None
+            and extra_ragged_indptr is not None
+        ),
     )
 
 
