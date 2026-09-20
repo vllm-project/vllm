@@ -3,7 +3,7 @@
 
 import json
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -13,16 +13,26 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.serve.dev.rlhf.weight_checker import compare_weight_checksums
+from vllm.entrypoints.serve.dev.rlhf.weight_checker import handle_weight_checker
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
-from vllm.v1.worker.utils import combine_weight_checksums
 
 logger = init_logger(__name__)
 
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
+
+
+async def _json_body(request: Request) -> Any:
+    """Return the JSON object body, or raise a 400 for anything else."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    return body
 
 
 router = APIRouter()
@@ -102,10 +112,7 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
     """
     engine = engine_client(raw_request)
 
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    body = await _json_body(raw_request)
 
     request_ids = body.get("request_ids")
 
@@ -157,10 +164,7 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 @router.post("/init_weight_transfer_engine")
 async def init_weight_transfer_engine(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    body = await _json_body(raw_request)
     init_info = body.get("init_info")
     if init_info is None:
         raise HTTPException(
@@ -187,10 +191,7 @@ async def start_draft_weight_update(raw_request: Request):
 
 @router.post("/update_weights")
 async def update_weights(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    body = await _json_body(raw_request)
     update_info = body.get("update_info")
     if update_info is None:
         raise HTTPException(
@@ -235,60 +236,9 @@ async def weight_info(raw_request: Request):
 @router.post("/weight_checker")
 async def weight_checker(raw_request: Request) -> JSONResponse:
     """Checksum, reset, or compare model weights."""
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
-
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Expected a JSON object")
-    action = body.get("action")
-    if action not in ("compare", "checksum", "reset"):
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail=f"action must be one of checksum|reset|compare, got {action!r}",
-        )
-
+    body = await _json_body(raw_request)
     client = engine_client(raw_request)
-
-    # A pause or sleep drops the weight storage, so hashing it or rewriting it
-    # is meaningless. Checked before the per-action arguments so that every
-    # action reports the engine state rather than a missing argument.
-    if await client.is_paused():
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT.value,
-            detail="weight_checker requires an awake, unpaused engine",
-        )
-
-    baseline: dict[str, str] | None = None
-    if action == "compare":
-        baseline = body.get("baseline")
-        if not isinstance(baseline, dict):
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="action='compare' requires a 'baseline' object",
-            )
-
-    if action == "reset":
-        await client.reset_weights()
-        return JSONResponse(content={"status": "reset"})
-
-    per_engine: list[dict[str, str]] = await client.compute_weight_checksums_all()
-    try:
-        checksums = combine_weight_checksums(per_engine)
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-            detail=str(exc),
-        ) from exc
-
-    if action == "checksum":
-        return JSONResponse(content={"checksums": checksums})
-
-    # action == "compare"
-    assert baseline is not None
-    match, mismatches = compare_weight_checksums(baseline, checksums)
-    return JSONResponse(content={"match": match, "mismatches": mismatches})
+    return JSONResponse(content=await handle_weight_checker(body, client))
 
 
 @router.get("/get_world_size")

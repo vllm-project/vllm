@@ -4,8 +4,10 @@
 
 import pytest
 
-from vllm.entrypoints.serve.dev.rlhf.weight_checker import compare_weight_checksums
-from vllm.v1.worker.utils import combine_weight_checksums
+from vllm.entrypoints.serve.dev.rlhf.weight_checker import (
+    combine_weight_checksums,
+    compare_weight_checksums,
+)
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
