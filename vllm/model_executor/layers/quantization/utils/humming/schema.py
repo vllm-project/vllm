@@ -85,8 +85,7 @@ logger = init_logger(__name__)
 
 
 def _group_shape(group_size: int, group_size_n: int = 0) -> GroupShape:
-    """
-    Map humming group sizes to QuantKey GroupShape.
+    """Map humming group sizes to QuantKey GroupShape.
 
     group_size:   elements per group along K (col); 0 means full dimension.
     group_size_n: elements per group along N (row); 0 means 1 (per-row).
