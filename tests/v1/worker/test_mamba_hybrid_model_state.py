@@ -34,7 +34,7 @@ def input_batch() -> SimpleNamespace:
         dcp_local_seq_lens=None,
         positions=torch.tensor([1536], dtype=torch.int64),
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
-        idx_mapping=torch.tensor([0], dtype=torch.int32),
+        idx_mapping=torch.tensor([2], dtype=torch.int32),
     )
 
 
@@ -69,7 +69,7 @@ def test_aligned_metadata_and_state_copies_keep_separate_table_bindings(
     input_batch: SimpleNamespace,
     warmup_first: bool,
 ) -> None:
-    """Dummy metadata may run before the first real request's state copies."""
+    """Keep batch-order metadata separate from copies, even for request slot 2."""
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(
         num_speculative_tokens=0,

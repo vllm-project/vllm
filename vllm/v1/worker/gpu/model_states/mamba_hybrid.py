@@ -306,8 +306,9 @@ class MambaHybridModelState(DefaultModelState):
                 ctx = self._ensure_align_ctx(
                     kv_cache_config, mamba_group_ids, block_tables, metadata_only=True
                 )
+                # This context already owns gathered, batch-order tables.
                 all_group_indices = ctx.compute_aligned_state_indices(
-                    input_batch.seq_lens, num_reqs, input_batch.idx_mapping
+                    input_batch.seq_lens, num_reqs
                 )
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]
