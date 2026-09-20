@@ -832,14 +832,13 @@ class EngineCore:
         # reset_connector=True so external connectors clear alongside
         # local caches, matching the pause_generation(clear_cache=True)
         # contract. No-op when no connector is configured.
-        prefix_reset_successful = self.reset_prefix_cache(
+        if not self.reset_prefix_cache(
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
-        )
+        ):
+            raise RuntimeError("Failed to reset the KV connector cache.")
         self.reset_mm_cache()
         self.reset_encoder_cache()
-        if not prefix_reset_successful:
-            raise RuntimeError("Failed to reset the KV connector cache.")
 
     def _finish_pause(self, clear_cache: bool) -> None:
         # A completed pause promises an idle device: nothing else waits on
