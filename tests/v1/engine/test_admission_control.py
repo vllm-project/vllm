@@ -71,6 +71,7 @@ def _make_async_llm(
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
     llm.admission_stats = None
+    llm._reject_while_paused = None
     return llm
 
 

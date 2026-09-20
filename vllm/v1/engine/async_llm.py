@@ -83,9 +83,6 @@ class InputStreamError(Exception):
 class AsyncLLM(EngineClient):
     """An asynchronous wrapper for the vLLM engine."""
 
-    # Pause mode that rejects new requests; None while admitting.
-    _reject_while_paused: PauseMode | None = None
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -143,8 +140,9 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
 
-        # Serializes pause/resume/sleep/wake state transitions.
+        # Pause state: the lock serializes transitions, the mode gates admission.
         self._pause_state_lock = asyncio.Lock()
+        self._reject_while_paused: PauseMode | None = None
 
         custom_stat_loggers = list(stat_loggers or [])
         custom_stat_loggers.extend(load_stat_logger_plugin_factories())
