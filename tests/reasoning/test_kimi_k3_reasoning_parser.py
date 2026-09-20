@@ -387,3 +387,42 @@ def test_is_reasoning_end_streaming_response_open_straddling_steps():
     # in the prior steps' tail, the last arrives now
     full = [*OPEN_IDS, 5, *RESP_OPEN_IDS]
     assert parser.is_reasoning_end_streaming(full, RESP_OPEN_IDS[2:])
+
+
+RESPONSE_CLOSE = f"◁/response{SEP}"
+MESSAGE_CLOSE = f"◁/message{SEP}"
+
+
+def test_end_detection_agrees_with_extraction_on_same_bytes():
+    """vllm/reasoning/AGENTS.md asks for this agreement: whatever the gate
+    calls reasoning-end must be what extraction calls the content boundary,
+    on identical inputs."""
+    OPEN = THINK_OPEN
+    CLOSE = THINK_CLOSE
+    RC = RESPONSE_CLOSE
+    MC = MESSAGE_CLOSE
+    cases = {
+        "normal thinking": (
+            f"{OPEN}think step{CLOSE}{RESPONSE_OPEN}answer{RC}{MC}",
+            True,
+            True,
+        ),
+        "response-only (no think markers)": (
+            f"{RESPONSE_OPEN}answer{RC}{MC}",
+            True,
+            True,
+        ),
+        "truncated reasoning": ("still thinking", False, False),
+    }
+    for name, (text, want_end, want_content) in cases.items():
+        parser = KimiK3ReasoningParser(DummyTokenizer())
+        ids = DummyTokenizer().encode(text)
+        reasoning, content = parser.extract_reasoning(
+            text, ChatCompletionRequest(model="test-model", messages=[])
+        )
+        got_end = parser.is_reasoning_end(ids)
+        got_content = content is not None and content.strip() != ""
+        assert got_end == want_end, (name, got_end)
+        assert got_content == want_content, (name, content)
+        # agreement: the gate says ended exactly when extraction produced content
+        assert got_end == got_content, name
