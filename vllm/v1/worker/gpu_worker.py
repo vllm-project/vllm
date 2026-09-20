@@ -336,12 +336,11 @@ class Worker(WorkerBase):
     def compute_weight_checksums(self) -> dict[str, str]:
         """Return SHA-256 hex digests for every named parameter AND buffer.
 
-        Copies each tensor to CPU before hashing so the result is the same
-        regardless of which GPU the worker is on.  Non-persistent buffers
-        (RoPE sin/cos caches recomputed from config) are skipped because they
-        vary across restarts even when weights are unchanged.
+        Hashing needs host bytes, so each tensor is moved to CPU as one uint8
+        array and passed to hashlib as a buffer. Non-persistent buffers (RoPE
+        sin/cos caches recomputed from config) are skipped because they vary
+        across restarts even when weights are unchanged.
         """
-
         dp_rank = self.parallel_config.data_parallel_rank
         pcp_rank = get_pcp_group().rank_in_group
         pp_rank = get_pp_group().rank_in_group
@@ -353,14 +352,10 @@ class Worker(WorkerBase):
         checksums: dict[str, str] = {}
 
         for name, tensor in _iter_checksum_targets(self.model_runner.model):
-            raw = (
-                tensor.data.contiguous()
-                .reshape(-1)
-                .cpu()
-                .view(torch.uint8)
-                .numpy()
-                .tobytes()
-            )
+            cpu_uint8 = tensor.data.contiguous().cpu().view(torch.uint8).numpy()
+            # memoryview hashes the array in place: .tobytes() would copy the
+            # whole tensor again on top of the host copy made above.
+            raw = memoryview(cpu_uint8)
             key = (
                 f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:ep{ep_rank}:{name}"
             )
