@@ -6,8 +6,24 @@ from functools import partial
 
 import torch
 
+from vllm.config import VllmConfig
+from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import is_deep_gemm_supported
+
 # GB200 TP4/FlashInfer improves through 16 tokens; larger screens tie or regress.
 MHC_OVERLAP_MAX_TOKENS = 16
+
+
+def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
+    """Check kernel requirements and safety of sharing the coefficient stream."""
+    config = vllm_config.model_config.hf_config
+    return (
+        current_platform.is_device_capability_family(100)
+        and is_deep_gemm_supported()
+        and config.hidden_size == 5120
+        and config.hc_mult == 4
+        and not vllm_config.parallel_config.use_ubatching
+    )
 
 
 def mhc_pre_delayed_overlap(

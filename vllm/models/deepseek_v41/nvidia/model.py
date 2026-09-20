@@ -78,7 +78,6 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -87,7 +86,11 @@ from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, gather_engram_hashes
 from .ops.mega_mhc import mhc_shifted_post_pre
-from .ops.mhc import MHC_OVERLAP_MAX_TOKENS, mhc_pre_delayed_overlap
+from .ops.mhc import (
+    MHC_OVERLAP_MAX_TOKENS,
+    mhc_pre_delayed_overlap,
+    supports_mhc_overlap,
+)
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -180,18 +183,6 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         and parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
         and (use_mega_moe or parallel_config.data_parallel_size > 1)
-    )
-
-
-def _supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
-    """Check kernel requirements and safety of sharing the coefficient stream."""
-    config = vllm_config.model_config.hf_config
-    return (
-        current_platform.is_device_capability_family(100)
-        and is_deep_gemm_supported()
-        and config.hidden_size == 5120
-        and config.hc_mult == 4
-        and not vllm_config.parallel_config.use_ubatching
     )
 
 
@@ -546,7 +537,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
         # Keep mHC independent of the streams used inside attention.
-        mhc_stream = torch.cuda.Stream() if _supports_mhc_overlap(vllm_config) else None
+        mhc_stream = torch.cuda.Stream() if supports_mhc_overlap(vllm_config) else None
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
