@@ -482,10 +482,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # VLLM_KERNEL_SYMBOL_MAP=1 (nightly), and placed after the compile layers so
 # their cache is untouched. Never fails the build; an empty map is a signal.
 ARG VLLM_KERNEL_SYMBOL_MAP=""
+ARG buildkite_commit=""
 COPY tools/ci/kernel_symbol_map.py tools/ci/kernel_symbol_map.py
 RUN if [ "${VLLM_KERNEL_SYMBOL_MAP}" = "1" ]; then \
         mkdir -p dist && python3 tools/ci/kernel_symbol_map.py \
-            --build-root build --source-root . --out dist/kernel_symbol_map.json.gz; \
+            --build-root build --source-root . --commit "${buildkite_commit}" \
+            --out dist/kernel_symbol_map.json.gz; \
     else echo "Skipping kernel symbol map (VLLM_KERNEL_SYMBOL_MAP != 1)"; fi
 
 # Exported on its own by the CI bake target of the same name (ci-infra

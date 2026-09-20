@@ -65,7 +65,8 @@ from pathlib import Path
 DEVICE_SUFFIXES = (".cu.o", ".hip.o")
 SOURCE_SUFFIXES = (".cu", ".hip", ".cpp", ".cc", ".cxx", ".c")
 DEPS_HEADER = re.compile(r"^(\S+): #deps (\d+), deps mtime \d+ \((VALID|STALE)\)$")
-OBJ_DIR = re.compile(r"^CMakeFiles/([^/]+)\.dir/(.+)\.o$")
+# FetchContent sub-builds nest their own CMakeFiles/ under _deps/<name>-build/.
+OBJ_DIR = re.compile(r"(?:^|/)CMakeFiles/([^/]+)\.dir/(.+)\.o$")
 
 
 def log(msg: str) -> None:
@@ -214,6 +215,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 2))
     ap.add_argument("--cuobjdump", default=None)
+    ap.add_argument("--commit", default="", help="commit the build is of")
     a = ap.parse_args()
     t0 = time.time()
     source_root = a.source_root.resolve()
@@ -227,7 +229,8 @@ def main() -> int:
 
     result: dict = {
         "version": 1,
-        "commit": os.environ.get("BUILDKITE_COMMIT")
+        "commit": a.commit
+        or os.environ.get("BUILDKITE_COMMIT")
         or os.environ.get("VLLM_BUILD_COMMIT")
         or "",
         "cuda": cuda_release(nvcc),
