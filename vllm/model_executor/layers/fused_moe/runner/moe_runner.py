@@ -337,6 +337,34 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._set_moe_config(new_moe_config)
 
+    def _warn_if_gate_hooks_are_bypassed(self) -> None:
+        """Warn once if gate fusion is silently bypassing the gate's hooks.
+
+        Under gate fusion the router logits are produced by an ``F.linear``
+        against the combined weight, so the ``gate`` module itself is never
+        called. A ``register_forward_hook`` on it installs cleanly, raises
+        nothing and captures nothing -- which is indistinguishable from a
+        layer that simply does no routing. Anyone instrumenting MoE routing
+        tries this first, so say something.
+        """
+        gate = self.gate
+        if gate is None:
+            return
+        if not (
+            getattr(gate, "_forward_hooks", None)
+            or getattr(gate, "_forward_pre_hooks", None)
+        ):
+            return
+        logger.warning_once(
+            "Forward hooks are registered on the MoE gate of layer %s, but "
+            "shared-expert gate fusion is active, so the gate module is "
+            "bypassed (its weights are folded into a single F.linear) and "
+            "those hooks will never fire. To observe router logits, hook the "
+            "runner's quant-method application instead, which sees the full "
+            "router_logits on every path.",
+            self.layer_name,
+        )
+
     def _maybe_fuse_gate_weights(self):
         """Fuse router and shared expert gate weights on first call.
 
@@ -897,6 +925,7 @@ class MoERunner(MoERunnerInterface):
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
             if self._fse_fuse_gate:
+                self._warn_if_gate_hooks_are_bypassed()
                 self._maybe_fuse_gate_weights()
                 router_logits = F.linear(hidden_states, self._combined_gate_weight)
             else:
