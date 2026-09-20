@@ -58,6 +58,7 @@ from .policy import (
     EPLB_POLICIES,
     AbstractEplbPolicy,
     EplbPlan,
+    EplbPolicyState,
     EplbRebalanceContext,
     EplbTopology,
 )
@@ -221,7 +222,8 @@ class EplbModelState:
     """
     The communicator for expert weight transfers.
     """
-    policy: AbstractEplbPolicy
+    policy_state: EplbPolicyState
+    """Mutable state owned by the shared policy for this model."""
     pending_result: AsyncEplbLayerResult | None = None
     """
     Set by the async worker after all writes to expert_buffer are done. Consumed
@@ -249,6 +251,7 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
+        self.policy = self.create_policy()
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
@@ -377,8 +380,8 @@ class EplbState:
         return EplbLayerState()
 
     def create_policy(self) -> AbstractEplbPolicy:
-        policy_type = self.parallel_config.eplb_config.policy
-        return EPLB_POLICIES[policy_type]()
+        """Create the policy shared by every model in this EPLB state."""
+        return EPLB_POLICIES[self.parallel_config.eplb_config.policy]()
 
     def _create_model_layer_states(self, model: MixtureOfExperts) -> None:
         for layer in model.moe_layers:
@@ -395,7 +398,7 @@ class EplbState:
         model_state: EplbModelState,
         context: EplbRebalanceContext,
     ) -> EplbPlan:
-        plan = model_state.policy.plan_rebalance(context)
+        plan = self.policy.plan_rebalance(context, model_state.policy_state)
         target = plan.physical_to_logical_map
         valid_dtype = target.dtype in (torch.int32, torch.int64)
         if target.device.type != "cpu" or not valid_dtype:
@@ -414,9 +417,10 @@ class EplbState:
     def _commit_rebalance(
         self,
         model_state: EplbModelState,
-        new_physical_to_logical_map: torch.Tensor,
+        plan: EplbPlan,
         layer_idx: int | None = None,
     ) -> None:
+        new_physical_to_logical_map = plan.physical_to_logical_map
         committed_layers: Sequence[int]
         if layer_idx is None:
             _commit_eplb_maps(model_state, new_physical_to_logical_map)
@@ -424,13 +428,16 @@ class EplbState:
         else:
             _commit_eplb_maps_for_layer(
                 model_state,
-                new_physical_to_logical_map,
+                new_physical_to_logical_map[layer_idx],
                 layer_idx,
             )
             committed_layers = (layer_idx,)
 
         for committed_layer in committed_layers:
             self.on_layer_committed(model_state, committed_layer)
+            self.policy.on_layer_committed(
+                model_state.policy_state, plan, committed_layer
+            )
 
     def add_model(
         self,
@@ -581,7 +588,7 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
-            policy=self.create_policy(),
+            policy_state=self.policy.create_state(model.num_moe_layers),
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
         self.model_states[model_config.compute_hash()] = model_state
@@ -1006,7 +1013,7 @@ class EplbState:
                     if not is_profile:
                         self._commit_rebalance(
                             eplb_model_state,
-                            new_physical_to_logical_map,
+                            plan,
                         )
 
                 if is_main_rank:
@@ -1218,7 +1225,9 @@ class EplbState:
         )
         for model_state_to_reset in self.model_states.values():
             model_state_to_reset.expert_load_window.zero_()
-            model_state_to_reset.policy = self.create_policy()
+            model_state_to_reset.policy_state = self.policy.create_state(
+                model_state_to_reset.model.num_moe_layers
+            )
         self.expert_load_window_step = 0
 
     def create_communicator(
@@ -1493,21 +1502,22 @@ def _commit_eplb_maps(
 def _move_to_workspace(
     model_state: EplbModelState,
     ep_rank: int,
-    commit_rebalance: Callable[[EplbModelState, torch.Tensor, int | None], None],
+    commit_rebalance: Callable[[EplbModelState, EplbPlan, int | None], None],
 ) -> None:
     result = model_state.pending_result
     assert result is not None
+    new_physical_to_logical_map = result.plan.physical_to_logical_map[result.layer_idx]
     move_from_buffer(
         expert_weights=model_state.model.expert_weights[result.layer_idx],
         expert_weights_buffers=model_state.expert_buffer,
         transfer_metadata=result.transfer_metadata,
-        new_indices=result.new_physical_to_logical_map.numpy(),
+        new_indices=new_physical_to_logical_map.numpy(),
         ep_rank=ep_rank,
     )
 
     commit_rebalance(
         model_state,
-        result.new_physical_to_logical_map,
+        result.plan,
         result.layer_idx,
     )
 

@@ -37,10 +37,40 @@ class EplbPlan:
     physical_to_logical_map: torch.Tensor
 
 
+class EplbPolicyState:
+    """Mutable per-model state, advanced only after a successful commit."""
+
+
 class AbstractEplbPolicy(ABC):
+    """Algorithm shared by all models in one EPLB state.
+
+    Implementations may keep immutable configuration here; model-local mutable
+    data belongs in :class:`EplbPolicyState`.
+    """
+
+    def create_state(self, num_moe_layers: int) -> EplbPolicyState:
+        """Create independent state for one model."""
+        return EplbPolicyState()
+
     @abstractmethod
-    def plan_rebalance(self, context: EplbRebalanceContext) -> EplbPlan:
+    def plan_rebalance(
+        self, context: EplbRebalanceContext, policy_state: EplbPolicyState
+    ) -> EplbPlan:
+        """Build a plan while treating committed state as read-only.
+
+        The returned plan and its tensors remain read-only after this call.
+        """
         raise NotImplementedError
+
+    def on_layer_committed(
+        self, policy_state: EplbPolicyState, plan: EplbPlan, layer_idx: int
+    ) -> None:
+        """Advance state after one layer of the read-only plan is committed.
+
+        This is the only policy hook allowed to mutate ``policy_state``. The same
+        complete plan is passed once for each successfully installed layer.
+        """
+        return None
 
     def _plan_from_legacy(self, context: EplbRebalanceContext) -> EplbPlan:
         physical_to_logical_map = self.rebalance_experts(

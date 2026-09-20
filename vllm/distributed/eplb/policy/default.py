@@ -15,11 +15,18 @@ on how the EPLB algorithm works.
 import numpy as np
 import torch
 
-from .abstract import AbstractEplbPolicy, EplbPlan, EplbRebalanceContext
+from .abstract import (
+    AbstractEplbPolicy,
+    EplbPlan,
+    EplbPolicyState,
+    EplbRebalanceContext,
+)
 
 
 class DefaultEplbPolicy(AbstractEplbPolicy):
-    def plan_rebalance(self, context: EplbRebalanceContext) -> EplbPlan:
+    def plan_rebalance(
+        self, context: EplbRebalanceContext, policy_state: EplbPolicyState
+    ) -> EplbPlan:
         return self._plan_from_legacy(context)
 
     @classmethod

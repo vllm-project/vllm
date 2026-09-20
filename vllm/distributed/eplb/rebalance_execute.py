@@ -15,6 +15,7 @@ from torch.distributed import ProcessGroup, all_gather
 
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.policy import EplbPlan
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
@@ -47,11 +48,8 @@ class AsyncEplbLayerResult:
 
     layer_idx: int
     """Index of the MoE layer that was transferred."""
-    new_physical_to_logical_map: torch.Tensor
-    """
-    New physical→logical mapping for layers_idx, on CPU.
-    Shape: (num_physical_experts)
-    """
+    plan: EplbPlan
+    """Read-only plan shared by every layer result in this rebalance."""
     transfer_metadata: TransferMetadata
     """Metadata describing what was received during transfer_layer."""
     consumed_event: CpuGpuEvent

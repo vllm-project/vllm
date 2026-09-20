@@ -20,6 +20,7 @@ from vllm.distributed.eplb.policy import (
     AbstractEplbPolicy,
     DefaultEplbPolicy,
     EplbPlan,
+    EplbPolicyState,
     EplbRebalanceContext,
     EplbTopology,
 )
@@ -151,7 +152,7 @@ def test_policy_planner_adapts_temporal_window_to_legacy_contract():
     class LegacyPolicy(AbstractEplbPolicy):
         received_args = None
 
-        def plan_rebalance(self, context):
+        def plan_rebalance(self, context, policy_state):
             return self._plan_from_legacy(context)
 
         @classmethod
@@ -167,7 +168,7 @@ def test_policy_planner_adapts_temporal_window_to_legacy_contract():
         cpu_group=Mock(),
     )
 
-    plan = LegacyPolicy().plan_rebalance(context)
+    plan = LegacyPolicy().plan_rebalance(context, EplbPolicyState())
 
     assert LegacyPolicy.received_args is not None
     weight, num_replicas, num_groups, num_nodes, num_ranks, old_map = (
@@ -179,18 +180,26 @@ def test_policy_planner_adapts_temporal_window_to_legacy_contract():
     torch.testing.assert_close(plan.physical_to_logical_map, torch.tensor([[1, 0]]))
 
 
-def test_state_creates_independent_policy_instances():
-    state = EplbState.__new__(EplbState)
-    state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(policy="default")
-    )
+def test_policy_creates_independent_model_states():
+    policy = DefaultEplbPolicy()
 
-    first = state.create_policy()
-    second = state.create_policy()
+    first = policy.create_state(num_moe_layers=2)
+    second = policy.create_state(num_moe_layers=2)
 
-    assert isinstance(first, DefaultEplbPolicy)
-    assert isinstance(second, DefaultEplbPolicy)
+    assert isinstance(first, EplbPolicyState)
     assert first is not second
+
+
+def test_eplb_state_creates_one_shared_policy():
+    policy = DefaultEplbPolicy()
+    with (
+        patch.object(EplbState, "create_policy", return_value=policy) as factory,
+        patch("vllm.distributed.eplb.eplb_state.CpuGpuEvent"),
+    ):
+        state = EplbState(SimpleNamespace(), torch.device("cpu"))
+
+    factory.assert_called_once_with()
+    assert state.policy is policy
 
 
 @pytest.mark.parametrize(
@@ -200,9 +209,8 @@ def test_state_creates_independent_policy_instances():
 def test_state_rejects_invalid_policy_target(target):
     state = EplbState.__new__(EplbState)
     plan = EplbPlan(target)
-    model_state = SimpleNamespace(
-        policy=SimpleNamespace(plan_rebalance=Mock(return_value=plan))
-    )
+    state.policy = SimpleNamespace(plan_rebalance=Mock(return_value=plan))
+    model_state = SimpleNamespace(policy_state=object())
 
     with pytest.raises(ValueError, match="CPU int32 or int64"):
         state.plan_rebalance(model_state, Mock())
@@ -211,11 +219,28 @@ def test_state_rejects_invalid_policy_target(target):
 def test_state_accepts_cpu_integer_policy_target():
     state = EplbState.__new__(EplbState)
     plan = EplbPlan(torch.zeros(1, 1, dtype=torch.int32))
-    model_state = SimpleNamespace(
-        policy=SimpleNamespace(plan_rebalance=Mock(return_value=plan))
-    )
+    state.policy = SimpleNamespace(plan_rebalance=Mock(return_value=plan))
+    model_state = SimpleNamespace(policy_state=object())
 
     assert state.plan_rebalance(model_state, Mock()) is plan
+
+
+def test_shared_policy_receives_each_models_own_state():
+    state = EplbState.__new__(EplbState)
+    plan = EplbPlan(torch.zeros(1, 1, dtype=torch.int64))
+    state.policy = SimpleNamespace(plan_rebalance=Mock(return_value=plan))
+    first_state = object()
+    second_state = object()
+    first_context = Mock()
+    second_context = Mock()
+
+    state.plan_rebalance(SimpleNamespace(policy_state=first_state), first_context)
+    state.plan_rebalance(SimpleNamespace(policy_state=second_state), second_context)
+
+    assert [call.args for call in state.policy.plan_rebalance.call_args_list] == [
+        (first_context, first_state),
+        (second_context, second_state),
+    ]
 
 
 def test_state_allreduces_temporal_windows_for_multiple_models():
@@ -289,23 +314,26 @@ def test_reconfigure_resets_load_timeline_for_scale_up():
     map_buffer = torch.zeros(1, 4, dtype=torch.int64)
     load_buffer = torch.ones(1, 4, dtype=torch.int64)
     model_state = SimpleNamespace(
-        model=SimpleNamespace(num_physical_experts=2),
+        model=SimpleNamespace(num_physical_experts=2, num_moe_layers=1),
         physical_to_logical_map_buffer=map_buffer,
         physical_to_logical_map=map_buffer[:, :2],
         expert_load_pass_buffer=load_buffer,
         expert_load_pass=load_buffer[:, :2],
         expert_load_window=torch.ones(4, 1, 2, dtype=torch.int64),
-        policy=object(),
+        policy_state=object(),
     )
     draft_state = SimpleNamespace(
         expert_load_window=torch.ones(4, 1, 2, dtype=torch.int64),
-        policy=object(),
+        model=SimpleNamespace(num_moe_layers=1),
+        policy_state=object(),
     )
     state.model_states = {"model": model_state, "draft": draft_state}
     state.expert_load_window_step = 2
-    new_policy = object()
-    new_draft_policy = object()
-    state.create_policy = Mock(side_effect=[new_policy, new_draft_policy])
+    new_policy_state = object()
+    new_draft_policy_state = object()
+    state.policy = SimpleNamespace(
+        create_state=Mock(side_effect=[new_policy_state, new_draft_policy_state])
+    )
 
     state.reconfigure_physical_expert_slots(
         SimpleNamespace(compute_hash=Mock(return_value="model")), 3
@@ -313,9 +341,9 @@ def test_reconfigure_resets_load_timeline_for_scale_up():
 
     assert model_state.expert_load_window.shape == (4, 1, 3)
     assert not model_state.expert_load_window.any()
-    assert model_state.policy is new_policy
+    assert model_state.policy_state is new_policy_state
     assert not draft_state.expert_load_window.any()
-    assert draft_state.policy is new_draft_policy
+    assert draft_state.policy_state is new_draft_policy_state
     assert state.expert_load_window_step == 0
 
 
@@ -396,9 +424,10 @@ def test_model_communicator_uses_state_hook():
 def test_layer_commit_hook_runs_before_worker_ack():
     calls = []
     event = SimpleNamespace(record=lambda: calls.append("ack"))
+    plan = EplbPlan(torch.tensor([[1, 0]]))
     result = SimpleNamespace(
         layer_idx=0,
-        new_physical_to_logical_map=torch.tensor([1, 0]),
+        plan=plan,
         transfer_metadata=object(),
         consumed_event=event,
     )
@@ -407,9 +436,11 @@ def test_layer_commit_hook_runs_before_worker_ack():
         model=SimpleNamespace(expert_weights=[[torch.empty(1)]], num_moe_layers=1),
         expert_buffer=[torch.empty(1)],
         rebalanced=True,
+        policy_state=object(),
     )
     state = EplbState.__new__(EplbState)
     state.on_layer_committed = lambda _state, _layer: calls.append("hook")
+    state.policy = SimpleNamespace(on_layer_committed=Mock())
     with (
         patch(
             "vllm.distributed.eplb.eplb_state.move_from_buffer",
@@ -426,15 +457,19 @@ def test_layer_commit_hook_runs_before_worker_ack():
             commit_rebalance=state._commit_rebalance,
         )
     assert calls == ["weights", "maps", "hook", "ack"]
+    state.policy.on_layer_committed.assert_called_once_with(
+        model_state.policy_state, plan, 0
+    )
     assert model_state.pending_result is None
     assert not model_state.rebalanced
 
 
-def test_failed_commit_hook_does_not_ack_buffer():
+def test_failed_device_commit_hook_does_not_ack_buffer():
     event = SimpleNamespace(record=Mock())
+    plan = EplbPlan(torch.tensor([[1, 0]]))
     result = SimpleNamespace(
         layer_idx=0,
-        new_physical_to_logical_map=torch.tensor([1, 0]),
+        plan=plan,
         transfer_metadata=object(),
         consumed_event=event,
     )
@@ -443,6 +478,7 @@ def test_failed_commit_hook_does_not_ack_buffer():
         model=SimpleNamespace(expert_weights=[[torch.empty(1)]], num_moe_layers=1),
         expert_buffer=[torch.empty(1)],
         rebalanced=True,
+        policy_state=object(),
     )
 
     def fail_refresh(_state, _layer):
@@ -450,6 +486,7 @@ def test_failed_commit_hook_does_not_ack_buffer():
 
     state = EplbState.__new__(EplbState)
     state.on_layer_committed = fail_refresh
+    state.policy = SimpleNamespace(on_layer_committed=Mock())
     with (
         patch("vllm.distributed.eplb.eplb_state.move_from_buffer"),
         patch("vllm.distributed.eplb.eplb_state._commit_eplb_maps_for_layer"),
@@ -461,22 +498,65 @@ def test_failed_commit_hook_does_not_ack_buffer():
             commit_rebalance=state._commit_rebalance,
         )
     assert model_state.pending_result is result
+    state.policy.on_layer_committed.assert_not_called()
+    event.record.assert_not_called()
+
+
+def test_failed_policy_commit_does_not_ack_buffer():
+    event = SimpleNamespace(record=Mock())
+    plan = EplbPlan(torch.tensor([[1, 0]]))
+    result = SimpleNamespace(
+        layer_idx=0,
+        plan=plan,
+        transfer_metadata=object(),
+        consumed_event=event,
+    )
+    model_state = SimpleNamespace(
+        pending_result=result,
+        model=SimpleNamespace(expert_weights=[[torch.empty(1)]], num_moe_layers=1),
+        expert_buffer=[torch.empty(1)],
+        rebalanced=True,
+        policy_state=object(),
+    )
+    state = EplbState.__new__(EplbState)
+    state.on_layer_committed = Mock()
+    state.policy = SimpleNamespace(
+        on_layer_committed=Mock(side_effect=RuntimeError("commit failed"))
+    )
+
+    with (
+        patch("vllm.distributed.eplb.eplb_state.move_from_buffer"),
+        patch("vllm.distributed.eplb.eplb_state._commit_eplb_maps_for_layer"),
+        pytest.raises(RuntimeError, match="commit failed"),
+    ):
+        _move_to_workspace(model_state, 0, state._commit_rebalance)
+
+    assert model_state.pending_result is result
     event.record.assert_not_called()
 
 
 def test_sync_commit_uses_layer_commit_hook():
     calls = []
-    model_state = SimpleNamespace(model=SimpleNamespace(num_moe_layers=2))
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(num_moe_layers=2), policy_state=object()
+    )
     state = EplbState.__new__(EplbState)
     state.on_layer_committed = lambda _state, layer: calls.append(f"hook-{layer}")
+    policy_commit = Mock()
+    state.policy = SimpleNamespace(on_layer_committed=policy_commit)
+    plan = EplbPlan(torch.tensor([[0], [0]]))
 
     with patch(
         "vllm.distributed.eplb.eplb_state._commit_eplb_maps",
         side_effect=lambda *_args: calls.append("maps"),
     ):
-        state._commit_rebalance(model_state, torch.tensor([[0], [0]]))
+        state._commit_rebalance(model_state, plan)
 
     assert calls == ["maps", "hook-0", "hook-1"]
+    assert [commit.args for commit in policy_commit.call_args_list] == [
+        (model_state.policy_state, plan, 0),
+        (model_state.policy_state, plan, 1),
+    ]
 
 
 def test_router_uses_device_specific_mapping_hook():
