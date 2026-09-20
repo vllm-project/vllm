@@ -447,20 +447,17 @@ class DecodeBenchConnectorWorker:
 
             kv_cache = self.kv_caches[layer_name]
 
-            # Attention layers store KV as a single block-indexed tensor whose
-            # first dim is num_blocks; fill the requested block rows. Hybrid /
-            # linear-attention layers (e.g. Mamba, Kimi Delta Attention) store
-            # their state as a list/tuple of tensors that are NOT block-indexed
-            # — each tensor is a single state buffer with no num_blocks
-            # dimension — so fill each tensor in its entirety with the same
-            # dummy values.
+            # Attention caches and each tensor in a Mamba state list/tuple
+            # are block-indexed. Leave other requests' state untouched.
             if isinstance(kv_cache, torch.Tensor):
                 self._fill_block_tensor(kv_cache, block_ids, fill_mean, fill_std)
             elif isinstance(kv_cache, (list, tuple)) and all(
                 isinstance(t, torch.Tensor) for t in kv_cache
             ):
                 for state_tensor in kv_cache:
-                    self._fill_state_tensor(state_tensor, fill_mean, fill_std)
+                    self._fill_block_tensor(
+                        state_tensor, block_ids, fill_mean, fill_std
+                    )
             else:
                 logger.warning_once(
                     "DecodeBenchConnector: skipping fill for layer %s whose KV "
@@ -531,24 +528,3 @@ class DecodeBenchConnectorWorker:
 
         # Batch fill operation
         kv_cache[valid_block_ids] = fill_values
-
-    def _fill_state_tensor(
-        self, kv_cache: torch.Tensor, fill_mean: float, fill_std: float
-    ):
-        """Fill an entire non-block-indexed state tensor with dummy values.
-
-        Hybrid / linear-attention layers (e.g. Mamba, Kimi Delta Attention)
-        store their per-layer state as tensors with no num_blocks dimension,
-        so the whole tensor is filled with the same constant or random values
-        used for block fills, rather than selected block rows.
-
-        Args:
-            kv_cache: A state tensor to fill in its entirety.
-            fill_mean: Mean value for the fill.
-            fill_std: Standard deviation for the fill.
-
-        """
-        if fill_std > 0:
-            kv_cache.normal_(mean=fill_mean, std=fill_std)
-        else:
-            kv_cache.fill_(fill_mean)
