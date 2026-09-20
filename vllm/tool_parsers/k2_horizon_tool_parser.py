@@ -8,6 +8,7 @@ from typing import Any
 import regex as re
 from openai.types.responses import ToolChoiceFunction
 
+import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -247,7 +248,11 @@ class K2HorizonToolParser(ToolParser):
         properties = find_tool_properties(request.tools, name)
         arguments: dict[str, Any] = {}
         position = first_arg
-        for match in cls._ARG_RE.finditer(body, first_arg):
+        for match in cls._ARG_RE.finditer(
+            body,
+            first_arg,
+            timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+        ):
             if body[position : match.start()].strip():
                 raise ValueError("Malformed IFM XML argument tags.")
 
@@ -305,18 +310,35 @@ class K2HorizonToolParser(ToolParser):
             return self._no_tool_calls(model_output)
 
         group_body = model_output[body_start:group_end]
-        matches = list(self._TOOL_CALL_RE.finditer(group_body))
-        if not matches or self._TOOL_CALL_RE.sub("", group_body).strip():
-            logger.warning("Malformed K2 Horizon IFM tool-call group.")
-            return self._no_tool_calls(model_output)
-
         try:
+            matches = list(
+                self._TOOL_CALL_RE.finditer(
+                    group_body,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                )
+            )
+            leftover = self._TOOL_CALL_RE.sub(
+                "",
+                group_body,
+                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+            )
+            if not matches or leftover.strip():
+                logger.warning("Malformed K2 Horizon IFM tool-call group.")
+                return self._no_tool_calls(model_output)
+
             tool_calls = [
                 self._make_tool_call(
                     *self._parse_call(match.group(1), request, tool_format)
                 )
                 for match in matches
             ]
+        except TimeoutError:
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            logger.debug(
+                "Regex timeout occurred when matching user input: %s",
+                model_output,
+            )
+            return self._no_tool_calls(model_output)
         except (json.JSONDecodeError, TypeError, ValueError):
             logger.warning("Failed to parse K2 Horizon IFM tool calls.", exc_info=True)
             return self._no_tool_calls(model_output)
