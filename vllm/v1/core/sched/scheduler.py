@@ -76,11 +76,6 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
-def _srpf_key(req: Request) -> tuple:
-    is_starved = getattr(req, "consecutive_starvation_ticks", 0) > 5
-    remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
-    return (not is_starved, remaining_prefill, req.arrival_time)
-
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -403,10 +398,19 @@ class Scheduler(SchedulerInterface):
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+        self.srpf_starvation_clock = 0
 
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+
+    def _get_srpf_key_for_req(self, req: Request) -> tuple:
+        starvation = getattr(req, "frozen_starvation_clock", 0)
+        if req.status != RequestStatus.WAITING_FOR_REMOTE_KVS:
+            starvation += (self.srpf_starvation_clock - getattr(req, "last_scheduled_clock", self.srpf_starvation_clock))
+        is_starved = starvation > 5
+        remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
+        return (not is_starved, remaining_prefill, req.arrival_time)
 
     def _mamba_block_aligned_split(
         self,
@@ -616,10 +620,10 @@ class Scheduler(SchedulerInterface):
         # SRPF + Aging Queue Sorting Prototype
         import os
         if self.policy == SchedulingPolicy.FCFS and os.environ.get("VLLM_ENABLE_SRPF") == "1":
-            self.running.sort(key=_srpf_key)
+            self.running.sort(key=self._get_srpf_key_for_req)
 
             for q in (self.waiting, self.skipped_waiting):
-                _sorted_reqs = sorted(q, key=_srpf_key)
+                _sorted_reqs = sorted(q, key=self._get_srpf_key_for_req)
                 if hasattr(q, "clear") and hasattr(q, "extend"):
                     q.clear()
                     q.extend(_sorted_reqs)
@@ -764,18 +768,19 @@ class Scheduler(SchedulerInterface):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    import os
-                    is_srpf = self.policy == SchedulingPolicy.FCFS and os.environ.get("VLLM_ENABLE_SRPF") == "1"
-
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
-                    elif is_srpf:
-                        preempted_req = max(self.running, key=lambda r: r.arrival_time)
                     else:
-                        preempted_req = self.running[-1]
+                        # If SRPF is enabled, self.running is reordered, so [-1] is the heaviest request.
+                        # We must scan for the youngest request (max arrival_time) to protect heavy requests from thrashing.
+                        import os
+                        if os.environ.get("VLLM_ENABLE_SRPF") == "1":
+                            preempted_req = max(self.running, key=lambda r: r.arrival_time)
+                        else:
+                            preempted_req = self.running[-1]
 
                     # A deferred free will not help with immediate allocation.
                     if not self._request_blocks_can_be_freed(preempted_req):
@@ -1273,6 +1278,7 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    request.frozen_starvation_clock = getattr(request, "frozen_starvation_clock", 0) + (self.srpf_starvation_clock - getattr(request, "last_scheduled_clock", self.srpf_starvation_clock))
                     step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
@@ -1302,7 +1308,6 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 self.running.append(request)
-                request.consecutive_starvation_ticks = 0
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
@@ -1360,19 +1365,13 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
 
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
-            scheduled_reqs = set(scheduled_running_reqs + scheduled_new_reqs + scheduled_resumed_reqs)
-            for req in self.running:
-                if req not in scheduled_reqs:
-                    if req.status != RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        req.consecutive_starvation_ticks = getattr(req, "consecutive_starvation_ticks", 0) + 1
-                else:
-                    req.consecutive_starvation_ticks = 0
-
-            for q in (self.waiting, self.skipped_waiting):
-                for req in q:
-                    if req.status != RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        req.consecutive_starvation_ticks = getattr(req, "consecutive_starvation_ticks", 0) + 1
+        if self._pause_state == PauseState.UNPAUSED:
+            if not preempted_reqs:
+                self.srpf_starvation_clock += 1
+            scheduled_reqs = scheduled_running_reqs + scheduled_new_reqs + scheduled_resumed_reqs
+            for req in scheduled_reqs:
+                req.last_scheduled_clock = self.srpf_starvation_clock
+                req.frozen_starvation_clock = 0
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -2366,12 +2365,7 @@ class Scheduler(SchedulerInterface):
             skipped_req = self.skipped_waiting.peek_request()
             
             if is_srpf:
-                def _srpf_key(req):
-                    is_starved = getattr(req, "consecutive_starvation_ticks", 0) > 5
-                    remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
-                    return (not is_starved, remaining_prefill, req.arrival_time)
-                
-                return self.waiting if _srpf_key(waiting_req) < _srpf_key(skipped_req) else self.skipped_waiting
+                return self.waiting if self._get_srpf_key_for_req(waiting_req) < self._get_srpf_key_for_req(skipped_req) else self.skipped_waiting
             else:
                 return self.waiting if waiting_req < skipped_req else self.skipped_waiting
 
@@ -2535,6 +2529,7 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
+            request.last_scheduled_clock = getattr(self, "srpf_starvation_clock", 0)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.spec_decode_metrics_level != "none":
@@ -3074,6 +3069,7 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.PREEMPTED
             else:
                 request.status = RequestStatus.WAITING
+            request.last_scheduled_clock = getattr(self, "srpf_starvation_clock", 0)
             return True
 
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
