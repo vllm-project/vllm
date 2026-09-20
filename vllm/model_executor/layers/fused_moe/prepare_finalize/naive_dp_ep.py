@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import AbstractContextManager, nullcontext
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -10,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
@@ -108,6 +111,15 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
     def output_is_reduced(self) -> bool:
         return False
 
+    def _comm_region(self) -> AbstractContextManager[None]:
+        """Scope the dispatch/combine collective runs in.
+
+        The base class runs the collective on the calling stream. Subclasses
+        may redirect it, e.g. to a side communication stream so a DBO peer
+        ubatch can compute while the collective is in flight.
+        """
+        return nullcontext()
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -153,13 +165,14 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 extra_tensors = []
             extra_tensors.append(local_token_lora_mapping)
 
-        res = get_ep_group().dispatch(
-            a1q,
-            topk_weights,
-            topk_ids,
-            is_sequence_parallel=self.is_sequence_parallel,
-            extra_tensors=extra_tensors,
-        )
+        with self._comm_region():
+            res = get_ep_group().dispatch(
+                a1q,
+                topk_weights,
+                topk_ids,
+                is_sequence_parallel=self.is_sequence_parallel,
+                extra_tensors=extra_tensors,
+            )
 
         if extra_tensors is None:
             assert len(res) == 3
@@ -202,9 +215,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-        output.copy_(
-            get_ep_group().combine(out, is_sequence_parallel=self.is_sequence_parallel)
-        )
+        with self._comm_region():
+            combined = get_ep_group().combine(
+                out, is_sequence_parallel=self.is_sequence_parallel
+            )
+        output.copy_(combined)
 
 
 class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
@@ -239,6 +254,15 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
     def output_is_reduced(self) -> bool:
         return False
 
+    def _comm_region(self) -> AbstractContextManager[None]:
+        """Scope the dispatch/combine collective runs in.
+
+        The base class runs the collective on the calling stream. Subclasses
+        may redirect it, e.g. to a side communication stream so a DBO peer
+        ubatch can compute while the collective is in flight.
+        """
+        return nullcontext()
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -251,12 +275,13 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
             a1, quant_config, defer_input_quant
         )
 
-        res = get_ep_group().dispatch_router_logits(
-            a1q,
-            router_logits,
-            is_sequence_parallel=self.is_sequence_parallel,
-            extra_tensors=scales,
-        )
+        with self._comm_region():
+            res = get_ep_group().dispatch_router_logits(
+                a1q,
+                router_logits,
+                is_sequence_parallel=self.is_sequence_parallel,
+                extra_tensors=scales,
+            )
 
         if scales is None:
             assert len(res) == 2
@@ -273,9 +298,10 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         self,
         fused_expert_output: torch.Tensor,
     ) -> torch.Tensor:
-        out = get_ep_group().combine(
-            fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
-        )
+        with self._comm_region():
+            out = get_ep_group().combine(
+                fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
+            )
         return out
 
 
@@ -284,6 +310,25 @@ def make_moe_prepare_and_finalize_naive_dp_ep(
     is_sequence_parallel: bool = False,
     num_dispatchers: int = 1,
 ) -> MoEPrepareAndFinalizeNaiveDPEPModular | MoEPrepareAndFinalizeNaiveDPEPMonolithic:
+    if current_platform.is_rocm():
+        # ROCm: use the DBO-aware subclasses so the DP all-gather /
+        # reduce-scatter runs on the shared comm stream instead of blocking
+        # the compute stream under --enable-dbo.
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep_rocm import (  # noqa: E501
+            MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO,
+            MoEPrepareAndFinalizeNaiveDPEPMonolithicROCmDBO,
+        )
+
+        cls = (
+            MoEPrepareAndFinalizeNaiveDPEPMonolithicROCmDBO
+            if use_monolithic
+            else MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO
+        )
+        return cls(
+            is_sequence_parallel=is_sequence_parallel,
+            num_dispatchers=num_dispatchers,
+        )
+
     return (
         MoEPrepareAndFinalizeNaiveDPEPMonolithic(
             is_sequence_parallel=is_sequence_parallel,
