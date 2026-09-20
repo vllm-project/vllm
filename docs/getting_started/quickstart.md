@@ -141,6 +141,9 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
 
+!!! note "Apple Silicon (Metal) users"
+    The `facebook/opt-125m` model only ships legacy `.bin` weights. vLLM-Metal uses MLX, which requires `.safetensors` weights from the [mlx-community](https://huggingface.co/mlx-community) organization. Use an MLX-optimized model instead, for example `mlx-community/Qwen2.5-0.5B-Instruct-4bit`.
+
 ```python
 llm = LLM(model="facebook/opt-125m")
 ```
