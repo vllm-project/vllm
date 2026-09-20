@@ -6,7 +6,8 @@
 These tests cover:
 - OutputProcessor.get_num_queued_tokens() token counting
 - AsyncLLM.check_admission() admission control logic
-- Exception classes (GracefulHTTPError, QueueOverflowError, MaxQueuedTokensError)
+- Exception classes (GracefulHTTPError, QueueOverflowError, MaxQueuedTokensError,
+  EnginePausedError)
 - create_error_response() mapping GracefulHTTPError to HTTP 503
 - SchedulerConfig field defaults and validation
 - human_readable_int CLI notation for max_num_queued_tokens
@@ -28,6 +29,7 @@ from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
 from vllm.exceptions import (
+    EnginePausedError,
     GracefulHTTPError,
     MaxQueuedTokensError,
     QueueOverflowError,
@@ -300,6 +302,18 @@ def test_admission_tokens_rejects_when_zero_limit():
         llm.check_admission()
 
 
+# -- pause ------------------------------------------------------------------
+
+
+def test_admission_rejects_while_paused():
+    """Only this branch runs in _preflight, so only it can 503 a stream."""
+    llm = _make_async_llm()
+    llm._reject_while_paused = "abort"
+    with pytest.raises(EnginePausedError) as exc_info:
+        llm.check_admission()
+    assert exc_info.value.http_status == HTTPStatus.SERVICE_UNAVAILABLE
+
+
 # -- interaction between both limits ----------------------------------------
 
 
@@ -429,6 +443,21 @@ async def test_parallel_admission_cancellation_cleans_up_all_children():
     assert llm.output_processor.get_num_unfinished_requests() == 0
     aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
     assert set(aborted_ids) == {"0_parallel", "1_parallel", "2_parallel"}
+
+
+@pytest.mark.asyncio
+async def test_admission_rejects_added_chunk_while_paused():
+    """check_admission is skipped once the request exists, so streaming-input
+    chunks are gated only inside _add_request."""
+    llm = _make_request_test_llm(10, AsyncMock())
+    request = _make_engine_request("stream", 1)
+    await llm.add_request("stream", request, request.params)
+    assert llm.output_processor.has_request("stream")
+
+    llm._reject_while_paused = "abort"
+    chunk = _make_engine_request("stream", 1)
+    with pytest.raises(EnginePausedError):
+        await llm.add_request("stream", chunk, chunk.params)
 
 
 # ---------------------------------------------------------------------------

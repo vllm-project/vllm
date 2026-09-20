@@ -334,8 +334,7 @@ class AsyncLLM(EngineClient):
             EnginePausedError: If generation is paused in a rejecting mode.
 
         """
-        if self._reject_while_paused is not None:
-            raise EnginePausedError(self._reject_while_paused)
+        self._reject_if_paused()
 
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:

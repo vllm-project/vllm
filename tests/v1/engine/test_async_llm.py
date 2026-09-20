@@ -1279,10 +1279,3 @@ async def test_resume_while_asleep_keeps_rejecting():
         ):
             pass
         assert out.finished
-
-
-def test_paused_error_maps_to_retryable_status():
-    """A pause rejection must reach the client as a retryable 503, not a 500."""
-    from http import HTTPStatus
-
-    assert EnginePausedError("abort").http_status == HTTPStatus.SERVICE_UNAVAILABLE

@@ -31,6 +31,11 @@ new requests are admitted while paused:
 arriving while paused is rejected rather than silently carried across it.
 Clients should retry on 503, or on a different instance.
 
+Rejection is scoped to the API server process that received the pause. Where
+several API server processes share the same engine, requests arriving at the
+others are still queued engine-side, so pause every process that fronts the
+engine -- the same rule as the external load balancer note below.
+
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 
 ### resume_generation
