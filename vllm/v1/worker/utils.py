@@ -116,6 +116,21 @@ def _iter_checksum_targets(model: nn.Module):
             yield name, tensor
 
 
+def _randomize_tensor_inplace(tensor: torch.Tensor) -> None:
+    """Fill ``tensor`` with random values without a same-sized temporary."""
+    if tensor.is_floating_point():
+        values = torch.rand_like(tensor, dtype=torch.float32).to(tensor.dtype)
+    else:
+        values = torch.randint(
+            0,
+            2,
+            tensor.shape,
+            device=tensor.device,
+            dtype=tensor.dtype,
+        )
+    tensor.copy_(values)
+
+
 @triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
