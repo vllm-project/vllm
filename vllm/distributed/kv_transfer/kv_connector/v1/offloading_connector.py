@@ -232,6 +232,8 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             return "BLHNC"
         return "LBHNC"
 
+    supports_retained_cache_on_pause: bool = True
+
     def reset_cache(self) -> bool | None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.reset_cache()

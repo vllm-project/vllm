@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
     if args.skip_sleep_wake {
         println!("sleep_wake=skipped");
     } else {
-        client.sleep(args.sleep_level, args.sleep_mode).await.with_context(|| {
+        client.sleep(args.sleep_level, args.sleep_mode, true).await.with_context(|| {
             format!(
                 "failed to call sleep utility with level={} mode={}",
                 args.sleep_level, args.sleep_mode

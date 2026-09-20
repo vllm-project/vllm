@@ -25,10 +25,16 @@ pub(crate) struct SleepParams {
     level: u32,
     #[serde(default)]
     mode: PauseMode,
+    #[serde(default = "default_clear_connector_cache")]
+    clear_connector_cache: bool,
 }
 
 const fn default_sleep_level() -> u32 {
     1
+}
+
+const fn default_clear_connector_cache() -> bool {
+    true
 }
 
 fn invalid_query(error: QueryRejection) -> ApiError {
@@ -44,7 +50,7 @@ pub async fn sleep(
 
     state
         .engine_core_client()
-        .sleep(params.level, params.mode)
+        .sleep(params.level, params.mode, params.clear_connector_cache)
         .await
         .map_err(|error| utility_call_error("sleep", error))?;
 

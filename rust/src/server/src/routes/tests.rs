@@ -5856,6 +5856,48 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn sleep_route_sends_connector_opt_out_only_when_requested() {
+    // Only the opt-out widens the call, so the default still drives an older engine.
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("sleep"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![
+                    Value::from(1_u64),
+                    Value::from("abort"),
+                    Value::from(false),
+                ])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/sleep?clear_connector_cache=false")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn release_kv_cache_memory_route_sends_expected_utility_call() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
@@ -6062,6 +6104,48 @@ async fn pause_route_uses_python_compatible_default_query_values() {
         serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
         json!({ "status": "paused" })
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pause_route_sends_connector_opt_out_only_when_requested() {
+    // Only the opt-out widens the call, so the default still drives an older engine.
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("pause_scheduler"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![
+                    Value::from("abort"),
+                    Value::from(true),
+                    Value::from(false),
+                ])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/pause?clear_connector_cache=false")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

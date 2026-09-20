@@ -727,6 +727,10 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    # Whether the connector tolerates surviving a pause: the resume then lands
+    # in the step that reports the pause's preemptions, carrying a load.
+    supports_retained_cache_on_pause: bool = False
+
     def reset_cache(self) -> bool | None:
         """Reset the connector's internal cache.
 

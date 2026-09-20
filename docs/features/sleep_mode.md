@@ -100,6 +100,10 @@ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
   --port 8000
 ```
 
+`sleep(level=1, clear_connector_cache=False)` keeps a KV connector's offloaded blocks, so
+requests after the wake-up are served from them instead of re-prefilled. Block hashes do not
+cover the weights, so leave the default in place whenever the weights are replaced.
+
 Below is an example of how to sleep and wake up a model in level 1.
 
 ```bash
