@@ -27,6 +27,7 @@ from vllm.model_executor.model_loader.tensorizer import (
 )
 from vllm.model_executor.model_loader.tensorizer_loader import (
     BLACKLISTED_TENSORIZER_ARGS,
+    TensorizerLoader,
 )
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -301,6 +302,39 @@ def test_vllm_tensorized_model_has_same_outputs(
         # noqa: E501
 
         assert outputs == deserialized_outputs
+
+
+def test_serialized_cpu_path_runs_post_load_processing(
+    monkeypatch, tmp_path, model_ref
+):
+    """The non-vLLM-tensorized path dispatches process_weights_after_loading."""
+    from vllm.model_executor.model_loader import tensorizer_loader
+
+    vllm_config = EngineArgs(
+        model=model_ref,
+        load_format="tensorizer",
+        model_loader_extra_config=TensorizerConfig(
+            tensorizer_uri=str(tmp_path / "model.tensors")
+        ),
+    ).create_engine_config()
+    model = torch.nn.Linear(2, 2)
+    calls: list[tuple[Any, ...]] = []
+    model.load_weights = lambda weights: calls.append(("load", weights))
+    monkeypatch.setattr(tensorizer_loader, "initialize_model", lambda **kw: model)
+    monkeypatch.setattr(
+        tensorizer_loader,
+        "process_weights_after_loading",
+        lambda *args: calls.append(("post_load", *args)),
+    )
+    loader = TensorizerLoader(vllm_config.load_config)
+    monkeypatch.setattr(loader, "_get_weights_iterator", lambda: iter(()))
+
+    loaded = loader._load_model_serialized_cpu(vllm_config)
+
+    assert loaded is model
+    assert [c[0] for c in calls] == ["load", "post_load"]
+    assert calls[1][1] is model
+    assert calls[1][2] is vllm_config.model_config
 
 
 def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):

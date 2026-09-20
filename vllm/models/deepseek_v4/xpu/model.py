@@ -540,10 +540,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             symm_buffer.topk_weights[:num_tokens],
         )
 
-        # This method must have been already called during the weight loading phase.
-        # We call it again here to cover the dummy weight loading case.
-        self.finalize_weights()
-
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
         deep_gemm.fp8_fp4_mega_moe(
@@ -1314,6 +1310,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
 
 class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     model_cls = DeepseekV4Model
+    finalizes_weights_during_load = False
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
@@ -1383,9 +1380,10 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
-        return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

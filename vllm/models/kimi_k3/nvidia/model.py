@@ -523,7 +523,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer.topk_weights[:num_tokens],
             is_padding=is_padding,
         )
-        self.finalize_weights()
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
         deep_gemm.fp8_fp4_mega_moe(
