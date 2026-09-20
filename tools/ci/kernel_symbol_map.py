@@ -260,6 +260,9 @@ def main() -> int:
             all_deps[bd] = ninja_deps(ninja, bd)
             for obj in bd.rglob("*.o"):
                 rel = obj.relative_to(bd).as_posix()
+                # CMake's compiler-identification probes are objects too.
+                if "CompilerId" in rel:
+                    continue
                 if "/CMakeFiles/" in f"/{rel}" or rel.startswith("CMakeFiles/"):
                     jobs.append((bd, rel, obj))
         n_deps = sum(len(d) for d in all_deps.values())
