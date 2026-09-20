@@ -609,10 +609,8 @@ class Scheduler(SchedulerInterface):
         )
         # SRPF + Aging Queue Sorting Prototype
         _now = time.time()
-        _STARVATION_THRESHOLD = 5.0
-
         def _srpf_key(req):
-            is_starved = (_now - req.arrival_time) > _STARVATION_THRESHOLD
+            is_starved = getattr(req, "consecutive_starvation_ticks", 0) > 5
             remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
             return (not is_starved, remaining_prefill, req.arrival_time)
 
@@ -625,6 +623,17 @@ class Scheduler(SchedulerInterface):
                 q.extend(_sorted_reqs)
             else:
                 q._heap = _sorted_reqs
+                import types
+                def _pop(self_q):
+                    if not self_q._heap:
+                        raise IndexError("pop from empty heap")
+                    return self_q._heap.pop(0)
+                def _peek(self_q):
+                    if not self_q._heap:
+                        raise IndexError("peek from empty heap")
+                    return self_q._heap[0]
+                q.pop_request = types.MethodType(_pop, q)
+                q.peek_request = types.MethodType(_peek, q)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -769,39 +778,36 @@ class Scheduler(SchedulerInterface):
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                     else:
-                        preempted_req = self.running[-1]
+                        preempted_req = max(self.running, key=lambda r: r.arrival_time)
 
                     # A deferred free will not help with immediate allocation.
                     if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        victim_index = self.running.index(preempted_req)
-                        del self.running[victim_index]
-                        if victim_index < req_index:
-                            req_index -= 1
+                    victim_index = self.running.index(preempted_req)
+                    del self.running[victim_index]
+                    if victim_index < req_index:
+                        req_index -= 1
 
-                        if preempted_req in scheduled_running_reqs:
-                            preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
-                            restored = num_scheduled_tokens.pop(preempted_req_id)
-                            token_budget += restored
-                            input_budget += restored + draft_slots
-                            req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
+                    if preempted_req in scheduled_running_reqs:
+                        preempted_req_id = preempted_req.request_id
+                        scheduled_running_reqs.remove(preempted_req)
+                        restored = num_scheduled_tokens.pop(preempted_req_id)
+                        token_budget += restored
+                        input_budget += restored + draft_slots
+                        req_to_new_blocks.pop(preempted_req_id)
+                        scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                        preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                            preempted_req_id, None
+                        )
+                        if preempted_encoder_inputs:
+                            # Restore encoder compute budget if the preempted
+                            # request had encoder inputs scheduled in this step.
+                            num_embeds_to_restore = sum(
+                                preempted_req.get_num_encoder_embeds(i)
+                                for i in preempted_encoder_inputs
                             )
-                            if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
-                                )
-                                encoder_compute_budget += num_embeds_to_restore
-                    else:
-                        preempted_req = self.running.pop()
+                            encoder_compute_budget += num_embeds_to_restore
 
                     self._preempt_request(
                         preempted_req,
@@ -1299,6 +1305,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 self.running.append(request)
+                request.consecutive_starvation_ticks = 0
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
@@ -1355,6 +1362,10 @@ class Scheduler(SchedulerInterface):
             # record whether it was capacity-bound.
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
+
+        for q in (self.waiting, self.skipped_waiting):
+            for req in q:
+                req.consecutive_starvation_ticks = getattr(req, "consecutive_starvation_ticks", 0) + 1
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
