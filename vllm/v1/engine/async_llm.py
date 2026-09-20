@@ -12,6 +12,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -94,8 +95,7 @@ class AsyncLLM(EngineClient):
         client_index: int = 0,
         profiler: TorchProfilerWrapper | None = None,
     ) -> None:
-        """
-        Create an AsyncLLM.
+        """Create an AsyncLLM.
 
         Args:
             vllm_config: global configuration.
@@ -105,13 +105,21 @@ class AsyncLLM(EngineClient):
             mm_registry: Multi-modal registry.
             log_requests: Whether to log requests.
             start_engine_loop: Whether to start the engine loop.
+            client_addresses: ZMQ addresses of an externally launched engine,
+                when not launching one in-process.
+            client_count: Number of API-server clients sharing the engine.
+            client_index: Index of this client within ``client_count``.
+            aggregate_engine_logging: Whether to aggregate per-engine logs
+                into a single stat logger.
             stat_loggers: customized stat loggers for the engine.
                 If not provided, default stat loggers will be used.
                 PLEASE BE AWARE THAT STAT LOGGER IS NOT STABLE
                 IN V1, AND ITS BASE CLASS INTERFACE MIGHT CHANGE.
+            profiler: Torch profiler wrapper used to trace the frontend.
 
         Returns:
             None
+
         """
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
@@ -255,7 +263,6 @@ class AsyncLLM(EngineClient):
         stat_loggers: list[StatLoggerFactory] | None = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
-
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
@@ -319,6 +326,7 @@ class AsyncLLM(EngineClient):
         Raises:
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
+
         """
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
@@ -378,7 +386,6 @@ class AsyncLLM(EngineClient):
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
-
         if self.errored:
             raise EngineDeadError()
 
@@ -394,10 +401,6 @@ class AsyncLLM(EngineClient):
                 "prompt tokens, please disable it when the requests need "
                 "prompt logprobs"
             )
-
-        if isinstance(params, SamplingParams) and params.n > 1:
-            # TODO (NickLucche) Batch check admission check for all n requests
-            self.check_admission(params.n, request_id)
 
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
@@ -494,14 +497,28 @@ class AsyncLLM(EngineClient):
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request)
+        child_requests: list[EngineCoreRequest] = []
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = child_params
-            await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
-            )
+            child_requests.append(child_request)
+
+        self.check_admission(parent_params.n, parent_request.request_id)
+        try:
+            for idx, child_request in enumerate(child_requests):
+                self.output_processor.add_request(
+                    child_request, prompt_text, parent_request, idx, queue
+                )
+
+            for child_request in child_requests:
+                await self.engine_core.add_request_async(child_request)
+                if self.log_requests:
+                    logger.info("Added request %s.", child_request.request_id)
+        except BaseException:
+            await self.abort(parent_request.request_id, internal=True)
+            raise
         return queue
 
     async def _add_request(
@@ -654,8 +671,7 @@ class AsyncLLM(EngineClient):
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
-        """
-        Main function called by the API server to kick off a request
+        """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
             * 2) Processing the Input.
             * 3) Adding the Request to the Detokenizer.
@@ -678,8 +694,8 @@ class AsyncLLM(EngineClient):
             >>> params = self.renderer.default_cmpl_tok_params
             >>> (engine_input,) = self.renderer.render_cmpl([parsed], params)
             >>> gen = self.generate(engine_input, sampling_params, request_id)
-        """
 
+        """
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -763,7 +779,6 @@ class AsyncLLM(EngineClient):
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
-
         if self.output_handler is not None:
             return
 
@@ -849,7 +864,6 @@ class AsyncLLM(EngineClient):
         self, request_id: str | Iterable[str], internal: bool = False
     ) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
-
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
@@ -893,8 +907,7 @@ class AsyncLLM(EngineClient):
         wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
     ) -> None:
-        """
-        Pause generation to allow model weight updates.
+        """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
         in the engine. New generation/encoding requests will not be scheduled
@@ -910,6 +923,7 @@ class AsyncLLM(EngineClient):
             wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
+
         """
         if wait_for_inflight_requests:
             warnings.warn(
@@ -950,8 +964,7 @@ class AsyncLLM(EngineClient):
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """
-        Main function called by the API server to kick off a request
+        """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
             * 2) Processing the Input.
             * 3) Adding the Request to the EngineCore (separate process).
@@ -963,7 +976,6 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
-
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -1078,10 +1090,17 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    async def wake_up(self, tags: list[str] | None = None) -> None:
-        await self.engine_core.wake_up_async(tags)
+    async def release_kv_cache_memory(self) -> None:
+        await self.renderer.clear_mm_cache_async()
+        await self.engine_core.release_kv_cache_memory_async()
 
         if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(1, 0)
+
+    async def wake_up(self, tags: list[str] | None = None) -> None:
+        fully_awake = await self.engine_core.wake_up_async(tags)
+
+        if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
 
     async def checkpoint_prepare(self) -> None:
@@ -1116,9 +1135,7 @@ class AsyncLLM(EngineClient):
         args: tuple = (),
         kwargs: dict | None = None,
     ):
-        """
-        Perform a collective RPC call to the given path.
-        """
+        """Perform a collective RPC call to the given path."""
         return await self.engine_core.collective_rpc_async(
             method, timeout, args, kwargs
         )
@@ -1198,7 +1215,7 @@ class AsyncLLM(EngineClient):
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        """send fault tolerance instruction to the engine"""
+        """Send fault tolerance instruction to the engine."""
         return await self.engine_core.handle_fault(fault_tolerance_request)
 
     async def get_status(self):
@@ -1224,11 +1241,11 @@ class AsyncLLM(EngineClient):
     async def init_weight_transfer_engine(
         self, request: WeightTransferInitRequest
     ) -> None:
-        """
-        Initialize weight transfer for RL training.
+        """Initialize weight transfer for RL training.
 
         Args:
             request: Weight transfer initialization request with backend-specific info
+
         """
         await self.collective_rpc(
             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
@@ -1243,11 +1260,11 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc("start_draft_weight_update")
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
-        """
-        Batched weight update for RL training.
+        """Batched weight update for RL training.
 
         Args:
             request: Weight update request with backend-specific update info
+
         """
         await self.collective_rpc(
             "update_weights", kwargs={"update_info": request.update_info}
@@ -1266,3 +1283,6 @@ class AsyncLLM(EngineClient):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return await self.engine_core.get_weight_version_async()
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        return self.engine_core.get_kv_event_sources()

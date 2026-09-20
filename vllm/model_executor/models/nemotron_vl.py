@@ -138,7 +138,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.img_context_token_id = None
+        self.img_context_token_id: int | None = None
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -146,7 +146,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -387,9 +387,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="mlp1",
@@ -467,8 +465,7 @@ class LlamaNemotronVLEmbedProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[LlamaNemotronVLEmbedProcessingInfo],
 )
 class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling):
-    """
-    LlamaNemotronVL model for embeddings.
+    """LlamaNemotronVL model for embeddings.
 
     Inherits from LlamaNemotronVLChatModel and specializes it for embedding tasks:
     - Uses SigLIP vision encoder instead of C-RADIO
@@ -521,12 +518,21 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
             use_head=False,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(
+        self,
+        config: PretrainedConfig,
+        vit_hidden_size: int | None = None,
+        vision_projection_hidden_size: int | None = None,
+    ) -> nn.Module:
         """Override to use different MLP structure for embedding model."""
+        if vit_hidden_size is None:
+            vit_hidden_size = config.vision_config.hidden_size
+        if vision_projection_hidden_size is None:
+            vision_projection_hidden_size = config.get_text_config().hidden_size
         return super()._init_mlp1(
             config,
-            vit_hidden_size=config.vision_config.hidden_size,
-            vision_projection_hidden_size=config.get_text_config().hidden_size,
+            vit_hidden_size=vit_hidden_size,
+            vision_projection_hidden_size=vision_projection_hidden_size,
         )
 
     def _call_vision_model(self, pixel_values: torch.Tensor) -> torch.Tensor:
