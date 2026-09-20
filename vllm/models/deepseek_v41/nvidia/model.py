@@ -986,6 +986,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if finalize is not None:
                 finalize()
 
+    def finalize_engram_host_pages(self) -> None:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            if layer.engram is not None:
+                layer.engram.embed_tokens.finish_weight_loading()
+
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
             return
@@ -1241,6 +1246,7 @@ class DeepseekV41LLMForCausalLM(
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
         self.model.finalize_mega_attn_weights()
+        self.model.finalize_engram_host_pages()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

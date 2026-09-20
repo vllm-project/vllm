@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NVIDIA Engram DP sharding, shared host storage, and asynchronous prefetch."""
 
+import ctypes
 import mmap
+import os
 import tempfile
 import weakref
 from contextlib import ExitStack
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -41,7 +44,55 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 logger = init_logger(__name__)
 
 
-def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
+def _checkpoint_dir() -> Path | None:
+    """The local snapshot holding the current model's weights, if any."""
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    config = get_current_vllm_config()
+    if config.model_config is None:
+        return None
+    model = config.model_config.model_weights or config.model_config.model
+    if os.path.isdir(model):
+        return Path(model)
+    try:
+        return Path(
+            hf_api().snapshot_download(
+                model,
+                revision=config.model_config.revision,
+                cache_dir=config.load_config.download_dir,
+                local_files_only=True,
+            )
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def _drop_checkpoint_cache(checkpoint_dir: Path | None) -> None:
+    """Evict cached checkpoint pages so contiguous memory is free for huge pages."""
+    if checkpoint_dir is None:
+        return
+    try:
+        for path in checkpoint_dir.glob("*.safetensors"):
+            with path.open("rb") as file:
+                os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError as exc:
+        logger.warning("Could not release the Engram checkpoint page cache: %s", exc)
+
+
+def _collapse_huge_pages(storage: torch.Tensor) -> None:
+    """Best-effort MADV_COLLAPSE (Linux >= 6.1) of pages that faulted small."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.madvise.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+    if libc.madvise(storage.data_ptr(), storage.numel(), 25) != 0:
+        logger.warning(
+            "Engram MADV_COLLAPSE failed; keeping existing pages: %s",
+            os.strerror(ctypes.get_errno()),
+        )
+
+
+def _allocate_huge_page_storage(
+    num_bytes: int, checkpoint_dir: Path | None
+) -> torch.Tensor | None:
     """Register a prefaulted anonymous mapping that requests huge pages.
 
     Returns None when anything fails, so callers fall back to pinned memory.
@@ -50,6 +101,7 @@ def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     try:
         mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         mapping.madvise(mmap.MADV_HUGEPAGE)
+        _drop_checkpoint_cache(checkpoint_dir)
         owner = np.frombuffer(mapping, dtype=np.uint8)
         # Fault the pages in before CUDA pins them, so they can be huge.
         owner[:: mmap.PAGESIZE] = 0
@@ -264,10 +316,13 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         thp_packing: bool = False,
+        checkpoint_dir: Path | None = None,
     ) -> None:
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.thp_packing = thp_packing
+        self._checkpoint_dir = checkpoint_dir
+        self._packed: torch.Tensor | None = None
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
             if not cpu_offload:
@@ -319,9 +374,10 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         if self.thp_packing:
             weight_bytes = self.part_num_embeddings * self.dim
             packed = _allocate_huge_page_storage(
-                weight_bytes + weight_bytes // self.block_size
+                weight_bytes + weight_bytes // self.block_size, self._checkpoint_dir
             )
             if packed is not None:
+                self._packed = packed
                 return (
                     packed[:weight_bytes].view(torch.float8_e4m3fn).view(-1, self.dim),
                     packed[weight_bytes:].view(-1, self.dim // self.block_size),
@@ -343,6 +399,12 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
                 pin_memory=True,
             ),
         )
+
+    def finish_weight_loading(self) -> None:
+        """Collapse pages that faulted small once loading refilled the page cache."""
+        if self._packed is not None:
+            _drop_checkpoint_cache(self._checkpoint_dir)
+            _collapse_huge_pages(self._packed)
 
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self._shared_memory is not None:
@@ -421,6 +483,7 @@ class Engram(BaseEngram):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=engram_config.dp_shared_memory,
             thp_packing=engram_config.thp_packing,
+            checkpoint_dir=_checkpoint_dir() if engram_config.thp_packing else None,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
