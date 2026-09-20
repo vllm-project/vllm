@@ -83,8 +83,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         unpadded_hidden = self.moe.hidden_dim_unpadded
         assert unpadded_hidden is not None
         unpadded_up = unpadded_intermediate * (2 if self.moe.is_act_and_mul else 1)
-        is_padded = intermediate_size_per_partition != unpadded_intermediate
-        alloc = torch.zeros if is_padded else torch.empty
+        requires_zero_alloc = (
+            self.unquantized_backend == UnquantizedMoeBackend.AITER
+            and intermediate_size_per_partition != unpadded_intermediate
+        )
+        alloc = torch.zeros if requires_zero_alloc else torch.empty
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             alloc(

@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     grouped_topk,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_cdna
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific tests"
@@ -49,47 +50,19 @@ pytestmark = pytest.mark.skipif(
         # the naive value is kept and the call site declines the kernel.
         (33, 3),
         (129, 43),
+        (257, 257),
         (320, 10),
         (384, 12),
     ],
 )
-def test_known_expert_counts(num_experts, expected):
+def test_group_count_and_guard(num_experts, expected):
     g = _aiter_get_num_expert_group(num_experts)
-
     assert g == expected
     # The router asserts both unconditionally; rounding must never break them.
     assert num_experts % g == 0
     assert num_experts // g <= MAX_EXPERTS_PER_GROUP
 
-
-@pytest.mark.parametrize(
-    ("num_experts", "supported"),
-    [
-        (8, True),
-        (32, True),
-        (64, True),
-        (72, True),
-        (96, True),
-        (128, True),
-        (160, True),
-        (192, True),
-        (256, True),
-        (33, False),
-        (129, False),
-        (257, False),
-        (320, False),
-        (384, False),
-    ],
-)
-def test_guard_admits_exactly_the_shapes_with_a_kernel(num_experts, supported):
-    """An unsupported group count must never reach the kernel.
-
-    ``topk >= g`` alone does not stop it: num_experts=33 gives g=3, which
-    passes at topk >= 3. Membership in SUPPORTED_NUM_GRP is what declines.
-    """
-    g = _aiter_get_num_expert_group(num_experts)
-    assert (g in SUPPORTED_NUM_GRP) == supported
-
+    supported = g in SUPPORTED_NUM_GRP
     # Ample topk, so only the membership check can decline.
     assert _aiter_can_use_biased_grouped_topk(num_experts, topk=64) == supported
     if supported:
@@ -97,6 +70,7 @@ def test_guard_admits_exactly_the_shapes_with_a_kernel(num_experts, supported):
         assert not _aiter_can_use_biased_grouped_topk(num_experts, topk=g - 1)
 
 
+@pytest.mark.skipif(not on_cdna(), reason="CDNA ROCm only")
 @pytest.mark.parametrize(
     "num_experts",
     [
