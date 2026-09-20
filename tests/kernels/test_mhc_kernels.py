@@ -115,10 +115,12 @@ def test_hc_collapse_rms_norm_matches_separate_ops(num_tokens):
     )
     pre = torch.rand(num_tokens, hc_mult, dtype=torch.float32, device=DEVICE)
     weight = torch.rand(hidden_size, dtype=torch.bfloat16, device=DEVICE)
-    collapsed = hc_collapse_triton(x, pre)
-    expected = torch.empty_like(collapsed)
+    expected = hc_collapse_triton(x, pre).float()
     if num_tokens:
-        torch.ops._C.rms_norm(expected, collapsed, weight, 1e-6)
+        variance = expected.square().mean(dim=-1, keepdim=True)
+        expected = (expected * torch.rsqrt(variance + 1e-6) * weight.float()).to(
+            x.dtype
+        )
     actual = torch.ops.vllm.hc_collapse_rms_norm_triton(x, pre, weight, 1e-6)
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
