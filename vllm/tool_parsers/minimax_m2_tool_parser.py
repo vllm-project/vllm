@@ -344,6 +344,23 @@ class MinimaxM2ToolParser(ToolParser):
                     param_value, param_type
                 )
 
+        # The model sometimes closes the invoke without closing the last
+        # parameter; its trailing value must survive the final conversion too.
+        remaining = self.parameter_complete_regex.sub("", invoke_str)
+        tail = re.search(r"<parameter name=([^>]+)>(.*)$", remaining, re.DOTALL)
+        if tail:
+            param_name = self._extract_name(tail.group(1))
+            param_value = tail.group(2).strip()
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
+
+            param_type = self._get_param_types_from_config(param_name, param_config)
+            param_dict[param_name] = self._convert_param_value_with_types(
+                param_value, param_type
+            )
+
         return ToolCall(
             type="function",
             function=FunctionCall(

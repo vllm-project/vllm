@@ -805,3 +805,54 @@ def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser, mock_r
     # Boolean should be deserialized as bool
     assert args["enabled"] is True
     assert isinstance(args["enabled"], bool)
+
+
+class _FakeGlm47Tokenizer:
+    """Minimal fake tokenizer for the Glm47 parser: a truthy
+    model_tokenizer marker plus the two tool-call sentinel tokens."""
+
+    model_tokenizer = True
+
+    def __init__(self):
+        self.vocab = {"<tool_calls>": 1, "</tool_calls>": 2}
+
+    def get_vocab(self):
+        return self.vocab
+
+
+class TestGlm47UnclosedLastArgument:
+    """#57827: Glm47's arg converter dropped a trailing <arg_value> that the
+    model never closed with </arg_value>."""
+
+    @pytest.fixture
+    def glm47_parser(self):
+        from vllm.tool_parsers.glm47_moe_tool_parser import (
+            Glm47MoeModelToolParser,
+        )
+
+        return Glm47MoeModelToolParser(_FakeGlm47Tokenizer())
+
+    def test_unclosed_last_arg_value_survives(self, glm47_parser, mock_request):
+        text = (
+            "<tool_calls><tool_call>get_weather"
+            "<arg_key>city</arg_key><arg_value>Seattle</arg_value>"
+            "<arg_key>unit</arg_key><arg_value>celsius"
+            "</tool_call></tool_calls>"
+        )
+        result = glm47_parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"city": "Seattle", "unit": "celsius"}
+
+    def test_fully_closed_output_unchanged(self, glm47_parser, mock_request):
+        text = (
+            "<tool_calls><tool_call>get_weather"
+            "<arg_key>city</arg_key><arg_value>Seattle</arg_value>"
+            "<arg_key>unit</arg_key><arg_value>celsius</arg_value>"
+            "</tool_call></tool_calls>"
+        )
+        result = glm47_parser.extract_tool_calls(text, mock_request)
+
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"city": "Seattle", "unit": "celsius"}

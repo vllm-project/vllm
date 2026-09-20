@@ -147,6 +147,16 @@ class DeepSeekV32ToolParser(ToolParser):
         param_dict = dict()
         for param_name, param_val in self.parameter_complete_regex.findall(invoke_str):
             param_dict[param_name] = param_val
+        # The model sometimes closes the invoke without closing the last
+        # parameter; its trailing value must survive the final conversion too.
+        remaining = self.parameter_complete_regex.sub("", invoke_str)
+        tail = re.search(
+            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(?:true|false)"\s*>(.*)$',
+            remaining,
+            re.DOTALL,
+        )
+        if tail:
+            param_dict[tail.group(1)] = tail.group(2)
         return param_dict
 
     def extract_tool_calls(

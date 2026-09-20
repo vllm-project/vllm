@@ -190,6 +190,21 @@ class Glm4MoeModelToolParser(ToolParser):
                         arg_val = self._deserialize(arg_val)
                     logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
+                # The model sometimes closes the tool call without closing the
+                # last arg_value; its trailing value must survive too.
+                remaining = self.func_arg_regex.sub("", tc_args) if tc_args else ""
+                tail = re.search(
+                    r"<arg_key>(.*?)</arg_key>(?:\\n|\s)*<arg_value>(.*)$",
+                    remaining,
+                    re.DOTALL,
+                )
+                if tail:
+                    arg_key = tail.group(1).strip()
+                    arg_val = tail.group(2).strip()
+                    if not self._is_string_type(tc_name, arg_key, request.tools):
+                        arg_val = self._deserialize(arg_val)
+                    logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
+                    arg_dct[arg_key] = arg_val
                 tool_calls.append(
                     ToolCall(
                         type="function",

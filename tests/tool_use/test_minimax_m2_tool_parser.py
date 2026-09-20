@@ -117,3 +117,47 @@ def test_streaming_minimax_m2_multiple_invokes(minimax_m2_tool_parser):
         expected_call = json.dumps(expected_call)
         actual_call = parser.streamed_args_for_tool[index]
         assert expected_call == actual_call
+
+
+def test_extract_tool_calls_keeps_unclosed_last_parameter(minimax_m2_tool_parser):
+    # #57827: the model sometimes closes the invoke without closing the last
+    # parameter; its trailing value must survive the final conversion.
+    text = (
+        '<minimax:tool_call><invoke name="get_weather">'
+        '<parameter name="city">Seattle</parameter>'
+        '<parameter name="unit">celsius</invoke></minimax:tool_call>'
+    )
+    result = minimax_m2_tool_parser.extract_tool_calls(text, None)
+
+    assert result.tools_called is True
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"city": "Seattle", "unit": "celsius"}
+
+
+def test_extract_tool_calls_unclosed_tail_after_complete_params(
+    minimax_m2_tool_parser,
+):
+    text = (
+        '<minimax:tool_call><invoke name="get_weather">'
+        '<parameter name="city">Seattle</parameter>'
+        '<parameter name="days">5</parameter>'
+        '<parameter name="unit">celsius</invoke></minimax:tool_call>'
+    )
+    result = minimax_m2_tool_parser.extract_tool_calls(text, None)
+
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"city": "Seattle", "days": "5", "unit": "celsius"}
+
+
+def test_extract_tool_calls_fully_closed_output_unchanged(minimax_m2_tool_parser):
+    # The tail path must not double-count a properly closed parameter list.
+    text = (
+        '<minimax:tool_call><invoke name="get_weather">'
+        '<parameter name="city">Seattle</parameter>'
+        '<parameter name="unit">celsius</parameter>'
+        "</invoke></minimax:tool_call>"
+    )
+    result = minimax_m2_tool_parser.extract_tool_calls(text, None)
+
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"city": "Seattle", "unit": "celsius"}
