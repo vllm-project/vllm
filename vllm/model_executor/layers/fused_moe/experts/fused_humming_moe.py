@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     MoEPermuteScratch,
+    get_moe_permute_scratch,
     moe_permute,
     moe_permute_unpermute_supported,
     moe_prepare_scatter,
@@ -151,7 +152,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        self._permute_scratch: dict[int, MoEPermuteScratch] = {}
 
     def init_humming_moe(self):
         from vllm.utils.humming import get_heuristics_config
@@ -264,28 +264,20 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if not moe_permute_unpermute_supported():
             return None
 
-        scratch = self._permute_scratch.get(topk)
-        if scratch is None:
-            max_expanded_rows = (
-                self.moe_config.max_num_tokens
-                * self.moe_config.dp_size
-                * self.moe_config.experts_per_token
-            )
-            scratch = MoEPermuteScratch(
-                max_num_tokens=math.ceil(max_expanded_rows / topk),
-                topk=topk,
-                num_experts=self.moe_config.num_experts,
-                num_local_experts=self.moe_config.num_local_experts,
-                device=torch.device(self.moe_config.device),
-            )
-            self._permute_scratch[topk] = scratch
-        if not indices_only and scratch.permuted_hidden_states is None:
-            scratch.permuted_hidden_states = torch.empty(
-                scratch.max_expanded_rows * self.moe_config.hidden_dim,
-                dtype=self.moe_config.in_dtype,
-                device=scratch.device,
-            )
-        return scratch
+        max_expanded_rows = (
+            self.moe_config.max_num_tokens
+            * self.moe_config.dp_size
+            * self.moe_config.experts_per_token
+        )
+        return get_moe_permute_scratch(
+            max_num_tokens=math.ceil(max_expanded_rows / topk),
+            topk=topk,
+            num_experts=self.moe_config.num_experts,
+            num_local_experts=self.moe_config.num_local_experts,
+            device=torch.device(self.moe_config.device),
+            hidden_size=None if indices_only else self.moe_config.hidden_dim,
+            hidden_dtype=None if indices_only else self.moe_config.in_dtype,
+        )
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
         ctx = get_forward_context()
