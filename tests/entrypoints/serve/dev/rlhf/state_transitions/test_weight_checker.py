@@ -17,6 +17,7 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     gen,
     health,
     ok,
+    pause,
     reusable_server,
     weight_checker,
 )
@@ -122,6 +123,23 @@ class TestWeightCheckerAPI:
             f"{response.status_code}: {response.text}"
         )
         assert health(url) == 200
+
+    def test_paused_server_is_conflict(self, wc_server):
+        """A paused or sleeping engine cannot hash or rewrite its weights."""
+        mode, url = wc_server
+        assert pause(url) == 200
+        try:
+            for action in ("checksum", "reset", "compare"):
+                response = weight_checker(url, action)
+                assert response.status_code == 409, (
+                    f"[{mode['name']}] expected 409 for {action} while paused, "
+                    f"got {response.status_code}: {response.text}"
+                )
+            assert health(url) == 200
+        finally:
+            # resume is idempotent, and the class fixture has no autouse
+            # cleanup, so leave the shared server unpaused for later tests.
+            assert requests.post(f"{url}/resume", timeout=10).status_code == 200
 
     def test_checksum_is_stable_and_stateless(self, wc_server):
         mode, url = wc_server

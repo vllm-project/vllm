@@ -138,10 +138,15 @@ group requires sending the action to every API server and merging the results.
 | `compare` | Diff current weights against the supplied `baseline` | No |
 
 Invalid or missing actions return HTTP 400, and so does `compare` without a
-`baseline` object.
+`baseline` object. A paused or sleeping engine returns HTTP 409 for every
+action: call `/wake_up` and `/resume` first, which is what a weight-update
+cycle does anyway.
 
 ## Limitations
 
+- The engine must be awake and unpaused. Sleep level 2 discards the weight
+  storage, so digests taken while asleep would describe freed memory and
+  `reset` would write to it.
 - Checksum calculation copies every covered tensor to CPU and hashes all its
   bytes, so it should not be placed on a latency-sensitive request path.
 - `compare` sends the whole baseline mapping, which is large for big models.

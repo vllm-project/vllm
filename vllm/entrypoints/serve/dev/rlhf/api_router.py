@@ -252,6 +252,9 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
     * **reset**:    ``{"status": "reset"}``
     * **compare**:  ``{"match": bool, "mismatches": [str]}``
 
+    A paused or sleeping engine returns HTTP 409: sleep level 2 discards the
+    weight storage, so the check requires an awake, unpaused engine.
+
     Use case in RL: checksum the current weights, reset them, transfer the
     original weights, checksum again, and compare that against the saved
     first result. A successful transfer is expected to match the baseline.
@@ -279,6 +282,16 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
                 status_code=HTTPStatus.BAD_REQUEST.value,
                 detail="action='compare' requires a 'baseline' object",
             )
+
+    # Sleeping discards or offloads the weight storage, and a paused engine is
+    # not serving, so hashing or rewriting the weights is meaningless: digests
+    # would describe freed memory and reset would write to it. Callers wake up
+    # and resume before checking, which is what a weight-update cycle does.
+    if await client.is_paused():
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT.value,
+            detail="weight_checker requires an awake, unpaused engine",
+        )
 
     if action == "reset":
         # Overwrite every weight-bearing tensor with random values on the GPU
