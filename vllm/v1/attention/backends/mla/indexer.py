@@ -634,6 +634,38 @@ class DeepseekV32IndexerMetadata:
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
 
 
+@triton.jit(do_not_specialize=["num_reqs", "num_actual_tokens", "num_tokens"])
+def _kpool_tail_slot_mapping_kernel(
+    slot_mapping_ptr,
+    block_table_ptr,
+    block_table_stride,
+    query_start_loc_ptr,
+    positions_ptr,
+    out_ptr,
+    num_reqs,
+    num_actual_tokens,
+    num_tokens,
+    kpool,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    if pid < num_reqs:
+        start = tl.load(query_start_loc_ptr + pid)
+        # Tokens past the last request's boundary (if any) also map to it.
+        end = tl.load(query_start_loc_ptr + pid + 1)
+        end = tl.where(pid == num_reqs - 1, num_actual_tokens, end)
+        own_block = tl.load(block_table_ptr + pid * block_table_stride).to(tl.int64)
+        for i in range(start, end, BLOCK):
+            offs = i + tl.arange(0, BLOCK)
+            mask = offs < end
+            pos = tl.load(positions_ptr + offs, mask=mask, other=0).to(tl.int64)
+            tl.store(out_ptr + offs, own_block * kpool + pos % kpool, mask=mask)
+    else:
+        offs = num_actual_tokens + (pid - num_reqs) * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < num_tokens
+        tl.store(out_ptr + offs, tl.load(slot_mapping_ptr + offs, mask=mask), mask=mask)
+
+
 def compute_kpool_tail_slot_mapping(
     slot_mapping: torch.Tensor,
     block_table: torch.Tensor,
@@ -646,10 +678,33 @@ def compute_kpool_tail_slot_mapping(
 ) -> torch.Tensor:
     """Map every token to its request's one circular tail block."""
     if out is None:
-        out = slot_mapping.clone()
+        out = torch.empty_like(slot_mapping)
     else:
         assert out.shape == slot_mapping.shape
-        out.copy_(slot_mapping)
+    if slot_mapping.is_cuda and slot_mapping.dim() == 1 and num_reqs > 0:
+        block = 256
+        num_tokens = slot_mapping.shape[0]
+        num_actual_tokens = min(num_actual_tokens, num_tokens)
+        grid = (num_reqs + triton.cdiv(num_tokens - num_actual_tokens, block),)
+        _kpool_tail_slot_mapping_kernel[grid](
+            slot_mapping,
+            block_table,
+            block_table.stride(0),
+            query_start_loc,
+            positions,
+            out,
+            num_reqs,
+            num_actual_tokens,
+            num_tokens,
+            kpool,
+            BLOCK=block,
+            num_warps=4,
+        )
+        return out
+    # Torch fallback: CPU tensors (the CPU unit tests), non-1D or empty inputs.
+    # Production always takes the Triton path above — spec-decode tokens arrive
+    # flattened token-major, so slot_mapping is 1D there too.
+    out.copy_(slot_mapping)
     if num_actual_tokens == 0:
         return out
     tokens = torch.arange(num_actual_tokens, device=slot_mapping.device)
