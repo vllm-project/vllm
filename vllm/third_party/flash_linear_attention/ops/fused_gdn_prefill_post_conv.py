@@ -58,7 +58,9 @@ def _fused_post_conv_kernel(
       - program_id(1) in [0, H):    Q/K head processing + l2norm
       - program_id(1) in [H, H+HV): V head processing + gating
     """
-    i_tb = tl.program_id(0)
+    # 64-bit so that offs_t * stride_*_tok cannot wrap: a long prefill
+    # (e.g. 262144 tokens x 10240 elems) exceeds int32 element offsets.
+    i_tb = tl.program_id(0).to(tl.int64)
     i_head = tl.program_id(1)
 
     HK: tl.constexpr = H * K
