@@ -608,32 +608,24 @@ class Scheduler(SchedulerInterface):
             else 0
         )
         # SRPF + Aging Queue Sorting Prototype
-        _now = time.time()
-        def _srpf_key(req):
-            is_starved = getattr(req, "consecutive_starvation_ticks", 0) > 5
-            remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
-            return (not is_starved, remaining_prefill, req.arrival_time)
+        import os
+        if self.policy == SchedulingPolicy.FCFS and os.environ.get("VLLM_ENABLE_SRPF") == "1":
+            _now = time.time()
+            def _srpf_key(req):
+                is_starved = getattr(req, "consecutive_starvation_ticks", 0) > 5
+                remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
+                return (not is_starved, remaining_prefill, req.arrival_time)
 
-        self.running.sort(key=_srpf_key)
+            self.running.sort(key=_srpf_key)
 
-        for q in (self.waiting, self.skipped_waiting):
-            _sorted_reqs = sorted(q, key=_srpf_key)
-            if hasattr(q, "clear") and hasattr(q, "extend"):
-                q.clear()
-                q.extend(_sorted_reqs)
-            else:
-                q._heap = _sorted_reqs
-                import types
-                def _pop(self_q):
-                    if not self_q._heap:
-                        raise IndexError("pop from empty heap")
-                    return self_q._heap.pop(0)
-                def _peek(self_q):
-                    if not self_q._heap:
-                        raise IndexError("peek from empty heap")
-                    return self_q._heap[0]
-                q.pop_request = types.MethodType(_pop, q)
-                q.peek_request = types.MethodType(_peek, q)
+            for q in (self.waiting, self.skipped_waiting):
+                _sorted_reqs = sorted(q, key=_srpf_key)
+                if hasattr(q, "clear") and hasattr(q, "extend"):
+                    q.clear()
+                    q.extend(_sorted_reqs)
+                else:
+                    q._heap.clear()
+                    q._heap.extend(_sorted_reqs)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -1363,9 +1355,11 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
 
-        for q in (self.waiting, self.skipped_waiting):
-            for req in q:
-                req.consecutive_starvation_ticks = getattr(req, "consecutive_starvation_ticks", 0) + 1
+        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+            if scheduled_new_reqs or step_skipped_waiting:
+                for q in (self.waiting, self.skipped_waiting):
+                    for req in q:
+                        req.consecutive_starvation_ticks = getattr(req, "consecutive_starvation_ticks", 0) + 1
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
