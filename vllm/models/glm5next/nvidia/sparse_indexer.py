@@ -117,7 +117,7 @@ def sparse_attn_indexer_kpool(
     scale_fmt: str | None,
     topk_tokens: int,
     head_dim: int,
-    max_model_len: int,
+    max_pool_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
@@ -153,7 +153,7 @@ def sparse_attn_indexer_kpool(
         )
 
         # Reserve profiler-visible memory for the worst-case decode logits,
-        # whose shape is [B * next_n, max_model_len]. This profiling branch
+        # whose shape is [B * next_n, max_pool_len]. This profiling branch
         # returns before invoking the logits kernel itself.
         cfg = get_current_vllm_config_or_none()
         worst_decode_tokens = 0
@@ -169,7 +169,7 @@ def sparse_attn_indexer_kpool(
                 sched.max_num_batched_tokens,
             )
         # float32 logits -> 4 bytes/element; uint8 sentinel so elems == bytes.
-        decode_logits_elems = worst_decode_tokens * max_model_len * 4
+        decode_logits_elems = worst_decode_tokens * max_pool_len * 4
         prefill_cap_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         max_logits_elems = max(decode_logits_elems, prefill_cap_elems)
         _ = torch.empty(
@@ -569,7 +569,7 @@ def sparse_attn_indexer_kpool(
             seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
+            max_model_len=max_pool_len,
             clean_logits=False,
         )
         num_rows = logits.shape[0]
@@ -668,7 +668,7 @@ class SparseAttnIndexerKpool(CustomOp):
         scale_fmt: str,
         topk_tokens: int,
         head_dim: int,
-        max_model_len: int,
+        max_pool_len: int,
         max_total_seq_len: int,
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
@@ -682,7 +682,7 @@ class SparseAttnIndexerKpool(CustomOp):
         self.scale_fmt = scale_fmt
         self.topk_tokens = topk_tokens
         self.head_dim = head_dim
-        self.max_model_len = max_model_len
+        self.max_pool_len = max_pool_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
@@ -755,7 +755,7 @@ class SparseAttnIndexerKpool(CustomOp):
             self.scale_fmt,
             self.topk_tokens,
             self.head_dim,
-            self.max_model_len,
+            self.max_pool_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
