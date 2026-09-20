@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import os
-from typing import ClassVar
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.profiler import ProfilerKind, TorchProfilerActivity
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
@@ -24,15 +22,6 @@ logger = init_logger(__name__)
 
 class XPUWorker(Worker):
     """A XPU worker class."""
-
-    DEFAULT_TORCH_PROFILER_ACTIVITIES: ClassVar[tuple[TorchProfilerActivity, ...]] = (
-        "CPU",
-        "XPU",
-    )
-    SUPPORTED_TORCH_PROFILER_ACTIVITIES: ClassVar[frozenset[TorchProfilerActivity]] = (
-        frozenset(DEFAULT_TORCH_PROFILER_ACTIVITIES)
-    )
-    SUPPORTED_PROFILER_KINDS: ClassVar[frozenset[ProfilerKind]] = frozenset(("torch",))
 
     def __init__(
         self,

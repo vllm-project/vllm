@@ -628,25 +628,40 @@ class CudaProfilerWrapper(WorkerProfiler):
         return torch.cuda.nvtx.range(name)
 
 
-def validate_worker_profiler_config(
-    profiler_config: ProfilerConfig,
-    *,
-    worker_name: str,
-    supported_kinds: frozenset[ProfilerKind],
-    default_activities: tuple[TorchProfilerActivity, ...],
-    supported_activities: frozenset[TorchProfilerActivity],
-) -> None:
+_DEFAULT_TORCH_PROFILER_ACTIVITIES: dict[str, tuple[TorchProfilerActivity, ...]] = {
+    "cpu": ("CPU",),
+    "cuda": ("CPU", "CUDA"),
+    "xpu": ("CPU", "XPU"),
+}
+_SUPPORTED_TORCH_PROFILER_ACTIVITIES = {
+    device: frozenset(activities)
+    for device, activities in _DEFAULT_TORCH_PROFILER_ACTIVITIES.items()
+}
+_SUPPORTED_PROFILER_KINDS: dict[str, frozenset[ProfilerKind]] = {
+    "cpu": frozenset(("torch",)),
+    "cuda": frozenset(("torch", "cuda", "proton")),
+    "xpu": frozenset(("torch",)),
+}
+
+
+def validate_worker_profiler_config(profiler_config: ProfilerConfig) -> None:
     """Validate profiler selections against the worker's capabilities."""
     profiler_type = profiler_config.profiler
     if profiler_type is None:
         return
+    device_type = current_platform.device_type
+    if device_type not in _SUPPORTED_PROFILER_KINDS:
+        raise ValueError(f"Unsupported profiler device type: {device_type}")
+    supported_kinds = _SUPPORTED_PROFILER_KINDS[device_type]
     if profiler_type not in supported_kinds:
         supported_names = ", ".join(sorted(supported_kinds))
         raise ValueError(
-            f"Unsupported profiler type for {worker_name}: "
+            f"Unsupported profiler type for {device_type}: "
             f"{profiler_type}. Supported profiler types: {supported_names}."
         )
     if profiler_type == "torch":
+        default_activities = _DEFAULT_TORCH_PROFILER_ACTIVITIES[device_type]
+        supported_activities = _SUPPORTED_TORCH_PROFILER_ACTIVITIES[device_type]
         configured = profiler_config.torch_profiler_activities
         activities = default_activities if configured is None else configured
         unsupported = set(activities) - supported_activities
@@ -655,7 +670,7 @@ def validate_worker_profiler_config(
             supported_names = ", ".join(sorted(supported_activities))
             raise ValueError(
                 f"Unsupported torch profiler activities for "
-                f"{worker_name}: {unsupported_names}. "
+                f"{device_type}: {unsupported_names}. "
                 f"Supported activities: {supported_names}."
             )
 
@@ -665,11 +680,13 @@ def create_worker_profiler(
     *,
     worker_name: str,
     local_rank: int,
-    default_activities: tuple[TorchProfilerActivity, ...],
 ) -> WorkerProfiler:
     """Create a profiler using a validated config and platform defaults."""
     profiler_type = profiler_config.profiler
     if profiler_type == "torch":
+        default_activities = _DEFAULT_TORCH_PROFILER_ACTIVITIES[
+            current_platform.device_type
+        ]
         configured = profiler_config.torch_profiler_activities
         logger.debug("Starting torch profiler with trace name: %s", worker_name)
         return TorchProfilerWrapper(

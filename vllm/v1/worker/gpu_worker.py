@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import regex as re
@@ -19,10 +19,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
-from vllm.config.profiler import (
-    ProfilerKind,
-    TorchProfilerActivity,
-)
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -184,17 +180,6 @@ class AsyncIntermediateTensors(IntermediateTensors):
 
 
 class Worker(WorkerBase):
-    DEFAULT_TORCH_PROFILER_ACTIVITIES: ClassVar[tuple[TorchProfilerActivity, ...]] = (
-        "CPU",
-        "CUDA",
-    )
-    SUPPORTED_TORCH_PROFILER_ACTIVITIES: ClassVar[frozenset[TorchProfilerActivity]] = (
-        frozenset(DEFAULT_TORCH_PROFILER_ACTIVITIES)
-    )
-    SUPPORTED_PROFILER_KINDS: ClassVar[frozenset[ProfilerKind]] = frozenset(
-        ("torch", "cuda", "proton")
-    )
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -236,13 +221,7 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
-        validate_worker_profiler_config(
-            self.profiler_config,
-            worker_name=type(self).__name__,
-            supported_kinds=self.SUPPORTED_PROFILER_KINDS,
-            default_activities=self.DEFAULT_TORCH_PROFILER_ACTIVITIES,
-            supported_activities=self.SUPPORTED_TORCH_PROFILER_ACTIVITIES,
-        )
+        validate_worker_profiler_config(self.profiler_config)
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
@@ -1303,7 +1282,6 @@ class Worker(WorkerBase):
                     self.profiler_config,
                     worker_name=trace_name,
                     local_rank=self.local_rank,
-                    default_activities=self.DEFAULT_TORCH_PROFILER_ACTIVITIES,
                 )
 
             self.profiler.start()

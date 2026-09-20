@@ -7,14 +7,12 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
-from typing import ClassVar
 
 import psutil
 import torch
 
 from vllm import envs
 from vllm.config import CompilationMode, VllmConfig
-from vllm.config.profiler import ProfilerKind, TorchProfilerActivity
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.cpu_resource_utils import (
@@ -32,14 +30,6 @@ logger = init_logger(__name__)
 
 
 class CPUWorker(Worker):
-    DEFAULT_TORCH_PROFILER_ACTIVITIES: ClassVar[tuple[TorchProfilerActivity, ...]] = (
-        "CPU",
-    )
-    SUPPORTED_TORCH_PROFILER_ACTIVITIES: ClassVar[frozenset[TorchProfilerActivity]] = (
-        frozenset(DEFAULT_TORCH_PROFILER_ACTIVITIES)
-    )
-    SUPPORTED_PROFILER_KINDS: ClassVar[frozenset[ProfilerKind]] = frozenset(("torch",))
-
     def __init__(
         self,
         vllm_config: VllmConfig,

@@ -171,53 +171,66 @@ def test_torch_profiler_activities_require_torch_profiler():
 
 
 @pytest.mark.parametrize(
-    ("worker_type", "activities"),
+    ("device_type", "activities"),
     [
-        (Worker, ["XPU"]),
-        (XPUWorker, ["CUDA"]),
+        ("cuda", ["XPU"]),
+        ("xpu", ["CUDA"]),
+        ("cpu", ["CUDA"]),
+        ("cpu", ["XPU"]),
     ],
 )
-def test_worker_rejects_unsupported_activities_at_startup(worker_type, activities):
+def test_worker_rejects_unsupported_activities_at_startup(device_type, activities):
     config = ProfilerConfig(
         profiler="torch",
         torch_profiler_dir="/tmp/mock",
         torch_profiler_activities=activities,
     )
 
-    with pytest.raises(ValueError, match="Unsupported torch profiler activities"):
-        validate_worker_profiler_config(
-            config,
-            worker_name=worker_type.__name__,
-            supported_kinds=worker_type.SUPPORTED_PROFILER_KINDS,
-            default_activities=worker_type.DEFAULT_TORCH_PROFILER_ACTIVITIES,
-            supported_activities=worker_type.SUPPORTED_TORCH_PROFILER_ACTIVITIES,
-        )
+    with (
+        patch.object(current_platform, "device_type", device_type),
+        pytest.raises(ValueError, match="Unsupported torch profiler activities"),
+    ):
+        validate_worker_profiler_config(config)
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "xpu"])
+def test_worker_rejects_cuda_profiler_on_other_devices(device_type):
+    with (
+        patch.object(current_platform, "device_type", device_type),
+        pytest.raises(ValueError, match="Unsupported profiler type"),
+    ):
+        validate_worker_profiler_config(ProfilerConfig(profiler="cuda"))
 
 
 @pytest.mark.parametrize(
-    ("worker_type", "activities", "expected"),
+    ("device_type", "activities", "expected"),
     [
-        (Worker, None, ("CPU", "CUDA")),
-        (XPUWorker, None, ("CPU", "XPU")),
-        (Worker, ["CUDA"], ("CUDA",)),
-        (XPUWorker, ["XPU"], ("XPU",)),
-        (Worker, ["CPU"], ("CPU",)),
-        (XPUWorker, ["CPU"], ("CPU",)),
+        ("cuda", None, ("CPU", "CUDA")),
+        ("xpu", None, ("CPU", "XPU")),
+        ("cpu", None, ("CPU",)),
+        ("cuda", ["CUDA"], ("CUDA",)),
+        ("xpu", ["XPU"], ("XPU",)),
+        ("cuda", ["CPU"], ("CPU",)),
+        ("xpu", ["CPU"], ("CPU",)),
+        ("cpu", ["CPU"], ("CPU",)),
     ],
 )
-def test_worker_creates_platform_torch_profiler(worker_type, activities, expected):
+def test_worker_creates_platform_torch_profiler(device_type, activities, expected):
     config = ProfilerConfig(
         profiler="torch",
         torch_profiler_dir="/tmp/mock",
         torch_profiler_activities=activities,
     )
 
-    with patch("vllm.profiler.wrapper.TorchProfilerWrapper") as wrapper:
+    with (
+        patch.object(current_platform, "device_type", device_type),
+        patch("vllm.profiler.wrapper.TorchProfilerWrapper") as wrapper,
+    ):
+        validate_worker_profiler_config(config)
         profiler = create_worker_profiler(
             config,
             worker_name="rank0",
             local_rank=0,
-            default_activities=worker_type.DEFAULT_TORCH_PROFILER_ACTIVITIES,
         )
 
     assert profiler is wrapper.return_value
