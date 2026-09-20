@@ -20,7 +20,6 @@ import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.config.profiler import (
-    ProfilerConfig,
     ProfilerKind,
     TorchProfilerActivity,
 )
@@ -66,11 +65,9 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
-    CudaProfilerWrapper,
-    ProtonProfilerWrapper,
-    TorchProfilerWrapper,
-    WorkerProfiler,
     create_graph_capture_profiler,
+    create_worker_profiler,
+    validate_worker_profiler_config,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -239,7 +236,13 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
-        self._validate_profiler_config()
+        validate_worker_profiler_config(
+            self.profiler_config,
+            worker_name=type(self).__name__,
+            supported_kinds=self.SUPPORTED_PROFILER_KINDS,
+            default_activities=self.DEFAULT_TORCH_PROFILER_ACTIVITIES,
+            supported_activities=self.SUPPORTED_TORCH_PROFILER_ACTIVITIES,
+        )
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
@@ -1269,61 +1272,6 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def _resolve_torch_profiler_activities(
-        self, profiler_config: ProfilerConfig
-    ) -> tuple[TorchProfilerActivity, ...]:
-        configured = profiler_config.torch_profiler_activities
-        activities = (
-            self.DEFAULT_TORCH_PROFILER_ACTIVITIES
-            if configured is None
-            else tuple(configured)
-        )
-        unsupported = set(activities) - self.SUPPORTED_TORCH_PROFILER_ACTIVITIES
-        if unsupported:
-            unsupported_names = ", ".join(sorted(unsupported))
-            supported_names = ", ".join(
-                sorted(self.SUPPORTED_TORCH_PROFILER_ACTIVITIES)
-            )
-            raise ValueError(
-                f"Unsupported torch profiler activities for "
-                f"{type(self).__name__}: {unsupported_names}. "
-                f"Supported activities: {supported_names}."
-            )
-        return activities
-
-    def _validate_profiler_config(self) -> None:
-        profiler_type = self.profiler_config.profiler
-        if profiler_type is None:
-            return
-        if profiler_type not in self.SUPPORTED_PROFILER_KINDS:
-            supported_names = ", ".join(sorted(self.SUPPORTED_PROFILER_KINDS))
-            raise ValueError(
-                f"Unsupported profiler type for {type(self).__name__}: "
-                f"{profiler_type}. Supported profiler types: {supported_names}."
-            )
-        if profiler_type == "torch":
-            self._resolve_torch_profiler_activities(self.profiler_config)
-
-    def _create_profiler(
-        self, profiler_config: ProfilerConfig, trace_name: str
-    ) -> WorkerProfiler:
-        profiler_type = profiler_config.profiler
-        if profiler_type == "torch":
-            logger.debug("Starting torch profiler with trace name: %s", trace_name)
-            return TorchProfilerWrapper(
-                profiler_config,
-                worker_name=trace_name,
-                local_rank=self.local_rank,
-                activities=self._resolve_torch_profiler_activities(profiler_config),
-            )
-        if profiler_type == "cuda":
-            logger.debug("Starting CUDA profiler")
-            return CudaProfilerWrapper(profiler_config)
-
-        assert profiler_type == "proton", f"Unknown profiler type: {profiler_type}"
-        logger.debug("Starting Proton profiler with trace name: %s", trace_name)
-        return ProtonProfilerWrapper(profiler_config, worker_name=trace_name)
-
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
@@ -1351,7 +1299,12 @@ class Worker(WorkerBase):
 
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
-                self.profiler = self._create_profiler(self.profiler_config, trace_name)
+                self.profiler = create_worker_profiler(
+                    self.profiler_config,
+                    worker_name=trace_name,
+                    local_rank=self.local_rank,
+                    default_activities=self.DEFAULT_TORCH_PROFILER_ACTIVITIES,
+                )
 
             self.profiler.start()
         else:

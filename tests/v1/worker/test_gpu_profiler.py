@@ -22,6 +22,8 @@ from vllm.profiler.wrapper import (
     ProtonProfilerWrapper,
     TorchProfilerWrapper,
     WorkerProfiler,
+    create_worker_profiler,
+    validate_worker_profiler_config,
 )
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -176,15 +178,20 @@ def test_torch_profiler_activities_require_torch_profiler():
     ],
 )
 def test_worker_rejects_unsupported_activities_at_startup(worker_type, activities):
-    worker = object.__new__(worker_type)
-    worker.profiler_config = ProfilerConfig(
+    config = ProfilerConfig(
         profiler="torch",
         torch_profiler_dir="/tmp/mock",
         torch_profiler_activities=activities,
     )
 
     with pytest.raises(ValueError, match="Unsupported torch profiler activities"):
-        worker._validate_profiler_config()
+        validate_worker_profiler_config(
+            config,
+            worker_name=worker_type.__name__,
+            supported_kinds=worker_type.SUPPORTED_PROFILER_KINDS,
+            default_activities=worker_type.DEFAULT_TORCH_PROFILER_ACTIVITIES,
+            supported_activities=worker_type.SUPPORTED_TORCH_PROFILER_ACTIVITIES,
+        )
 
 
 @pytest.mark.parametrize(
@@ -199,16 +206,19 @@ def test_worker_rejects_unsupported_activities_at_startup(worker_type, activitie
     ],
 )
 def test_worker_creates_platform_torch_profiler(worker_type, activities, expected):
-    worker = object.__new__(worker_type)
-    worker.local_rank = 0
     config = ProfilerConfig(
         profiler="torch",
         torch_profiler_dir="/tmp/mock",
         torch_profiler_activities=activities,
     )
 
-    with patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper:
-        profiler = worker._create_profiler(config, "rank0")
+    with patch("vllm.profiler.wrapper.TorchProfilerWrapper") as wrapper:
+        profiler = create_worker_profiler(
+            config,
+            worker_name="rank0",
+            local_rank=0,
+            default_activities=worker_type.DEFAULT_TORCH_PROFILER_ACTIVITIES,
+        )
 
     assert profiler is wrapper.return_value
     wrapper.assert_called_once_with(
@@ -231,7 +241,7 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
 
     with (
         patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"),
-        patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper,
+        patch("vllm.profiler.wrapper.TorchProfilerWrapper") as wrapper,
     ):
         worker.profile()
         worker.profile(is_start=False)
@@ -1044,7 +1054,7 @@ def test_gpu_worker_creates_proton_profiler():
             "vllm.distributed.utils.get_worker_rank_suffix",
             return_value="rank1",
         ),
-        patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
+        patch("vllm.profiler.wrapper.ProtonProfilerWrapper") as wrapper,
     ):
         Worker.profile(worker)
 
@@ -1065,7 +1075,7 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
             "vllm.distributed.utils.get_worker_rank_suffix",
             return_value="rank1",
         ),
-        patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
+        patch("vllm.profiler.wrapper.ProtonProfilerWrapper") as wrapper,
     ):
         wrapper.return_value.has_cuda_graph_session = False
         Worker.profile(worker, profile_prefix="first")

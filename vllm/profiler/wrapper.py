@@ -17,7 +17,7 @@ from typing_extensions import override
 
 import vllm.version
 from vllm.config import ProfilerConfig
-from vllm.config.profiler import TorchProfilerActivity, _is_uri_path
+from vllm.config.profiler import ProfilerKind, TorchProfilerActivity, _is_uri_path
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -626,6 +626,65 @@ class CudaProfilerWrapper(WorkerProfiler):
     @override
     def annotate_context_manager(self, name: str):
         return torch.cuda.nvtx.range(name)
+
+
+def validate_worker_profiler_config(
+    profiler_config: ProfilerConfig,
+    *,
+    worker_name: str,
+    supported_kinds: frozenset[ProfilerKind],
+    default_activities: tuple[TorchProfilerActivity, ...],
+    supported_activities: frozenset[TorchProfilerActivity],
+) -> None:
+    """Validate profiler selections against the worker's capabilities."""
+    profiler_type = profiler_config.profiler
+    if profiler_type is None:
+        return
+    if profiler_type not in supported_kinds:
+        supported_names = ", ".join(sorted(supported_kinds))
+        raise ValueError(
+            f"Unsupported profiler type for {worker_name}: "
+            f"{profiler_type}. Supported profiler types: {supported_names}."
+        )
+    if profiler_type == "torch":
+        configured = profiler_config.torch_profiler_activities
+        activities = default_activities if configured is None else configured
+        unsupported = set(activities) - supported_activities
+        if unsupported:
+            unsupported_names = ", ".join(sorted(unsupported))
+            supported_names = ", ".join(sorted(supported_activities))
+            raise ValueError(
+                f"Unsupported torch profiler activities for "
+                f"{worker_name}: {unsupported_names}. "
+                f"Supported activities: {supported_names}."
+            )
+
+
+def create_worker_profiler(
+    profiler_config: ProfilerConfig,
+    *,
+    worker_name: str,
+    local_rank: int,
+    default_activities: tuple[TorchProfilerActivity, ...],
+) -> WorkerProfiler:
+    """Create a profiler using a validated config and platform defaults."""
+    profiler_type = profiler_config.profiler
+    if profiler_type == "torch":
+        configured = profiler_config.torch_profiler_activities
+        logger.debug("Starting torch profiler with trace name: %s", worker_name)
+        return TorchProfilerWrapper(
+            profiler_config,
+            worker_name=worker_name,
+            local_rank=local_rank,
+            activities=default_activities if configured is None else tuple(configured),
+        )
+    if profiler_type == "cuda":
+        logger.debug("Starting CUDA profiler")
+        return CudaProfilerWrapper(profiler_config)
+
+    assert profiler_type == "proton", f"Unknown profiler type: {profiler_type}"
+    logger.debug("Starting Proton profiler with trace name: %s", worker_name)
+    return ProtonProfilerWrapper(profiler_config, worker_name=worker_name)
 
 
 def create_graph_capture_profiler(
