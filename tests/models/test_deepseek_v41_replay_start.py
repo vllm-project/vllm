@@ -23,7 +23,6 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
 
 DEVICE = torch.device("cuda")
 WINDOW = 4
-LAYERED_REPLAY = 3 * WINDOW
 # Group 0 is prefix-cacheable (compressed KV), group 1 is the replayed window.
 KV_CACHE_CONFIG = SimpleNamespace(
     kv_cache_groups=[
@@ -32,7 +31,7 @@ KV_CACHE_CONFIG = SimpleNamespace(
         ),
         SimpleNamespace(
             kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=False, prefix_replay_tokens=LAYERED_REPLAY
+                prefix_cacheable=False, prefix_replay_tokens=WINDOW
             )
         ),
     ]
@@ -93,16 +92,15 @@ def _prepare(state, batch):
 
 
 def test_replayed_tokens_write_only_the_window_group(state):
-    # Request state 3 resumes a layered replay at 16: positions 16..27 retain
-    # the loaded compressed KV, while positions 28..29 are new prompt tokens.
+    # Request state 3 resumes a hit at 16: positions 16..19 are replayed.
     state.add_request(3, SimpleNamespace(replay_start=16))
     state.add_request(1, SimpleNamespace(replay_start=0))
-    batch = _batch([14, 2], [30, 2], idx_mapping=[3, 1], is_prefilling=[True, True])
+    batch = _batch([6, 2], [22, 2], idx_mapping=[3, 1], is_prefilling=[True, True])
     replay_start, slots = _prepare(state, batch)
     assert replay_start == [16, 0]
-    padded = [PAD_SLOT_ID] * LAYERED_REPLAY + [12, 13, 14, 15]
+    padded = [PAD_SLOT_ID] * WINDOW + [4, 5, 6, 7]
     assert slots[0].tolist() == padded  # compressed KV keeps its cached rows
-    assert slots[1].tolist() == list(range(16, 32))  # the window is rebuilt
+    assert slots[1].tolist() == list(range(8, 16))  # the window is rebuilt
 
 
 def test_only_prefills_carry_a_replay_start(state):

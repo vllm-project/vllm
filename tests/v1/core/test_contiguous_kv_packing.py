@@ -677,7 +677,6 @@ class TestSWABoundedReplayGrouping:
             sliding_window=128,
             alignment=576,
             bounded_replay=True,
-            bounded_replay_tokens=5120,
         )
         for layer in range(4):
             specs[f"layers.{layer}.attn.swa_cache"] = swa
@@ -688,7 +687,7 @@ class TestSWABoundedReplayGrouping:
         assert sorted(
             (g.kv_cache_spec.prefix_cacheable, g.kv_cache_spec.prefix_replay_tokens)
             for g in groups
-        ) == [(False, 5120)] * 4 + [(True, 0)]
+        ) == [(False, 128)] * 4 + [(True, 0)]
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=64 * _get_kv_cache_bytes_per_block(groups)
         )

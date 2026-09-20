@@ -2287,7 +2287,6 @@ def test_worker_init_excludes_dsv41_dspark_draft_group(monkeypatch):
         dtype=torch.bfloat16,
         sliding_window=128,
         bounded_replay=True,
-        bounded_replay_tokens=40 * 128,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=10,
@@ -2335,7 +2334,7 @@ def test_worker_init_rejects_dsv41_dspark_without_bounded_replay(monkeypatch):
         ],
     )
 
-    with pytest.raises(ValueError, match="requires layered SWA replay"):
+    with pytest.raises(ValueError, match="requires bounded SWA replay"):
         worker.MooncakeStoreWorker(vllm_config, kv_cache_config)
 
 
@@ -3880,7 +3879,7 @@ def test_lookup_partial_prefix_returns_first_hit_length():
     assert worker.lookup(48, [b"a0", b"a1", b"a2"]).hit_length == 32
 
 
-def test_dsv41_dspark_lookup_leaves_layered_replay_to_scheduler():
+def test_dsv41_dspark_lookup_leaves_bounded_replay_to_scheduler():
     worker = _make_bare_worker(block_size=16)
     num_tokens = 120000
     block_hashes = [f"h{i}".encode() for i in range(num_tokens // 16)]
@@ -3889,7 +3888,7 @@ def test_dsv41_dspark_lookup_leaves_layered_replay_to_scheduler():
     result = worker.lookup(num_tokens, block_hashes)
 
     # The worker returns the complete target hit. The scheduler owns the
-    # 40-layer replay so all replayed target KV slots can remain padded.
+    # bounded SWA replay so replayed target KV slots can remain padded.
     assert result.hit_length == num_tokens - 16
     queried_keys = worker.store.batch_is_exist.call_args.args[0]
     assert len(queried_keys) == num_tokens // 16

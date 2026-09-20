@@ -1598,24 +1598,13 @@ class MooncakeStoreWorker:
         dspark_sliding_window = getattr(
             getattr(model_config, "hf_config", None), "sliding_window", None
         )
-        num_hidden_layers = getattr(
-            getattr(model_config, "hf_config", None), "num_hidden_layers", None
-        )
         dspark_replay_tokens = (
             dspark_sliding_window if isinstance(dspark_sliding_window, int) else 0
-        )
-        dsv41_num_hidden_layers = (
-            num_hidden_layers if isinstance(num_hidden_layers, int) else 0
         )
         if is_deepseek_v41 and use_dspark and dspark_replay_tokens <= 0:
             raise ValueError(
                 "DeepSeek-V4.1 DSpark requires a positive sliding_window to "
                 "rebuild draft KV after loading target KV from Mooncake"
-            )
-        if is_deepseek_v41 and use_dspark and dsv41_num_hidden_layers <= 0:
-            raise ValueError(
-                "DeepSeek-V4.1 DSpark requires a positive num_hidden_layers to "
-                "rebuild layered SWA state after loading KV from Mooncake"
             )
         prefix_replay_tokens = max(
             (
@@ -1624,15 +1613,14 @@ class MooncakeStoreWorker:
             ),
             default=0,
         )
-        required_replay_tokens = dspark_replay_tokens * dsv41_num_hidden_layers
         if (
             is_deepseek_v41
             and use_dspark
-            and (prefix_replay_tokens < required_replay_tokens)
+            and (prefix_replay_tokens < dspark_replay_tokens)
         ):
             raise ValueError(
-                "DeepSeek-V4.1 DSpark with Mooncake requires layered SWA replay "
-                f"of at least {required_replay_tokens} tokens"
+                "DeepSeek-V4.1 DSpark with Mooncake requires bounded SWA replay "
+                f"of at least {dspark_replay_tokens} tokens"
             )
         self._excluded_group_ids = {
             group_id
@@ -1648,8 +1636,7 @@ class MooncakeStoreWorker:
             logger.warning(
                 "Excluding DeepSeek-V4.1 DSpark draft KV groups %s from "
                 "Mooncake store/lookup/load; target-model KV groups remain reusable "
-                "and the model replays %d suffix tokens to rebuild layered SWA "
-                "and draft KV",
+                "and the model replays %d suffix tokens to rebuild SWA and draft KV",
                 sorted(self._excluded_group_ids),
                 prefix_replay_tokens,
             )

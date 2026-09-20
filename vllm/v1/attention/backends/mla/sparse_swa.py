@@ -82,13 +82,11 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         packed_bytes_per_token: int = 584,
         packed_page_alignment: int = 576,
         bounded_replay: bool = False,
-        bounded_replay_tokens: int | None = None,
     ):
         super().__init__()
         self.backend_cls = backend_cls or DeepseekSparseSWABackend
         # DeepseekV4.1 SWA bounded replay.
         self.bounded_replay = bounded_replay
-        self.bounded_replay_tokens = bounded_replay_tokens
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.window_size = window_size
@@ -123,7 +121,6 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         )
         return SlidingWindowMLASpec(
             bounded_replay=self.bounded_replay,
-            bounded_replay_tokens=self.bounded_replay_tokens,
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,

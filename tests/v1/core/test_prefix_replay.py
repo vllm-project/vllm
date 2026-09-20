@@ -33,7 +33,6 @@ def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
     use_kv_connector: MockKVConfig | None = None,
-    replay_tokens: int | None = None,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
@@ -66,7 +65,6 @@ def _replay_scheduler(
                     dtype=torch.bfloat16,
                     sliding_window=WINDOW,
                     bounded_replay=True,
-                    bounded_replay_tokens=replay_tokens,
                 ),
             ),
         ],
@@ -79,7 +77,7 @@ def _replay_scheduler(
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     scheduler.use_v2_model_runner = True
-    assert scheduler.prefix_replay_tokens == (replay_tokens or WINDOW)
+    assert scheduler.prefix_replay_tokens == WINDOW
     return scheduler
 
 
@@ -218,34 +216,6 @@ def test_async_remote_kv_hit_replays_after_load():
     assert (
         out.num_scheduled_tokens[request.request_id]
         == NUM_PROMPT_TOKENS - matched + WINDOW
-    )
-
-
-def test_async_remote_kv_hit_supports_layered_replay():
-    """A model can replay beyond its physical SWA window while preserving
-    externally loaded prefix-cacheable KV."""
-    matched = HIT_TOKENS
-    replay_tokens = 2 * WINDOW
-    scheduler = _replay_scheduler(
-        use_kv_connector=MockKVConfig(matched_tokens=matched, is_async=True),
-        replay_tokens=replay_tokens,
-    )
-    request = create_requests(
-        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
-    )[0]
-    scheduler.add_request(request)
-    out = scheduler.schedule()
-    scheduler.update_from_output(
-        out, create_model_runner_output([], finished_recving={request.request_id})
-    )
-
-    out = scheduler.schedule()
-    new_req = _new_req_data(out, request)
-    assert new_req.num_computed_tokens == matched - replay_tokens
-    assert new_req.replay_start == matched - replay_tokens
-    assert (
-        out.num_scheduled_tokens[request.request_id]
-        == NUM_PROMPT_TOKENS - matched + replay_tokens
     )
 
 
