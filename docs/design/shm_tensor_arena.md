@@ -122,23 +122,28 @@ the pickler is an `_ArenaPickler` whose `reducer_override` *additionally* divert
 ```python
 class _ArenaPickler(pickle.Pickler):
     def reducer_override(self, obj):
-        if (type(obj) is torch.Tensor and obj.device.type == "cpu"
+        rebuild_fn = _ARENA_REBUILD_FNS.get(type(obj))   # {Tensor: ..., Parameter: ...}
+        if (rebuild_fn is not None and obj.device.type == "cpu"
                 and obj.layout is torch.strided and obj.is_contiguous()
                 and not obj.requires_grad
                 and obj.numel() * obj.element_size() >= MIN_BYTES):
             idx = self.arena.write_tensor(obj)        # ONE memcpy into a free slot
             if idx is not None:
-                return (_rebuild_arena_tensor,
+                return (rebuild_fn,
                         (self.arena.shared_memory.name, idx, nbytes, dtype_str, shape))
         return NotImplemented   # fall through to dispatch_table → _reduce_tensor
 ```
 
-Note the `type(obj) is torch.Tensor` exact-type check (not `isinstance`): the
-`dispatch_table` this falls through to is itself keyed by exact type, so a
-`Tensor` subclass (e.g. `torch.nn.Parameter`) must decline here too, or it
-would be diverted into the arena and rebuilt as a plain `Tensor`, silently
-losing its subclass identity — a divergence from the no-arena behavior that
-an `isinstance` check would have introduced.
+Note the exact-type dict lookup (not `isinstance`): the `dispatch_table` this
+falls through to is itself keyed by exact type, so an *unrecognized*
+`Tensor` subclass must decline here too, or it would be diverted into the
+arena and rebuilt as a plain `Tensor`, silently losing its subclass
+identity — a divergence from the no-arena behavior that an `isinstance`
+check would have introduced. `torch.nn.Parameter` is the one subclass this
+*does* know how to divert safely, via its own rebuild function — see §2.3
+for why a naive "divert its `.data` and let `Parameter.__reduce_ex__`
+handle the wrapping" approach is a correctness trap, not just a
+type-identity one.
 
 `reducer_override` is consulted before an object's normal reduction, and
 returning `NotImplemented` falls through to the `dispatch_table` — so a diverted
@@ -161,9 +166,48 @@ The stub unpickles through a module-level rebuild function:
 ```python
 def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
     arena = _TENSOR_ARENAS[arena_name]             # this process's registry of attached arenas
-    return arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
+    t = arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
     # get_tensor: torch.frombuffer over the mapped slot — zero bytes copied
+    arena.schedule_release(t, slot_idx)            # see below — must be `t` itself here
+    return t
 ```
+
+**The `torch.nn.Parameter` trap.** `get_tensor` and release scheduling are
+two separate calls, not one, because they must not always be scheduled on
+the *same* object. For a plain tensor, `t` — the value `_rebuild_arena_
+tensor` returns — is exactly what the caller ends up holding, so scheduling
+release on `t` is correct. But `torch.nn.Parameter` doesn't get diverted by
+falling through to `_rebuild_arena_tensor` at all: `Parameter.__reduce_ex__`
+returns `(_rebuild_parameter, (data_tensor, requires_grad, state))`, and
+`_rebuild_parameter` builds `torch.nn.Parameter(data_tensor, requires_grad)`
+**without keeping a Python reference to `data_tensor` itself** — sharing its
+storage at the C++ level is enough for PyTorch, but not enough for a
+`weakref.finalize`-based scheme that only knows how to watch one specific
+Python object. Scheduling release on `data_tensor` there would queue the
+slot the instant `_rebuild_parameter` returns (nothing references
+`data_tensor` anymore) — while the just-constructed `Parameter`, still a
+live zero-copy view into that same slot, is what the caller actually gets
+back. The writer could then overwrite the slot underneath it with no error
+raised anywhere.
+
+The arena closes this by giving `torch.nn.Parameter` its own rebuild
+function instead of letting it fall through:
+
+```python
+def _rebuild_arena_parameter(arena_name, slot_idx, nbytes, dtype_str, shape):
+    arena = _TENSOR_ARENAS[arena_name]
+    t = arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
+    param = torch.nn.Parameter(t, requires_grad=False)
+    arena.schedule_release(param, slot_idx)        # schedule on `param`, not `t`
+    return param
+```
+
+`_ARENA_REBUILD_FNS = {torch.Tensor: _rebuild_arena_tensor, torch.nn.
+Parameter: _rebuild_arena_parameter}` is the full set of types the arena
+knows how to divert correctly today; anything else (any other `Tensor`
+subclass) declines in `reducer_override` and takes the out-of-band path,
+which needs no such scheme — `_reduce_tensor` never constructs a new
+wrapper object around its payload.
 
 The registry is keyed by arena shm name (`_TENSOR_ARENAS:
 weakref.WeakValueDictionary[str, ShmTensorArena]`) rather than a single
@@ -185,8 +229,8 @@ on any rank.
 **Slot lifecycle.** The rebuilt tensor is the *source* of an async H2D
 (`x.to(device, non_blocking=True)`) while the worker executes that step, so the
 reader must not release the slot at unpickle time. Release is tied to the
-**garbage collection of the returned tensor object** (`weakref.finalize` in
-`get_tensor`), not to a fixed "next dequeue" schedule — this matters for
+**garbage collection of the caller-retained object** (`weakref.finalize` in
+`schedule_release`), not to a fixed "next dequeue" schedule — this matters for
 callers that retain the tensor across many `dequeue` calls (e.g.
 `prompt_embeds`, which the worker re-slices on the CPU every step of a
 chunked prefill: a fixed next-dequeue release would let the writer reclaim
@@ -205,12 +249,12 @@ readers' done flags before reusing a slot, so a slot is never overwritten
 while any reader's DMA is in flight.
 
 > **Known residual limitation.** `weakref.finalize` tracks the garbage
-> collection of the *specific* tensor object `get_tensor` returns. A caller
-> that takes a view/slice of that tensor and drops the original object —
-> instead of keeping the base tensor alive, as vLLM's current callers do —
-> would not delay the release, since PyTorch views keep the underlying
-> storage alive via the C++ refcount independent of this (Python-object-
-> level) finalizer.
+> collection of the *specific* object each rebuild function passes to
+> `schedule_release` (see §2.3). A caller that takes a view/slice of that
+> object and drops the original — instead of keeping it alive, as vLLM's
+> current callers do — would not delay the release, since PyTorch views
+> keep the underlying storage alive via the C++ refcount independent of
+> this (Python-object-level) finalizer.
 >
 > Assumes the multimodal H2D is issued on the worker's current/default compute
 > stream (true today: mm inputs are copied eagerly, outside the decode CUDA

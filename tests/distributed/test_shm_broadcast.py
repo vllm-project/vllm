@@ -841,9 +841,15 @@ def _make_arena(n_reader: int = 2, slot_bytes: int = 4 << 20, n_slots: int = 3):
 
 
 def _get_view(reader: ShmTensorArena, idx: int, ref: torch.Tensor) -> torch.Tensor:
-    return reader.get_tensor(
+    """Like `_rebuild_arena_tensor`: build the zero-copy view and schedule
+    its release on that exact object, the same two calls the real unpickle
+    hook makes (`get_tensor` no longer schedules release itself -- see
+    `ShmTensorArena.schedule_release`)."""
+    t = reader.get_tensor(
         idx, ref.numel() * ref.element_size(), ref.dtype, tuple(ref.shape)
     )
+    reader.schedule_release(t, idx)
+    return t
 
 
 def _drain(reader: ShmTensorArena) -> None:
@@ -1098,22 +1104,30 @@ def test_arena_pickler_excludes_requires_grad_and_conj(monkeypatch, case: str):
 
 
 def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
-    """`reducer_override` must use an exact-type check, not `isinstance`:
-    the `dispatch_table` it falls through to is itself keyed by exact type
-    (pickle looks up `type(obj)`, not its MRO), so a `Tensor` subclass like
-    `torch.nn.Parameter` must decline here too. Declining lets pickle fall
-    through to `Parameter.__reduce_ex__` itself, which returns
-    `(_rebuild_parameter, (plain_data_tensor, requires_grad, state_dict))`
-    -- an exact-type `torch.Tensor` constructor arg that the arena then
-    legitimately (and separately) diverts. So the arena IS still touched
-    (`written` is non-empty); what must hold is that the *outer* object
-    survives as a `Parameter`, not a bare `Tensor`. With the old
-    `isinstance` check, the outer `param` itself would have matched
-    `reducer_override` directly, bypassing `_rebuild_parameter` entirely
-    and reconstructing as a plain `Tensor` -- silently losing its subclass
-    identity, unlike the no-arena path (test_tensor_pickle_roundtrip
-    ["param"], which keeps the type via the same `_rebuild_parameter`
-    protocol this test now also exercises through the arena)."""
+    """`reducer_override` declines a bare `isinstance`/`type` match for
+    `torch.Tensor` subclasses in general -- but `torch.nn.Parameter`
+    specifically IS diverted, via its own dedicated `_rebuild_arena_
+    parameter` rebuild hook (`_ARENA_REBUILD_FNS`), because a naive
+    "decline and let it fall through" approach has a subtler failure mode
+    than losing type identity: `Parameter.__reduce_ex__` returns
+    `(_rebuild_parameter, (plain_data_tensor, requires_grad, state_dict))`,
+    and `plain_data_tensor` (an exact-type `torch.Tensor`) is what the
+    arena would divert if `reducer_override` merely declined the outer
+    `Parameter` and let it recurse naturally. `_rebuild_parameter` builds
+    `torch.nn.Parameter(plain_data_tensor, requires_grad)` and returns
+    it -- WITHOUT keeping a Python reference to `plain_data_tensor` itself.
+    Regression test: `ShmTensorArena.get_tensor`'s caller used to schedule
+    release via `weakref.finalize` on that exact intermediate tensor
+    object, which would then be immediately garbage-collected (nothing
+    references it once `_rebuild_parameter` returns), queuing the slot for
+    release WHILE the constructed Parameter was still a live, in-use view
+    into it -- silent corruption the instant the writer reused the slot,
+    with no exception anywhere. `_rebuild_arena_parameter` fixes this by
+    scheduling release on the constructed `Parameter` instead (the object
+    the caller actually retains); this test would fail on the
+    `_pending_release` assertion below against the pre-fix code, even
+    though it already asserted (and passed) `type(out) is torch.nn.
+    Parameter`."""
     writer, (reader,) = _make_arena(n_reader=1)
     monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
     monkeypatch.setitem(
@@ -1127,15 +1141,20 @@ def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
     assert param.numel() * param.element_size() >= shm_tensor_arena._ARENA_MIN_BYTES
 
     data, buffers, written = _dumps_arena(param, writer)
-    # The inner data tensor is still a legitimate, separate diversion.
+    # The inner data tensor is a legitimate, separate diversion.
     assert written != []
     out = pickle.loads(data, buffers=buffers)
-    # The outer Parameter's type identity survives: reducer_override
-    # declined it and let Parameter's own reduce protocol run.
+    # The outer Parameter's type identity survives.
     assert type(out) is torch.nn.Parameter
     assert torch.equal(out, param)
     assert out.requires_grad == param.requires_grad
+    # Not yet queued for release: `out` -- the object that actually keeps
+    # the arena slot's data alive -- is still referenced here. Fails
+    # against the pre-fix code, where the intermediate tensor
+    # `_rebuild_parameter` wraps (and drops) had already queued it.
+    assert reader._pending_release == []
     del out
+    assert reader._pending_release == written
     _drain(reader)
 
 
