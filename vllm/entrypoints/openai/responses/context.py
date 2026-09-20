@@ -167,6 +167,24 @@ def _create_json_parse_error_messages(
     ]
 
 
+def _create_json_parse_error_response_items(
+    last_msg: ResponseFunctionToolCall, e: json.JSONDecodeError
+) -> list[ResponseInputOutputItem]:
+    error_msg = (
+        f"Error parsing tool arguments as JSON: {str(e)}. "
+        "Please ensure the tool call arguments are valid JSON and try again."
+    )
+    return [
+        ResponseFunctionToolCallOutputItem(
+            id=f"fco_{random_uuid()}",
+            type="function_call_output",
+            call_id=last_msg.call_id,
+            output=error_msg,
+            status="completed",
+        )
+    ]
+
+
 class SimpleContext(ConversationContext):
     """This is a context that cannot handle MCP tool calls."""
 
@@ -476,13 +494,7 @@ class ParsableContext(ConversationContext):
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
-            try:
-                args = json.loads(last_msg.arguments)
-            except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
-        else:
-            args = json.loads(last_msg.arguments)
+        args = json.loads(last_msg.arguments)
         result = await tool_session.call_tool("search", args)
         result_str = result.content[0].text
 
@@ -520,13 +532,7 @@ class ParsableContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
         # tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
-            try:
-                args = json.loads(last_msg.arguments)
-            except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
-        else:
-            args = json.loads(last_msg.arguments)
+        args = json.loads(last_msg.arguments)
         result = await tool_session.call_tool("exec", args)
         result_str = result.content[0].text
 
@@ -547,6 +553,11 @@ class ParsableContext(ConversationContext):
         # change this to a mcp_ function call
         last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
         self.response_messages[-1] = last_msg
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                json.loads(last_msg.arguments)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_response_items(last_msg, e)
         if last_msg.name == "code_interpreter":
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)
         elif last_msg.name == "web_search_preview":
