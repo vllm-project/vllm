@@ -1287,10 +1287,28 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("is_sleeping")
 
     async def compute_weight_checksums_all_async(self) -> list[dict[str, str]]:
-        return [await self.call_utility_async("compute_weight_checksums")]
+        """Return checksums from every engine this client manages.
+
+        Each engine owns its own workers, so a client that manages more than
+        one engine (data parallelism) must ask all of them: covering only
+        core_engines[0] would let a weight update that never reached the other
+        engines pass verification. For a plain client the list has one entry.
+        """
+        return await asyncio.gather(
+            *[
+                self._call_utility_async("compute_weight_checksums", engine=engine)
+                for engine in self.core_engines
+            ]
+        )
 
     async def reset_weights_all_async(self) -> None:
-        await self.call_utility_async("reset_weights")
+        """Randomize weights on every engine this client manages."""
+        await asyncio.gather(
+            *[
+                self._call_utility_async("reset_weights", engine=engine)
+                for engine in self.core_engines
+            ]
+        )
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
@@ -1635,22 +1653,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 ]
             )
         )[0]
-
-    async def compute_weight_checksums_all_async(self) -> list[dict]:
-        return await asyncio.gather(
-            *[
-                self._call_utility_async("compute_weight_checksums", engine=engine)
-                for engine in self.core_engines
-            ]
-        )
-
-    async def reset_weights_all_async(self) -> None:
-        await asyncio.gather(
-            *[
-                self._call_utility_async("reset_weights", engine=engine)
-                for engine in self.core_engines
-            ]
-        )
 
     @staticmethod
     async def process_engine_outputs(

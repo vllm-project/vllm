@@ -121,8 +121,13 @@ curl -X POST 'http://localhost:8000/weight_checker' \
 ```
 
 Because the original weights are transferred back after `reset`, the expected
-result is `match: true` with an empty `mismatches` list. Under data parallelism,
-the operation covers every engine returned by the frontend.
+result is `match: true` with an empty `mismatches` list.
+
+A single request covers every engine that the frontend it reaches manages, and
+each engine covers its own workers. In a deployment with several frontends
+(for example `--data-parallel-external-lb` with more than one local engine per
+frontend), each frontend only reports its own engines, so verifying the whole
+group requires sending the action to every API server and merging the results.
 
 ## HTTP API summary
 

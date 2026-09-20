@@ -6,12 +6,10 @@
 import contextlib
 import json
 import os
-import socket
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
