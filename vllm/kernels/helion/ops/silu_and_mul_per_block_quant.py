@@ -60,7 +60,14 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             device=input.device,
             dtype=scale_dtype,
         )
-        scale_ub = torch.mean(input).to(scale_dtype)
+        # scale_ub clamps the per-group amax of the SiLU-and-mul activation. Use
+        # a non-degenerate upper bound (midway between the mean and max of the
+        # activation magnitude) so clamping is partially active and the baseline
+        # comparison is meaningful. torch.mean(input) ~= 0 for the zero-mean
+        # input would collapse every scale to the floor and saturate the output.
+        # Mirrors tests/kernels/helion/test_silu_and_mul_per_block_quant.py.
+        act_abs = SiluAndMul.forward_native(input.to(torch.float32)).abs()
+        scale_ub = (0.5 * (act_abs.mean() + act_abs.amax())).to(scale_dtype)
 
         config_key = CaseKey(
             {
@@ -89,7 +96,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
          pick the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
     """
-
     if not config_keys:
         return None
 
@@ -130,17 +136,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     )
     _pick_cache[cache_key] = result
     return result
-
-
-def fake_impl(
-    out: torch.Tensor,  # [num_tokens, intermediate_size]
-    input: torch.Tensor,  # [num_tokens, 2 * intermediate_size]
-    scales: torch.Tensor,  # [num_tokens, groups_per_row]
-    group_size: int,
-    scale_ub: torch.Tensor | None = None,  # scalar tensor
-    is_scale_transposed: bool = False,
-) -> None:
-    return
 
 
 def baseline(
@@ -186,7 +181,6 @@ def baseline(
     mutates_args=["out", "scales"],
     config_picker=pick_config,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],

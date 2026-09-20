@@ -308,6 +308,25 @@ async def test_derender_chat_unknown_model(client):
     assert response.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_derender_chat_model_omitted_resolves_served_name(client):
+    """Omitting `model` resolves the served name rather than rejecting.
+
+    Mirrors test_serving_chat.py's "full name is returned when no model is
+    specified" assertion for the derender path. Asserts the resolved value,
+    not just the status, so the fallback is proven to have fired.
+    """
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={"generate_response": _make_generate_response(synthetic_ids)},
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] == MODEL_NAME
+
+
 # ---------------------------------------------------------------------------
 # Completion derender tests
 # ---------------------------------------------------------------------------
@@ -536,7 +555,7 @@ async def test_derender_chat_oversized_token_ids_rejected(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_too_many_choices_rejected(client):
-    """choices count exceeding VLLM_MAX_N_SEQUENCES returns 400."""
+    """Choices count exceeding VLLM_MAX_N_SEQUENCES returns 400."""
     # Default VLLM_MAX_N_SEQUENCES is 16384; use a larger count.
     oversized_choices = [
         {"index": i, "token_ids": [42], "finish_reason": "stop"} for i in range(20_000)
@@ -781,7 +800,12 @@ def _e2e_generate_response(
 
 @pytest.mark.asyncio
 async def test_e2e_plain_roundtrip(parser_client, parser_tokenizer):
-    """Plain text without reasoning markers roundtrips correctly."""
+    """Plain text without reasoning markers roundtrips correctly.
+
+    Markerless output has no ``</think>``, which deepseek_r1 classifies
+    wholly as reasoning, so the text lands there rather than in content.
+    What this pins is detokenization fidelity through the parser path.
+    """
     messages = [{"role": "user", "content": "What is 2+2?"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -795,16 +819,22 @@ async def test_e2e_plain_roundtrip(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200, resp.text
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert content == expected
+    message = resp.json()["choices"][0]["message"]
+    assert message["reasoning"] == expected
+    assert message["content"] is None
 
 
 @pytest.mark.asyncio
 async def test_e2e_token_identity(parser_client, parser_tokenizer):
-    """encode(derender(token_ids)) == token_ids (RL invariant)."""
+    """encode(derender(token_ids)) == token_ids (RL invariant).
+
+    Markerless output comes back as reasoning (see
+    ``test_e2e_plain_roundtrip``), so re-encode that.
+    """
     messages = [{"role": "user", "content": "Hi"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -817,17 +847,22 @@ async def test_e2e_token_identity(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    re_encoded = _encode(parser_tokenizer, content)
+    reasoning = resp.json()["choices"][0]["message"]["reasoning"]
+    re_encoded = _encode(parser_tokenizer, reasoning)
     assert output_ids == re_encoded
 
 
 @pytest.mark.asyncio
 async def test_e2e_non_ascii_roundtrip(parser_client, parser_tokenizer):
-    """CJK + emoji roundtrip without U+FFFD."""
+    """CJK + emoji roundtrip without U+FFFD.
+
+    Markerless output comes back as reasoning (see
+    ``test_e2e_plain_roundtrip``).
+    """
     messages = [{"role": "user", "content": "Reply in Chinese"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -840,11 +875,12 @@ async def test_e2e_non_ascii_roundtrip(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert "�" not in content
+    reasoning = resp.json()["choices"][0]["message"]["reasoning"]
+    assert "�" not in reasoning
 
 
 @pytest.mark.asyncio
@@ -957,8 +993,10 @@ async def test_e2e_parsed_reasoning_and_tool_call(parser_client, parser_tokenize
 
 
 @pytest.mark.asyncio
-async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
-    """Without chat_request, derender falls back to plain detokenization."""
+async def test_e2e_no_chat_request_rejected(parser_client, parser_tokenizer):
+    """Without chat_request a parser configured model rejects with 400
+    rather than silently falling back to plain detokenization. This is to
+    prevent the leak of raw reasoning/tool markup into content."""
     messages = [{"role": "user", "content": "Hello"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -973,9 +1011,8 @@ async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
             "prompt_tokens": len(gen_req["token_ids"]),
         },
     )
-    assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert "Hi" in content
+    assert resp.status_code == 400
+    assert "chat_request" in resp.json()["error"]["message"]
 
 
 # ---------------------------------------------------------------------------

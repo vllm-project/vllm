@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This module defines a framework for sampling benchmark requests from various
+"""This module defines a framework for sampling benchmark requests from various
 datasets. Each dataset subclass of BenchmarkDataset must implement sample
 generation. Supported dataset types include:
   - ShareGPT
@@ -75,11 +74,9 @@ DEFAULT_NUM_PROMPTS = 1000
 
 @dataclass
 class SampleRequest:
-    """
-    Represents a single inference request for benchmarking.
-    """
+    """Represents a single inference request for benchmarking."""
 
-    prompt: str | list[str] | list[dict]
+    prompt: str | list[str] | list[int] | list[list[int]] | list[dict]
     prompt_len: int
     expected_output_len: int = 0
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
@@ -112,8 +109,7 @@ class BenchmarkDataset(ABC):
         disable_shuffle: bool = False,
         **kwargs,
     ) -> None:
-        """
-        Initialize the BenchmarkDataset with an optional dataset path and random
+        """Initialize the BenchmarkDataset with an optional dataset path and random
         seed.
 
         Args:
@@ -121,6 +117,9 @@ class BenchmarkDataset(ABC):
                 indicates that a default or random dataset might be used.
             random_seed (int): Seed value for reproducible shuffling or
                 sampling. Defaults to DEFAULT_SEED.
+            disable_shuffle (bool): If True, keep the dataset in its original
+                order instead of shuffling it.
+
         """
         self.dataset_path = dataset_path
         # Set the random seed, ensuring that a None value is replaced with the
@@ -134,8 +133,7 @@ class BenchmarkDataset(ABC):
         prompt: str,
         mm_content: MultiModalDataDict | dict | list[dict] | None = None,
     ) -> list[dict]:
-        """
-        Transform a prompt and optional multimodal content into a chat format.
+        """Transform a prompt and optional multimodal content into a chat format.
         This method is used for chat models that expect a specific conversation
         format.
         """
@@ -152,25 +150,24 @@ class BenchmarkDataset(ABC):
         return [{"role": "user", "content": content}]
 
     def load_data(self) -> None:
-        """
-        Load data from the dataset path into self.data.
+        """Load data from the dataset path into self.data.
 
         This method must be overridden by subclasses since the method to load
         data will vary depending on the dataset format and source.
 
         Raises:
             NotImplementedError: If a subclass does not implement this method.
+
         """
         # TODO (jenniferzhao): add support for downloading data
         raise NotImplementedError("load_data must be implemented in subclasses.")
 
+    @staticmethod
     def get_random_lora_request(
-        self,
         max_loras: int | None = None,
         lora_path: str | None = None,
     ) -> LoRARequest | None:
-        """
-        Optionally select a random LoRA request.
+        """Optionally select a random LoRA request.
 
         This method is used when LoRA parameters are provided.  It randomly
         selects a LoRA based on max_loras.
@@ -184,6 +181,7 @@ class BenchmarkDataset(ABC):
         Returns:
             A new [`LoRARequest`][vllm.lora.request.LoRARequest]
             (or `None` if not applicable).
+
         """
         if max_loras is None or lora_path is None:
             return None
@@ -197,14 +195,13 @@ class BenchmarkDataset(ABC):
         )
         return lora_request
 
+    @staticmethod
     def get_round_robin_lora_request(
-        self,
         index: int,
         max_loras: int | None = None,
         lora_path: str | None = None,
     ) -> LoRARequest | None:
-        """
-        Optionally select a LoRA request using deterministic round-robin.
+        """Optionally select a LoRA request using deterministic round-robin.
 
         This method cycles through LoRA IDs in order based on the request
         index, providing reproducible LoRA assignment.
@@ -219,6 +216,7 @@ class BenchmarkDataset(ABC):
         Returns:
             A new [`LoRARequest`][vllm.lora.request.LoRARequest]
             (or `None` if not applicable).
+
         """
         if max_loras is None or lora_path is None:
             return None
@@ -232,15 +230,14 @@ class BenchmarkDataset(ABC):
         )
         return lora_request
 
+    @staticmethod
     def get_lora_request(
-        self,
         index: int,
         max_loras: int | None = None,
         lora_path: str | None = None,
         lora_assignment: str = "random",
     ) -> LoRARequest | None:
-        """
-        Select a LoRA request using the specified assignment strategy.
+        """Select a LoRA request using the specified assignment strategy.
 
         Args:
             index (int): The request index (used for round-robin).
@@ -252,12 +249,15 @@ class BenchmarkDataset(ABC):
         Returns:
             A new [`LoRARequest`][vllm.lora.request.LoRARequest]
             (or `None` if not applicable).
+
         """
         if lora_assignment == "round-robin":
-            return self.get_round_robin_lora_request(
+            return BenchmarkDataset.get_round_robin_lora_request(
                 index=index, max_loras=max_loras, lora_path=lora_path
             )
-        return self.get_random_lora_request(max_loras=max_loras, lora_path=lora_path)
+        return BenchmarkDataset.get_random_lora_request(
+            max_loras=max_loras, lora_path=lora_path
+        )
 
     @abstractmethod
     def sample(
@@ -268,8 +268,7 @@ class BenchmarkDataset(ABC):
         no_oversample: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
-        """
-        Abstract method to generate sample requests from the dataset.
+        """Abstract method to generate sample requests from the dataset.
 
         Subclasses must override this method to implement dataset-specific logic
         for generating a list of SampleRequest objects.
@@ -279,10 +278,13 @@ class BenchmarkDataset(ABC):
                 for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
             request_id_prefix (str): The prefix of request_id.
+            no_oversample (bool): If True, do not oversample the dataset to
+                reach num_requests.
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
             dataset.
+
         """
         raise NotImplementedError("sample must be implemented in subclasses.")
 
@@ -293,8 +295,7 @@ class BenchmarkDataset(ABC):
         request_id_prefix: str = "",
         no_oversample: bool = False,
     ) -> None:
-        """
-        Oversamples the list of requests if its size is less than the desired
+        """Oversamples the list of requests if its size is less than the desired
         number.
 
         Args:
@@ -303,6 +304,8 @@ class BenchmarkDataset(ABC):
             num_requests (int): The target number of requests.
             request_id_prefix (str): The prefix applied to generated request
                 identifiers.
+            no_oversample (bool): If True, return the requests unchanged
+                instead of oversampling up to num_requests.
 
         """
         if no_oversample:
@@ -344,8 +347,7 @@ def is_valid_sequence(
     max_total_len: int = 2048,
     skip_min_output_len_check: bool = False,
 ) -> bool:
-    """
-    Validate a sequence based on prompt and output lengths.
+    """Validate a sequence based on prompt and output lengths.
 
     Default pruning criteria are copied from the original `sample_hf_requests`
     and `sample_sharegpt_requests` functions in benchmark_serving.py, as well as
@@ -377,8 +379,7 @@ def process_image(
     *,
     ensure_client_side_data: bool = False,
 ) -> Mapping[str, Any]:
-    """
-    Process a single image input and return a multimedia content dictionary.
+    """Process a single image input and return a multimedia content dictionary.
 
     Supports the following input types:
 
@@ -400,6 +401,7 @@ def process_image(
 
     Raises:
         ValueError: If the input is not a supported type.
+
     """
     if isinstance(image, dict) and "bytes" in image:
         image = Image.open(BytesIO(image["bytes"]))
@@ -435,8 +437,7 @@ def process_image(
 
 
 def process_video(video: Any) -> Mapping[str, Any]:
-    """
-    Process a single video input and return a multimedia content dictionary.
+    """Process a single video input and return a multimedia content dictionary.
 
     Supports the following input types:
 
@@ -449,6 +450,7 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
     Raises:
         ValueError: If the input is not a supported type.
+
     """
     if isinstance(video, dict) and "bytes" in video:
         video_bytes = video["bytes"]
@@ -472,8 +474,7 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
 
 def process_audio(audio: Any) -> tuple:
-    """
-    Process a single audio input and return a (array, sample_rate) tuple.
+    """Process a single audio input and return a (array, sample_rate) tuple.
 
     Supports:
     1. String: treated as a file path, loaded with soundfile.
@@ -500,8 +501,7 @@ def gen_prompt_decode_to_target_len(
     add_special_tokens: bool = False,
     rng: np.random.Generator | None = None,
 ) -> tuple[str, list[int], int]:
-    """
-    Ensure decoded-then-encoded prompt length matches the target token length.
+    """Ensure decoded-then-encoded prompt length matches the target token length.
 
     This function decodes an initial token sequence to text and re-encodes it
     , iteratively adjusting the token sequence length to match a target.
@@ -555,8 +555,7 @@ def gen_prompt_decode_to_target_len(
 
 
 class RandomDataset(BenchmarkDataset):
-    """
-    Synthetic text-only dataset for serving/throughput benchmarks.
+    """Synthetic text-only dataset for serving/throughput benchmarks.
 
     Strategy:
     - Sample input/output token lengths per request from integer-uniform ranges
@@ -697,9 +696,7 @@ class RandomDataset(BenchmarkDataset):
         allowed_tokens: np.ndarray,
         prefix_len: int,
     ) -> list[int]:
-        """
-        Get the prefix for the dataset.
-        """
+        """Get the prefix for the dataset."""
         if prefix_len <= 0:
             return []
 
@@ -736,8 +733,7 @@ class RandomDataset(BenchmarkDataset):
         index: int,
         allowed_tokens: np.ndarray,
     ) -> tuple[str, int, int]:
-        """
-        Returns (prompt, total_input_len).
+        """Returns (prompt, total_input_len).
 
         NOTE: After decoding the prompt we have to encode and decode it again.
         This is done because in some cases N consecutive tokens
@@ -776,8 +772,7 @@ class RandomDataset(BenchmarkDataset):
 
 
 class RandomDatasetForReranking(RandomDataset):
-    """
-    Random dataset specialized for the needs of scoring:
+    """Random dataset specialized for the needs of scoring:
     - Batches of inputs
     - Inputs composed of pairs
     """
@@ -904,8 +899,7 @@ class RandomDatasetForReranking(RandomDataset):
 
 
 class RandomMultiModalDataset(RandomDataset):
-    """
-    Synthetic multimodal dataset (text + images) that extends RandomDataset.
+    """Synthetic multimodal dataset (text + images) that extends RandomDataset.
 
     Status:
     - Images: supported via synthetic RGB data.
@@ -1020,8 +1014,7 @@ class RandomMultiModalDataset(RandomDataset):
     def normalize_bucket_config(
         self, bucket_config: dict[tuple[int, int, int], float]
     ) -> dict[tuple[int, int, int], float]:
-        """
-        Remove zero probability entries
+        """Remove zero probability entries
         and normalize the bucket config to sum to 1.
         """
         # Raise error if value is negative
@@ -1042,13 +1035,11 @@ class RandomMultiModalDataset(RandomDataset):
         self,
         mm_item_config: tuple[int, int, int],
     ) -> Mapping[str, Any]:
-        """
-        Create synthetic images and videos and
+        """Create synthetic images and videos and
         apply process_image/process_video respectively.
         This follows the OpenAI API chat completions
         https://github.com/openai/openai-python
         """
-
         if self.map_config_to_modality(mm_item_config) == "image":
             return process_image(
                 self.generate_synthetic_image(mm_item_config[1], mm_item_config[0])
@@ -1069,9 +1060,7 @@ class RandomMultiModalDataset(RandomDataset):
         limit_mm_per_prompt: dict[str, int],
         bucket_config: dict[tuple[int, int, int], float],
     ) -> tuple[int, int, dict[str, int], dict[tuple[int, int, int], float]]:
-        """
-        Get the sampling parameters for the multimodal items.
-        """
+        """Get the sampling parameters for the multimodal items."""
         # Enforce num_mm_items_range_ratio <= 1
         if not (0.0 <= num_mm_items_range_ratio <= 1.0):
             raise ValueError("num_mm_items_range_ratio must be in [0, 1].")
@@ -1144,8 +1133,7 @@ class RandomMultiModalDataset(RandomDataset):
         bucket_config: dict[tuple[int, int, int], float],
         limit_mm_per_prompt: dict[str, int],
     ) -> Iterator[tuple[int, int, int]]:
-        """
-        Iterator over the multimodal items for each request
+        """Iterator over the multimodal items for each request
         whose size is between min_num_mm_items and max_num_mm_items.
 
         Loop over the bucket config and sample a multimodal item.
@@ -1158,6 +1146,7 @@ class RandomMultiModalDataset(RandomDataset):
           `bucket_config` (tuple->float). The original dict passed to
           `sample` is not mutated. If this ever changes, a test
           is implemented and will fail.
+
         """
         # Get the number of multimodal items to sample
         request_num_mm_items = int(
@@ -1344,8 +1333,7 @@ class RandomMultiModalDataset(RandomDataset):
 
 
 class ShareGPTDataset(BenchmarkDataset):
-    """
-    Implements the ShareGPT dataset.  Loads data from a JSON file and generates
+    """Implements the ShareGPT dataset.  Loads data from a JSON file and generates
     sample requests based on conversation turns.
     """
 
@@ -1435,8 +1423,7 @@ class ShareGPTDataset(BenchmarkDataset):
 
 
 class TimedTrace(BenchmarkDataset):
-    """
-    Implements a base class to replay various timed traces.
+    """Implements a base class to replay various timed traces.
     Loads data from a JSON file and generates sample requests
     based on the timing information in the traces.
     """
@@ -1570,7 +1557,6 @@ class TimedTrace(BenchmarkDataset):
             prompt_ids = self._expand_prompt(
                 entry.get(self.label_hash_ids, []), input_length, tokenizer
             )
-            prompt = tokenizer.decode(prompt_ids)
 
             # Get timestamp with proper error handling
             ts_value = entry.get(self.label_ts)
@@ -1586,7 +1572,7 @@ class TimedTrace(BenchmarkDataset):
 
             samples.append(
                 SampleRequest(
-                    prompt=prompt,
+                    prompt=prompt_ids,
                     prompt_len=prompt_len,
                     expected_output_len=new_output_len,
                     lora_request=None,
@@ -1926,6 +1912,7 @@ def add_random_dataset_base_args(
 
     Args:
         parser_or_group: Either a parser or an argument group to add arguments to.
+
     """
     parser_or_group.add_argument(
         "--random-input-len",
@@ -1987,6 +1974,7 @@ def add_random_multimodal_dataset_args(
 
     Args:
         parser_or_group: Either a parser or an argument group to add arguments to.
+
     """
     parser_or_group.add_argument(
         "--random-mm-base-items-per-request",
@@ -2091,7 +2079,12 @@ def _parse_range_ratio(value: str) -> RangeRatio:
         return json.loads(value)
 
 
-def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
+def get_samples(
+    args,
+    tokenizer: TokenizerLike | None,
+    *,
+    multimodal_backends: tuple[str, ...] = ("openai-chat", "openai-audio"),
+) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
 
@@ -2148,6 +2141,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         )
 
     elif args.dataset_name == "sonnet":
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'sonnet' dataset."
+        )
         sonnet_dataset = SonnetDataset(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
         )
@@ -2307,16 +2303,21 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 "like to add support for additional dataset formats."
             )
 
-        if dataset_class.IS_MULTIMODAL and not (
-            args.backend in ("openai-chat", "openai-audio")
-            or "embeddings-" in args.backend
+        if (
+            dataset_class.IS_MULTIMODAL
+            and args.backend not in multimodal_backends
+            and "embeddings-" not in args.backend
         ):
-            # multi-modal benchmark is only available on OpenAI Chat
-            # endpoint-type.
+            # multi-modal benchmark is only available on chat-style backends;
+            # which ones are allowed is caller-controlled (serve uses the
+            # OpenAI endpoints, throughput uses vllm-chat).
             raise ValueError(
-                "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backends."
+                f"Multi-modal content is not supported on backend "
+                f"{args.backend!r}; use one of {sorted(multimodal_backends)}."
             )
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'hf' dataset."
+        )
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -2338,6 +2339,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         )
 
     elif args.dataset_name == "timed_trace":
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'timed_trace' dataset."
+        )
         dataloader = TimedTrace(**vars(args))
         input_requests = dataloader.sample(
             num_requests=args.num_prompts,
@@ -2347,6 +2351,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
     else:
         # For datasets that follow a similar structure, use a mapping.
+        assert tokenizer is not None, (
+            f"Tokenizer must be initialized for the '{args.dataset_name}' dataset."
+        )
         dataset_mapping = {
             "spec_bench": lambda: SpecBench(
                 dataset_path=args.dataset_path,
@@ -2462,10 +2469,13 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
         try:
             # Enforce endpoint compatibility for multimodal datasets.
-            if args.dataset_name == "random-mm" and args.backend not in ["openai-chat"]:
+            if (
+                args.dataset_name == "random-mm"
+                and args.backend not in multimodal_backends
+            ):
                 raise ValueError(
-                    "Multi-modal content (images) is only supported on "
-                    "'openai-chat' backend."
+                    f"Multi-modal content (images) is not supported on backend "
+                    f"{args.backend!r}; use one of {sorted(multimodal_backends)}."
                 )
             input_requests = dataset_mapping[args.dataset_name]()
         except KeyError as err:
@@ -2480,8 +2490,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
 
 class CustomDataset(BenchmarkDataset):
-    """
-    Implements the Custom dataset.  Loads data from a JSONL file and generates
+    """Implements the Custom dataset.  Loads data from a JSONL file and generates
     sample requests based on conversation turns. E.g.,
     ```
     {"prompt": "What is the capital of India?", "output_tokens": 10}
@@ -2532,7 +2541,7 @@ class CustomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2609,8 +2618,7 @@ class CustomDataset(BenchmarkDataset):
 
 
 class CustomImageDataset(CustomDataset):
-    """
-    Implements the Custom image dataset. Loads data from a JSONL file and generates
+    """Implements the Custom image dataset. Loads data from a JSONL file and generates
     sample requests based on conversation turns. E.g.,
     ```
     {
@@ -2809,7 +2817,7 @@ class CustomImageDataset(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2894,8 +2902,7 @@ class CustomImageDataset(CustomDataset):
 
 
 class CustomAudioDataset(CustomDataset):
-    """
-    Custom dataset for audio benchmarking. Loads data from a JSONL file. E.g.,
+    """Custom dataset for audio benchmarking. Loads data from a JSONL file. E.g.,
     {"prompt": "Transcribe the audio.", "audio": "/path/to/audio.wav"}
 
     Supports both:
@@ -2907,7 +2914,7 @@ class CustomAudioDataset(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2929,7 +2936,9 @@ class CustomAudioDataset(CustomDataset):
             prompt = item.get("prompt", "")
             if tokenizer is None:
                 prompt_len = 1
-                new_output_len = output_len if output_len not in (None, -1) else 256
+                new_output_len = (
+                    output_len if (output_len is not None and output_len != -1) else 256
+                )
                 mm_content = None
             else:
                 use_chat_template = (
@@ -2979,6 +2988,7 @@ class CustomAudioDataset(CustomDataset):
                         )
                     new_output_len = int(item["output_tokens"])
                 else:
+                    assert output_len is not None
                     new_output_len = output_len
             sampled_requests.append(
                 SampleRequest(
@@ -3001,8 +3011,7 @@ class CustomAudioDataset(CustomDataset):
 
 
 class SpecBench(CustomDataset):
-    """
-    Implements the SpecBench dataset: https://github.com/hemingkx/Spec-Bench
+    """Implements the SpecBench dataset: https://github.com/hemingkx/Spec-Bench
     Download the dataset using:
     wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl
     """  # noqa: E501
@@ -3037,7 +3046,7 @@ class SpecBench(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -3074,8 +3083,7 @@ class SpecBench(CustomDataset):
     "SonnetDataset is deprecated and will be removed in a future version.",
 )
 class SonnetDataset(BenchmarkDataset):
-    """
-    Simplified implementation of the Sonnet dataset.  Loads poem lines from a
+    """Simplified implementation of the Sonnet dataset.  Loads poem lines from a
     text file and generates sample requests.  Default values here copied from
     `benchmark_serving.py` for the sonnet dataset.
     """
@@ -3172,8 +3180,7 @@ class SonnetDataset(BenchmarkDataset):
 
 
 class BurstGPTDataset(BenchmarkDataset):
-    """
-    Implements the BurstGPT dataset.  Loads data from a CSV file and generates
+    """Implements the BurstGPT dataset.  Loads data from a CSV file and generates
     sample requests based on synthetic prompt generation. Only rows with Model
     "GPT-4" and positive response tokens are used.
     """
@@ -3421,9 +3428,7 @@ class MultiModalConversationDataset(HuggingFaceDataset):
 
 
 class VisionArenaDataset(HuggingFaceDataset):
-    """
-    Vision Arena Dataset.
-    """
+    """Vision Arena Dataset."""
 
     DEFAULT_OUTPUT_LEN = 128
     SUPPORTED_DATASET_PATHS = {
@@ -3480,8 +3485,7 @@ class VisionArenaDataset(HuggingFaceDataset):
 
 
 class MMVUDataset(HuggingFaceDataset):
-    """
-    MMVU Dataset.
+    """MMVU Dataset.
     https://huggingface.co/datasets/yale-nlp/MMVU
     """
 
@@ -3560,8 +3564,7 @@ class MMVUDataset(HuggingFaceDataset):
 
 
 class InstructCoderDataset(HuggingFaceDataset):
-    """
-    InstructCoder Dataset.
+    """InstructCoder Dataset.
     https://huggingface.co/datasets/likaixin/InstructCoder
 
     InstructCoder is the dataset designed for general code editing.  It consists
@@ -3629,8 +3632,7 @@ class InstructCoderDataset(HuggingFaceDataset):
 
 
 class MTBenchDataset(HuggingFaceDataset):
-    """
-    MT-Bench Dataset.
+    """MT-Bench Dataset.
     https://huggingface.co/datasets/philschmid/mt-bench
 
     We create a single turn dataset for MT-Bench.
@@ -3692,8 +3694,7 @@ class MTBenchDataset(HuggingFaceDataset):
 
 
 class HumanEvalDataset(HuggingFaceDataset):
-    """
-    HumanEvalDataset Dataset.
+    """HumanEvalDataset Dataset.
     https://huggingface.co/datasets/openai/openai_humaneval
 
     We create a single turn dataset for HumanEval.
@@ -3753,8 +3754,7 @@ class HumanEvalDataset(HuggingFaceDataset):
 
 
 class GSM8KDataset(HuggingFaceDataset):
-    """
-    GSM8K Dataset.
+    """GSM8K Dataset.
     https://huggingface.co/datasets/openai/gsm8k
 
     We create a single turn dataset for GSM8K.
@@ -3814,8 +3814,7 @@ class GSM8KDataset(HuggingFaceDataset):
 
 
 class BlazeditDataset(HuggingFaceDataset):
-    """
-    Blazedit Dataset.
+    """Blazedit Dataset.
     https://github.com/ise-uiuc/blazedit
 
     5k char version: vdaita/edit_5k_char
@@ -3906,9 +3905,7 @@ Please generate the new code file in the "New file" section below."""  # noqa: E
 
 
 class AIMODataset(HuggingFaceDataset):
-    """
-    Dataset class for processing a AIMO dataset with reasoning questions.
-    """
+    """Dataset class for processing a AIMO dataset with reasoning questions."""
 
     SUPPORTED_DATASET_PATHS = {
         "AI-MO/aimo-validation-aime",
@@ -4000,6 +3997,7 @@ def _format_zeta_prompt(
 
     Returns:
         A dictionary with the formatted prompts and expected outputs.
+
     """
     events = sample["events"]
     input = sample["input"]
@@ -4016,9 +4014,7 @@ def _format_zeta_prompt(
 
 
 class NextEditPredictionDataset(HuggingFaceDataset):
-    """
-    Dataset class for processing a Next Edit Prediction dataset.
-    """
+    """Dataset class for processing a Next Edit Prediction dataset."""
 
     SUPPORTED_DATASET_PATHS = {
         "zed-industries/zeta",
@@ -4066,8 +4062,7 @@ class NextEditPredictionDataset(HuggingFaceDataset):
 
 
 class ASRDataset(HuggingFaceDataset):
-    """
-    Dataset class for processing a ASR dataset for transcription.
+    """Dataset class for processing a ASR dataset for transcription.
     Tested on the following set:
 
     +---------------------------+----------------------------------------+--------------------------+-----------------------------+
@@ -4264,8 +4259,7 @@ class ASRDataset(HuggingFaceDataset):
 
 
 class MLPerfDataset(HuggingFaceDataset):
-    """
-    MLPerf Inference Dataset.
+    """MLPerf Inference Dataset.
 
     Dataset on HF:
     https://huggingface.co/datasets/mgoin/mlperf-inference-llama2-data
@@ -4444,8 +4438,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
 
 
 class MMStarDataset(HuggingFaceDataset):
-    """
-    Lin-Chen/MMStar: https://huggingface.co/datasets/Lin-Chen/MMStar
+    """Lin-Chen/MMStar: https://huggingface.co/datasets/Lin-Chen/MMStar
     refer to: https://github.com/sgl-project/SpecForge/pull/106
     """
 
@@ -4734,8 +4727,7 @@ class BFCLDataset(HuggingFaceDataset):
 
 
 class SpeedBench(CustomDataset):
-    """
-    SPEED-Bench dataset: https://huggingface.co/datasets/nvidia/SPEED-Bench
+    """SPEED-Bench dataset: https://huggingface.co/datasets/nvidia/SPEED-Bench.
 
     Download the dataset using:
 

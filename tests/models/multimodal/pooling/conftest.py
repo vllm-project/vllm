@@ -1,18 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pytest configuration for vLLM pooling tests."""
+"""Pytest configuration for vLLM multimodal pooling tests."""
+
+import gc
 
 import pytest
+import torch
 
-from vllm.platforms import current_platform
+from tests.utils import wait_for_memory_to_settle
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
-@pytest.fixture
-def siglip_attention_config():
-    """Return attention config for SigLIP tests on ROCm.
+@pytest.fixture(autouse=True)
+def release_gpu_memory_between_tests():
+    """Reclaim cached GPU memory between tests in this shard.
 
-    On ROCm, SigLIP tests require FLEX_ATTENTION backend.
+    These tests start many vLLM/HF engines sequentially in one pytest
+    process; without explicit reclamation between tests, VRAM fragmentation
+    accumulates and later tests fail at engine startup ("Engine core
+    initialization failed").
     """
-    if current_platform.is_rocm():
-        return {"backend": "FLEX_ATTENTION"}
-    return None
+    yield
+    gc.collect()
+    if torch.accelerator.is_available():
+        torch.accelerator.empty_cache()
+    try:
+        wait_for_memory_to_settle()
+    except ValueError as e:
+        # Longer-lived (class/module-scoped) engine fixtures may legitimately
+        # still hold VRAM; nothing further to reclaim in that case.
+        logger.info("Failed to clean GPU memory: %s", e)

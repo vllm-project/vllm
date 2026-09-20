@@ -98,6 +98,9 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
 
 
 class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
+    def supports_deferred_moe_finalize(self) -> bool:
+        return True
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
