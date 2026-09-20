@@ -858,6 +858,31 @@ mod tests {
     }
 
     #[test]
+    fn scoped_builder_skips_none_tool_choice_without_caller_constraint() {
+        // A server strictness floor must not override `tool_choice: none`.
+        for strict in [Some(true), None] {
+            for level in [
+                ToolStrictLevel::Auto,
+                ToolStrictLevel::Function,
+                ToolStrictLevel::Parameter,
+            ] {
+                let mut request = request(ChatToolChoice::None, vec![chat_tool("search", strict)]);
+                let builder = MockScopedBuilder::default();
+
+                apply_structural_tag_constraint(&mut request, None, Some(&builder), level)
+                    .expect("structural tag decision should succeed");
+
+                assert!(
+                    request.sampling_params.structured_outputs.is_none(),
+                    "{level:?}"
+                );
+                assert_eq!(request.reasoning_ended, None, "{level:?}");
+                assert!(builder.calls().is_empty(), "{level:?}");
+            }
+        }
+    }
+
+    #[test]
     fn scoped_builder_resolves_the_server_strict_floor_per_tool() {
         // `auto` with non-strict tools constrains only from the `function`
         // floor; arguments are pinned only from `parameter` or `strict: true`.

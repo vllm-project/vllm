@@ -284,7 +284,11 @@ impl Config {
     /// Validate frontend configuration that can be checked before engine
     /// startup.
     pub fn validate(&self) -> Result<()> {
-        vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        vllm_chat::validate_parser_overrides(
+            &self.tool_call_parser,
+            &self.reasoning_parser,
+            &self.model,
+        )?;
         self.cors.validate()?;
         if let Some(tls) = &self.tls {
             tls.validate()?;

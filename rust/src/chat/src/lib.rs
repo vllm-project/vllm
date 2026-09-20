@@ -374,6 +374,7 @@ mod tests {
         validate_parser_overrides(
             &ParserSelection::Explicit("llama3_json".to_string()),
             &ParserSelection::Explicit(names::QWEN3.to_string()),
+            "Qwen/Qwen3-8B",
         )
         .unwrap();
     }
@@ -381,12 +382,58 @@ mod tests {
     #[test]
     fn validate_parser_overrides_accepts_explicit_kimi_k3() {
         let selection = ParserSelection::Explicit("kimi_k3".to_string());
-        validate_parser_overrides(&selection, &selection).unwrap();
+        validate_parser_overrides(&selection, &selection, "/data/ckpt").unwrap();
     }
 
     #[test]
     fn validate_parser_overrides_accepts_auto_and_none() {
-        validate_parser_overrides(&ParserSelection::Auto, &ParserSelection::None).unwrap();
+        validate_parser_overrides(
+            &ParserSelection::Auto,
+            &ParserSelection::None,
+            "Qwen/Qwen3-8B",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_parser_overrides_rejects_a_split_unified_parser() {
+        // A unified parser owns both streams, so pairing it with any other
+        // parser fails at startup rather than on every request.
+        let explicit = |name: &str| ParserSelection::Explicit(name.to_string());
+        for (tool, reasoning, model, expected) in [
+            (
+                explicit("hermes"),
+                explicit("muse_glimmer"),
+                "meta-models/Muse-Glimmer-30B",
+                "resolved tool=hermes, reasoning=muse_glimmer",
+            ),
+            (
+                explicit("muse_glimmer"),
+                explicit(names::QWEN3),
+                "/data/ckpt",
+                "resolved tool=muse_glimmer, reasoning=qwen3",
+            ),
+            (
+                ParserSelection::Auto,
+                ParserSelection::None,
+                "meta-models/Muse-Glimmer-30B",
+                "resolved tool=muse_glimmer, reasoning=none",
+            ),
+        ] {
+            let error = validate_parser_overrides(&tool, &reasoning, model).unwrap_err();
+            assert!(
+                error.to_report_string().contains(expected),
+                "{}",
+                error.to_report_string()
+            );
+        }
+
+        validate_parser_overrides(
+            &explicit("muse_glimmer"),
+            &ParserSelection::Auto,
+            "meta-models/Muse-Glimmer-30B",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -394,6 +441,7 @@ mod tests {
         let error = validate_parser_overrides(
             &ParserSelection::Explicit("definitely_missing_tool_parser".to_string()),
             &ParserSelection::Auto,
+            "Qwen/Qwen3-8B",
         )
         .unwrap_err();
 
@@ -405,6 +453,7 @@ mod tests {
         let error = validate_parser_overrides(
             &ParserSelection::Auto,
             &ParserSelection::Explicit("definitely_missing_reasoning_parser".to_string()),
+            "Qwen/Qwen3-8B",
         )
         .unwrap_err();
 

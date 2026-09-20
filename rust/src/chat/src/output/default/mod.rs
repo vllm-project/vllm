@@ -21,7 +21,7 @@ use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEvent
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
 use crate::parser::unified::UnifiedParserFactory;
-use crate::parser::{ParserSelection, ToolStrictLevel};
+use crate::parser::{ParserSelection, ToolStrictLevel, validate_unified_selection};
 use crate::request::{ChatRequest, ChatTool};
 use crate::{Error, Result as ChatResult};
 
@@ -132,18 +132,15 @@ impl DefaultChatOutputProcessor {
         tool_name: Option<&str>,
         reasoning_name: Option<&str>,
     ) -> ChatResult<Option<Box<dyn UnifiedParser>>> {
+        // Startup validation already rejects a split selection; this is the
+        // per-request backstop.
+        validate_unified_selection(tool_name, reasoning_name)?;
         let factory = UnifiedParserFactory::global();
         let Some(parser_name) =
             tool_name.into_iter().chain(reasoning_name).find(|name| factory.contains(name))
         else {
             return Ok(None);
         };
-        if tool_name != reasoning_name {
-            return Err(Error::IncompatibleParserSelections {
-                tool: tool_name.unwrap_or("none").to_owned(),
-                reasoning: reasoning_name.unwrap_or("none").to_owned(),
-            });
-        }
 
         let parser = factory.create(parser_name, tools, tokenizer)?;
 
@@ -275,5 +272,67 @@ mod tests {
 
         expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=qwen3_xml, reasoning=gemma4"]
             .assert_eq(&format!("{error}"));
+    }
+
+    fn muse_glimmer_tokenizer() -> Arc<TestTokenizer> {
+        Arc::new(
+            TestTokenizer::new()
+                .with_regular_token("<|start|>", 1001)
+                .with_regular_token("<|message|>", 1002)
+                .with_regular_token("<|eom|>", 1003)
+                .with_regular_token("<|eot|>", 1004),
+        )
+    }
+
+    #[test]
+    fn muse_glimmer_requires_matching_tool_and_reasoning_selections() {
+        let explicit = |name: &str| ParserSelection::Explicit(name.to_string());
+        for (model, tool, reasoning, expected) in [
+            (
+                "meta-models/Muse-Glimmer-30B",
+                explicit("hermes"),
+                explicit("muse_glimmer"),
+                "resolved tool=hermes, reasoning=muse_glimmer",
+            ),
+            (
+                "/data/ckpt",
+                explicit("muse_glimmer"),
+                explicit("qwen3"),
+                "resolved tool=muse_glimmer, reasoning=qwen3",
+            ),
+            (
+                "/data/ckpt",
+                explicit("muse_glimmer"),
+                ParserSelection::None,
+                "resolved tool=muse_glimmer, reasoning=none",
+            ),
+        ] {
+            let mut request = ChatRequest::for_test();
+            let error = match DefaultChatOutputProcessor::new(
+                &mut request,
+                model,
+                muse_glimmer_tokenizer(),
+                &tool,
+                &reasoning,
+                ToolStrictLevel::Auto,
+            ) {
+                Ok(_) => panic!("expected a split Muse Glimmer selection to fail"),
+                Err(error) => error,
+            };
+            assert!(format!("{error}").contains(expected), "{error}");
+        }
+
+        // `auto` resolves the other side to the same unified parser.
+        let mut request = ChatRequest::for_test();
+        DefaultChatOutputProcessor::new(
+            &mut request,
+            "meta-models/Muse-Glimmer-30B",
+            muse_glimmer_tokenizer(),
+            &explicit("muse_glimmer"),
+            &ParserSelection::Auto,
+            ToolStrictLevel::Auto,
+        )
+        .expect("matching Muse Glimmer selections should build");
+        assert!(!request.decode_options.skip_special_tokens);
     }
 }

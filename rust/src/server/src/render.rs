@@ -46,7 +46,11 @@ impl RenderConfig {
     /// Validate configuration before initializing renderer/tokenizer backends
     /// or binding a listener.
     pub fn validate(&self) -> Result<()> {
-        vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        vllm_chat::validate_parser_overrides(
+            &self.tool_call_parser,
+            &self.reasoning_parser,
+            &self.model,
+        )?;
         if self.max_logprobs.is_some_and(|value| value < -1) {
             bail!("max_logprobs must be non-negative or -1");
         }

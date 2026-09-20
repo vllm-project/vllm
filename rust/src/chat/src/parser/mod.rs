@@ -117,17 +117,42 @@ impl fmt::Display for ToolStrictLevel {
     }
 }
 
-/// Validate explicit parser override names without starting request processing.
+/// Validate parser overrides without starting request processing: explicit
+/// names must be registered, and the selections resolved for `model_id` must
+/// not split a unified parser between the tool and reasoning sides.
 pub fn validate_parser_overrides(
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
+    model_id: &str,
 ) -> crate::Result<()> {
     validate_selection(tool_call_parser, "tool", ToolParserFactory::global())?;
     validate_selection(
         reasoning_parser,
         "reasoning",
         ReasoningParserFactory::global(),
+    )?;
+    validate_unified_selection(
+        tool_call_parser.resolve_tool_name(model_id),
+        reasoning_parser.resolve_reasoning_name(model_id),
     )
+}
+
+/// A unified parser owns the whole stream, so when either resolved selection
+/// names one, both must name the same parser.
+pub(crate) fn validate_unified_selection(
+    tool_name: Option<&str>,
+    reasoning_name: Option<&str>,
+) -> crate::Result<()> {
+    let unified = UnifiedParserFactory::global();
+    let involves_unified =
+        tool_name.into_iter().chain(reasoning_name).any(|name| unified.contains(name));
+    if involves_unified && tool_name != reasoning_name {
+        return Err(crate::Error::IncompatibleParserSelections {
+            tool: tool_name.unwrap_or("none").to_owned(),
+            reasoning: reasoning_name.unwrap_or("none").to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_selection<C>(

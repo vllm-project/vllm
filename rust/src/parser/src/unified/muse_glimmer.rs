@@ -34,7 +34,7 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::combinator::{alt, delimited, eof, not, opt, peek, preceded, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult};
 use winnow::prelude::*;
-use winnow::stream::{Partial, Stream};
+use winnow::stream::{FindSlice, Partial, Stream};
 use winnow::token::{literal, rest, take_until, take_while};
 
 use self::structural_tag::MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER;
@@ -42,8 +42,8 @@ use super::{Result, ScopedStructuralTagBuilder, UnifiedParser, UnifiedParserOutp
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
-    MarkerScanState, find_slice_mul, incomplete, max_partial_prefix_len, parse_buffered_event,
-    partial_prefix_len, take_until_marker_mul,
+    MarkerScanState, incomplete, max_partial_prefix_len, parse_buffered_event, partial_prefix_len,
+    take_until_marker_mul,
 };
 
 const START: &str = "<|start|>";
@@ -630,6 +630,13 @@ fn parse_idle_event(
         literal(MESSAGE).value(MuseGlimmerEvent::Text),
         // A `<|start|>` that does not begin a valid framed header is literal text.
         literal(START).value(MuseGlimmerEvent::Text),
+        // Whitespace directly before a complete framed header is structural
+        // noise, not body text (Python parity).
+        terminated(
+            capped_run(1, is_ascii_multispace),
+            peek(framed_header_event),
+        )
+        .value(MuseGlimmerEvent::Skip),
         safe_idle_text_event,
     ))
     .parse_next(input)
@@ -637,19 +644,28 @@ fn parse_idle_event(
 
 /// Parse an event inside a reasoning (`to=self`) or `to=user` content
 /// channel, committing body text as `text_event`. Neither reclassifies ATEM
-/// markup: quoted markup stays body text.
+/// markup: quoted markup stays body text. A bare header mid-body switches
+/// channels only out of reasoning (the model's dropped-`<|eom|>` defect leaves
+/// the analysis channel); inside the final answer every bare header is literal
+/// text, so header-like text never truncates the answer — under the
+/// structural tag it is only generable inside a folded JSON string anyway.
 fn parse_plain_body_event(
     input: &mut MuseGlimmerInput<'_>,
     bare_header_anchor: BareHeaderAnchor,
     text_event: MuseGlimmerEvent,
 ) -> ModalResult<MuseGlimmerEvent> {
+    let (switch, literal_header): (BareHeaderParser<MuseGlimmerEvent>, BareHeaderParser<()>) =
+        if text_event == MuseGlimmerEvent::Reasoning {
+            (bare_channel_switch_event, failed_bare_header_text)
+        } else {
+            (no_bare_header_switch, bare_header_text)
+        };
     alt((
         framed_header_event,
-        at_bare_header_position(bare_header_anchor, bare_channel_switch_event),
+        at_bare_header_position(bare_header_anchor, switch),
         literal(EOM).value(MuseGlimmerEvent::ChannelClose),
         literal(EOT).value(MuseGlimmerEvent::TurnEnd),
-        at_bare_header_position(bare_header_anchor, failed_bare_header_text)
-            .value(text_event.clone()),
+        at_bare_header_position(bare_header_anchor, literal_header).value(text_event.clone()),
         literal(START).value(text_event.clone()),
         |input: &mut MuseGlimmerInput<'_>| {
             safe_body_text_len(input, BODY_STOP_MARKERS, FRAMING_MARKERS)
@@ -657,6 +673,20 @@ fn parse_plain_body_event(
         },
     ))
     .parse_next(input)
+}
+
+/// A bare-header alternative of [`parse_plain_body_event`].
+type BareHeaderParser<O> = for<'i> fn(&mut MuseGlimmerInput<'i>) -> ModalResult<O>;
+
+/// Parse nothing: the final answer never hands off on a bare header.
+fn no_bare_header_switch(_input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
+    Err(ErrMode::Backtrack(ContextError::new()))
+}
+
+/// Consume a bare `to=RECIPIENT<|message|>` header inside the final answer as
+/// literal body text.
+fn bare_header_text(input: &mut MuseGlimmerInput<'_>) -> ModalResult<()> {
+    bare_recipient_header.void().parse_next(input)
 }
 
 /// Parse an event inside an untagged content channel, which additionally
@@ -912,8 +942,8 @@ fn skip_tool_noise_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGl
 /// candidate (whitespace directly followed by `to=`, the same anchor the tail
 /// holdback uses — chunked and whole-input parses must agree on what is a
 /// header), so the header alternatives get first chance at it. With no
-/// candidate in sight, the tail holdback keeps partials of `hold_markers` and
-/// any trailing ` to=…` fragment that could still grow into a header.
+/// candidate in sight, the tail holdback keeps a partial of `hold_markers`,
+/// else a trailing ` to=…` fragment that could still grow into a header.
 fn safe_body_text_len(
     input: &mut MuseGlimmerInput<'_>,
     stop_markers: &[&str],
@@ -924,17 +954,7 @@ fn safe_body_text_len(
         return incomplete();
     }
 
-    let mut stop = find_slice_mul(text, stop_markers).unwrap_or(text.len());
-    for (index, _) in text.match_indices("to=") {
-        if index >= stop {
-            break;
-        }
-        if index > 0 && text[..index].chars().next_back().is_some_and(char::is_whitespace) {
-            stop = index;
-            break;
-        }
-    }
-    if stop < text.len() {
+    if let Some(stop) = earliest_structural_candidate(text, stop_markers) {
         if stop == 0 {
             // A structural alternative ahead of this scanner must consume it.
             return incomplete();
@@ -943,27 +963,49 @@ fn safe_body_text_len(
         return Ok(stop);
     }
 
-    // Iterate the holdback to a fixpoint: trimming a partial marker can expose
-    // a trailing ` to=…` fragment (" to=skill<") and vice versa. One marker
-    // strip with nothing else to strip is settled: a marker's third byte is a
-    // letter, so of a run of marker starts only the last can still grow into a
-    // marker and the earlier ones are text. The fragment scan resumes at the
-    // previous strip point, so one call is O(n) overall.
-    let mut emit_len = text.len();
-    loop {
-        let marker_hold = max_partial_prefix_len(&text[..emit_len], hold_markers);
-        let body_end = emit_len - marker_hold;
-        let fragment_hold = open_tail_to_fragment_len(&text[..body_end]);
-        emit_len = body_end - fragment_hold;
-        if fragment_hold == 0 {
-            break;
-        }
-    }
+    // One level of holdback settles everything before it: a fragment followed
+    // by `<` can no longer become `to=`, a partial marker followed by
+    // whitespace can no longer become a marker, and a whitespace-anchored
+    // `to=` is a candidate the scan above already stopped at. Iterating to a
+    // fixpoint instead held whole bodies of ` to` fragments and rescanned
+    // them on every delta.
+    let marker_hold = max_partial_prefix_len(text, hold_markers);
+    let hold = if marker_hold > 0 {
+        marker_hold
+    } else {
+        open_tail_to_fragment_len(text)
+    };
+    let emit_len = text.len() - hold;
     if emit_len == 0 {
         return incomplete();
     }
     input.next_slice(emit_len);
     Ok(emit_len)
+}
+
+/// Byte offset of the earliest structural candidate in `text`: a stop marker
+/// (all start with `<`) or a whitespace-anchored bare-header `to=`. One pass
+/// over the candidate bytes, so a body of many pieces stays linear.
+fn earliest_structural_candidate(text: &str, stop_markers: &[&str]) -> Option<usize> {
+    debug_assert!(stop_markers.iter().all(|marker| marker.starts_with('<')));
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(range) = (&bytes[from..]).find_slice((b'<', b't')) {
+        let index = from + range.start;
+        let rest = &text[index..];
+        let hit = if bytes[index] == b'<' {
+            stop_markers.iter().any(|marker| rest.starts_with(marker))
+        } else {
+            rest.starts_with("to=")
+                && index > 0
+                && text[..index].chars().next_back().is_some_and(char::is_whitespace)
+        };
+        if hit {
+            return Some(index);
+        }
+        from = index + 1;
+    }
+    None
 }
 
 /// Length of a trailing ` to=`-in-progress fragment (` t`, ` to`, ` to=NAME*`)
@@ -1613,11 +1655,41 @@ mod tests {
         assert_eq!(output.reasoning_text(), "The answer is clear. ");
         assert_eq!(output.normal_text(), "42");
 
-        // And mirrored: hidden reasoning must not leak into the answer.
+        // Not mirrored: the final answer never hands off on a bare header, so
+        // header-like text inside it is kept rather than truncating the answer.
         let output =
             assert_chunking_invariant(" to=user<|message|>Answer to=self<|message|>hidden<|eot|>");
-        assert_eq!(output.normal_text(), "Answer ");
-        assert_eq!(output.reasoning_text(), "hidden");
+        assert_eq!(output.normal_text(), "Answer to=self<|message|>hidden");
+        assert!(output.reasoning_text().is_empty());
+    }
+
+    #[test]
+    fn muse_glimmer_header_like_text_inside_answer_stays_intact() {
+        // A structured answer quoting a header must not be cut into invalid
+        // JSON, whatever the recipient, even when ATEM follows the header.
+        let bodies = [
+            r#"{"value":"literal to=x<|message|> t"}"#.to_string(),
+            r#"{"value":"literal to=self<|message|> t"}"#.to_string(),
+            r#"{"value":"literal to=user<|message|> t"}"#.to_string(),
+            format!(
+                r#"{{"value":"literal to=weather.get<|message|><atem:function_calls>\n{}</atem:function_calls> t"}}"#,
+                invoke("weather.get", &param("city", "Paris"))
+            ),
+        ];
+        for body in bodies {
+            let text = format!(" to=user<|message|>{body}<|eot|>");
+            let whole = collect_stream(&mut test_parser_with_tools(&["weather.get"]), &[&text]);
+            for size in [1, 3, 7] {
+                let streamed = collect_stream(
+                    &mut test_parser_with_tools(&["weather.get"]),
+                    &split_by_chars(&text, size),
+                );
+                assert_eq!(streamed, whole, "chunk size {size}: {body}");
+            }
+            assert_eq!(whole.normal_text(), body);
+            assert!(whole.reasoning_text().is_empty(), "{body}");
+            assert!(whole.calls().is_empty(), "{body}");
+        }
     }
 
     #[test]
@@ -1903,19 +1975,25 @@ mod tests {
 
     #[test]
     fn muse_glimmer_one_delta_spanning_answer_and_tool_channel() {
-        let mut parser = test_parser();
-        let output = parser
-            .parse_complete(
-                " to=user<|message|>answer before <|eom|>\
-                 <|start|>assistant to=weather.get<|message|>\
-                 <atem:function_calls>\n<atem:invoke name=\"weather.get\">\n\
-                 <atem:parameter name=\"city\">Paris</atem:parameter>\n\
-                 </atem:invoke>\n</atem:function_calls><|eot|>",
-            )
-            .unwrap();
+        let head = " to=self<|message|>think<|eom|><|start|>assistant to=user<|message|>";
+        let tool = tool_channel("weather.get", &param("city", "Paris"), EOT);
+        let text = format!("{head}answer before tool<|eom|>{tool}");
+        let whole = assert_chunking_invariant(&text);
 
-        assert_eq!(output.normal_text(), "answer before ");
-        let call = first_call(&output);
+        // The straddling split from the Python review: one delta carries the
+        // answer tail and the whole tool channel.
+        let straddled = collect_stream(
+            &mut test_parser(),
+            &[
+                &format!("{head}answer before "),
+                &format!("tool<|eom|>{tool}"),
+            ],
+        );
+        assert_eq!(straddled, whole);
+
+        assert_eq!(whole.reasoning_text(), "think");
+        assert_eq!(whole.normal_text(), "answer before tool");
+        let call = first_call(&whole);
         assert_eq!(call.name.as_deref(), Some("weather.get"));
         assert_eq!(call.arguments, r#"{"city":"Paris"}"#);
     }
@@ -2424,5 +2502,72 @@ mod tests {
 
         assert_eq!(output.reasoning_text(), "t");
         assert_eq!(output.normal_text(), "a");
+    }
+
+    #[test]
+    fn muse_glimmer_initialize_closed_reasoning_prefill_then_framed_answer() {
+        // The Python review's repro: a prompt ending at a CLOSED `to=self` must
+        // not seed a reasoning body, and stray whitespace before the turn's
+        // first framed header is not content.
+        let prompt = tokenizer()
+            .encode(
+                "<|start|>user<|message|>hi<|eom|><|start|>assistant to=self<|message|>Prior.<|eom|>",
+                false,
+            )
+            .unwrap();
+        for generation in [
+            "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>",
+            " <|start|>assistant to=user<|message|>The answer is 42.<|eot|>",
+        ] {
+            let mut parser = test_parser();
+            parser.initialize(&prompt).unwrap();
+            let whole = collect_stream(&mut parser, &[generation]);
+            for size in [1, 3, 7] {
+                let mut parser = test_parser();
+                parser.initialize(&prompt).unwrap();
+                let streamed = collect_stream(&mut parser, &split_by_chars(generation, size));
+                assert_eq!(streamed, whole, "chunk size {size}");
+            }
+            assert_eq!(whole.normal_text(), "The answer is 42.");
+            assert!(whole.reasoning_text().is_empty());
+        }
+    }
+
+    #[test]
+    fn muse_glimmer_fragment_deltas_do_not_cascade_holdback() {
+        // One ` to` per delta must not hold the whole body back: only the last
+        // fragment can still grow into a header.
+        let n = 200;
+        let mut parser = test_parser();
+        let mut streamed = parser.parse_chunk(" to=self<|message|>").unwrap();
+        for _ in 0..n {
+            streamed.append(parser.parse_chunk(" to").unwrap());
+        }
+        let emitted = streamed.reasoning_text().len();
+        assert!(
+            emitted >= 3 * n - 3,
+            "held back {} of {} bytes",
+            3 * n - emitted,
+            3 * n
+        );
+        streamed.append(parser.parse_chunk("<|eom|>").unwrap());
+        streamed.append(parser.finish().unwrap());
+
+        let text = format!(" to=self<|message|>{}<|eom|>", " to".repeat(n));
+        assert_eq!(streamed, collect_stream(&mut test_parser(), &[&text]));
+    }
+
+    #[test]
+    fn muse_glimmer_many_header_candidates_in_one_body_parse_whole_and_chunked() {
+        // Every ` to=x<|` piece is a candidate that fails; the body must still
+        // stream as content identically whole and byte by byte.
+        let body = " to=x<|".repeat(300);
+        let text = format!(" to=user<|message|>{body}<|eot|>");
+        let whole = collect_stream(&mut test_parser(), &[&text]);
+        assert_eq!(whole.normal_text(), body);
+        assert_eq!(
+            collect_stream(&mut test_parser(), &split_by_chars(&text, 1)),
+            whole
+        );
     }
 }
