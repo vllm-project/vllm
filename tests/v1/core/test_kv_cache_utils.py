@@ -19,6 +19,7 @@ import vllm.v1.core.kv_cache_utils as kv_cache_utils
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     KVTransferConfig,
     ModelConfig,
     ParallelConfig,
@@ -1830,22 +1831,11 @@ def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
 
 
 def test_get_kv_cache_configs_unifies_cpu_offload_blocks_across_pp_stages():
-    model_config = SimpleNamespace(
-        max_model_len=512,
-        original_max_model_len=512,
-        use_mla=False,
-    )
-    cache_config = CacheConfig(block_size=16)
-    cache_config.kv_cache_layout = "LBNHC"
-    cache_config.prefix_cache_retention_interval = None
-    vllm_config = SimpleNamespace(
-        model_config=model_config,
-        cache_config=cache_config,
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=512),
+        # Pin the device so the test needs no inferable accelerator.
+        device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(pipeline_parallel_size=2),
-        speculative_config=None,
-        num_prefill_lookahead_tokens=0,
-        attention_config=SimpleNamespace(hisparse_config=None),
         kv_transfer_config=KVTransferConfig(
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
@@ -1854,6 +1844,8 @@ def test_get_kv_cache_configs_unifies_cpu_offload_blocks_across_pp_stages():
             },
         ),
     )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.cache_config.prefix_cache_retention_interval = None
 
     ref_kv_cache_spec = new_kv_cache_spec()
     pp_kv_cache_specs = [
