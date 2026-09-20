@@ -102,6 +102,27 @@ def test_hc_collapse_preserves_weighted_residual_sum(
         )
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="GPU required",
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 8, 64])
+def test_hc_collapse_rms_norm_matches_separate_ops(num_tokens):
+    set_random_seed(41)
+    hidden_size, hc_mult = 5120, 4
+    x = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    pre = torch.rand(num_tokens, hc_mult, dtype=torch.float32, device=DEVICE)
+    weight = torch.rand(hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    collapsed = hc_collapse_triton(x, pre)
+    expected = torch.empty_like(collapsed)
+    if num_tokens:
+        torch.ops._C.rms_norm(expected, collapsed, weight, 1e-6)
+    actual = torch.ops.vllm.hc_collapse_rms_norm_triton(x, pre, weight, 1e-6)
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_hc_collapse_custom_op_supports_compile():
     x = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)

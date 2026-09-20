@@ -137,6 +137,70 @@ def hc_collapse_triton(x: Tensor, pre_mix: Tensor) -> Tensor:
     return out
 
 
+@triton.jit
+def _hc_collapse_rms_norm_kernel(
+    x_ptr,
+    pre_ptr,
+    weight_ptr,
+    out_ptr,
+    hidden_size: tl.constexpr,
+    hc_mult: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, BLOCK_H)
+    mask = offsets < hidden_size
+    acc = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    for mix_idx in tl.static_range(0, hc_mult):
+        pre = tl.load(pre_ptr + token_idx * hc_mult + mix_idx).to(tl.float32)
+        x = tl.load(
+            x_ptr + (token_idx * hc_mult + mix_idx) * hidden_size + offsets,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        acc += pre * x
+
+    collapsed = acc.to(tl.bfloat16).to(tl.float32)
+    rstd = tl.rsqrt(tl.sum(collapsed * collapsed, axis=0) / hidden_size + eps)
+    weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    tl.store(
+        out_ptr + token_idx * hidden_size + offsets,
+        collapsed * rstd * weight,
+        mask=mask,
+    )
+
+
+def hc_collapse_rms_norm_triton(
+    x: Tensor, pre_mix: Tensor, weight: Tensor, eps: float
+) -> Tensor:
+    assert x.ndim == 3 and x.dtype == torch.bfloat16 and x.is_contiguous()
+    num_tokens, hc_mult, hidden_size = x.shape
+    assert pre_mix.shape == (num_tokens, hc_mult) and pre_mix.is_contiguous()
+    assert weight.shape == (hidden_size,)
+    out = torch.empty(num_tokens, hidden_size, dtype=x.dtype, device=x.device)
+    if num_tokens:
+        _hc_collapse_rms_norm_kernel[(num_tokens,)](
+            x,
+            pre_mix,
+            weight,
+            out,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            eps=eps,
+            BLOCK_H=triton.next_power_of_2(hidden_size),
+            num_warps=8,
+            enable_fp_fusion=False,
+        )
+    return out
+
+
+def _hc_collapse_rms_norm_triton_fake(
+    x: Tensor, pre_mix: Tensor, weight: Tensor, eps: float
+) -> Tensor:
+    return torch.empty(x.shape[0], x.shape[2], dtype=x.dtype, device=x.device)
+
+
 def _hc_collapse_triton_fake(x: Tensor, pre_mix: Tensor) -> Tensor:
     return torch.empty(x.shape[0], x.shape[2], dtype=x.dtype, device=x.device)
 
@@ -330,6 +394,14 @@ direct_register_custom_op(
     op_name="hc_head_triton",
     op_func=_hc_head_triton,
     mutates_args=["out"],
+)
+
+
+direct_register_custom_op(
+    op_name="hc_collapse_rms_norm_triton",
+    op_func=hc_collapse_rms_norm_triton,
+    mutates_args=[],
+    fake_impl=_hc_collapse_rms_norm_triton_fake,
 )
 
 
