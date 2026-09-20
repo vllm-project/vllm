@@ -523,6 +523,7 @@ def convert_to_fp8_moe_kernel_format(
         w2.is_shuffled = True
     elif fp8_backend == Fp8MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            HummingFP8MoEProcessingPlan,
             convert_to_humming_moe_kernel_format,
         )
         from vllm.model_executor.utils import replace_parameter
@@ -550,7 +551,14 @@ def convert_to_fp8_moe_kernel_format(
             (f"w2_{scale_name}", w2_scale),
         ):
             replace_parameter(layer, name, tensor)
-        convert_to_humming_moe_kernel_format(layer, quant_config=quant_config)
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config=quant_config, record_processing_plan=True
+        )
+        layer.fp8_humming_processing_plan = HummingFP8MoEProcessingPlan(
+            tuple(layer.humming_processing_plans.items()),
+            scale_name,
+            layer.moe_config.activation.is_gated,
+        )
         # Schema conversion may discard these checkpoint-only parameters.
         # Fp8MoEMethod still reads them when constructing its quant config.
         replace_parameter(layer, "w13_input_scale", w13_input_scale)

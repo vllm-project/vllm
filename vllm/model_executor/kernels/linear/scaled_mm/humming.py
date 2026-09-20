@@ -5,6 +5,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
+    HummingLinearProcessingPlan,
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
@@ -49,11 +50,12 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.layer_config = self.prepare_weights(layer)
+        self.processing_plan = layer.humming_linear_processing_plan
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
     def prepare_weights(self, layer: torch.nn.Module):
-        """Convert a layer without changing this kernel's runtime state."""
+        """Cold-only schema selection, conversion and parameter installation."""
         from vllm.utils.humming import dtypes
 
         name_map = {"weight": "weight", "weight_scale": "weight_scale"}
@@ -92,8 +94,16 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             quant_config["weight_scale_group_size_n"] = scale_group_shape.row
             quant_config["weight_scale_group_size"] = scale_group_shape.col
 
-        convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        return prepare_humming_linear_layer_config(layer, quant_config)
+        input_layout = convert_linear_layer_to_humming_standard(
+            layer=layer, name_map=name_map
+        )
+        config = prepare_humming_linear_layer_config(
+            layer, quant_config, record_processing_plan=True
+        )
+        layer.humming_linear_processing_plan = HummingLinearProcessingPlan(
+            input_layout, layer.humming_tensor_processing_plan
+        )
+        return config
 
     def apply_weights(
         self,

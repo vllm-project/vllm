@@ -940,6 +940,7 @@ def test_fp8_reload_trace_matches_cold_load(
     marlin_static=False,
     legacy_reference=False,
     capture_graph=True,
+    cold_events=None,
 ):
     """Real backend conversion must match cold load without replacing targets."""
     from transformers import LlamaConfig
@@ -1252,9 +1253,7 @@ def test_fp8_reload_trace_matches_cold_load(
         for name, target in state.targets.items()
     }
     prepare_calls = []
-    tracks_preparation = hasattr(state.policy, "prepare_for_load") and not (
-        backend.startswith(("marlin", "humming"))
-    )
+    tracks_preparation = hasattr(state.policy, "prepare_for_load")
     if tracks_preparation:
         prepare_for_load = state.policy.prepare_for_load
 
@@ -1274,6 +1273,16 @@ def test_fp8_reload_trace_matches_cold_load(
                         source.untyped_storage().data_ptr()
                         == target.untyped_storage().data_ptr()
                     ) == expected_alias
+                if backend in ("marlin", "humming"):
+                    target = current.targets.get(role)
+                    aliases = target is not None and (
+                        source.untyped_storage().data_ptr()
+                        == target.tensor.untyped_storage().data_ptr()
+                    )
+                    if preserve or role in ("weight", "w13_weight", "w2_weight"):
+                        assert not aliases
+                    elif not moe and role == "bias":
+                        assert aliases
                 assert source.shape == current.metadata[role].shape
                 assert source.stride() == current.metadata[role].stride()
                 assert source.dtype == current.metadata[role].dtype
@@ -1283,6 +1292,7 @@ def test_fp8_reload_trace_matches_cold_load(
         state.policy.prepare_for_load = checked_prepare
     kernel = method.moe_kernel if moe else method.fp8_linear
     processing_plan = getattr(method, "processing_plan", None)
+    policy_plan = getattr(state.policy, "plan", None)
     if processing_plan is not None:
 
         def reject_kernel_reinitialization(*args, **kwargs):
@@ -1325,10 +1335,13 @@ def test_fp8_reload_trace_matches_cold_load(
             # Compare against the pre-split cold path, not plan against itself.
             reference_method._create_processing_plan = lambda _: None
         reference_method.process_weights_after_loading(reference)
+        cold_calls_before = list(cold_events or ())
         with trace.round(preserve_checkpoint=preserve):
             load(layer, dict(reversed(list(source_b.items()))))
             assert state.complete
             assert bool(state.checkpoint) is preserve
+        assert list(cold_events or ()) == cold_calls_before
+        assert getattr(state.policy, "plan", None) is policy_plan
         if tracks_preparation:
             assert len(prepare_calls) == (1 if factor == 0.5 else 2)
         assert (method.moe_kernel if moe else method.fp8_linear) is kernel
@@ -1384,6 +1397,30 @@ def test_fp8_reload_trace_matches_cold_load(
         with pytest.raises(ReloadError, match="shuffled layout marker"):
             state.policy.validate(state)
         layer.w13_weight.is_shuffled = True
+    if backend in ("marlin", "humming"):
+        from vllm.model_executor.model_loader.reload.trace import ReloadError
+
+        if backend == "humming" and moe:
+            for mapping in (
+                layer.humming_configs,
+                layer.weight_schemas,
+                layer.input_schemas,
+            ):
+                original = mapping["w13"]
+                mapping["w13"] = object()
+                with pytest.raises(ReloadError, match="configuration changed"):
+                    state.policy.validate(state)
+                mapping["w13"] = original
+        owner, attribute = (
+            (kernel, "processing_plan")
+            if backend == "humming" and not moe
+            else (layer, f"fp8_{backend}_processing_plan")
+        )
+        original_plan = getattr(owner, attribute)
+        setattr(owner, attribute, object())
+        with pytest.raises(ReloadError):
+            state.policy.validate(state)
+        setattr(owner, attribute, original_plan)
 
 
 def test_fp8_processing_plan_cutlass_canonical_input():
@@ -1459,30 +1496,63 @@ def test_fp8_reload_trace_fnuz_moe_conversion(
     )
 
 
+def _stub_marlin_processing_ops(monkeypatch):
+    """Keep production conversion/workspace code; record cold-only allocation."""
+    from vllm.model_executor.layers.quantization.utils import marlin_utils_fp8
+
+    cold_events = []
+    make_workspace = marlin_utils_fp8.marlin_make_workspace_new
+
+    def workspace(*args, **kwargs):
+        cold_events.append("workspace")
+        return make_workspace(*args, **kwargs)
+
+    def repack(b_q_weight, size_k, size_n, num_bits):
+        assert num_bits == 8
+        return b_q_weight.reshape(size_k // 16, size_n * 4).roll(1, -1)
+
+    monkeypatch.setattr(ops, "gptq_marlin_repack", repack)
+    monkeypatch.setattr(marlin_utils_fp8, "marlin_make_workspace_new", workspace)
+    return cold_events
+
+
+@pytest.mark.parametrize("moe,eplb", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_marlin_packing_lifecycle(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    monkeypatch,
+    moe,
+    eplb,
+    block,
+    preserve,
+):
+    """Keep real scale/bias conversion; replace only the native repack operator."""
+    cold_events = _stub_marlin_processing_ops(monkeypatch)
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "marlin",
+        moe,
+        block,
+        eplb,
+        preserve,
+        check_forward=False,
+        cold_events=cold_events,
+    )
+
+
 @pytest.mark.parametrize("preserve", [False, True])
 def test_fp8_reload_trace_marlin_static_lifecycle(
     default_vllm_config, dist_init, workspace_init, tmp_path, monkeypatch, preserve
 ):
     """A static checkpoint scale is tracked even though W8A16 discards it."""
-    from vllm.model_executor.kernels.linear.scaled_mm import marlin
-    from vllm.model_executor.layers.quantization.utils import marlin_utils_fp8
-
-    def pack(layer, size_k_first, input_dtype):
-        assert size_k_first
-        layer.weight = torch.nn.Parameter(
-            layer.weight.t().contiguous().view(torch.int32), requires_grad=False
-        )
-        layer.weight_scale = torch.nn.Parameter(
-            layer.weight_scale.detach().clone().mul_(2), requires_grad=False
-        )
-        if not hasattr(layer, "workspace"):
-            layer.workspace = torch.empty(
-                16, dtype=torch.int32, device=layer.weight.device
-            )
-        layer.workspace.zero_()
-
-    monkeypatch.setattr(marlin, "prepare_fp8_layer_for_marlin", pack)
-    monkeypatch.setattr(marlin_utils_fp8, "prepare_fp8_layer_for_marlin", pack)
+    cold_events = _stub_marlin_processing_ops(monkeypatch)
     test_fp8_reload_trace_matches_cold_load(
         default_vllm_config,
         dist_init,
@@ -1495,6 +1565,7 @@ def test_fp8_reload_trace_marlin_static_lifecycle(
         preserve,
         check_forward=False,
         marlin_static=True,
+        cold_events=cold_events,
     )
 
 
@@ -1516,6 +1587,140 @@ def test_fp8_reload_trace_marlin_static(
     )
 
 
+def _stub_humming_processing_library(monkeypatch):
+    """Exercise production plan creation and processing, not a mock layer hook."""
+    from vllm.utils import humming
+
+    cold_events = []
+
+    class StandardSchema:
+        pass
+
+    standard = StandardSchema()
+
+    class WeightSchema:
+        def __init__(self, config):
+            self.config = config
+
+        @classmethod
+        def from_config(cls, config):
+            cold_events.append("weight_schema")
+            return cls(config)
+
+        def convert_humming(self, *, tensors, **kwargs):
+            scale = tensors.get("weight_scale", tensors.get("weight_scale_inv"))
+            weight = tensors["weight"]
+            if (
+                self.config.get("strategy") == "tensor"
+                and len(kwargs["shape_n_stacks"]) == 2
+                and kwargs.get("num_experts") is not None
+            ):
+                # The normalized W13 scale is repeated for the W1/W3 stacks,
+                # not replaced by their different original checkpoint scales.
+                assert scale.shape == (kwargs["num_experts"], 2)
+                torch.testing.assert_close(scale[:, 0], scale[:, 1], rtol=0, atol=0)
+            values = {
+                "weight": weight.view(torch.int32),
+                "weight_scale": scale.clone(),
+            }
+            if "bias" in tensors:
+                values["bias"] = tensors["bias"]
+            return standard, values
+
+    class InputSchema:
+        def __init__(self):
+            cold_events.append("input_schema")
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+        def convert_humming(self, **kwargs):
+            return self, {}
+
+    def prepare_config(**kwargs):
+        cold_events.append("config")
+        return SimpleNamespace(**kwargs)
+
+    def transform(config, tensors):
+        values = {
+            "weight": tensors["weight"].roll(1, -1),
+            "weight_scale": tensors["weight_scale"].clone().mul_(2),
+            "weight_scale_2": tensors["weight_scale"].float().sum().reshape(1),
+        }
+        if "bias" in tensors:
+            values["bias"] = tensors["bias"].clone()
+        return values
+
+    for name, value in {
+        "BaseWeightSchema": WeightSchema,
+        "BaseInputSchema": InputSchema,
+        "HummingWeightSchema": StandardSchema,
+        "HummingInputSchema": InputSchema,
+        "prepare_layer_config": prepare_config,
+        "transform_humming_tensors": transform,
+    }.items():
+        # The facade lazily imports optional modules; override without resolving
+        # those imports so this test also works with an older Humming package.
+        monkeypatch.setitem(humming.__dict__, name, value)
+    return cold_events
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.int32])
+def test_fp8_humming_processing_plan_standardization(transpose, dtype):
+    """Saved input dimensions match cold renaming for FP8 and packed inputs."""
+    from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        convert_linear_layer_to_humming_standard,
+    )
+
+    weight = torch.arange(32).reshape(4, 8).to(dtype)
+    scale = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    values = {
+        "qweight": weight.t() if transpose else weight,
+        "scales": scale.t() if transpose else scale,
+    }
+    layer = torch.nn.Module()
+    for name, value in values.items():
+        layer.register_parameter(name, torch.nn.Parameter(value, requires_grad=False))
+        param = getattr(layer, name)
+        param.input_dim = 0 if transpose else 1
+        param.output_dim = 1 if transpose else 0
+    layout = convert_linear_layer_to_humming_standard(
+        layer, {"weight": "qweight", "weight_scale": "scales"}
+    )
+    expected = {"weight": weight.view(torch.int32), "weight_scale": scale}
+    replay = layout.process(values)
+    for name, value in expected.items():
+        torch.testing.assert_close(getattr(layer, name), value, rtol=0, atol=0)
+        torch.testing.assert_close(replay[name], value, rtol=0, atol=0)
+    assert not hasattr(layer, "qweight") and not hasattr(layer, "scales")
+
+
+def test_fp8_humming_processing_plan_rejects_schema_drift(monkeypatch):
+    """A changed schema must not reach the fixed-config transform."""
+    from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        HummingTensorProcessingPlan,
+    )
+    from vllm.utils import humming
+
+    def reject_transform(*args):
+        pytest.fail("Changed schema reached the runtime transform")
+
+    monkeypatch.setitem(humming.__dict__, "transform_humming_tensors", reject_transform)
+    plan = HummingTensorProcessingPlan(
+        source_schema=SimpleNamespace(convert_humming=lambda **kwargs: (object(), {})),
+        weight_schema=object(),
+        input_schema=object(),
+        config=object(),
+        shape_n_stacks=(4,),
+        shape_k_stacks=(4,),
+        param_dtype=torch.bfloat16,
+    )
+    with pytest.raises(ValueError, match="schema changed"):
+        plan.process({})
+
+
 @pytest.mark.parametrize("block", [False, True])
 @pytest.mark.parametrize("preserve", [False, True])
 @pytest.mark.parametrize("eplb", [False, True])
@@ -1529,47 +1734,13 @@ def test_fp8_reload_trace_humming_moe_lifecycle(
     preserve,
     eplb,
 ):
-    """Exercise dynamic expert placement and derived targets with a packer stub."""
-    from vllm.model_executor.layers.quantization.utils import humming_utils
-
-    def pack(layer, quant_config):
-        if block:
-            assert quant_config["weight_block_size"] == [128, 128]
-        else:
-            assert quant_config["strategy"] == "tensor"
-        scale_name = "weight_scale_inv" if block else "weight_scale"
-        converted = {}
-        for prefix in ("w13", "w2"):
-            weight = getattr(layer, f"{prefix}_weight")
-            scale = getattr(layer, f"{prefix}_{scale_name}")
-            if prefix == "w13" and not block:
-                # Each logical stack gets the same normalized scale, not
-                # the original, potentially different W1/W3 checkpoint scales.
-                assert scale.shape == (2, 2)
-                torch.testing.assert_close(scale[:, 0], scale[:, 1], rtol=0, atol=0)
-            converted[f"{prefix}_weight"] = weight.view(torch.int32).roll(1, 1)
-            converted[f"{prefix}_weight_scale"] = scale.clone().mul_(2)
-            converted[f"{prefix}_weight_scale_2"] = scale.float().sum().reshape(1)
-        for name, _ in list(layer.named_parameters()):
-            if name.startswith(("w13_", "w2_")):
-                delattr(layer, name)
-        for name, value in converted.items():
-            layer.register_parameter(
-                name, torch.nn.Parameter(value, requires_grad=False)
-            )
-        layer.humming_configs = {
-            prefix: tuple(converted[f"{prefix}_weight"].shape)
-            for prefix in ("w13", "w2")
-        }
-        layer.weight_schemas = {}
-        layer.input_schemas = {}
-        return layer.humming_configs
+    """Exercise dynamic placement and derived tensors with cold-bound plans."""
+    cold_events = _stub_humming_processing_library(monkeypatch)
 
     def init_kernel(method, layer):
         method.moe_quant_config = SimpleNamespace()
         method.moe_kernel = SimpleNamespace()
 
-    monkeypatch.setattr(humming_utils, "convert_to_humming_moe_kernel_format", pack)
     monkeypatch.setattr(Fp8MoEMethod, "_init_moe_kernel", init_kernel)
     test_fp8_reload_trace_matches_cold_load(
         default_vllm_config,
@@ -1582,6 +1753,7 @@ def test_fp8_reload_trace_humming_moe_lifecycle(
         eplb,
         preserve,
         check_forward=False,
+        cold_events=cold_events,
     )
 
 
@@ -1620,32 +1792,12 @@ def test_fp8_reload_trace_humming_linear_lifecycle(
     preserve,
 ):
     """Test deleted/renamed roles without depending on Humming's native packing."""
-    from vllm.model_executor.kernels.linear.scaled_mm import humming
     from vllm.utils.import_utils import has_humming
 
     if not has_humming():
         pytest.skip("Humming dtype definitions are unavailable")
 
-    def pack(layer, config):
-        # Keep the real KN-to-NK standardization, but substitute the optional
-        # schema/packing library. This is a lifecycle test, not a kernel test.
-        assert layer.weight.shape == (256, 64)
-        assert layer.weight.dtype == torch.int32
-        converted = {
-            "weight": layer.weight.roll(1, 0).contiguous(),
-            "weight_scale": layer.weight_scale.clone().mul_(2),
-            "bias": layer.bias.clone(),
-        }
-        for name, _ in list(layer.named_parameters()):
-            delattr(layer, name)
-        for name, value in converted.items():
-            layer.register_parameter(
-                name, torch.nn.Parameter(value, requires_grad=False)
-            )
-        layer.weight_schema = object()
-        return {"shape": (256, 256), "scale_type": config["weight_scale_type"]}
-
-    monkeypatch.setattr(humming, "prepare_humming_linear_layer_config", pack)
+    cold_events = _stub_humming_processing_library(monkeypatch)
     test_fp8_reload_trace_humming_linear(
         default_vllm_config,
         dist_init,
@@ -1654,6 +1806,7 @@ def test_fp8_reload_trace_humming_linear_lifecycle(
         block,
         preserve,
         check_forward=False,
+        cold_events=cold_events,
     )
 
 
@@ -1667,6 +1820,7 @@ def test_fp8_reload_trace_humming_linear(
     block,
     preserve,
     check_forward=True,
+    cold_events=None,
 ):
     from vllm.utils.import_utils import has_humming
 
@@ -1683,6 +1837,7 @@ def test_fp8_reload_trace_humming_linear(
         False,
         preserve,
         check_forward=check_forward,
+        cold_events=cold_events,
     )
 
 

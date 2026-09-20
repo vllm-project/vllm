@@ -422,46 +422,152 @@ def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
     return False
 
 
+@dataclass(frozen=True)
+class HummingTensorProcessingPlan:
+    """Replay weight conversion with the schemas/config selected at cold load."""
+
+    source_schema: Any
+    weight_schema: Any
+    input_schema: Any
+    config: Any
+    shape_n_stacks: tuple[int, ...]
+    shape_k_stacks: tuple[int, ...]
+    param_dtype: torch.dtype
+    num_experts: int | None = None
+    already_standard: bool = False
+
+    def process(self, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        if not self.already_standard:
+            kwargs = {}
+            if self.num_experts is not None:
+                kwargs["num_experts"] = self.num_experts
+            schema, tensors = self.source_schema.convert_humming(
+                tensors=tensors,
+                shape_n_stacks=list(self.shape_n_stacks),
+                shape_k_stacks=list(self.shape_k_stacks),
+                param_dtype=self.param_dtype,
+                **kwargs,
+            )
+            if schema != self.weight_schema:
+                raise ValueError("Humming weight schema changed during processing")
+        from vllm.utils.humming import transform_humming_tensors
+
+        return transform_humming_tensors(self.config, tensors)
+
+
+@dataclass(frozen=True)
+class HummingLinearInputLayout:
+    """Checkpoint names and dimensions before Humming standardization."""
+
+    parameters: tuple[tuple[str, str, int, int], ...]
+
+    def process(self, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        values = dict(tensors)
+        for name, checkpoint_name, input_dim, output_dim in self.parameters:
+            tensor = values.pop(checkpoint_name)
+            if name == "weight":
+                if input_dim == 0 and output_dim == 1:
+                    tensor = tensor.transpose(1, 0).contiguous()
+                else:
+                    assert output_dim == 0 and input_dim == 1
+                tensor = tensor.view(tensor.size(0), -1).view(torch.int32)
+            elif name in ("weight_scale", "zero_point"):
+                if output_dim == 1:
+                    tensor = tensor.transpose(0, 1).contiguous()
+                if tensor.ndim == 1:
+                    tensor = tensor.unsqueeze(1)
+                if name == "zero_point":
+                    tensor = tensor.view(torch.int32)
+            values[name] = tensor
+        return values
+
+
+@dataclass(frozen=True)
+class HummingLinearProcessingPlan:
+    input_layout: HummingLinearInputLayout
+    conversion: HummingTensorProcessingPlan
+
+    def process(self, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return self.conversion.process(self.input_layout.process(tensors))
+
+
+@dataclass(frozen=True)
+class HummingFP8MoEProcessingPlan:
+    sublayers: tuple[tuple[str, HummingTensorProcessingPlan], ...]
+    scale_name: str
+    is_gated: bool
+
+    def process(self, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        values = dict(tensors)
+        if self.scale_name == "weight_scale" and self.is_gated:
+            scale = values["w13_weight_scale"]
+            experts = values["w13_weight"].shape[0]
+            if scale.numel() == experts:
+                values["w13_weight_scale"] = (
+                    scale.reshape(-1, 1).expand(-1, 2).contiguous()
+                )
+        outputs = {}
+        for prefix, plan in self.sublayers:
+            converted = plan.process(
+                {
+                    key.removeprefix(prefix + "_"): value
+                    for key, value in values.items()
+                    if key.startswith(prefix + "_")
+                }
+            )
+            outputs.update(
+                {f"{prefix}_{key}": value for key, value in converted.items()}
+            )
+            # Match the public FP8 scale aliases and checkpoint activation
+            # scales installed by the cold oracle/_setup_kernel path.
+            outputs[f"{prefix}_{self.scale_name}"] = converted["weight_scale"]
+            input_scale = values.get(f"{prefix}_input_scale")
+            if input_scale is not None:
+                outputs[f"{prefix}_input_scale"] = input_scale
+        return outputs
+
+
 def convert_linear_layer_to_humming_standard(
     layer: LinearBase, name_map: dict[str, str]
-):
+) -> HummingLinearInputLayout:
     """Rename/reshape a linear layer's quantized params (the canonical MPLinear
     layout: ``weight_packed`` int32 + ``weight_scale``) into the parameter names
     and layout humming's weight schema expects (``weight`` / ``weight_scale``)."""
-    for name, checkpoint_name in name_map.items():
-        tensor = getattr(layer, checkpoint_name)
+    layout = HummingLinearInputLayout(
+        tuple(
+            (
+                name,
+                checkpoint_name,
+                getattr(getattr(layer, checkpoint_name), "input_dim", 1),
+                getattr(getattr(layer, checkpoint_name), "output_dim", 0),
+            )
+            for name, checkpoint_name in name_map.items()
+        )
+    )
+    values = layout.process(
+        {
+            checkpoint_name: getattr(layer, checkpoint_name)
+            for checkpoint_name in name_map.values()
+        }
+    )
+    for checkpoint_name in name_map.values():
         delattr(layer, checkpoint_name)
-
-        if name == "weight":
-            input_dim = getattr(tensor, "input_dim", 1)
-            output_dim = getattr(tensor, "output_dim", 0)
-
-            if input_dim == 0 and output_dim == 1:
-                tensor = tensor.transpose(1, 0).contiguous()
-            else:
-                assert output_dim == 0 and input_dim == 1
-
-            tensor = tensor.view(tensor.size(0), -1).view(torch.int32)
-        elif name in ["weight_scale", "zero_point"]:
-            if getattr(tensor, "output_dim", 0) == 1:
-                tensor = tensor.transpose(0, 1).contiguous()
-            if tensor.ndim == 1:
-                tensor = tensor.unsqueeze(1)
-
-            tensor = tensor.view(torch.int32) if name == "zero_point" else tensor
-
+    for name, tensor in values.items():
         if isinstance(tensor, torch.nn.Parameter):
             param = tensor
         else:
             param = torch.nn.Parameter(tensor, requires_grad=False)
 
         setattr(layer, name, param)
+    return layout
 
 
 def prepare_humming_linear_layer_config(
     layer: LinearBase,
     quant_config: dict,
     input_quant_config: dict | None = None,
+    *,
+    record_processing_plan: bool = False,
 ) -> "LayerConfig":
     from vllm.utils.humming import (
         BaseInputSchema,
@@ -472,10 +578,15 @@ def prepare_humming_linear_layer_config(
     )
 
     weight_schema = BaseWeightSchema.from_config(quant_config)
+    source_schema = weight_schema
     if input_quant_config is not None:
         input_schema = BaseInputSchema.from_config(input_quant_config)
     else:
         input_schema = HummingInputSchema()
+    if record_processing_plan and not isinstance(input_schema, HummingInputSchema):
+        raise ValueError(
+            "FP8 processing plans require a tensor-independent input schema"
+        )
 
     # ReplicatedLinear has no TP partitioning and so does not set
     # input_size_per_partition; for it that is just input_size. Use hasattr
@@ -516,6 +627,16 @@ def prepare_humming_linear_layer_config(
         torch_dtype=layer.params_dtype,
     )
     tensors = transform_humming_tensors(config, tensors)
+    if record_processing_plan:
+        layer.humming_tensor_processing_plan = HummingTensorProcessingPlan(
+            source_schema,
+            weight_schema,
+            input_schema,
+            config,
+            tuple(shape_n_stacks),
+            tuple(shape_k_stacks),
+            layer.params_dtype,
+        )
     for name, _ in list(layer.named_parameters()):
         delattr(layer, name)
     for name, tensor in tensors.items():
@@ -930,6 +1051,7 @@ def _process_single_sublayer(
     num_experts: int,
     param_dtype: torch.dtype,
     force_weight_schema: Any | None = None,
+    record_processing_plan: bool = False,
 ) -> tuple[Any, Any, "LayerConfig"]:
     """
     Process a single sublayer: convert, optionally requant, prepare, and transform.
@@ -948,6 +1070,7 @@ def _process_single_sublayer(
         num_experts: Number of experts
         param_dtype: Parameter data type
         force_weight_schema: Optional schema to force requantization to
+        record_processing_plan: Retain cold schemas/config for FP8 tensor replay.
 
     Returns:
         Tuple of the final weight schema, input schema, and Humming layer config.
@@ -993,6 +1116,23 @@ def _process_single_sublayer(
         num_experts=num_experts,
         param_dtype=param_dtype,
     )
+    if record_processing_plan:
+        shape_n_stacks = (
+            (shape_n // 2, shape_n // 2)
+            if sublayer_name == "w13" and layer.moe_config.activation.is_gated
+            else (shape_n,)
+        )
+        layer.humming_processing_plans[sublayer_name] = HummingTensorProcessingPlan(
+            weight_schema,
+            current_weight_schema,
+            current_input_schema,
+            config,
+            shape_n_stacks,
+            (shape_k,),
+            param_dtype,
+            num_experts,
+            isinstance(weight_schema, HummingWeightSchema),
+        )
 
     return current_weight_schema, current_input_schema, config
 
@@ -1004,6 +1144,8 @@ def convert_to_humming_moe_kernel_format(
     weight_schema: Any | None = None,
     input_schema: Any | None = None,
     force_weight_schema: Any | None = None,
+    *,
+    record_processing_plan: bool = False,
 ) -> dict[str, "LayerConfig"]:
     """
     Convert MoE weights from checkpoint format to Humming kernel format.
@@ -1027,12 +1169,19 @@ def convert_to_humming_moe_kernel_format(
         input_schema: Optional initial input quantization schema.
                      If None, built from quant_config or env vars.
         force_weight_schema: Optional schema to force requantization to
+        record_processing_plan: Record fixed FP8 conversion plans. Forced
+            requantization and value-dependent input schemas are unsupported.
 
     Side effects:
         - Modifies layer parameters in place
         - Sets layer.weight_schemas and layer.input_schemas
         - Sets layer.humming_configs for quant config construction
     """
+
+    if record_processing_plan and force_weight_schema is not None:
+        raise ValueError("Humming FP8 processing plans do not support forced requant")
+    if record_processing_plan:
+        layer.humming_processing_plans = {}
 
     # Build schemas from quant_config if not provided
     has_bias = layer.moe_config.has_bias
@@ -1060,6 +1209,14 @@ def convert_to_humming_moe_kernel_format(
             else:
                 # TODO: read input_quant_config from quant_config
                 input_schema = HummingInputSchema.from_config(input_quant_config)
+
+    if record_processing_plan:
+        from vllm.utils.humming import HummingInputSchema
+
+        if not isinstance(input_schema, HummingInputSchema):
+            raise ValueError(
+                "FP8 processing plans require a tensor-independent input schema"
+            )
 
     # Build sublayer configs from layer properties if not provided
     if sublayer_configs is None:
@@ -1093,6 +1250,7 @@ def convert_to_humming_moe_kernel_format(
                 num_experts=num_experts,
                 param_dtype=param_dtype,
                 force_weight_schema=force_weight_schema,
+                record_processing_plan=record_processing_plan,
             )
         )
 

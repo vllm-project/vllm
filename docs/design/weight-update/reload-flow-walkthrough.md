@@ -2,6 +2,8 @@
 
 本文描述当前代码中的 `reload_mode="trace"` 路径，而不是早期的全模型原子提交提案。
 建议先读流程图和示例，再对照 [policy 存储布局排查表](reload-loading-layout.md)。
+其他离线量化的覆盖范围与接入步骤见
+[离线量化 Reload 接入排查与实施指南](offline-quantization-reload-integration.md)。
 
 最重要的三条：
 
@@ -204,7 +206,11 @@ flowchart TD
 这里 `prepare_for_load()` 是当前已适配 policy 的内部约定，
 不是 tracer 直接调用的新增必选 Protocol 方法。
 FP8 policy 通过 `_CanonicalReloadPolicy.destination()` 共用这段逻辑；
-`CopyReloadPolicy` 实现等价入口。暂缓的 Marlin/Humming 仍保留原 destination 路径。
+`CopyReloadPolicy` 实现等价入口。Marlin/Humming 也使用统一准备入口，
+但 packed 权重仍暂存；只有 policy 允许且 dtype、容量、布局兼容的 scale/bias
+才会复用 runtime storage。打包转换调用冷加载保存的 processing plan，
+不构造临时 layer/shell、不重新创建配置或初始化 workspace，也不重建 live kernel。
+具体调用边界见 [Marlin/Humming processing plans](reload-loading-layout.md#marlinhumming-processing-plans)。
 
 `prepare_sources()` 不负责判断某个后端的转换是否适合复用；policy 先声明 `reuse_roles`。
 它再检查 dtype、容量、canonical 布局和 runtime 稠密性，构造共享 storage 的加载 view。

@@ -4,10 +4,9 @@
 
 import inspect
 import math
-from copy import copy, deepcopy
+from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from functools import partial
-from types import SimpleNamespace
 from typing import Literal
 
 import torch
@@ -136,7 +135,7 @@ class TensorFP8LinearReloadPolicy(_CanonicalReloadPolicy):
 
 @dataclass
 class HummingFP8LinearReloadPolicy(TensorFP8LinearReloadPolicy):
-    """Pack a temporary layer, retaining Humming's live config and all buffers."""
+    """Replay the cold processing plan without constructing a layer or config."""
 
     block_quant: bool = False
 
@@ -144,6 +143,7 @@ class HummingFP8LinearReloadPolicy(TensorFP8LinearReloadPolicy):
         super().bind(state)
         layer = state.module
         self.layer_config = self.kernel.layer_config
+        self.plan = self.kernel.processing_plan
         self.compute_config = self.kernel.compute_config
         self.weight_schema = layer.weight_schema
         self.parameters = tuple(dict(layer.named_parameters(recurse=False)))
@@ -165,6 +165,8 @@ class HummingFP8LinearReloadPolicy(TensorFP8LinearReloadPolicy):
         super().validate(state)
         if (
             self.kernel.layer_config is not self.layer_config
+            or self.kernel.processing_plan is not self.plan
+            or self.plan.conversion.config is not self.layer_config
             or self.kernel.compute_config != self.compute_config
             or state.module.weight_schema is not self.weight_schema
             or any(
@@ -174,17 +176,16 @@ class HummingFP8LinearReloadPolicy(TensorFP8LinearReloadPolicy):
         ):
             raise ReloadError("Humming linear configuration changed since binding")
 
-    def destination(
-        self, state: ReloadState, role: str, bound: inspect.BoundArguments
-    ) -> torch.Tensor:
-        self.validate(state)
-        return state.source(role)
+    def prepare_for_load(self, state: ReloadState) -> None:
+        # Packed int32 weights have no same-dtype FP8 loading view. Scales
+        # (including renamed block scales) and bias may lend dense storage.
+        # Missing, encoded or undersized targets automatically use staging.
+        state.prepare_sources(
+            reuse_roles=tuple(role for role in state.roles if role != "weight")
+        )
 
     def finish(self, state: ReloadState) -> None:
         self.validate(state)
-        temporary = torch.nn.Module()
-        for name, value in self.layer_metadata.items():
-            setattr(temporary, name, value)
         if self.block_quant:
             values = {role: state.work(role) for role in state.roles}
         else:
@@ -194,16 +195,8 @@ class HummingFP8LinearReloadPolicy(TensorFP8LinearReloadPolicy):
                 values["input_scale"] = input_scale.max()
             if "bias" in state.roles:
                 values["bias"] = state.work("bias")
-        for name, value in values.items():
-            parameter = torch.nn.Parameter(value.detach(), requires_grad=False)
-            # Cold block parameters retain loader dimension attributes, while
-            # non-block processing replaces them before Humming conversion.
-            if self.block_quant:
-                parameter.__dict__.update(state.metadata[name].__dict__)
-            temporary.register_parameter(name, parameter)
-        config = self.kernel.prepare_weights(temporary)
-        converted = dict(temporary.named_parameters(recurse=False))
-        if config != self.layer_config or set(converted) != set(self.parameters):
+        converted = self.plan.process(values)
+        if set(converted) != set(self.parameters):
             raise ReloadError("Humming conversion changed the runtime schema")
         # Validate every output before the first live write.
         for name, value in converted.items():
@@ -591,13 +584,14 @@ class DeepGEMMReloadPolicy(_CanonicalReloadPolicy):
 
 
 @dataclass
-class MarlinFP8LinearReloadPolicy:
-    """Pack checkpoint tensors on a shell, preserving live Marlin storage."""
+class MarlinFP8LinearReloadPolicy(_CanonicalReloadPolicy):
+    """Replay packing with fixed layout metadata and no workspace allocation."""
 
     block_quant: bool
 
     def bind(self, state: ReloadState) -> None:
         self.kernel = state.module.quant_method.fp8_linear
+        self.plan = state.module.fp8_marlin_processing_plan
         self.input_dtype = self.kernel.marlin_input_dtype
         state.bind_target("workspace", partial(getattr, state.module, "workspace"))
         self.layout = self._layout(state)
@@ -615,23 +609,21 @@ class MarlinFP8LinearReloadPolicy:
     def validate(self, state: ReloadState) -> None:
         if (
             state.module.quant_method.fp8_linear is not self.kernel
+            or state.module.fp8_marlin_processing_plan is not self.plan
             or self.kernel.marlin_input_dtype != self.input_dtype
             or self._layout(state) != self.layout
         ):
             raise ReloadError("Marlin kernel/layout changed since runtime binding")
 
-    def destination(
-        self, state: ReloadState, role: str, bound: inspect.BoundArguments
-    ) -> torch.Tensor:
-        self.validate(state)
-        return state.source(role)
+    def prepare_for_load(self, state: ReloadState) -> None:
+        # Weight packing changes FP8 to int32; scales include an exponent-bias
+        # conversion to the activation dtype. Do not reinterpret either one.
+        # Bias permutation/padding is repeatable over a canonical loading view.
+        state.prepare_sources(reuse_roles=("bias",))
 
     def finish(self, state: ReloadState) -> None:
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             process_fp8_weight_block_strategy,
-        )
-        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-            prepare_fp8_layer_for_marlin,
         )
 
         self.validate(state)
@@ -641,34 +633,15 @@ class MarlinFP8LinearReloadPolicy:
             weight, scale = process_fp8_weight_block_strategy(weight, scale)
         else:
             weight = weight.t()
-        shell = torch.nn.Module()
-        for name in (
-            "input_size_per_partition",
-            "output_size_per_partition",
-            "logical_widths",
-            "orig_dtype",
-        ):
-            setattr(shell, name, getattr(state.module, name))
-        if self.block_quant:
-            shell.weight_block_size = list(state.module.weight_block_size)
-        shell.weight = torch.nn.Parameter(weight.detach(), requires_grad=False)
-        shell.register_parameter(
-            scale_name, torch.nn.Parameter(scale.detach(), requires_grad=False)
+        weight, scale, bias = self.plan.process(
+            weight,
+            scale,
+            state.work("bias") if "bias" in state.roles else None,
         )
-        if "bias" in state.roles:
-            shell.bias = torch.nn.Parameter(
-                state.work("bias").detach(), requires_grad=False
-            )
-        # The helper zeros its workspace; never pass the graph-bound live one.
-        shell.workspace = torch.empty_like(state.targets["workspace"].tensor)
-        prepare_fp8_layer_for_marlin(
-            shell, size_k_first=not self.block_quant, input_dtype=self.input_dtype
-        )
-        for role in state.roles:
-            # Marlin consumes BF16/FP16 activations; cold loading discards this
-            # checkpoint scale, but its arrival still participates in readiness.
-            if role != "input_scale":
-                state.copy_(role, getattr(shell, role))
+        state.copy_("weight", weight)
+        state.copy_(scale_name, scale)
+        if bias is not None:
+            state.copy_("bias", bias)
 
 
 @dataclass
@@ -755,11 +728,12 @@ class PlainMoEReloadPolicy(_CanonicalReloadPolicy):
 
 @dataclass
 class HummingMoEReloadPolicy(PlainMoEReloadPolicy):
-    """Convert staged experts without replacing Humming's live tensor bindings."""
+    """Convert expert tensors with cold-bound Humming schemas and configs."""
 
     def bind(self, state: ReloadState) -> None:
         super().bind(state)
         layer = state.module
+        self.plan = layer.fp8_humming_processing_plan
         self.moe_config = layer.moe_config
         self.humming_configs = layer.humming_configs
         self.weight_schemas = layer.weight_schemas
@@ -790,61 +764,33 @@ class HummingMoEReloadPolicy(PlainMoEReloadPolicy):
         layer = state.module
         if (
             layer.moe_config is not self.moe_config
+            or layer.fp8_humming_processing_plan is not self.plan
             or layer.humming_configs is not self.humming_configs
             or layer.weight_schemas is not self.weight_schemas
             or layer.input_schemas is not self.input_schemas
             or self._layout(layer) != self.layout
+            or any(
+                self.humming_configs.get(prefix) is not plan.config
+                or self.weight_schemas.get(prefix) is not plan.weight_schema
+                or self.input_schemas.get(prefix) is not plan.input_schema
+                for prefix, plan in self.plan.sublayers
+            )
         ):
             raise ReloadError("Humming MoE configuration changed since binding")
 
-    def destination(
-        self, state: ReloadState, role: str, bound: inspect.BoundArguments
-    ) -> torch.Tensor:
-        self.validate(state)
-        return state.source(role)
+    def prepare_for_load(self, state: ReloadState) -> None:
+        # Only source roles participate: Humming's additional derived scales
+        # must remain output targets, never independent checkpoint destinations.
+        state.prepare_sources(
+            reuse_roles=tuple(
+                role for role in state.roles if role not in ("w13_weight", "w2_weight")
+            )
+        )
 
     def finish(self, state: ReloadState) -> None:
-        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-            convert_to_fp8_moe_kernel_format,
-        )
-
         values = self._checkpoint_values(state)
-        temporary = torch.nn.Module()
-        temporary.moe_config = copy(self.moe_config)
-        temporary.params_dtype = state.module.params_dtype
-        temporary.layer_name = state.module.layer_name
-        if self.block_quant:
-            temporary.weight_block_size = list(state.module.weight_block_size)
-        for name, value in values.items():
-            temporary.register_parameter(
-                name, torch.nn.Parameter(value.detach(), requires_grad=False)
-            )
-        scale_name = "weight_scale_inv" if self.block_quant else "weight_scale"
-        w13, w2, s13, s2 = convert_to_fp8_moe_kernel_format(
-            self.backend,
-            temporary,
-            values["w13_weight"],
-            values["w2_weight"],
-            values[f"w13_{scale_name}"],
-            values[f"w2_{scale_name}"],
-            values.get("w13_input_scale"),
-            values.get("w2_input_scale"),
-        )
-        # Match Fp8MoEMethod._setup_kernel's public scale aliases, without
-        # constructing or touching a kernel on the live module.
-        for name, value in (
-            ("w13_weight", w13),
-            ("w2_weight", w2),
-            (f"w13_{scale_name}", s13),
-            (f"w2_{scale_name}", s2),
-        ):
-            temporary.register_parameter(
-                name, torch.nn.Parameter(value.detach(), requires_grad=False)
-            )
-        converted = dict(temporary.named_parameters(recurse=False))
-        if temporary.humming_configs != self.humming_configs or set(converted) != set(
-            self.parameters
-        ):
+        converted = self.plan.process(values)
+        if set(converted) != set(self.parameters):
             raise ReloadError("Humming MoE conversion changed the runtime schema")
         for name, value in converted.items():
             target = state.targets[f"humming.{name}"].tensor
@@ -934,10 +880,11 @@ class PlannedMoEReloadPolicy(_CanonicalReloadPolicy):
 
 @dataclass
 class MarlinMoEReloadPolicy(PlainMoEReloadPolicy):
-    """Normalize expert shards, then repack without mutating the live layer."""
+    """Normalize expert shards and replay the cold-bound packing plan."""
 
     def bind(self, state: ReloadState) -> None:
         super().bind(state)
+        self.plan = state.module.fp8_marlin_processing_plan
         state.bind_target("workspace", partial(getattr, state.module, "workspace"))
         self.layout = self._layout(state)
 
@@ -958,37 +905,24 @@ class MarlinMoEReloadPolicy(PlainMoEReloadPolicy):
 
     def validate(self, state: ReloadState) -> None:
         super().validate(state)
-        if self._layout(state) != self.layout:
+        if (
+            state.module.fp8_marlin_processing_plan is not self.plan
+            or self._layout(state) != self.layout
+        ):
             raise ReloadError("Marlin expert layout changed since runtime binding")
 
-    def destination(
-        self, state: ReloadState, role: str, bound: inspect.BoundArguments
-    ) -> torch.Tensor:
-        self.validate(state)
-        return state.source(role)
-
-    def finish(self, state: ReloadState) -> None:
-        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-            prepare_fp8_moe_layer_for_marlin,
+    def prepare_for_load(self, state: ReloadState) -> None:
+        # Packed weights and exponent-adjusted FP16/BF16 scales stay separate
+        # from FP8/FP32 loader inputs. Activation scales can reuse dense storage.
+        state.prepare_sources(
+            reuse_roles=tuple(role for role in state.roles if "input_scale" in role)
         )
 
+    def finish(self, state: ReloadState) -> None:
         values = self._checkpoint_values(state)
         suffix = "weight_scale_inv" if self.block_quant else "weight_scale"
         names = ("w13_weight", "w2_weight", f"w13_{suffix}", f"w2_{suffix}")
-        shell = SimpleNamespace(
-            num_experts=state.module.num_experts,
-            hidden_size=state.module.hidden_size,
-            intermediate_size_per_partition=state.module.intermediate_size_per_partition,
-            weight_block_size=(
-                list(state.module.weight_block_size) if self.block_quant else None
-            ),
-            orig_dtype=state.module.orig_dtype,
-            w13_weight=values["w13_weight"],
-            workspace=torch.empty_like(state.targets["workspace"].tensor),
-        )
-        converted = prepare_fp8_moe_layer_for_marlin(
-            shell, *(values[name] for name in names)
-        )
+        converted = self.plan.process(*(values[name] for name in names))
         values.update(zip(names, converted))
         for role, value in values.items():
             state.copy_(role, value)

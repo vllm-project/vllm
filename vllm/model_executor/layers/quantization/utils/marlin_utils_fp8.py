@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from dataclasses import dataclass
+
 import torch
 
 import vllm._custom_ops as ops
@@ -102,6 +104,26 @@ def apply_fp8_marlin_linear(
     return output.reshape(out_shape)
 
 
+@dataclass(frozen=True)
+class MarlinFP8LinearProcessingPlan:
+    """Cold-selected layout; processing never installs parameters or workspace."""
+
+    size_n: int
+    size_k: int
+    padded_n: int
+    padded_k: int
+    logical_widths: tuple[int, ...]
+    block_shape: tuple[int, ...] | None
+    orig_dtype: torch.dtype
+    input_dtype: torch.dtype | None
+    size_k_first: bool
+
+    def process(
+        self, weight: torch.Tensor, scales: torch.Tensor, bias: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        return _process_fp8_linear_for_marlin(self, weight, scales, bias)
+
+
 def prepare_fp8_layer_for_marlin(
     layer: torch.nn.Module,
     size_k_first: bool = True,
@@ -122,21 +144,52 @@ def prepare_fp8_layer_for_marlin(
     group_size = -1 if weight_block_size is None else weight_block_size[1]
     padded_n, padded_k = marlin_padded_nk(part_size_n, part_size_k, group_size)
 
-    if size_k_first:
-        assert layer.weight.shape == (part_size_k, part_size_n)
-    else:
-        assert layer.weight.shape == (part_size_n, part_size_k)
-
-    device = layer.weight.device
-
-    # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(
-        device, existing=getattr(layer, "workspace", None)
+    plan = MarlinFP8LinearProcessingPlan(
+        part_size_n,
+        part_size_k,
+        padded_n,
+        padded_k,
+        tuple(getattr(layer, "logical_widths", ())),
+        tuple(weight_block_size) if weight_block_size is not None else None,
+        layer.orig_dtype,
+        input_dtype,
+        size_k_first,
     )
+    scale_name = (
+        "weight_scale" if hasattr(layer, "weight_scale") else "weight_scale_inv"
+    )
+    weight, scales, bias = plan.process(
+        layer.weight, getattr(layer, scale_name), getattr(layer, "bias", None)
+    )
+    layer.workspace = marlin_make_workspace_new(
+        layer.weight.device, existing=getattr(layer, "workspace", None)
+    )
+    replace_parameter(layer, "weight", weight)
+    replace_parameter(layer, scale_name, scales)
+    if bias is not None:
+        replace_parameter(layer, "bias", bias)
+    layer.fp8_marlin_processing_plan = plan
+
+
+def _process_fp8_linear_for_marlin(
+    plan: MarlinFP8LinearProcessingPlan,
+    weight: torch.Tensor,
+    scales: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    part_size_n, part_size_k = plan.size_n, plan.size_k
+    padded_n, padded_k = plan.padded_n, plan.padded_k
+    weight_block_size = plan.block_shape
+    group_size = -1 if weight_block_size is None else weight_block_size[1]
+    size_k_first = plan.size_k_first
+    if size_k_first:
+        assert weight.shape == (part_size_k, part_size_n)
+    else:
+        assert weight.shape == (part_size_n, part_size_k)
 
     # WEIGHT
     # Repack weights to marlin format
-    qweight = pack_fp8_to_int32(layer.weight, size_k_first)
+    qweight = pack_fp8_to_int32(weight, size_k_first)
     if not size_k_first:
         qweight = qweight.T.contiguous()
     qweight = marlin_pad_qweight(qweight, part_size_n, part_size_k, padded_n, padded_k)
@@ -147,19 +200,14 @@ def prepare_fp8_layer_for_marlin(
         size_n=padded_n,
         num_bits=8,
     )
-    replace_parameter(layer, "weight", marlin_qweight)
-
     # WEIGHT SCALES
     # Permute scales
-    if "weight_scale" in dir(layer):
-        scales = layer.weight_scale.to(layer.orig_dtype)
-    elif "weight_scale_inv" in dir(layer):
-        scales = layer.weight_scale_inv.to(layer.orig_dtype)
+    scales = scales.to(plan.orig_dtype)
 
     # marlin kernel only support channel-wise and group-wise quantization
     # we need to convert the scales
     if weight_block_size is None:
-        logical_widths = getattr(layer, "logical_widths", [])
+        logical_widths = plan.logical_widths
         if scales.nelement() == 1:
             # tensor-wise quantization -> channel-wise quantization
             # (1, 1) =>(repeat)=> (1, size_n)
@@ -202,17 +250,12 @@ def prepare_fp8_layer_for_marlin(
     marlin_scales = marlin_permute_scales(
         s=scales, size_k=padded_k, size_n=padded_n, group_size=group_size
     )
-    if input_dtype != torch.float8_e4m3fn:
+    if plan.input_dtype != torch.float8_e4m3fn:
         marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
-    if hasattr(layer, "weight_scale"):
-        replace_parameter(layer, "weight_scale", marlin_scales)
-    elif hasattr(layer, "weight_scale_inv"):
-        replace_parameter(layer, "weight_scale_inv", marlin_scales)
-
-    if hasattr(layer, "bias") and layer.bias is not None:
-        assert layer.bias.shape == (part_size_n,)
-        bias = marlin_permute_bias(marlin_pad_dim(layer.bias, part_size_n, padded_n))
-        replace_parameter(layer, "bias", bias)
+    if bias is not None:
+        assert bias.shape == (part_size_n,)
+        bias = marlin_permute_bias(marlin_pad_dim(bias, part_size_n, padded_n))
+    return marlin_qweight, marlin_scales, bias
 
 
 def _moe_pad_shard_rows(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
@@ -232,6 +275,28 @@ def _moe_pad_last(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
     if padded_n == n:
         return x
     return torch.nn.functional.pad(x, (0, padded_n - n))
+
+
+@dataclass(frozen=True)
+class MarlinFP8MoEProcessingPlan:
+    """Expert packing layout independent of placement and live layer state."""
+
+    num_experts: int
+    hidden_size: int
+    intermediate_size: int
+    padded_intermediate_size: int
+    block_shape: tuple[int, ...] | None
+    orig_dtype: torch.dtype
+    input_dtype: torch.dtype | None
+
+    def process(
+        self,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        s13: torch.Tensor,
+        s2: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return _process_fp8_moe_for_marlin(self, w13, w2, s13, s2)
 
 
 def prepare_fp8_moe_layer_for_marlin(
@@ -259,26 +324,46 @@ def prepare_fp8_moe_layer_for_marlin(
     if input_dtype is not None and input_dtype.itemsize == 1:
         raise NotImplementedError("Marlin W8A8 is not supported.")
 
-    e = layer.num_experts
-    k = layer.hidden_size
     n = layer.intermediate_size_per_partition
-    w13_n = w13_weight.size(1)
     weight_block_size = getattr(layer, "weight_block_size", None)
     group_size = -1 if weight_block_size is None else weight_block_size[1]
+    plan = MarlinFP8MoEProcessingPlan(
+        layer.num_experts,
+        layer.hidden_size,
+        n,
+        marlin_moe_padded_intermediate(n, group_size),
+        tuple(weight_block_size) if weight_block_size is not None else None,
+        layer.orig_dtype,
+        input_dtype,
+    )
+    converted = plan.process(w13_weight, w2_weight, w13_weight_scale, w2_weight_scale)
+    layer.workspace = marlin_make_workspace_new(
+        layer.w13_weight.device, 4, existing=getattr(layer, "workspace", None)
+    )
+    layer.fp8_marlin_processing_plan = plan
+    return converted
+
+
+def _process_fp8_moe_for_marlin(
+    plan: MarlinFP8MoEProcessingPlan,
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    e, k, n = plan.num_experts, plan.hidden_size, plan.intermediate_size
+    w13_n = w13_weight.size(1)
+    weight_block_size = plan.block_shape
+    group_size = -1 if weight_block_size is None else weight_block_size[1]
+    input_dtype = plan.input_dtype
 
     # Pad a tile-misaligned intermediate size to a valid Marlin thread tile.
     # FP8 zero decodes to 0.0, so padded weights drop out; the converted scales
     # are padded to match below (the padded values are irrelevant).
-    padded_n = marlin_moe_padded_intermediate(n, group_size)
+    padded_n = plan.padded_intermediate_size
     if padded_n != n:
         w13_weight = _moe_pad_shard_rows(w13_weight, n, padded_n)
         w2_weight = _moe_pad_last(w2_weight, n, padded_n)
-
-    # WORKSPACE
-    device = layer.w13_weight.device
-    layer.workspace = marlin_make_workspace_new(
-        device, 4, existing=getattr(layer, "workspace", None)
-    )
 
     # WEIGHT
     # Repack weights to marlin format
@@ -302,7 +387,7 @@ def prepare_fp8_moe_layer_for_marlin(
     # WEIGHT SCALES
     # Permute scales (convert at the original size, then pad to the tile).
     def permute_scales(scales: torch.Tensor, name: str) -> torch.Tensor:
-        scales = scales.to(layer.orig_dtype)
+        scales = scales.to(plan.orig_dtype)
         tensor_list = []
         if "w13" in name:
             size_n, size_k = w13_n, k

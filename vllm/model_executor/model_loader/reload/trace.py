@@ -271,10 +271,19 @@ class ReloadState:
         runtime_modified: Conservative marker that runtime writes may have begun.
             It is set before writes and is neither a byte counter nor rollback.
         runtime_names: Optional checkpoint-role to runtime-attribute mapping.
+            Each key is a cold-load parameter attribute name from ``roles``,
+            relative to ``module``, not a full checkpoint file key.
+            Each string value is the attribute name on the same module after
+            cold PWAL; bind_runtime resolves it with getattr(module, value)
+            and stores the target under the original role key.
+            An omitted key defaults to the same attribute name as the role.
+            For example, ``{"weight_scale_inv": "weight_scale"}`` binds the
+            checkpoint role ``weight_scale_inv`` to ``module.weight_scale``.
             Renamed parameters are exposed under their checkpoint names only
             during a reload round; the canonical runtime objects never change.
-            A None value denotes an input consumed by conversion with no
-            corresponding runtime tensor, such as a discarded activation scale.
+            A None value disables automatic target binding for that input role,
+            such as a discarded activation scale. If the input produces
+            multiple outputs, policy.bind must explicitly bind those targets.
 
     Example:
         An FP8 linear unit can use ``roles=("weight", "weight_scale_inv")``.

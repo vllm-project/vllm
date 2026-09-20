@@ -165,6 +165,92 @@ def test_reload_trace_cutlass_prepares_scale_layout(block, preserve):
     )
 
 
+@pytest.mark.parametrize("backend", ["marlin", "humming"])
+@pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("encoded_scale", [False, True])
+def test_reload_trace_packed_policy_loading_sources(
+    backend, moe, preserve, encoded_scale
+):
+    """Packed weights stage; only compatible scale/bias inputs borrow storage."""
+    from vllm.model_executor.model_loader.reload.fp8 import (
+        HummingFP8LinearReloadPolicy,
+        HummingMoEReloadPolicy,
+        MarlinFP8LinearReloadPolicy,
+        MarlinMoEReloadPolicy,
+    )
+
+    policies = {
+        ("marlin", False): MarlinFP8LinearReloadPolicy,
+        ("marlin", True): MarlinMoEReloadPolicy,
+        ("humming", False): HummingFP8LinearReloadPolicy,
+        ("humming", True): HummingMoEReloadPolicy,
+    }
+    kwargs: dict[str, bool | int] = dict(block_quant=True)
+    if moe:
+        kwargs.update(is_act_and_mul=True, shard_size=4, num_experts=2)
+    policy = policies[backend, moe](**kwargs)
+    # Isolate destination allocation from backend initialization/kernel imports.
+    policy.validate = lambda state: None
+    prefixes = ("w13_", "w2_") if moe else ("",)
+    roles = tuple(
+        prefix + suffix
+        for prefix in prefixes
+        for suffix in ("weight", "weight_scale_inv")
+    ) + (() if moe else ("bias",))
+    layer = torch.nn.Module()
+    state = ReloadState("packed", layer, roles, policy)
+    state.preserve_checkpoint = preserve
+    for role in roles:
+        weight = role.endswith("weight")
+        meta_dtype = torch.float8_e4m3fn if weight else torch.float32
+        runtime_dtype = (
+            torch.int32
+            if weight or ("scale" in role and encoded_scale)
+            else torch.float32
+        )
+        runtime_name = (
+            role.replace("weight_scale_inv", "weight_scale")
+            if backend == "humming"
+            else role
+        )
+        state.runtime_names[role] = runtime_name
+        state.metadata[role] = to_meta_tensor(torch.empty(4, dtype=meta_dtype))
+        layer.register_parameter(
+            runtime_name,
+            torch.nn.Parameter(
+                torch.zeros(8, dtype=runtime_dtype), requires_grad=False
+            ),
+        )
+        state.bind_target(role, lambda name=runtime_name: getattr(layer, name))
+    # Extra Humming-derived outputs are not checkpoint inputs.
+    layer.derived_scale = torch.nn.Parameter(torch.ones(2), requires_grad=False)
+    state.bind_target("derived", lambda: layer.derived_scale)
+    bound = inspect.signature(default_weight_loader).bind(None, None)
+    first = policy.destination(state, roles[0], bound)
+    assert set(state.checkpoint) == set(roles)
+    assert policy.destination(state, roles[0], bound) is first
+    for role, source in state.checkpoint.items():
+        runtime = state.targets[role].tensor
+        aliases = (
+            source.untyped_storage().data_ptr() == runtime.untyped_storage().data_ptr()
+        )
+        expected = not preserve and (
+            role == "bias"
+            or (backend == "humming" and "scale" in role and not encoded_scale)
+        )
+        assert aliases == expected
+        assert source.shape == state.metadata[role].shape
+        assert source.dtype == state.metadata[role].dtype
+        source.copy_(torch.full((4,), 2, dtype=source.dtype))
+        state.targets[role].validate()
+        torch.testing.assert_close(
+            runtime[:4], torch.full((4,), 2 if aliases else 0, dtype=runtime.dtype)
+        )
+        torch.testing.assert_close(runtime[4:], torch.zeros(4, dtype=runtime.dtype))
+    torch.testing.assert_close(layer.derived_scale, torch.ones(2))
+
+
 @pytest.mark.parametrize("preserve", [False, True])
 @pytest.mark.parametrize(
     "layout,can_reuse",
