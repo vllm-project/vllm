@@ -211,6 +211,7 @@ async fn generate_chunk_stream(
                 };
 
                 let prompt_token_ids = prompt_token_ids.take();
+                let request_spec_decode_stats = output.spec_decode_metrics;
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
                     choices: vec![GenerateResponseStreamChoice {
@@ -223,6 +224,7 @@ async fn generate_chunk_stream(
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
                     mm_placeholders: prompt_token_ids.as_ref().and_then(|_| mm_placeholders.take()),
                     prompt_token_ids,
+                    request_spec_decode_stats,
                 })
                 .await;
             }
@@ -243,6 +245,7 @@ async fn generate_chunk_stream(
             usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
             prompt_token_ids: None,
             mm_placeholders: None,
+            request_spec_decode_stats: None,
         })
         .await;
     }
@@ -318,6 +321,7 @@ fn collect_generate(
         mm_placeholders: return_token_ids.then_some(mm_placeholders).flatten(),
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
+        request_spec_decode_stats: collected.spec_decode_metrics,
     })
 }
 
@@ -464,6 +468,7 @@ mod tests {
     use std::sync::Arc;
 
     use futures::{TryStreamExt as _, stream};
+    use vllm_engine_core_client::protocol::OpaqueValue;
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_llm::GeneratePromptInfo;
 
@@ -482,6 +487,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                spec_decode_metrics: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -496,6 +502,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                spec_decode_metrics: None,
             }),
         ]);
 
@@ -578,6 +585,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
+            spec_decode_metrics: None,
         }
     }
 
@@ -645,6 +653,21 @@ mod tests {
         assert!(chunks[1].mm_placeholders.is_none());
     }
 
+    #[tokio::test]
+    async fn generate_chunk_stream_returns_terminal_spec_decode_metrics() {
+        let metrics = OpaqueValue::Map(vec![(
+            OpaqueValue::from("num_draft_tokens"),
+            OpaqueValue::from(3),
+        )]);
+        let mut output = stream_output(None, Vec::new(), Some(FinishReason::stop_eos()));
+        output.spec_decode_metrics = Some(metrics.clone());
+
+        let chunks = collect_chunks(vec![output], false, None).await;
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].request_spec_decode_stats, Some(metrics));
+    }
+
     #[test]
     fn collect_generate_omits_prompt_metadata_by_default() {
         let output = CollectedGenerateOutput {
@@ -662,6 +685,7 @@ mod tests {
             ec_transfer_params: None,
             prompt_token_ids: vec![10, 20],
             sampling_mask: None,
+            spec_decode_metrics: None,
         };
 
         let response = collect_generate(
@@ -749,6 +773,7 @@ mod tests {
             ec_transfer_params: None,
             prompt_token_ids: vec![10, 20],
             sampling_mask: None,
+            spec_decode_metrics: None,
         };
 
         let response = collect_generate(
@@ -782,6 +807,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
+            spec_decode_metrics: None,
             prompt_token_ids,
         };
 

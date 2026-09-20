@@ -15,6 +15,7 @@ from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    build_spec_decoding_metrics,
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -384,6 +385,11 @@ class ServingTokens(GenerateBaseServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             mm_placeholders=request._response_mm_placeholders,
+            request_spec_decode_stats=(
+                build_spec_decoding_metrics(final_res)
+                if request.sampling_params.n == 1
+                else None
+            ),
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
@@ -450,9 +456,13 @@ class ServingTokens(GenerateBaseServing):
                     self._raise_if_error(finish_reason, request_id)
 
                     # Still emit a terminal empty chunk while prompt metadata
-                    # is pending, so zero-token completions deliver it.
+                    # or request metrics are pending.
                     if not delta_token_ids and (
-                        finish_reason is None or prompt_token_ids is None
+                        finish_reason is None
+                        or (
+                            prompt_token_ids is None
+                            and output.spec_decode_metrics is None
+                        )
                     ):
                         continue
 
@@ -484,6 +494,12 @@ class ServingTokens(GenerateBaseServing):
                                 routed_experts=routed_experts_b64,
                             )
                         ],
+                        request_spec_decode_stats=(
+                            None
+                            if sampling_params.n != 1
+                            or output.spec_decode_metrics is None
+                            else output.spec_decode_metrics.to_dict()
+                        ),
                     )
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids

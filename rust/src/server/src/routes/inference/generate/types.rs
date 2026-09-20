@@ -7,6 +7,7 @@ use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
+use vllm_engine_core_client::protocol::OpaqueValue;
 use vllm_text::SamplingParams;
 
 use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOptions, Usage};
@@ -84,6 +85,7 @@ pub(super) struct GenerateStreamResponse {
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
+    pub request_spec_decode_stats: Option<OpaqueValue>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
@@ -96,6 +98,7 @@ pub(super) struct GenerateResponse {
     pub mm_placeholders: Option<MultiModalPlaceholders>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
+    pub request_spec_decode_stats: Option<OpaqueValue>,
 }
 
 pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInfo>>;
