@@ -36,7 +36,7 @@ def test_kpool_indexer_dispatches_through_shared_topk_backend(backend: str) -> N
             scale_fmt="ue8m0",
             topk_tokens=2048,
             head_dim=128,
-            max_model_len=4096,
+            max_pool_len=4096,
             max_total_seq_len=8192,
             topk_indices_buffer=torch.empty(8, 2176, dtype=torch.int32, device="cuda"),
         )
