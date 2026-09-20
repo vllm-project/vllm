@@ -13,3 +13,14 @@ class WeightTransferConfig:
     """The backend to use for weight transfer. Validated against the
     `WeightTransferEngineFactory` registry at engine creation time.
     """
+
+    reload_mode: Literal["layerwise", "direct"] = "layerwise"
+    """How the `nccl` and `ipc` backends write received weights into the model.
+    `"layerwise"` loads each layer into a temporary copy, post-processes it and
+    copies it back: correct for every model. `"direct"` has each `weight_loader`
+    write into the live parameters with no post-processing: only for models
+    whose post-load step leaves the parameters as the checkpoint has them, and
+    nothing checks this. A failed direct update leaves the weights undefined
+    and the engine must be restarted. `sparse_nccl` and `sharded_rdt` ignore
+    this setting.
+    """
