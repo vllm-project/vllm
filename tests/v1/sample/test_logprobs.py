@@ -473,6 +473,7 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
         speculative_config=None,
         structured_outputs_config=None,
         tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
     )
     params = SamplingParams(prompt_logprob_token_ids=[1, 2])
     with patch.object(SamplingParams, "verify"):
