@@ -235,20 +235,21 @@ class Scheduler:
             self._n_read_batch_threads = n_read_threads or self.total_threads
             self._n_write_batch_threads = n_write_threads or self.total_threads
 
-        # Allow load threads share store jobs.
-        # - Store jobs are tied to engine running requests.
-        #   They are effectively bounded by engine forward pass.
-        #   i.e. they are relatively short and quick.
-        #
-        # Don't allow store threads to grab load jobs.
-        # - Load jobs are tied to engine waiting requests.
-        #   If we receive a lot of requests, we'd lock up the
-        #   the store threads from draining the store queue.
-        # - Load jobs maybe long. This will commit the store
-        # threads to long running loads, stalling the stores
-        # from draining.
+        # Read threads may always steal store jobs — stores are short and
+        # bounded by the engine forward pass.
         self._read_threads_can_write = True
-        self._write_threads_can_read = False or self._n_read_threads == 0
+
+        # Store threads steal from the load queue in small quanta so they
+        # can check back frequently for new store work.  The quanta is the
+        # running-mean store job size, updated on every store submission.
+        # When no read threads exist, write threads handle full load batches
+        # (no quanta restriction).  Stealing is gated on _avg_store_tasks > 0:
+        # until the first store job lands there is no calibrated quanta.
+        self._write_threads_can_read = True
+
+        # Running mean of store job sizes — used as the steal quanta.
+        self._avg_store_tasks: float = 0.0
+        self._n_store_jobs: int = 0
 
         # Work queues that the threads draw work from
         self._load_q: deque = deque()
@@ -276,26 +277,19 @@ class Scheduler:
             self._load_job_q.put(job_id, n_tasks)
         else:
             self._store_job_q.put(job_id, n_tasks)
+            # Update running mean — used as the steal quanta for write threads.
+            self._n_store_jobs += 1
+            self._avg_store_tasks += (
+                n_tasks - self._avg_store_tasks
+            ) / self._n_store_jobs
 
         # TODO(varun): unfortunate! - wake selectively
         return self._n_read_threads + self._n_write_threads
 
     def has_work(self, load_priority: bool):
-        is_read_thread = load_priority
-        has_load_work = self._load_q or self._load_job_q.maybe_has_work()
-        has_store_work = self._store_q or self._store_job_q.maybe_has_work()
-        if is_read_thread:
-            return (
-                has_load_work or has_store_work
-                if self._read_threads_can_write
-                else has_load_work
-            )
-        else:
-            return (
-                has_load_work or has_store_work
-                if self._write_threads_can_read
-                else has_store_work
-            )
+        has_load_work = bool(self._load_q or self._load_job_q.maybe_has_work())
+        has_store_work = bool(self._store_q or self._store_job_q.maybe_has_work())
+        return has_load_work or has_store_work
 
     def _batch_tasks(
         self,
@@ -334,7 +328,7 @@ class Scheduler:
             self._n_read_batch_threads if is_load else self._n_write_batch_threads
         )
         return [
-            (make_batch_fn(b), len(b), state)
+            (make_batch_fn, make_batch_fn(b), b, state)
             for b in self._batch_tasks(tasks, n_threads)
         ]
 
@@ -351,25 +345,51 @@ class Scheduler:
             return
         work_q.extend(self._jobs.pop(job_id))
 
+    @staticmethod
+    def _unpack(item: tuple) -> tuple:
+        """Unpack a work-queue item into the (fn, batch_size, state) the
+        worker expects."""
+        _, fn, tasks, state = item
+        return fn, len(tasks), state
+
+    def _steal_from_load_q(self) -> tuple:
+        """Pop the head of _load_q and return a quanta-sized work item.
+
+        The quanta is the running-mean store job size.  When no store jobs
+        have been observed yet (avg == 0), the full batch is taken.  If the
+        batch is larger than the quanta, the remainder is pushed back to the
+        front of _load_q for read threads (or future steal calls) to pick up.
+        """
+        make_batch_fn, fn, tasks, state = self._load_q.popleft()
+        quanta = int(self._avg_store_tasks) if self._avg_store_tasks > 0 else len(tasks)
+        if len(tasks) <= quanta:
+            return fn, len(tasks), state
+        # Split: steal the first `quanta` tasks, push remainder back to front.
+        steal_fn = make_batch_fn(tasks[:quanta])
+        remainder = tasks[quanta:]
+        self._load_q.appendleft(
+            (make_batch_fn, make_batch_fn(remainder), remainder, state)
+        )
+        return steal_fn, quanta, state
+
     def fetch_work(self, load_priority: bool):
         is_read_thread = load_priority
         if is_read_thread:
             self._maybe_populate_work_q(self._load_q, self._load_job_q)
             if self._load_q:
-                return self._load_q.popleft()
+                return self._unpack(self._load_q.popleft())
             if self._read_threads_can_write:
                 self._maybe_populate_work_q(self._store_q, self._store_job_q)
                 if self._store_q:
-                    return self._store_q.popleft()
+                    return self._unpack(self._store_q.popleft())
             return None
         else:
             self._maybe_populate_work_q(self._store_q, self._store_job_q)
             if self._store_q:
-                return self._store_q.popleft()
-            if self._write_threads_can_read:
-                self._maybe_populate_work_q(self._load_q, self._load_job_q)
-                if self._load_q:
-                    return self._load_q.popleft()
+                return self._unpack(self._store_q.popleft())
+            self._maybe_populate_work_q(self._load_q, self._load_job_q)
+            if self._load_q:
+                return self._steal_from_load_q()
             return None
 
     def clear(
@@ -380,3 +400,5 @@ class Scheduler:
         self._load_q.clear()
         self._store_q.clear()
         self._jobs.clear()
+        self._avg_store_tasks = 0.0
+        self._n_store_jobs = 0
