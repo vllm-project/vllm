@@ -72,6 +72,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+from vllm.models.deepseek_v4.sink import load_padded_attn_sink
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
@@ -1263,9 +1264,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 elif "attn_sink" in name:
                     if is_pp_missing_parameter(name, self):
                         continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
+                    load_padded_attn_sink(
+                        params_dict[name],
+                        loaded_weight,
+                        head_rank_start,
+                        head_rank_end,
+                    )
                     loaded_params.add(name)
                     continue
                 else:
