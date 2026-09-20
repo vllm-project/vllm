@@ -235,6 +235,20 @@ class Step3ToolParser(ToolParser):
                     )
                     if final_args:
                         final_args_json = json.dumps(final_args, ensure_ascii=False)
+                        # Record the emitted payload under the names the base
+                        # class reads. ``get_remaining_unstreamed_args()`` diffs
+                        # ``prev_tool_call_arr[-1]["arguments"]`` against
+                        # ``streamed_args_for_tool[-1]``; with neither written,
+                        # it reports arguments as still owed and the stream
+                        # finalizer appends them a second time.
+                        self.prev_tool_call_arr[self.current_tool_id]["arguments"] = (
+                            final_args_json
+                        )
+                        while len(self.streamed_args_for_tool) <= self.current_tool_id:
+                            self.streamed_args_for_tool.append("")
+                        self.streamed_args_for_tool[self.current_tool_id] = (
+                            final_args_json
+                        )
                         return DeltaMessage(
                             tool_calls=[
                                 DeltaToolCall(

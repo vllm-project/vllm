@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
@@ -9,6 +11,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTests,
 )
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.tool_parsers.step3_tool_parser import Step3ToolParser
 
 
 class TestStep3ToolParser(ToolParserTests):
@@ -110,3 +113,73 @@ class TestStep3ToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+
+class TestStep3RecordsStreamedArgs:
+    """step3 must record what it streamed, or the finalizer re-sends it.
+
+    ``DelegatingParser.finalize_generation`` runs ``_append_unstreamed_tool_args``
+    on every finished stream, appending ``get_remaining_unstreamed_args()`` to
+    the last tool call. That helper diffs ``prev_tool_call_arr[-1]["arguments"]``
+    against ``streamed_args_for_tool[-1]``, so a parser that emits arguments
+    without recording them gets the payload appended a second time and the
+    client sees concatenated JSON.
+    """
+
+    SINGLE_CALL = (
+        "<｜tool_calls_begin｜><｜tool_call_begin｜>"
+        '<steptml:invoke name="get_weather">'
+        '<steptml:parameter name="city">Paris</steptml:parameter>'
+        "</steptml:invoke><｜tool_call_end｜><｜tool_calls_end｜>"
+    )
+
+    @pytest.fixture(scope="class")
+    def tokenizer(self) -> TokenizerLike:
+        return get_tokenizer("stepfun-ai/step3")
+
+    @pytest.fixture
+    def parser(self, tokenizer) -> Step3ToolParser:
+        return Step3ToolParser(tokenizer)
+
+    @staticmethod
+    def _stream(parser: Step3ToolParser, text: str) -> str:
+        """Feed ``text`` one character at a time; return the arguments emitted."""
+        emitted: list[str] = []
+        previous = ""
+        for i in range(1, len(text) + 1):
+            current = text[:i]
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous,
+                current_text=current,
+                delta_text=current[len(previous) :],
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=None,
+            )
+            if delta is not None and delta.tool_calls:
+                for tool_call in delta.tool_calls:
+                    if tool_call.function and tool_call.function.arguments:
+                        emitted.append(tool_call.function.arguments)
+            previous = current
+        return "".join(emitted)
+
+    def test_streamed_arguments_are_recorded(self, parser):
+        emitted = self._stream(parser, self.SINGLE_CALL)
+
+        assert emitted, "parser emitted no arguments"
+        assert parser.streamed_args_for_tool == [emitted]
+
+    def test_nothing_is_owed_after_a_complete_call(self, parser):
+        self._stream(parser, self.SINGLE_CALL)
+
+        assert parser.get_remaining_unstreamed_args() == ""
+
+    def test_finalizer_does_not_duplicate_arguments(self, parser):
+        # What the client ends up with: the streamed deltas plus whatever the
+        # finalizer decides is still owed.
+        emitted = self._stream(parser, self.SINGLE_CALL)
+
+        final = emitted + parser.get_remaining_unstreamed_args()
+
+        assert json.loads(final) == {"city": "Paris"}
