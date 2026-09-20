@@ -87,6 +87,10 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         runtime_config = UMBPRuntimeConfig.from_vllm(
             vllm_config
         ).resolve_for_rank_count(topology.rank_count)
+        if runtime_config.mode == "embedded" and topology.pp_size > 1:
+            raise NotImplementedError(
+                "embedded UMBP does not support pipeline parallelism"
+            )
         runtime = UMBPRuntimeFactory.build(runtime_config)
         if (
             runtime_config.options.get("enable_partial_hash_hits", False)

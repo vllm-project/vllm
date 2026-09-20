@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     KVRegion,
     RankTopology,
     TransferJobState,
+    TransferJobStatus,
     UMBPConnectorMetadata,
     UMBPNamespace,
 )
@@ -120,6 +122,18 @@ def test_runtime_config_rejects_ambiguous_embedded_capacity():
                     "total_capacity_bytes": 4096,
                 }
             )
+        )
+
+
+def test_embedded_connector_rejects_pipeline_parallelism():
+    with pytest.raises(NotImplementedError, match="pipeline parallelism"):
+        UMBPStoreConnector(
+            _vllm_config(
+                {"mode": "embedded", "backend": "memory"},
+                pipeline_parallel_size=2,
+            ),
+            KVConnectorRole.SCHEDULER,
+            _kv_cache_config(),
         )
 
 
@@ -389,4 +403,82 @@ def test_mori_worker_reports_published_key_eviction(tmp_path):
     assert handle.batch_exists(["evicted-key"]) == [False]
     assert handle.take_evicted_keys() == ("evicted-key",)
     assert handle.take_evicted_keys() == ()
+    handle.close()
+
+
+def test_mori_store_cancellation_waits_before_source_reuse(tmp_path):
+    class _Client:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def register_memory(self, *args):
+            return True
+
+        def deregister_memory(self, *args):
+            return True
+
+        def batch_exists(self, keys):
+            return [False] * len(keys)
+
+        def batch_put_ranges_from_ptr(self, keys, *args):
+            self.started.set()
+            assert self.release.wait(5)
+            return [True] * len(keys)
+
+        def batch_get_ranges_into_ptr(self, keys, *args):
+            return [False] * len(keys)
+
+        def flush(self):
+            return True
+
+        def clear(self):
+            return True
+
+        def close(self):
+            pass
+
+    client = _Client()
+    source = torch.zeros(1024, dtype=torch.uint8)
+    handle = _MoriWorkerHandle(
+        client,
+        "cancel-reuse",
+        RankTopology(),
+        str(tmp_path),
+        1,
+        5,
+    )
+    handle.register_buffers({"layer0": source})
+    job = handle.store(
+        [
+            BlockTransferPlan(
+                "cancel-reuse-key",
+                0,
+                ranges=(
+                    KVRange(
+                        "layer0",
+                        0,
+                        0,
+                        source.data_ptr(),
+                        source.numel(),
+                        source.numel(),
+                        0,
+                    ),
+                ),
+            )
+        ]
+    )
+    assert client.started.wait(5)
+    result = []
+    cancelled = threading.Thread(target=lambda: result.append(handle.cancel(job)))
+    cancelled.start()
+    cancelled.join(0.1)
+    assert cancelled.is_alive()
+
+    client.release.set()
+    cancelled.join(5)
+    assert not cancelled.is_alive()
+    assert result[0].status is TransferJobStatus.COMPLETED
+
+    source.fill_(1)
     handle.close()

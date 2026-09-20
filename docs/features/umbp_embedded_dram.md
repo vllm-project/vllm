@@ -24,6 +24,10 @@ distributed runtime
 Standalone services, cross-engine sharing, cross-node access, RDMA, and SSD
 tiers are therefore not completion requirements for embedded mode.
 
+Embedded mode currently rejects pipeline parallelism (`PP > 1`). PP stages need
+a stage-specific KV ownership map before logical object completeness can be
+implemented safely.
+
 ## Data Path
 
 Embedded mode registers each rank's GPU KV buffers with MORI and transfers KV
@@ -156,11 +160,11 @@ Disk offloading is outside the embedded DRAM runtime's scope.
 - [x] Lazy offload with TP=4.
 - [ ] Store cancellation followed by immediate GPU block reuse.
 - [ ] Partial failure where one TP rank fails to publish an object.
-- [ ] Partial eviction where one TP rank loses an object before lookup.
+- [x] Partial eviction where one TP rank loses an object before lookup.
 - [x] Repeated eviction and restore cycles under a deliberately small DRAM
   capacity.
-- [ ] PP=2 serving-level restore.
-- [ ] TP=2 plus PP=2 serving-level restore.
+- [ ] PP=2 serving-level restore (unsupported in embedded mode).
+- [ ] TP=2 plus PP=2 serving-level restore (unsupported in embedded mode).
 - [ ] DCP serving-level restore.
 - [ ] Hybrid attention and Mamba model restore.
 - [ ] Multiple prefix-cacheable KV groups.
