@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -128,6 +129,7 @@ class StreamingUpdate:
     prompt: str | None
     prompt_token_ids: list[int] | None
     arrival_time: float
+    logprobs_processor: LogprobsProcessor | None
     final: bool = False
 
 
@@ -203,6 +205,8 @@ class RequestState:
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
         self.streaming_input = not update.final
+        if update.logprobs_processor is not None:
+            self.logprobs_processor = update.logprobs_processor
         # TODO also include relevant output tokens in new prompt here
         #     (match scheduler behavior).
         if update.prompt:
@@ -624,10 +628,50 @@ class OutputProcessor:
                 req_state.streaming_input = False
             return
 
+        sampling_params = request.sampling_params
+        assert sampling_params is not None
+        tokenizer = self.tokenizer if sampling_params.detokenize else None
+        new_logprobs_processor = LogprobsProcessor.from_new_request(
+            tokenizer=tokenizer,
+            request=request,
+        )
+        current_logprobs_processor = req_state.logprobs_processor
+        assert current_logprobs_processor is not None
+        if req_state.input_chunk_queue:
+            current_logprobs_processor = next(
+                (
+                    update.logprobs_processor
+                    for update in reversed(req_state.input_chunk_queue)
+                    if update.logprobs_processor is not None
+                ),
+                current_logprobs_processor,
+            )
+        same_logprobs_config = (
+            current_logprobs_processor.num_logprobs
+            == new_logprobs_processor.num_logprobs
+            and current_logprobs_processor.num_prompt_logprobs
+            == new_logprobs_processor.num_prompt_logprobs
+            and type(current_logprobs_processor.logprobs)
+            is type(new_logprobs_processor.logprobs)
+            and type(current_logprobs_processor.prompt_logprobs)
+            is type(new_logprobs_processor.prompt_logprobs)
+            and (current_logprobs_processor.tokenizer is None)
+            == (new_logprobs_processor.tokenizer is None)
+        )
+        if (
+            not same_logprobs_config
+            and req_state.output_kind != RequestOutputKind.DELTA
+        ):
+            raise VLLMValidationError(
+                "Changing logprob configuration between streaming input chunks "
+                "requires output_kind=DELTA."
+            )
+        logprobs_processor = None if same_logprobs_config else new_logprobs_processor
         update = StreamingUpdate(
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
             arrival_time=request.arrival_time,
+            logprobs_processor=logprobs_processor,
         )
 
         # Apply request updates now if the last input already completed.
