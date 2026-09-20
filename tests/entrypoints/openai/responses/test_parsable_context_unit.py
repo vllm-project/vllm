@@ -20,7 +20,8 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.mcp.tool import HarmonyPythonTool
+from vllm.entrypoints.mcp.tool import HarmonyPythonTool, Tool
+from vllm.entrypoints.openai.responses import context as responses_context
 from vllm.entrypoints.openai.responses.context import ParsableContext
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -154,6 +155,28 @@ class _ToolCallingParser(DelegatingParser):
         return None
 
 
+class _JsonParsingTool(Tool):
+    def __init__(self):
+        self.called = False
+
+    async def get_result(self, context):
+        raise NotImplementedError
+
+    async def get_result_parsable_context(self, context):
+        self.called = True
+        last_msg = context.response_messages[-1]
+        json.loads(last_msg.arguments)
+        return []
+
+
+_TOOL_CASES = (
+    ("code_interpreter", "python", "python", {"code": "print(6 * 7)"}),
+    ("web_search_preview", "browser", "search", {"query": "vLLM"}),
+    ("container.exec", "container", "exec", {"cmd": ["pwd"]}),
+)
+_INVALID_JSON = '{"unterminated":'
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -211,6 +234,21 @@ def _make_context(parser_cls, **overrides):
     )
     defaults.update(overrides)
     return ParsableContext(**defaults)
+
+
+def _make_tool_context(tool_case, tool_session, arguments):
+    tool_name, session_name, _, _ = tool_case
+    ctx = _make_context(None)
+    tool_call = ResponseFunctionToolCall(
+        id=f"fc_{tool_name}",
+        call_id=f"call_{tool_name}",
+        type="function_call",
+        name=tool_name,
+        arguments=arguments,
+    )
+    ctx.response_messages.append(tool_call)
+    ctx._tool_sessions[session_name] = tool_session
+    return ctx, tool_call
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +418,83 @@ async def test_local_python_tool_output_preserves_function_call_id():
     output = await context.call_tool()
 
     assert output[0].call_id == tool_call.call_id
+
+
+@pytest.mark.parametrize("tool_case", _TOOL_CASES)
+@pytest.mark.asyncio
+async def test_call_tool_valid_json_dispatches_client_session_once(
+    monkeypatch, tool_case
+):
+    monkeypatch.setattr(
+        responses_context.envs, "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", True
+    )
+    _, session_name, dispatched_name, arguments = tool_case
+    tool_session = MagicMock()
+    tool_session.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(text="result")])
+    )
+    ctx, _ = _make_tool_context(tool_case, tool_session, json.dumps(arguments))
+
+    output = await ctx.call_tool()
+
+    tool_session.call_tool.assert_awaited_once_with(dispatched_name, arguments)
+    assert ctx.called_tools == {session_name}
+    assert output[0].output == "result"
+
+
+@pytest.mark.parametrize("tool_case", _TOOL_CASES)
+@pytest.mark.parametrize("use_tool", [True, False], ids=["Tool", "ClientSession"])
+@pytest.mark.asyncio
+async def test_call_tool_invalid_json_returns_retry_before_dispatch(
+    monkeypatch, tool_case, use_tool
+):
+    monkeypatch.setattr(
+        responses_context.envs, "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", True
+    )
+    _, session_name, _, _ = tool_case
+    tool_session = _JsonParsingTool() if use_tool else MagicMock()
+    ctx, tool_call = _make_tool_context(tool_case, tool_session, _INVALID_JSON)
+
+    output = await ctx.call_tool()
+
+    retry_item = output[0]
+    assert retry_item.call_id == tool_call.call_id
+    assert "Error parsing tool arguments as JSON" in retry_item.output
+    assert session_name not in ctx.called_tools
+    if isinstance(tool_session, _JsonParsingTool):
+        assert not tool_session.called
+    else:
+        tool_session.call_tool.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tool_case", "use_tool"),
+    [
+        pytest.param(_TOOL_CASES[0], True, id="Tool"),
+        pytest.param(_TOOL_CASES[1], False, id="ClientSession"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_invalid_builtin_tool_json_raises_when_retry_disabled(
+    monkeypatch, tool_case, use_tool
+):
+    monkeypatch.setattr(
+        responses_context.envs,
+        "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY",
+        False,
+    )
+    _, session_name, _, _ = tool_case
+    tool_session = _JsonParsingTool() if use_tool else MagicMock()
+    ctx, _ = _make_tool_context(tool_case, tool_session, _INVALID_JSON)
+
+    with pytest.raises(json.JSONDecodeError):
+        await ctx.call_tool()
+
+    assert session_name in ctx.called_tools
+    if isinstance(tool_session, _JsonParsingTool):
+        assert tool_session.called
+    else:
+        tool_session.call_tool.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
