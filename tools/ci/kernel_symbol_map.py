@@ -189,7 +189,7 @@ def source_of(
     names it, with `__/` segments standing for `..`.
     """
     target = ""
-    m = OBJ_DIR.match(obj_rel)
+    m = OBJ_DIR.search(obj_rel)  # search: sub-builds nest CMakeFiles/
     if m:
         target = m.group(1)
     for d in deps:
