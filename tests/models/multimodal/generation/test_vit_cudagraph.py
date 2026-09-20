@@ -55,6 +55,10 @@ def kimi_vl_chat_template(content: str) -> str:
     )
 
 
+def deepseek_v41_chat_template(content: str) -> str:
+    return f"<｜begin▁of▁sentence｜><｜User｜>{content}<｜Assistant｜></think>"
+
+
 def step3_vl_chat_template(content: str) -> str:
     return (
         "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
@@ -220,6 +224,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         vllm_runner_kwargs={"gpu_memory_utilization": 0.80},
         marks=[pytest.mark.core_model],
+    ),
+    "deepseek_v41": VitCudagraphTestConfig(
+        model="deepseek-ai/DeepSeek-V4.1-Flash",
+        modalities=["image"],
+        image_prompt=deepseek_v41_chat_template(
+            "<｜deepseek_image｜>\n\nWhat is in this image?"
+        ),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1024],
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "attention_backend": "FLASHMLA_SPARSE_DSV41",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="DeepseekV41ForCausalLM",
+                exist_overrides={"vision_n_layers": 1},
+            ),
+        },
     ),
     "step3_vl": VitCudagraphTestConfig(
         model="stepfun-ai/Step3-VL-10B",
