@@ -151,6 +151,18 @@ def test_rank_topology_is_part_of_layout_identity():
     assert len(topology.all_namespaces()) == 4
 
 
+def test_rank_topology_maps_dcp_onto_tp_workers():
+    topology = RankTopology(tp_rank=1, tp_size=4, dcp_rank=1, dcp_size=2)
+
+    assert topology.rank_count == 4
+    assert topology.all_namespaces() == (
+        (0, 0, 0, 0),
+        (1, 0, 1, 0),
+        (2, 0, 0, 0),
+        (3, 0, 1, 0),
+    )
+
+
 @pytest.mark.parametrize(
     ("producer", "consumer", "rank", "expected"),
     [
@@ -621,6 +633,54 @@ def test_lazy_store_event_releases_refs_after_partial_rank_failure():
     )
     assert freed == [block]
     assert not scheduler.has_pending_push_work()
+
+
+def test_lazy_store_reselects_block_after_event_completion():
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "lazy_offload": True}),
+        _kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("lazy-reselect")),
+    )
+    block = SimpleNamespace(
+        block_id=4,
+        block_hash=make_block_hash_with_group_id(b"a", 0),
+        is_null=False,
+        ref_cnt=0,
+    )
+
+    def iter_blocks_after(cursor):
+        return iter((block,)) if cursor is None else iter(())
+
+    scheduler.bind_gpu_block_pool(
+        SimpleNamespace(
+            blocks=[None, None, None, None, block],
+            free_block_queue=SimpleNamespace(iter_blocks_after=iter_blocks_after),
+            touch=lambda blocks: None,
+            free_blocks=lambda blocks: None,
+        )
+    )
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={},
+    )
+
+    scheduler.request_finished(SimpleNamespace(request_id="first"), ([],))
+    first = scheduler.build_connector_meta(output)
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                completed_store_events={first.store_event: 1}
+            )
+        )
+    )
+    scheduler.request_finished(SimpleNamespace(request_id="second"), ([],))
+    second = scheduler.build_connector_meta(output)
+
+    assert first.store_plans[0].key == second.store_plans[0].key
 
 
 def test_scheduler_resumed_request_replaces_stale_block_table():
@@ -1202,7 +1262,7 @@ def test_embedded_tp_dcp_pp_rank_local_store_flow(monkeypatch):
     }
     assert runtime.scheduler_args is not None
     assert runtime.scheduler_args[1].local_namespace == (1, 0, 1, 1)
-    assert runtime.scheduler_args[1].rank_count == 8
+    assert runtime.scheduler_args[1].rank_count == 4
 
 
 def test_embedded_logical_hit_requires_all_tp_dcp_pp_objects(monkeypatch):

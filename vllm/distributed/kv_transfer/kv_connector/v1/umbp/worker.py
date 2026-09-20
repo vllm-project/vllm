@@ -12,6 +12,7 @@ import torch
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.forward_context import ForwardContext
+from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
@@ -27,6 +28,8 @@ from .data import (
 )
 from .runtime import UMBPWorkerHandle
 from .stats import UMBPStoreConnectorStats
+
+logger = init_logger(__name__)
 
 
 class UMBPStoreConnectorWorker:
@@ -196,6 +199,13 @@ class UMBPStoreConnectorWorker:
                 for key in result.failed_keys:
                     self._worker_meta.failed_loads[key] = result.error or "load failed"
         else:
+            logger.debug(
+                "UMBP store worker plans=%d completed=%d failed=%d keys=%s",
+                len(result.plans),
+                len(result.completed_keys),
+                len(result.failed_keys),
+                tuple(plan.key for plan in result.plans),
+            )
             self._stats.record(
                 "store",
                 completed=len(result.completed_keys),
