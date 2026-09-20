@@ -315,7 +315,7 @@ def _fused_norm_rope_kernel(
             if MLA_CACHE_DS_MLA:
                 # fp8_ds_mla layout (DeepSeek-V3.2, KV_DIM == 512): per-128-element
                 # tile of the NoPE is dynamically quantized to fp8 with its own
-                # float32 scale; the RoPE tail is stored unquantized in bf16.
+                # power-of-two scale stored as float32; the RoPE tail is bf16.
                 #   bytes [0, KV_DIM)            : KV_DIM fp8 NoPE values
                 #   bytes [KV_DIM, KV_DIM + 16)  : MLA_NUM_TILES float32 scales
                 #   bytes [KV_DIM + 16, ...)     : 2 * KPE_HALF_ROT_DIM bf16 RoPE
@@ -327,9 +327,8 @@ def _fused_norm_rope_kernel(
                 )
                 kv_2d = tl.reshape(kv_c, (MLA_NUM_TILES, MLA_TILE_DIM))
                 tile_amax = tl.max(tl.abs(kv_2d), axis=1, keep_dims=True)
-                # scale = amax / 448 (fp8 e4m3 max), matching the reference
-                # concat_and_cache_ds_mla kernel; floored to FLT_MIN.
-                tile_scale = tl.maximum(tile_amax * (1.0 / 448.0), 1.1754944e-38)
+                tile_scale = tl.maximum(tile_amax * (1.0 / 448.0), 1e-4)
+                tile_scale = tl.math.exp2(tl.math.ceil(tl.math.log2(tile_scale)))
                 kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(tl.float8e4nv), (KV_DIM,))
                 tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
                 tile_off = tl.arange(0, MLA_NUM_TILES)

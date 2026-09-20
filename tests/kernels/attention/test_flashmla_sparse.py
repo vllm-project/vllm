@@ -109,8 +109,9 @@ def test_sparse_flashmla_metadata_smoke():
     assert num_splits is None
 
 
-def test_sparse_flashmla_decode_smoke():
+def test_sparse_flashmla_decode_matches_cache_writer_scales():
     import vllm.v1.attention.ops.flashmla as fm
+    from vllm import _custom_ops as ops
 
     ok, reason = fm.is_flashmla_sparse_supported()
     if not ok:
@@ -130,7 +131,7 @@ def test_sparse_flashmla_decode_smoke():
     # Metadata
     q_seq_per_hk = seqlen_q * num_heads_q // num_heads_k
     # q_heads_per_hk = num_heads_q // num_heads_k
-    cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    cache_seqlens = torch.ones(batch_size, dtype=torch.int32, device=device)
     tile_md, num_splits = fm.get_mla_metadata(
         cache_seqlens,
         q_seq_per_hk,
@@ -146,14 +147,33 @@ def test_sparse_flashmla_decode_smoke():
         dtype=torch.bfloat16,
         device=device,
     )
-    k_cache = torch.zeros(
-        (1, page_block_size, num_heads_k, bytes_per_token),
-        dtype=torch.uint8,
-        device=device,
+    cache_rows = torch.zeros(
+        (1, page_block_size, bytes_per_token), dtype=torch.uint8, device=device
     )
-    indices = torch.zeros(
-        (batch_size, seqlen_q, topk), dtype=torch.int32, device=device
+    # 336 / 448 = 0.75 distinguishes arbitrary FP32 from power-of-two scales.
+    kv_c = torch.full((1, 512), 336.0, dtype=torch.bfloat16, device=device)
+    kv_c[:, -128:] = 0
+    ops.concat_and_cache_mla(
+        kv_c,
+        torch.zeros((1, 64), dtype=torch.bfloat16, device=device),
+        cache_rows,
+        torch.zeros(1, dtype=torch.int64, device=device),
+        "fp8_ds_mla",
+        torch.ones(1, dtype=torch.float32, device=device),
     )
+    scales = cache_rows[0, 0].view(torch.float32)[128:132]
+    expected_scales = torch.tensor([1.0, 1.0, 1.0, 2**-13], device=device)
+    torch.testing.assert_close(scales, expected_scales, rtol=0, atol=0)
+    cached_nope = cache_rows[0, 0, :512].view(torch.float8_e4m3fn).float()
+    expected = (cached_nope * scales.repeat_interleave(128)).to(torch.bfloat16)
+
+    k_cache = cache_rows.unsqueeze(2)
+    indices = torch.full(
+        (batch_size, seqlen_q, topk), -1, dtype=torch.int32, device=device
+    )
+    indices[..., 0] = 0
+    # SM90 sparse decode only supports a fixed top-k width. Padding with -1
+    # exercises the same cache data on SM90 and SM100 without topk_length.
 
     block_table = torch.zeros((batch_size, 128), dtype=torch.int32, device=device)
     out, lse = fm.flash_mla_with_kvcache(
@@ -170,6 +190,9 @@ def test_sparse_flashmla_decode_smoke():
     assert out.shape[0] == batch_size
     assert out.shape[-1] == head_dim_v
     assert lse.shape[0] == batch_size
+    torch.testing.assert_close(
+        out, expected.view(1, 1, 1, 512).expand_as(out), rtol=0, atol=0
+    )
 
 
 @pytest.mark.parametrize("h_q", [64, 128])
