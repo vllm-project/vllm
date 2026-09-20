@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Recipes"
+  short_description: "Find vLLM recipes by model, hardware, and task."
+  default_prompt: "Use $model-recipes to find a recipe for running my model on my hardware for my task, or create or update the recipe."
