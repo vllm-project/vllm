@@ -882,15 +882,33 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
         del mxscale_op, inverse_quant_op
 
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            get_fp8_block_weight_scale,
+            is_fp8,
+        )
+
         weight = getattr(self.wo_a, "weight", None)
-        scale = getattr(self.wo_a, "weight_scale_inv", None)
-        if (
-            weight is None
-            or scale is None
-            or weight.dim() != 2
-            or scale.dim() != 2
-            or weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
-        ):
+        scale = get_fp8_block_weight_scale(self.wo_a)
+        if scale is None:
+            # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
+            # historical ``_inv`` suffix.
+            scale = getattr(self.wo_a, "weight_scale", None)
+        if weight is None or scale is None:
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs a block-scaled FP8 wo_a weight; "
+                "the layer exposes no weight/weight scale. Falling back to "
+                "BF16 WO_A."
+            )
+            return
+        if weight.dim() != 2 or scale.dim() != 2 or not is_fp8(weight.dtype):
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs a 2-D FP8 wo_a weight with a 2-D "
+                "block scale, got weight %s%s and scale %s. Falling back to "
+                "BF16 WO_A.",
+                weight.dtype,
+                tuple(weight.shape),
+                tuple(scale.shape),
+            )
             return
 
         groups = self.n_local_groups
@@ -902,10 +920,24 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             or in_features % 128 != 0
             or scale.shape != (out_features // 128, in_features // 128)
         ):
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs group-128 blocks for %d groups of "
+                "%d outputs, got weight %s and scale %s. Falling back to BF16 "
+                "WO_A.",
+                groups,
+                out_per_group,
+                tuple(weight.shape),
+                tuple(scale.shape),
+            )
             return
 
         e8m0_scale = _wo_a_block_scale_to_e8m0(scale)
         if e8m0_scale is None:
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A could not losslessly encode the %s wo_a "
+                "block scale as OCP E8M0. Falling back to BF16 WO_A.",
+                scale.dtype,
+            )
             return
 
         self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
