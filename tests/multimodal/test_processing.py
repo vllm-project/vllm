@@ -3,6 +3,7 @@
 
 import time
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -1119,6 +1120,7 @@ class _FakeTokenizer:
 class _FakeProcessingInfo:
     def __init__(self, tokenizer) -> None:
         self._tokenizer = tokenizer
+        self.ctx = SimpleNamespace(tokenizer=tokenizer)
 
     def get_tokenizer(self):
         return self._tokenizer
@@ -1205,6 +1207,172 @@ def test_apply_prompt_updates_falls_back_with_index_targets():
 
     assert new_token_ids == [200, 201, ord("d"), 9]
     assert [p.tokens for p in placeholders["image"]] == [[200, 201], [9]]
+
+
+def _replacement(modality: str, target, replacement, item_idx: int = 0):
+    return PromptReplacement(modality, target, replacement).resolve(item_idx)
+
+
+def _validate(prompt_ids, mm_updates, mm_placeholders, mm_item_counts):
+    _text_fallback_processor()._validate_mm_placeholders(
+        mm_placeholders,
+        mm_item_counts,
+        prompt_ids=prompt_ids,
+        mm_updates=mm_updates,
+    )
+
+
+def test_validate_mm_placeholders_allows_exact_target_count():
+    _validate(
+        [ord("a"), 200, 200, ord("b")],
+        {"image": [[_replacement("image", [200], [200, 200])]]},
+        {"image": [_placeholder("image", 0, 1, [200, 200])]},
+        {"image": 1},
+    )
+
+
+def test_validate_mm_placeholders_allows_one_target_per_item():
+    _validate(
+        [200, 200, ord("a"), 200, 200],
+        {
+            "image": [
+                [_replacement("image", [200], [200, 200], 0)],
+                [_replacement("image", [200], [200, 200], 1)],
+            ]
+        },
+        {
+            "image": [
+                _placeholder("image", 0, 0, [200, 200]),
+                _placeholder("image", 1, 3, [200, 200]),
+            ]
+        },
+        {"image": 2},
+    )
+
+
+def test_validate_mm_placeholders_counts_targets_across_modalities():
+    """A video replacement may be built out of image pads, as in
+    `llava_onevision2` and `glm4_1v`."""
+    _validate(
+        [200, 200, 301, 200, 200, 301],
+        {
+            "image": [[_replacement("image", [200], [200, 200])]],
+            "video": [[_replacement("video", [301], [301, 200, 200, 301])]],
+        },
+        {
+            "image": [_placeholder("image", 0, 0, [200, 200])],
+            "video": [_placeholder("video", 0, 2, [301, 200, 200, 301])],
+        },
+        {"image": 1, "video": 1},
+    )
+
+
+def test_validate_mm_placeholders_counts_a_shared_span_once():
+    """Under `use_audio_in_video` the Qwen Omni models record an audio and a
+    video placeholder over the same tokens, which must not count twice."""
+    tokens = [200, 301, 200, 301]
+
+    with pytest.raises(VLLMValidationError, match="Found more"):
+        _validate(
+            tokens + [200],
+            {
+                "audio": [[_replacement("audio", [200], tokens)]],
+                "video": [[_replacement("video", [301], tokens)]],
+            },
+            {
+                "audio": [_placeholder("audio", 0, 0, tokens)],
+                "video": [_placeholder("video", 0, 0, tokens)],
+            },
+            {"audio": 1, "video": 1},
+        )
+
+
+def test_validate_mm_placeholders_rejects_target_outside_the_placeholders():
+    """A target token that no placeholder covers means the item was bound to
+    the wrong one, as in vllm-project/vllm#57740."""
+    with pytest.raises(VLLMValidationError, match="Found more"):
+        _validate(
+            [200, 200, ord("a"), 200],
+            {"image": [[_replacement("image", [200], [200, 200])]]},
+            {"image": [_placeholder("image", 0, 0, [200, 200])]},
+            {"image": 1},
+        )
+
+
+def test_validate_mm_placeholders_only_counts_the_target():
+    """The replacement may carry other tokens that recur freely: `qwen3_vl`
+    wraps each pruned video frame in `<|vision_start|>`/`<|vision_end|>`."""
+    _validate(
+        [300, 200, 200, 301, 300, 301],
+        {"image": [[_replacement("image", [200], [300, 200, 200, 301])]]},
+        {"image": [_placeholder("image", 0, 0, [300, 200, 200, 301])]},
+        {"image": 1},
+    )
+
+
+def test_validate_mm_placeholders_skips_insertions():
+    """An insertion keeps its target instead of consuming it."""
+    _validate(
+        [300, 200, 200],
+        {"image": [[PromptInsertion("image", [300], [200, 200]).resolve(0)]]},
+        {"image": [_placeholder("image", 0, 1, [200, 200])]},
+        {"image": 1},
+    )
+
+
+def test_validate_mm_placeholders_skips_index_targets():
+    """A `PromptIndex` target is a position, not a token to count."""
+    _validate(
+        [200, 200, 200],
+        {"image": [[_replacement("image", PromptIndexTargets.start(), [200, 200])]]},
+        {"image": [_placeholder("image", 0, 0, [200, 200])]},
+        {"image": 1},
+    )
+
+
+def test_validate_mm_placeholders_skips_targets_the_replacement_drops():
+    """Some models swap the target out for a different token (`phi3v`,
+    `molmo2`), so the target itself is not conserved."""
+    _validate(
+        [200, 301, 301, 200],
+        {"image": [[_replacement("image", [200], [301, 301])]]},
+        {"image": [_placeholder("image", 0, 0, [301, 301])]},
+        {"image": 1},
+    )
+
+
+def test_validate_mm_placeholders_skips_multi_token_targets():
+    """Only a lone target token can be reproduced by accident. `glm4v` and
+    `moondream3` anchor on a sequence whose `<|endoftext|>` recurs per turn."""
+    _validate(
+        [300, 200, 301, 300, 200, 301],
+        {"image": [[_replacement("image", [300, 200, 301], [300, 200, 301])]]},
+        {"image": [_placeholder("image", 0, 0, [300, 200, 301])]},
+        {"image": 1},
+    )
+
+
+def test_validate_mm_placeholders_after_apply_prompt_updates():
+    """Run the real applier, so the tokens fed to the check are the ones it
+    records rather than hand-built ones."""
+    processor = _text_fallback_processor()
+    mm_updates = {"image": [[_replacement("image", [200], [200, 200])]]}
+
+    def check(prompt_ids: list[int]):
+        new_token_ids, placeholders = processor._apply_prompt_updates(
+            prompt_ids, mm_updates
+        )
+        processor._validate_mm_placeholders(
+            placeholders,
+            {"image": 1},
+            prompt_ids=new_token_ids,
+            mm_updates=mm_updates,
+        )
+
+    check([200, ord("a")])
+
+    with pytest.raises(VLLMValidationError, match="Found more"):
+        check([200, ord("a"), 200])
 
 
 @pytest.mark.skip_global_cleanup

@@ -673,7 +673,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 mm_prompt_updates,
             )
 
-        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+        self._validate_mm_placeholders(
+            mm_placeholders,
+            mm_item_counts,
+            prompt_ids=prompt_ids,
+            mm_updates=mm_prompt_updates,
+        )
 
         return prompt_ids, mm_placeholders
 

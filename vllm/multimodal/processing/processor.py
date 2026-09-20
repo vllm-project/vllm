@@ -19,6 +19,7 @@ import torch
 from typing_extensions import TypeVar, assert_never
 
 from vllm.config import SchedulerConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     MultiModalEncDecInput,
     MultiModalHashes,
@@ -1721,11 +1722,31 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     "sure you have applied it before calling `LLM.generate`."
                 )
 
+    def _get_single_token_replace_targets(
+        self,
+        mm_updates: MultiModalPromptUpdates,
+    ) -> set[int]:
+        """The token IDs that a replacement consumes one at a time."""
+        return {
+            update.target[0]
+            for updates in mm_updates.values()
+            for item_updates in updates
+            for update in item_updates
+            if update.mode == UpdateMode.REPLACE
+            and isinstance(update.target, list)
+            and len(update.target) == 1
+        }
+
     def _validate_mm_placeholders(
         self,
         mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
         mm_item_counts: Mapping[str, int],
+        *,
+        prompt_ids: list[int] | None = None,
+        mm_updates: MultiModalPromptUpdates | None = None,
     ) -> None:
+        # `RuntimeError` below is for an inconsistent processor implementation;
+        # `VLLMValidationError` is for a prompt the caller can fix.
         for modality, item_count in mm_item_counts.items():
             placeholders = mm_placeholders.get(modality, [])
 
@@ -1736,6 +1757,53 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     f"instead found {len(placeholders)} prompt placeholders! "
                     "Make sure the implementation of `_apply_hf_processor_main` "
                     "and `_get_mm_fields_config` are consistent with each other."
+                )
+
+        if prompt_ids is None or mm_updates is None:
+            return
+
+        # One span can carry more than one placeholder: under
+        # `use_audio_in_video` the Qwen Omni models record an audio and a video
+        # placeholder over the same tokens, which would otherwise count twice.
+        spans = {
+            (p.start_idx, len(p.tokens)): p.tokens
+            for placeholders in mm_placeholders.values()
+            for p in placeholders
+        }
+
+        # Targets are matched in prompt order, so a target token the caller
+        # wrote themselves is matched before the one the chat template
+        # rendered and takes the item's position, leaving the rendered one
+        # unexpanded. The counts above do not see this: the item is still
+        # bound exactly once. Count over all modalities at once, since one
+        # modality's target may sit inside another modality's placeholder.
+        for token_id in self._get_single_token_replace_targets(mm_updates):
+            num_placed = sum(tokens.count(token_id) for tokens in spans.values())
+
+            # The replacement dropped the target rather than re-emitting it
+            # (`phi3v`, `molmo2`), or the target is not what the update
+            # consumed, as on the Transformers backend's offsets path. Either
+            # way there is nothing to conserve.
+            if num_placed == 0:
+                continue
+
+            num_found = prompt_ids.count(token_id)
+
+            if num_found > num_placed:
+                tokenizer = self.info.ctx.tokenizer
+                token = (
+                    f"token id {token_id}"
+                    if tokenizer is None
+                    else repr(tokenizer.decode([token_id]))
+                )
+                raise VLLMValidationError(
+                    f"Found more {token} tokens in the prompt ({num_found}) "
+                    f"than the multi-modal items account for ({num_placed})! "
+                    "Placeholder tokens are matched in prompt order, so the "
+                    "extra ones take the items' positions and the real "
+                    "placeholders are left unexpanded. Remove them from the "
+                    "prompt.",
+                    parameter="prompt",
                 )
 
     def _maybe_apply_prompt_updates(
@@ -1752,7 +1820,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_res.prompt_updates,
         )
 
-        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+        self._validate_mm_placeholders(
+            mm_placeholders,
+            mm_item_counts,
+            prompt_ids=prompt_ids,
+            mm_updates=mm_res.prompt_updates,
+        )
 
         return prompt_ids, mm_placeholders
 
