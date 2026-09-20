@@ -363,3 +363,63 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
                 "time they DEALER-connect. See PR #42585 / Ray-DP "
                 "multi-API-server regression."
             )
+
+
+def test_elastic_scale_up_local_only_does_not_restart_remote_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_local_actor = Mock()
+    old_remote_actor = Mock()
+    new_local_actor = Mock()
+    old_local_ref = object()
+    old_remote_ref = object()
+    new_wait_ref = object()
+    new_local_ref = object()
+    new_local_actor.wait_for_init.remote.return_value = new_wait_ref
+    new_local_actor.run.remote.return_value = new_local_ref
+
+    manager = CoreEngineActorManager.__new__(CoreEngineActorManager)
+    manager.local_engine_actors = [old_local_actor]
+    manager.remote_engine_actors = [old_remote_actor]
+    manager.created_placement_groups = []
+    manager.placement_group_is_local = [True, False]
+    manager.env_vars_dict = {}
+    manager.addresses = _make_addresses()
+    manager.executor_class = _DummyExecutor
+    manager.log_stats = False
+    manager.run_refs = [old_local_ref, old_remote_ref]
+    manager.actor_run_ref_dict = {
+        old_local_actor: old_local_ref,
+        old_remote_actor: old_remote_ref,
+    }
+
+    config = _make_vllm_config_ray_dp_multinode()
+    config.model_config.is_moe = True
+    config.parallel_config.enable_elastic_ep = True
+    config.parallel_config.eplb_config = SimpleNamespace(num_redundant_experts=0)
+    master_ip = config.parallel_config.data_parallel_master_ip
+    placement_group = SimpleNamespace(
+        bundle_specs=[{f"node:{master_ip}": 0.001}, {"CPU": 1.0}]
+    )
+
+    monkeypatch.setattr(
+        manager,
+        "add_dp_placement_groups",
+        Mock(return_value=([placement_group], [1])),
+    )
+    actor_factory = Mock()
+    actor_factory.options.return_value.remote.return_value = new_local_actor
+    monkeypatch.setattr(ray, "remote", Mock(return_value=actor_factory))
+    ray_get = Mock()
+    monkeypatch.setattr(ray, "get", ray_get)
+
+    manager.scale_up_elastic_ep(config, 3, 0)
+
+    assert manager.local_engine_actors == [old_local_actor, new_local_actor]
+    assert manager.remote_engine_actors == [old_remote_actor]
+    ray_get.assert_called_once_with([new_wait_ref])
+    new_local_actor.run.remote.assert_called_once_with()
+    old_remote_actor.wait_for_init.remote.assert_not_called()
+    old_remote_actor.run.remote.assert_not_called()
+    assert manager.run_refs == [old_local_ref, old_remote_ref, new_local_ref]
+    assert manager.actor_run_ref_dict[old_remote_actor] is old_remote_ref

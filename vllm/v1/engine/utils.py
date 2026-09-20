@@ -936,11 +936,16 @@ class CoreEngineActorManager:
             self.created_placement_groups.append(pg)
             self.placement_group_is_local.append(local_client)
 
+        new_remote_engines = len(placement_groups) - new_local_engines
         actors = (
             self.local_engine_actors[-new_local_engines:]
             if new_local_engines > 0
             else []
-        ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
+        ) + (
+            self.remote_engine_actors[-new_remote_engines:]
+            if new_remote_engines > 0
+            else []
+        )
 
         ray.get([actor.wait_for_init.remote() for actor in actors])
         for actor in actors:
