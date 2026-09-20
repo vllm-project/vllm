@@ -393,12 +393,12 @@ class EplbState:
             else:
                 cast(Any, layer).eplb_state = layer_state
 
-    def plan_rebalance(
+    def rebalance_experts(
         self,
         model_state: EplbModelState,
         context: EplbRebalanceContext,
     ) -> EplbPlan:
-        plan = self.policy.plan_rebalance(context, model_state.policy_state)
+        plan = self.policy.rebalance_experts(context, model_state.policy_state)
         target = plan.physical_to_logical_map
         valid_dtype = target.dtype in (torch.int32, torch.int64)
         if target.device.type != "cpu" or not valid_dtype:
@@ -938,7 +938,7 @@ class EplbState:
                         num_replicas=num_replicas,
                         cpu_group=get_eplb_group().cpu_group,
                     )
-                    plan = self.plan_rebalance(eplb_model_state, context)
+                    plan = self.rebalance_experts(eplb_model_state, context)
                     new_physical_to_logical_map = plan.physical_to_logical_map
 
                 skip_rearrange = False

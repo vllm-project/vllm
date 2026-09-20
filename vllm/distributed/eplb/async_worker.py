@@ -69,7 +69,7 @@ def run_rebalance_experts(
         num_replicas=stats.num_replicas,
         cpu_group=get_eplb_group().cpu_group,
     )
-    plan = eplb_state.plan_rebalance(model_state, context)
+    plan = eplb_state.rebalance_experts(model_state, context)
 
     return plan
 

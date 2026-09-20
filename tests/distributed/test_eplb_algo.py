@@ -44,7 +44,7 @@ def test_basic_rebalance():
     num_nodes = 2
     num_gpus = 8
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     log2phy, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
@@ -99,7 +99,7 @@ def test_single_gpu_case():
     num_nodes = 1
     num_gpus = 1
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     log2phy, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
@@ -122,7 +122,7 @@ def test_equal_weights():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
@@ -146,7 +146,7 @@ def test_extreme_weight_imbalance():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
@@ -175,7 +175,7 @@ def test_multiple_layers():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
@@ -201,7 +201,7 @@ def test_parameter_validation():
     # Test non-divisible case - this should handle normally without throwing
     # errors because the function will fall back to global load balancing
     # strategy
-    phy2log = DefaultEplbPolicy.rebalance_experts(weight, 8, 3, 2, 4)
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(weight, 8, 3, 2, 4)
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
     assert phy2log.shape == (1, 8)
     assert logcnt.shape == (1, 4)
@@ -209,7 +209,9 @@ def test_parameter_validation():
     # Test cases that will actually cause errors:
     # num_physical_experts not divisible by num_gpus
     with pytest.raises(AssertionError):
-        DefaultEplbPolicy.rebalance_experts(weight, 7, 2, 2, 4)  # 7 not divisible by 4
+        DefaultEplbPolicy._rebalance_from_weights(
+            weight, 7, 2, 2, 4
+        )  # 7 not divisible by 4
 
 
 def test_small_scale_hierarchical():
@@ -224,7 +226,7 @@ def test_small_scale_hierarchical():
     num_nodes = 2  # 2 nodes
     num_gpus = 4  # 4 GPUs
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
@@ -252,7 +254,7 @@ def test_global_load_balance_fallback():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
@@ -275,7 +277,7 @@ def test_device_compatibility(device):
     num_nodes = 1
     num_gpus = 2
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
@@ -293,7 +295,7 @@ def test_additional_cases():
     weight1 = torch.tensor(
         [[50, 100, 75, 120, 90, 60, 80, 110, 40, 70, 95, 85, 65, 55, 45, 35]]
     )
-    phy2log1 = DefaultEplbPolicy.rebalance_experts(weight1, 24, 8, 4, 8)
+    phy2log1 = DefaultEplbPolicy._rebalance_from_weights(weight1, 24, 8, 4, 8)
     _, logcnt1 = compute_logical_maps(phy2log1, weight1.shape[-1])
 
     assert phy2log1.shape == (1, 24)
@@ -307,7 +309,7 @@ def test_additional_cases():
             [12, 25, 50, 100, 150, 200],  # Increasing weights
         ]
     )
-    phy2log2 = DefaultEplbPolicy.rebalance_experts(weight2, 10, 3, 1, 2)
+    phy2log2 = DefaultEplbPolicy._rebalance_from_weights(weight2, 10, 3, 1, 2)
     _, logcnt2 = compute_logical_maps(phy2log2, weight2.shape[-1])
 
     assert phy2log2.shape == (2, 10)
@@ -368,7 +370,7 @@ if __name__ == "__main__":
     num_nodes = 2
     num_gpus = 8
 
-    phy2log = DefaultEplbPolicy.rebalance_experts(
+    phy2log = DefaultEplbPolicy._rebalance_from_weights(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     print(phy2log)
