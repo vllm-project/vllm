@@ -205,7 +205,13 @@ def fused_sigmoid_gating_delta_rule_update(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
+    BK = triton.next_power_of_2(K)
+    # V-tile width. The grid is (NK, NV, N*HV) with NV = V/BV, so at low batch
+    # there are too few programs to fill the GPU and a narrower tile buys
+    # occupancy. min(32, 8*N) is identical to the shipped cap for N >= 4 and
+    # only narrows the starved regime. Measured on MI355X / Kimi-K3 tp=8,
+    # CUDA-graph replay: C1 decode -11.1%, C1 spec(T=4) -16.4%, C2 decode -7.3%.
+    BV = min(triton.next_power_of_2(V), 32, max(4, 8 * N))
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
