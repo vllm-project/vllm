@@ -563,15 +563,36 @@ class NgramHashState(nn.Module):
 def _engram_head_shard_weight_loader(
     param: torch.nn.Parameter, loaded_weight: torch.Tensor
 ) -> None:
-    """Load this rank's complete head buckets. ue8m0 scales arrive as
-    float8_e8m0fnu; keep the raw bytes (the param stores uint8)."""
+    """Load this rank's complete head buckets.
+
+    MXFP8 checkpoints store ue8m0 block scales as float8_e8m0fnu; keep the
+    raw bytes (the param stores uint8). PTPC-FP8 weight-only engram exports
+    store one float32 scale per row, so replace the placeholder scale tensor
+    with a 1-D fp32 shard and let the lookup kernel use row-wise scaling.
+    """
     part_rows = param.shape[0]
     if loaded_weight.dtype == torch.float8_e8m0fnu:
         loaded_weight = loaded_weight.view(torch.uint8)
     shard = loaded_weight.narrow(0, param.engram_vocab_start, part_rows)
-    assert shard.shape == param.shape, (
-        f"engram shard {tuple(shard.shape)} does not fit param {tuple(param.shape)}"
-    )
+    if shard.shape != param.shape:
+        if (
+            shard.ndim == 1
+            and shard.numel() == part_rows
+            and shard.dtype == torch.float32
+        ):
+            pin_memory = param.device.type == "cpu" and param.data.is_pinned()
+            data = torch.empty(
+                (part_rows,),
+                dtype=shard.dtype,
+                device=param.device,
+                pin_memory=pin_memory,
+            )
+            data.copy_(shard)
+            param.data = data
+            return
+        raise AssertionError(
+            f"engram shard {tuple(shard.shape)} does not fit param {tuple(param.shape)}"
+        )
     param.data.copy_(shard)
 
 
@@ -602,6 +623,7 @@ def _engram_lookup_kernel(
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     GRID,
+    ROWWISE_SCALE: tl.constexpr,
 ):
     """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
 
@@ -628,13 +650,18 @@ def _engram_lookup_kernel(
             mask=owned[:, None],
             other=0.0,
         )
-        scale = tl.load(
-            scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
-            mask=owned[:, None],
-            other=0,
-        )
-        # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
-        scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+        if ROWWISE_SCALE:
+            scale = tl.load(scales + local, mask=owned, other=0.0)[:, None].to(
+                tl.float32
+            )
+        else:
+            scale = tl.load(
+                scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
+                mask=owned[:, None],
+                other=0,
+            )
+            # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
+            scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
         tl.store(
             out + rows[:, None] * DIM + cols[None, :],
             (values.to(tl.float32) * scale).to(tl.bfloat16),
@@ -735,6 +762,7 @@ class ParallelEngramEmbedding(nn.Module):
             QUANT_BLOCK=self.block_size,
             BLOCK_R=16,
             GRID=grid,
+            ROWWISE_SCALE=scales.dim() == 1,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
