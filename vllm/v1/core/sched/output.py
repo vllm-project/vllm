@@ -265,6 +265,9 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
+    # Token positions scheduled again after a preemption in this step.
+    num_recomputed_tokens: int = 0
+
     scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
 
     # Request IDs that are preempted in this step.
@@ -321,6 +324,7 @@ class SchedulerOutput:
             scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens={},
             total_num_scheduled_tokens=0,
+            num_recomputed_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[],
