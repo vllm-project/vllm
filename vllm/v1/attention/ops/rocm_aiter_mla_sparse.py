@@ -3670,6 +3670,9 @@ def _rocm_sparse_attn_decode_triton(
     main_ragged_indptr: torch.Tensor | None = None,
     extra_ragged_indices: torch.Tensor | None = None,
     extra_ragged_indptr: torch.Tensor | None = None,
+    extra_token_to_req: torch.Tensor | None = None,
+    extra_valid_token: torch.Tensor | None = None,
+    extra_block_table: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
     extra_cache_nan_free: bool = False,
     adaptive_splits: bool = False,
@@ -3683,8 +3686,14 @@ def _rocm_sparse_attn_decode_triton(
             num_rows=main_cache.shape[0] * main_cache.shape[1],
         )
 
+    direct_extra = (
+        extra_token_to_req is not None
+        and extra_valid_token is not None
+        and extra_block_table is not None
+    )
     if (
-        (extra_ragged_indices is None or extra_ragged_indptr is None)
+        not direct_extra
+        and (extra_ragged_indices is None or extra_ragged_indptr is None)
         and extra_cache is not None
         and extra_indices is not None
     ):
@@ -3706,8 +3715,11 @@ def _rocm_sparse_attn_decode_triton(
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         extra_cache=extra_cache,
-        extra_indices=extra_ragged_indices,
-        extra_indptr=extra_ragged_indptr,
+        extra_indices=extra_indices if direct_extra else extra_ragged_indices,
+        extra_indptr=None if direct_extra else extra_ragged_indptr,
+        extra_token_to_req=extra_token_to_req,
+        extra_valid_token=extra_valid_token,
+        extra_block_table=extra_block_table,
         out=out,
         extra_cache_nan_free=extra_cache_nan_free,
         adaptive_splits=adaptive_splits,
