@@ -511,10 +511,10 @@ class BackgroundResources:
                         with contextlib.suppress(Exception):
                             task.cancel()
 
-            if loop is not None:
+            if loop is not None and not loop.is_closed():
                 if in_loop(loop):
                     close_sockets_and_tasks()
-                elif not loop.is_closed():
+                else:
                     loop.call_soon_threadsafe(close_sockets_and_tasks)
             else:
                 # Loop has been closed, try to clean up directly.
