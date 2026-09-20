@@ -24,6 +24,7 @@ use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::GenerationConfigMode;
+use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
@@ -33,6 +34,7 @@ use vllm_server::{
     DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
     RendererSelection,
 };
+use vllm_text::backend::hf::HfOverrides;
 
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
@@ -113,6 +115,9 @@ pub struct RenderArgs {
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     #[arg(long)]
     revision: Option<String>,
+    /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
+    #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
+    hf_overrides: HfOverrides,
     /// HTTP bind host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -130,6 +135,10 @@ pub struct RenderArgs {
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
     reasoning_parser: ParserSelection,
+    /// Server-side floor for structural-tag based tool calling: `auto`,
+    /// `function`, or `parameter`.
+    #[arg(long, default_value_t)]
+    tool_strict_level: ToolStrictLevel,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -161,11 +170,13 @@ impl RenderArgs {
         RenderConfig {
             model: self.model,
             revision: self.revision,
+            hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             host: self.host,
             port: self.port,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
@@ -204,6 +215,12 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub revision: Option<String>,
 
+    /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
+    /// Objects merge recursively and arrays/scalars replace existing values.
+    #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
+    #[serde(default)]
+    pub hf_overrides: HfOverrides,
+
     /// The source of generation-config sampling defaults. `"auto"` loads the
     /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
     #[arg(long, default_value_t)]
@@ -230,6 +247,14 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default = "default_py_bootstrap_parser_selection")]
     pub reasoning_parser: ParserSelection,
+    /// Server-side floor for structural-tag based tool calling, applied on
+    /// top of the per-tool `strict` field: `auto` follows the request's
+    /// tool choice and per-tool strictness,
+    /// `function` constrains the tool-call envelope for every request with
+    /// tools, `parameter` additionally pins argument schemas.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub tool_strict_level: ToolStrictLevel,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -328,6 +353,15 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub enable_request_id_headers: bool,
+
+    /// Register the scale-out `/inference/v1/generate` endpoint.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_scale_out: bool,
 
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
@@ -491,11 +525,13 @@ impl SharedRuntimeArgs {
             },
             model: self.model,
             revision: self.revision,
+            hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
@@ -547,11 +583,13 @@ impl SharedRuntimeArgs {
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
             revision: self.revision,
+            hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
@@ -577,6 +615,7 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
+            enable_scale_out: self.enable_scale_out,
         }
     }
 
@@ -751,6 +790,9 @@ impl ServeArgs {
         let reasoning_parser =
             effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
         let profiler_config = self.runtime.profiler_config_json();
+        let hf_overrides = (!self.runtime.hf_overrides.is_empty()).then(|| {
+            serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
+        });
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
@@ -763,6 +805,7 @@ impl ServeArgs {
             self.runtime.shutdown_timeout,
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
+            hf_overrides,
         )
     }
 }

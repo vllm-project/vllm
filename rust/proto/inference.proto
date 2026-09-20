@@ -53,6 +53,9 @@ message GenerateRequest {
 
   // Loaded LoRA name; empty selects the base model.
   string lora_name = 15;
+
+  // Apply the engine's configured watermark. Defaults to true when omitted.
+  optional bool watermarking = 16;
 }
 
 message RandomSampling {
@@ -157,6 +160,8 @@ message SequenceOutput {
 
   // Only present in final output for this sequence
   optional FinishInfo finish_info = 8;
+  // Only present in final output when sampling-mask capture is enabled.
+  repeated TokenIds sampling_mask = 10;
 }
 
 // Prompt info, returned in the first response

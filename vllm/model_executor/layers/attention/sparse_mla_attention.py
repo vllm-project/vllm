@@ -111,6 +111,8 @@ def _is_masked_mha_available(
     if model_dims not in (
         (128, 512, 128, 64, 128),
         (64, 512, 192, 64, 256),
+        # GLM-5.3-Flash: NoPE, qk_head_dim 256 == the (192, 64, 256) kernel.
+        (64, 512, 256, 0, 256),
     ):
         return False
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -190,7 +192,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             pin_memory=PIN_MEMORY,
         )
         parallel_config = vllm_config.parallel_config
-        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
+        self.use_pcp = self.pcp_world_size > 1
         try:
             self.dcp_world_size = get_dcp_group().world_size
         except AssertionError:
@@ -409,8 +412,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 q_data_type=self.model_config.dtype,
                 output_dtype=self.model_config.dtype,
                 prefill_backend=self._prefill_backend,
-                use_dense_mha=_use_dense_mha_prefill(
-                    self.vllm_config, prefill_max_seq_len, self.topk_tokens
+                use_dense_mha=(
+                    _use_dense_mha_prefill(
+                        self.vllm_config, prefill_max_seq_len, self.topk_tokens
+                    )
+                    # Dense MHA cannot be used under PCP+DCP.
+                    and not (self.use_pcp and self.dcp_world_size > 1)
                 ),
                 topk_mask_workspace=self.topk_mask_workspace,
                 host_staging_plan=staging_plan,
