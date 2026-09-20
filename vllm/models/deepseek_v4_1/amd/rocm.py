@@ -15,6 +15,9 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4_1.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4_1.common.ops.cache_utils import (
+    pack_fp8_and_gather_k_cache,
+)
 from vllm.models.deepseek_v4_1.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4SparseMLABackend,
@@ -32,14 +35,146 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    Q_MXFP8_ROPE_DIM,
+    Q_MXFP8_ROW_BYTES,
     build_ragged_indices_from_dense,
+    can_stage_fp8_sparse_prefill,
+    fp8_sparse_prefill_available,
     rocm_inv_rope_einsum,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
+    rocm_sparse_attn_prefill_fp8,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fused q/kv RMSNorm + MXFP8 q quant (ROCm producer for the native CDNA4 GEMM)
+# ---------------------------------------------------------------------------
+@triton.jit
+def _rocm_q_kv_norm_mxfp8_kernel(
+    q,
+    kv,
+    qw,
+    kvw,
+    qo,
+    kvo,
+    scales,
+    q_stride,
+    kv_stride,
+    s_stride,
+    eps,
+    Q_SIZE: tl.constexpr,
+    KV_SIZE: tl.constexpr,
+    BLOCK: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    TINY: tl.constexpr,
+):
+    """One program per (token, half). Half 0 norms+quantizes q, half 1 norms kv.
+
+    The quantization arithmetic is a line-for-line copy of
+    ``mxfp8_utils._mxfp8_e4m3_quantize_triton`` (block amax -> ceil(log2(amax /
+    448)) + 127, clamped to [0, 254]; rescale by ``exp2(127 - sb)`` rather than
+    dividing, so an all-zero block cannot produce 0/0 = NaN). Combined with the
+    bf16 round below, the (values, scales) this writes are BITWISE equal to
+    ``mxfp8_e4m3_quantize(fused_q_kv_rmsnorm(...)[0])``, which is what makes
+    turning this on a pure fusion rather than a numerics change.
+    """
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, BLOCK)
+    if tl.program_id(1) == 0:
+        w = tl.load(qw + cols, cols < Q_SIZE, 0.0).to(tl.float32)
+        v = tl.load(q + row * q_stride + cols, cols < Q_SIZE, 0.0).to(tl.float32)
+        rrms = tl.rsqrt(tl.sum(v * v, 0) / Q_SIZE + eps)
+        y = v * rrms * w
+        # Preserve the rounding boundary of the bf16 tensor this used to
+        # materialize: quantize from the bf16-rounded value, not from fp32.
+        y = y.to(q.dtype.element_ty).to(tl.float32)
+        grouped = tl.reshape(y, (BLOCK // 32, 32))
+        amax = tl.maximum(tl.max(tl.abs(grouped), axis=1), TINY)
+        sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
+        sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
+        rescale = tl.exp2(127.0 - sb)
+        xq = tl.reshape(grouped * rescale[:, None], (BLOCK,))
+        tl.store(qo + row * Q_SIZE + cols, xq.to(qo.dtype.element_ty), cols < Q_SIZE)
+        groups = tl.arange(0, BLOCK // 32)
+        tl.store(scales + row * s_stride + groups, sb.to(tl.uint8),
+                 groups < Q_SIZE // 32)
+    else:
+        w = tl.load(kvw + cols, cols < KV_SIZE, 0.0).to(tl.float32)
+        v = tl.load(kv + row * kv_stride + cols, cols < KV_SIZE, 0.0).to(tl.float32)
+        rrms = tl.rsqrt(tl.sum(v * v, 0) / KV_SIZE + eps)
+        tl.store(kvo + row * KV_SIZE + cols, v * rrms * w, cols < KV_SIZE)
+
+
+def _rocm_q_kv_rmsnorm_mxfp8(
+    qr: torch.Tensor,
+    kv: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    eps: float,
+):
+    """Normalize q/kv and emit q as MXFP8 with ROW-MAJOR E8M0 scales.
+
+    The ROCm counterpart of ``common/ops/query_quant.fused_q_kv_rmsnorm_quant``.
+    That one is CUDA-only by construction -- it writes FlashInfer's F8_128x4
+    swizzled scales, and ``can_fuse_query_quant`` opens with
+    ``if not current_platform.is_cuda(): return False`` because ``QuantKey``
+    cannot express the layout difference. This one writes the ``[M, K/32]``
+    row-major layout ``RocmDotScaledMxfp8LinearKernel`` reads, so the gate is
+    ``_wq_b_uses_rocm_native_mxfp8`` (a kernel TYPE test) instead.
+    """
+    from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+
+    assert qr.ndim == kv.ndim == 2 and qr.shape[0] == kv.shape[0]
+    assert qr.stride(-1) == kv.stride(-1) == 1
+    assert qr.shape[1] % 32 == 0
+    tokens, q_size = qr.shape
+    kv_size = kv.shape[1]
+    qo = torch.empty((tokens, q_size), dtype=torch.float8_e4m3fn, device=qr.device)
+    kvo = torch.empty_like(kv)
+    scales = torch.empty((tokens, q_size // 32), dtype=torch.uint8, device=qr.device)
+    block = triton.next_power_of_2(max(q_size, kv_size))
+    _rocm_q_kv_norm_mxfp8_kernel[(tokens, 2)](
+        qr,
+        kv,
+        q_weight,
+        kv_weight,
+        qo,
+        kvo,
+        scales,
+        qr.stride(0),
+        kv.stride(0),
+        scales.stride(0),
+        eps,
+        Q_SIZE=q_size,
+        KV_SIZE=kv_size,
+        BLOCK=block,
+        FP8_MAX=float(torch.finfo(torch.float8_e4m3fn).max),
+        TINY=float(torch.finfo(torch.float32).tiny),
+        num_warps=8 if block >= 2048 else 4,
+    )
+    return QuantizedActivation(qo, scales, qr.dtype, qr.shape, kMxfp8Dynamic), kvo
+
+
+def _fp8_prefill_workspace_requests(
+    chunk: int, m: int, max_batched_tokens: int, num_heads: int
+) -> tuple[tuple[tuple[int, ...], torch.dtype], ...]:
+    """The staging buffers the FP8 sparse-prefill route asks the arena for.
+
+    Kept in one place because the warmup step has to reserve exactly what the
+    real step will request: the arena is locked after warmup, and an under-
+    reservation there becomes a hard failure in the serving path.
+    """
+    return (
+        ((chunk, m, Q_MXFP8_ROW_BYTES), torch.uint8),
+        ((chunk, m, Q_MXFP8_ROPE_DIM), torch.bfloat16),
+        ((max_batched_tokens, num_heads, Q_MXFP8_ROW_BYTES), torch.uint8),
+        ((max_batched_tokens, num_heads, Q_MXFP8_ROPE_DIM), torch.bfloat16),
+    )
 
 
 def _trust_dsv4_extra_cache_nan_free(
@@ -114,6 +249,10 @@ def _combine_topk_swa_indices_kernel(
     WINDOW_SIZE: tl.constexpr,
     TOPK_WIDTH: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
+    # Lane count for the sliding-window store. ``tl.arange`` needs a
+    # power-of-two extent; 0 means "WINDOW_SIZE is already one, use it", which
+    # keeps every pre-existing caller of this kernel compiling unchanged.
+    PADDED_WINDOW: tl.constexpr = 0,
 ):
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -150,7 +289,13 @@ def _combine_topk_swa_indices_kernel(
             mask=topk_mask,
         )
 
-        swa_offset = tl.arange(0, WINDOW_SIZE)
+        # ``swa_len <= WINDOW_SIZE <= PADDED_WINDOW``, so padding the lane count
+        # and masking on ``swa_len`` is exact for any window, not just the 128
+        # this checkpoint happens to use.
+        if PADDED_WINDOW > 0:
+            swa_offset = tl.arange(0, PADDED_WINDOW)
+        else:
+            swa_offset = tl.arange(0, WINDOW_SIZE)
         tl.store(
             combined_indices_ptr
             + token_idx * combined_indices_stride
@@ -163,7 +308,7 @@ def _combine_topk_swa_indices_kernel(
         tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
 
 
-def combine_topk_swa_indices(
+def _combine_topk_swa_indices_reference(
     topk_indices: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -174,14 +319,17 @@ def combine_topk_swa_indices(
     M: int,
     N: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Combine compressed-attention and sliding-window indices with Torch.
+    """Eager-Torch reference for :func:`combine_topk_swa_indices`.
 
-    The Triton implementation inherited from DeepSeek V4 launches a
-    two-dimensional grid with 128 workers per request.  On gfx950 it can issue
-    an out-of-bounds access for V4.1's mixed prefill metadata (including the
-    synthetic mixed-token warmup).  This path is prefill-only and the tensors
-    are small, so use ordinary Torch indexing until a gfx950-safe fused kernel
-    is available.
+    This was the shipped ROCm path.  It is retained, unmodified, purely as the
+    correctness oracle that ``eval/eval_prefill_index_combine_fused.py`` holds
+    the fused kernel to; nothing in the model calls it.
+
+    It is NOT a fallback.  Two of its steps (``rows[swa_mask]`` and
+    ``swa_values[swa_mask]``) are boolean-mask selections, which call
+    ``nonzero()`` and therefore synchronize the stream -- once per sparse
+    attention layer per prefill chunk, 43 times per prefill step, on the
+    critical path.
     """
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
@@ -248,6 +396,77 @@ def combine_topk_swa_indices(
     flat_dst = rows[swa_mask] * combined_topk + swa_columns[swa_mask]
     combined_indices.view(-1).index_copy_(0, flat_dst, swa_values[swa_mask])
     combined_lens.copy_((topk_lens + swa_lens).to(torch.int32))
+    return combined_indices, combined_lens
+
+
+def combine_topk_swa_indices(
+    topk_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+    M: int,
+    N: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Combine compressed-attention and sliding-window indices in one kernel.
+
+    One Triton launch, no host synchronization, bitwise-identical to
+    :func:`_combine_topk_swa_indices_reference`.
+
+    ``compress_ratio`` is clamped to 1 only to keep the ``//`` a legal constexpr
+    on the five SWA-only layers, where ``compress_ratios[layer] == 0``.  Those
+    layers also pass ``topk == 0``, so ``topk_len`` is identically zero and the
+    divisor is never observable -- exactly as in the reference, where the same
+    division by zero is masked by ``minimum(..., 0)``.
+    """
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
+    num_tokens = topk_indices.shape[0]
+    topk_width = topk_indices.shape[1]
+    # The reference bounds the live top-k prefix by the tensor it was handed,
+    # not by the requested ``topk``; match that or the two disagree whenever a
+    # caller passes a wider ``topk`` than the buffer it published.
+    logical_topk_width = min(topk, topk_width)
+
+    combined_topk = (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )
+    # The kernel writes only each token's live prefix; the pad stays -1, which
+    # is the contract every consumer of ``combined_indices`` relies on.
+    combined_indices = torch.full(
+        (num_tokens, combined_topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    combined_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=topk_indices.device
+    )
+    if num_tokens == 0:
+        return combined_indices, combined_lens
+
+    num_prefills = seq_lens.shape[0]
+    _combine_topk_swa_indices_kernel[(num_prefills, 128)](
+        combined_indices,
+        combined_indices.stride(0),
+        combined_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        M,
+        N,
+        TOP_K=logical_topk_width,
+        COMPRESS_RATIO=max(1, compress_ratio),
+        WINDOW_SIZE=window_size,
+        TOPK_WIDTH=topk_width,
+        PADDED_TOP_K=max(1, triton.next_power_of_2(logical_topk_width)),
+        PADDED_WINDOW=max(1, triton.next_power_of_2(window_size)),
+    )
     return combined_indices, combined_lens
 
 
@@ -486,16 +705,21 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
-        # CUDA executes WO_A with a quantized grouped-BMM kernel.  ROCm's
-        # correctness path below dequantizes WO_A once and uses torch.einsum,
-        # so retain the ordinary MXFP8 linear kernel for post-load processing
-        # instead of asking for the CUDA-only BMM kernel.
+        # CUDA executes WO_A with a quantized grouped-BMM kernel. ROCm now runs
+        # the equivalent AITER FP8 chain (inverse_rope_group_quant +
+        # batched_gemm_a8w8_mxscale) instead of dequantizing to BF16, but that
+        # chain reads the *plain* MXFP8 linear layout and re-expresses the
+        # scales itself, so post-load processing must still leave the weight
+        # unshuffled rather than request the CUDA-only BMM kernel.
         self.wo_a.is_bmm = False
         self._has_kv_transfer = vllm_config.kv_transfer_config is not None
+        # Activation dtype for the inverse-RoPE cos/sin caches, taken from the
+        # model config rather than guessed at first use, so the load-time prime
+        # produces the exact dtype the step path will ask for.
+        self._woa_act_dtype = vllm_config.model_config.dtype
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
-        self._cos_sin_cache_fp32: torch.Tensor | None = None  # for FP8 _o_proj
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
@@ -503,6 +727,28 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def prepare_wo_a_fp8(self) -> bool:
+        """A1: re-express the WO_A scales for the AITER FP8 chain, at load time.
+
+        Deliberately separate from ``prepare_attn_preshuffle`` below, which this
+        model never calls (see ``process_weights_after_loading``): that routine
+        also reshuffles ``fused_wqa_wkv`` and ``wo_b``, which are different
+        GEMMs with their own evidence requirements. Only the WO_A rearrangement
+        is measured and landed here.
+        """
+        from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+            rocm_prepare_inv_rope_woa_fp8,
+        )
+
+        return rocm_prepare_inv_rope_woa_fp8(
+            self.rotary_emb,
+            self.wo_a,
+            self.rope_head_dim,
+            self.n_local_groups,
+            self.o_lora_rank,
+            self._woa_act_dtype,
+        )
 
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -536,10 +782,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
         self._wo_b_scale = _prep(self.wo_b)
-        if hasattr(self, "rotary_emb") and hasattr(self.rotary_emb, "cos_sin_cache"):
-            self._cos_sin_cache_fp32 = (
-                self.rotary_emb.cos_sin_cache.contiguous().float()
-            )
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         # V4.1 derives index keys from the source compressor's emitted latent
@@ -577,6 +819,56 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         return super()._run_parallel_input_projections(hidden_states)
 
     @functools.cached_property
+    def _wq_b_uses_rocm_native_mxfp8(self) -> bool:
+        """True when both wq_b GEMMs are the native CDNA4 MXFP8 kernel.
+
+        This is the gate for ``_rocm_q_kv_rmsnorm_mxfp8`` below. It has to be
+        a TYPE test, not just an ``input_quant_key`` test: QuantKey does not
+        encode scale layout, and ``kMxfp8Dynamic`` is also what FlashInfer's
+        kernels advertise for F8_128x4-SWIZZLED scales. Our producer writes
+        row-major ``[M, K/32]`` scales, so it may only feed the ROCm kernel.
+        Same discipline as ``can_fuse_query_quant`` on the CUDA side.
+
+        Cached: the linear kernels are fixed once the model is built.
+        """
+        from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+            RocmDotScaledMxfp8LinearKernel,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kMxfp8Dynamic,
+        )
+
+        linears = [self.wq_b]
+        if self.indexer is not None:
+            linears.append(self.indexer.wq_b)
+        for linear in linears:
+            kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+            if type(kernel) is not RocmDotScaledMxfp8LinearKernel:
+                logger.info_once(
+                    "DSv4.1 ROCm: fused q/kv norm+MXFP8-quant DECLINED -- "
+                    "wq_b kernel is %s, not RocmDotScaledMxfp8LinearKernel",
+                    type(kernel).__name__,
+                )
+                return False
+            # The layer must actually be advertising the key, i.e.
+            # expose_input_quant_key ran and the consumer will call
+            # as_quantized_activation. If it is not advertised, handing it a
+            # QuantizedActivation would raise, so decline instead.
+            if getattr(linear, "input_quant_key", None) != kMxfp8Dynamic:
+                logger.info_once(
+                    "DSv4.1 ROCm: fused q/kv norm+MXFP8-quant DECLINED -- "
+                    "wq_b does not advertise input_quant_key=%s (got %s)",
+                    kMxfp8Dynamic,
+                    getattr(linear, "input_quant_key", None),
+                )
+                return False
+        logger.info_once(
+            "DSv4.1 ROCm: fused q/kv RMSNorm + MXFP8 q quant ENGAGED; wq_b and "
+            "indexer.wq_b share one pre-quantized activation."
+        )
+        return True
+
+    @functools.cached_property
     def _wq_b_uses_aiter_block_scaled(self) -> bool:
         """True when both wq_b GEMMs run the aiter block-scaled fp8 kernel.
 
@@ -608,24 +900,35 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-        """Fuse q/kv RMSNorm + per-1x128 fp8 q quant into one aiter kernel.
+        """Fuse q/kv RMSNorm + q quant into one kernel, for both wq_b GEMMs.
 
         The shared path norms q and kv in one triton kernel and the wq_b
-        linears then re-read the bf16 qr to quantize it. The aiter kernel
-        computes both RMSNorms (fp32 accumulate) and the fp8 group quant
-        in a single pass, writing fp8 qr + group scales directly; both
-        wq_b GEMMs (attention and indexer) then consume that pair and
-        skip their own input quant. kv stays bf16: the fused insert
-        kernel RoPE/quantizes it itself. Falls back to the shared path
-        when the aiter linear path is not active.
+        linears then re-read the bf16 qr to quantize it -- TWICE, because
+        ``wq_b`` and ``indexer.wq_b`` each quantize the same tensor. Fusing
+        norm and quant writes the quantized pair once and both GEMMs consume
+        it. kv stays bf16: the fused insert kernel RoPE/quantizes it itself.
+
+        Two producers, picked by what the consumers actually are:
+
+        * MXFP8 1x32 E8M0 (this checkpoint: ``weight_block_size=[32,32]``,
+          ``scale_fmt=ue8m0``) -> ``_rocm_q_kv_rmsnorm_mxfp8``, which emits a
+          ``QuantizedActivation`` for the native CDNA4 ``tl.dot_scaled``
+          kernel. Bitwise-identical to the path it replaces.
+        * block-scaled FP8 1x128 -> the aiter kernel below.
+
+        Falls back to the shared path when neither consumer matches.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        if not (
-            qr.dim() == 2
-            and qr.shape[0] > 0
-            and self.q_lora_rank % 128 == 0
-            and self._wq_b_uses_aiter_block_scaled
-        ):
+        if not (qr.dim() == 2 and qr.shape[0] > 0):
+            return super()._split_qkv_and_norm(qr_kv)
+
+        if self.q_lora_rank % 32 == 0 and self._wq_b_uses_rocm_native_mxfp8:
+            qr_quant, kv_out = _rocm_q_kv_rmsnorm_mxfp8(
+                qr, kv, self.q_norm.weight.data, self.kv_norm.weight.data, self.eps
+            )
+            return qr_quant, None, kv_out
+
+        if not (self.q_lora_rank % 128 == 0 and self._wq_b_uses_aiter_block_scaled):
             return super()._split_qkv_and_norm(qr_kv)
 
         from vllm._aiter_ops import rocm_aiter_ops
@@ -642,74 +945,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # FP8 fast path: checkpoint wo_a is float8_e4m3fn with MX block scales
-        # (weight_block_size=[32,32], scale_fmt=ue8m0). Use them directly via
-        # fused_inv_rope_fp8_quant + batched_gemm_a8w8_mxscale (AITER CK).
-        # Gated on not-capturing: batched_gemm_a8w8_mxscale segfaults during
-        # CUDA graph capture on gfx950; captured graphs use the BF16 fallback.
-        # Lazy fallback: populate cos_sin cache if prepare_attn_preshuffle was
-        # not called (e.g. non-preshuffled serving path).
-        if (self._cos_sin_cache_fp32 is None
-                and hasattr(self, "rotary_emb")
-                and hasattr(self.rotary_emb, "cos_sin_cache")):
-            self._cos_sin_cache_fp32 = (
-                self.rotary_emb.cos_sin_cache.contiguous().float()
-            )
-
-        fp8_weight = getattr(self.wo_a, 'weight', None)
-        fp8_scale = (getattr(self.wo_a, 'scale', None)
-                     or getattr(self.wo_a, 'weight_scale_inv', None)
-                     or getattr(self.wo_a, 'weight_scale', None))
-        if (fp8_weight is not None
-                and fp8_scale is not None
-                and fp8_weight.dtype == torch.float8_e4m3fn
-                and self._cos_sin_cache_fp32 is not None
-                and not torch.cuda.is_current_stream_capturing()
-                and o.shape[0] <= self._cos_sin_cache_fp32.shape[0]):
-            try:
-                from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
-                    fused_inv_rope_fp8_quant,
-                )
-                from aiter.ops.batched_gemm_op_a8w8 import batched_gemm_a8w8_mxscale
-
-                x_fp8, x_scale_fp32 = fused_inv_rope_fp8_quant(
-                    o, positions, self._cos_sin_cache_fp32,
-                    n_groups=self.n_local_groups,
-                    heads_per_group=self.n_local_heads // self.n_local_groups,
-                    nope_dim=self.nope_head_dim,
-                    rope_dim=self.rope_head_dim,
-                    quant_group_size=32,
-                    tma_aligned_scales=False,
-                )
-                log2 = x_scale_fp32.abs().clamp(min=1e-30).log2().round().clamp(-127, 127)
-                x_scale_e8m0 = (log2 + 127).to(torch.uint8)
-
-                G = self.n_local_groups
-                N = self.o_lora_rank
-                K = self.n_local_heads * self.head_dim // G
-                w_fp8 = fp8_weight.view(G, N, K)
-                if fp8_scale.dtype == torch.float8_e8m0fnu:
-                    ws_e8m0 = fp8_scale.view(torch.uint8).view(G, N // 32, K // 32)
-                elif fp8_scale.dtype == torch.float32:
-                    log2_w = fp8_scale.abs().clamp(min=1e-30).log2().round().clamp(-127, 127)
-                    ws_e8m0 = (log2_w + 127).to(torch.uint8).view(G, N // 32, K // 32)
-                else:
-                    ws_e8m0 = fp8_scale.to(torch.uint8).view(G, N // 32, K // 32)
-
-                z = batched_gemm_a8w8_mxscale(
-                    x_fp8, w_fp8, x_scale_e8m0, ws_e8m0,
-                    dtype=torch.bfloat16,
-                )
-                zf = z.flatten(1)
-                if self._wo_b_scale is not None and zf.dim() == 2:
-                    return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
-                return self.wo_b(zf)
-            except Exception as _e:
-                import logging
-                logging.getLogger(__name__).warning_once(
-                    f'[ROCm] FP8 o_proj failed ({type(_e).__name__}), using BF16: {_e}')
-
-        # BF16 fallback (CUDA graph capture, or FP8 path unavailable)
+        # Stage A (inverse RoPE + WO_A) via the AITER FP8 chain, with the BF16
+        # einsum as a named fallback; then wo_b.
+        # NOTE: the ``_wo_b_scale`` branch below is currently unreachable in
+        # this model -- it is only set by ``prepare_attn_preshuffle``, which
+        # V4.1's ``process_weights_after_loading`` never calls (V4's does).
+        # Left alone deliberately: wiring it up is a separate GEMM change that
+        # needs its own evidence, not a rider on this one.
         z = rocm_inv_rope_einsum(
             self.rotary_emb,
             o,
@@ -721,8 +963,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         )
         zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
-            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
-        return self.wo_b(zf)
+            result = self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
+        else:
+            result = self.wo_b(zf)
+        return result
 
     def forward_mqa(
         self,
@@ -756,6 +1000,31 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             current_workspace_manager().get_simultaneous(
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
             )
+            # ...and, if this layer *could* ever take the FP8 route, its
+            # buffers too.  Deliberately gated on structural capability
+            # alone, not on the step-time profitability bound: warmup has no
+            # context lengths to key that bound on, and the arena is locked
+            # after warmup, so anything shape-dependent here risks an
+            # under-reservation that fails hard in the serving path.
+            # Reserving unconditionally costs nothing -- the BF16 request
+            # just above is made for every layer and is strictly larger
+            # (4160.5 MiB vs 2760.3 MiB at production geometry), and
+            # `_ensure_workspace_size` only grows, so the arena is the max
+            # over requests, not their sum.  It is not yet locked, so two
+            # calls are safe.
+            if not swa_only and fp8_sparse_prefill_available(
+                attn_sink=self.attn_sink,
+                head_dim=q.shape[-1],
+                caches_are_ocp=not current_platform.is_fp8_fnuz(),
+            ):
+                current_workspace_manager().get_simultaneous(
+                    *_fp8_prefill_workspace_requests(
+                        self.PREFILL_CHUNK_SIZE,
+                        M,
+                        self.max_num_batched_tokens,
+                        q.shape[1],
+                    )
+                )
             output.zero_()
             return
 
@@ -905,41 +1174,121 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             self.PREFILL_CHUNK_SIZE
         )
 
+        # The KV staging format is chosen once per call, not per chunk: the
+        # workspace arena is shared, so requesting both a BF16 and an FP8
+        # staging buffer would size it to their sum.  The FP8 route's
+        # profitability scales with the KV rows staged per request, so take
+        # the *smallest* request in the batch -- then every request clears
+        # the crossover the gate encodes.
+        min_staged_kv_rows = 0
+        if not swa_only and num_prefills > 0:
+            seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
+            query_lens_cpu = swa_metadata.prefill_query_lens_cpu
+            assert seq_lens_cpu is not None
+            assert query_lens_cpu is not None
+            # Mirrors the two gather calls below exactly: the compressed
+            # prefix pool written at offset 0, plus the SWA window written
+            # at offset N.  Host tensors throughout -- no device sync.
+            gather_lens_cpu = query_lens_cpu + torch.clamp(
+                seq_lens_cpu - query_lens_cpu,
+                min=0,
+                max=self.window_size - 1,
+            )
+            compressed_lens_cpu = torch.div(
+                seq_lens_cpu, self.compress_ratio, rounding_mode="floor"
+            )
+            min_staged_kv_rows = int(
+                (compressed_lens_cpu + gather_lens_cpu)[:num_prefills].min()
+            )
+
+        # SWA-only layers gather ~window rows per query; the FP8 kernel's
+        # win comes from KV bytes moved and inverts at that density, so they
+        # stay on BF16.  See LEDGER a1-fp8-prefill-nnz-crossover.
+        stage_fp8 = not swa_only and can_stage_fp8_sparse_prefill(
+            staged_kv_rows=min_staged_kv_rows,
+            attn_sink=self.attn_sink,
+            head_dim=q.shape[-1],
+            caches_are_ocp=not current_platform.is_fp8_fnuz(),
+        )
+
         workspace_manager = current_workspace_manager()
-        kv = workspace_manager.get_simultaneous(
-            ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
-        )[0]
+        if stage_fp8:
+            # The cache's own format: 448 FP8 NoPE bytes + 14 E8M0 scale
+            # bytes + pad per row, with RoPE kept BF16 alongside.  Smaller
+            # than the BF16 staging buffer it replaces, so the arena -- sized
+            # to the largest request the process makes -- does not grow.
+            kv_nope, kv_rope, q_nope_buf, q_rope_buf = (
+                workspace_manager.get_simultaneous(
+                    *_fp8_prefill_workspace_requests(
+                        self.PREFILL_CHUNK_SIZE,
+                        M,
+                        self.max_num_batched_tokens,
+                        q.shape[1],
+                    )
+                )
+            )
+        else:
+            kv = workspace_manager.get_simultaneous(
+                ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+            )[0]
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * self.PREFILL_CHUNK_SIZE
             chunk_end = min(chunk_start + self.PREFILL_CHUNK_SIZE, num_prefills)
             chunk_size = chunk_end - chunk_start
-            if not swa_only:
+            swa_block_table = swa_metadata.block_table[num_decodes:]
+            if stage_fp8:
                 assert attn_metadata is not None
                 assert compressed_k_cache is not None
                 block_table = attn_metadata.block_table[num_decodes:]
                 # compressed_k_cache is OCP on every platform (Triton encoder).
-                dequantize_and_gather_k_cache(
-                    kv[:chunk_size],
+                pack_fp8_and_gather_k_cache(
+                    kv_nope[:chunk_size],
+                    kv_rope[:chunk_size],
                     compressed_k_cache,
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,
                     block_table=block_table[chunk_start:chunk_end],
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
-                    use_fnuz=False,
                 )
+                pack_fp8_and_gather_k_cache(
+                    kv_nope[:chunk_size],
+                    kv_rope[:chunk_size],
+                    swa_k_cache,
+                    seq_lens=seq_lens[chunk_start:chunk_end],
+                    gather_lens=gather_lens[chunk_start:chunk_end],
+                    block_table=swa_block_table[chunk_start:chunk_end],
+                    block_size=swa_metadata.block_size,
+                    offset=N,
+                )
+            else:
+                if not swa_only:
+                    assert attn_metadata is not None
+                    assert compressed_k_cache is not None
+                    block_table = attn_metadata.block_table[num_decodes:]
+                    # compressed_k_cache is OCP on every platform.
+                    dequantize_and_gather_k_cache(
+                        kv[:chunk_size],
+                        compressed_k_cache,
+                        seq_lens=seq_lens[chunk_start:chunk_end]
+                        // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=block_table[chunk_start:chunk_end],
+                        block_size=attn_metadata.block_size // self.compress_ratio,
+                        offset=0,
+                        use_fnuz=False,
+                    )
 
-            swa_block_table = swa_metadata.block_table[num_decodes:]
-            dequantize_and_gather_k_cache(
-                kv[:chunk_size],
-                swa_k_cache,
-                seq_lens=seq_lens[chunk_start:chunk_end],
-                gather_lens=gather_lens[chunk_start:chunk_end],
-                block_table=swa_block_table[chunk_start:chunk_end],
-                block_size=swa_metadata.block_size,
-                offset=N,
-                use_fnuz=current_platform.is_fp8_fnuz(),
-            )
+                dequantize_and_gather_k_cache(
+                    kv[:chunk_size],
+                    swa_k_cache,
+                    seq_lens=seq_lens[chunk_start:chunk_end],
+                    gather_lens=gather_lens[chunk_start:chunk_end],
+                    block_table=swa_block_table[chunk_start:chunk_end],
+                    block_size=swa_metadata.block_size,
+                    offset=N,
+                    use_fnuz=current_platform.is_fp8_fnuz(),
+                )
 
             query_start = (
                 query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
@@ -961,15 +1310,30 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 M,
                 N,
             )
-            rocm_sparse_attn_prefill(
-                q=q[query_start:query_end],
-                kv=kv.view(-1, 1, q.shape[-1]),
-                indices=combined_indices,
-                topk_length=combined_lens,
-                scale=self.scale,
-                head_dim=self.head_dim,
-                nope_head_dim=self.nope_head_dim,
-                rope_head_dim=self.rope_head_dim,
-                attn_sink=self.attn_sink,
-                output=output[query_start:query_end],
-            )
+            if stage_fp8:
+                n_q = query_end - query_start
+                rocm_sparse_attn_prefill_fp8(
+                    q=q[query_start:query_end],
+                    q_nope_buf=q_nope_buf[:n_q],
+                    q_rope_buf=q_rope_buf[:n_q],
+                    kv_nope=kv_nope.view(-1, Q_MXFP8_ROW_BYTES),
+                    kv_rope=kv_rope.view(-1, Q_MXFP8_ROPE_DIM),
+                    indices=combined_indices,
+                    topk_length=combined_lens,
+                    scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    output=output[query_start:query_end],
+                )
+            else:
+                rocm_sparse_attn_prefill(
+                    q=q[query_start:query_end],
+                    kv=kv.view(-1, 1, q.shape[-1]),
+                    indices=combined_indices,
+                    topk_length=combined_lens,
+                    scale=self.scale,
+                    head_dim=self.head_dim,
+                    nope_head_dim=self.nope_head_dim,
+                    rope_head_dim=self.rope_head_dim,
+                    attn_sink=self.attn_sink,
+                    output=output[query_start:query_end],
+                )
