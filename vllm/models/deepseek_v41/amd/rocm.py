@@ -944,7 +944,15 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
-                not swa_only and kv_cache is not None,
+                not swa_only
+                and kv_cache is not None
+                and (
+                    topk_indices is not None
+                    or (
+                        topk_ragged_indices is not None
+                        and topk_ragged_indptr is not None
+                    )
+                ),
             ),
         )
 
