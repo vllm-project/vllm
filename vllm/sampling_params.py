@@ -290,7 +290,9 @@ class SamplingParams(
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
     prompt_logprob_token_ids: list[int] | None = None
-    """Token IDs to score at selected causal prompt rows."""
+    """Token IDs to score at each scored causal prompt row, where row i scores
+    them as predictions of prompt token i + 1. The last prompt row is excluded,
+    so the result has `prompt_len - 1 - prompt_logprob_start` rows."""
     prompt_logprob_start: int | None = None
     """First causal prompt row to score; defaults to the first row."""
     logprob_token_ids: list[int] | None = None
@@ -1019,6 +1021,10 @@ class SamplingParams(
         if self.prompt_logprobs is not None:
             raise ValueError(
                 "trace_decode_token_ids is not supported with prompt_logprobs."
+            )
+        if self.prompt_logprob_token_ids is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with prompt_logprob_token_ids."
             )
         if speculative_config is not None:
             raise ValueError(

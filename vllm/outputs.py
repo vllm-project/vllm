@@ -117,7 +117,9 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
-        prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids per row.
+        prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids, shaped
+            [prompt_len - 1 - prompt_logprob_start, len(prompt_logprob_token_ids)];
+            row i scores them as predictions of prompt token i + 1.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.

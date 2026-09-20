@@ -1422,6 +1422,39 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
         )
 
 
+def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
+    """A prefill that starts past the first scored row returns no scores.
+
+    Such a prefill (here a prefix-cache hit the caller opted back into) never
+    computes the leading rows, so emitting the buffer would return values the
+    model never produced for them.
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+    prompt = "The capital of France is Paris. " * 20
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=1,
+        prompt_logprob_token_ids=[10, 100, 1000],
+        skip_reading_prefix_cache=False,
+    )
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=512,
+        enable_prefix_caching=True,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
+        first = vllm_model.llm.generate([prompt], sampling_params)[0]
+        assert first.prompt_token_id_logprobs is not None
+        assert math.isfinite(float(first.prompt_token_id_logprobs.min()))
+
+        # The re-send is served from the prefix cache, so its prefill starts
+        # past row 0 and the leading rows are never computed.
+        second = vllm_model.llm.generate([prompt], sampling_params)[0]
+        assert second.prompt_token_id_logprobs is None
+
+
 @large_gpu_mark(min_gb=24)
 def test_token_logprobs_large_batch_int64_row_offset():
     """Regression: logprob kernel row offset (row * vocab_size) must use int64.

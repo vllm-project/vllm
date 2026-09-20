@@ -87,6 +87,12 @@ class PromptLogprobsWorker:
             if chunk_start >= prompt_len or prompt_len < input_batch.prefill_len_np[i]:
                 continue
             if req.scores is None:
+                if chunk_start > req.start:
+                    # This prefill starts past the first scored row, so those
+                    # rows will never be written; drop the request instead of
+                    # emitting a buffer with unwritten rows.
+                    self.token_id_scores.pop(req_id, None)
+                    continue
                 req.scores = hidden_states.new_empty(
                     (max(prompt_len - 1 - req.start, 0), len(req.token_ids)),
                     dtype=torch.float32,
