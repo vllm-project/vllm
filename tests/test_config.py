@@ -44,7 +44,8 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
@@ -1251,6 +1252,91 @@ def test_data_parallel_rpc_port_has_fixed_default():
 
 def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+
+
+def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
+    # `is_device_capability_family` is a classmethod, so it reads the capability
+    # off the class rather than the instance patched above.
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        staticmethod(
+            lambda device_id=0: DeviceCapability(
+                major=capability[0], minor=capability[1]
+            )
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "capability", "expected"),
+    [
+        # GB200 and GB300: datacenter Blackwell on a Grace host.
+        (CpuArchEnum.ARM, (10, 0), "flashinfer_nvlink_one_sided"),
+        (CpuArchEnum.ARM, (10, 3), "flashinfer_nvlink_one_sided"),
+        # HGX B200/B300 share the compute capability but not the Grace host.
+        (CpuArchEnum.X86, (10, 0), "allgather_reducescatter"),
+        (CpuArchEnum.X86, (10, 3), "allgather_reducescatter"),
+        # GB10 is a Grace-Blackwell superchip too, but not a 10.x part.
+        (CpuArchEnum.ARM, (12, 1), "allgather_reducescatter"),
+        # GH200 is Grace, but Hopper.
+        (CpuArchEnum.ARM, (9, 0), "allgather_reducescatter"),
+        (CpuArchEnum.X86, (9, 0), "allgather_reducescatter"),
+    ],
+)
+def test_all2all_backend_defaults_to_one_sided_only_on_gb200_gb300(
+    monkeypatch, cpu_arch, capability, expected
+):
+    """x86 HGX B200/B300 report the same compute capability as GB200/GB300, so
+    the default needs the Grace host to stay off unbenchmarked parts."""
+    from vllm.config.parallel import _prefers_one_sided_all2all
+
+    _pretend_cuda_host(monkeypatch, cpu_arch, capability)
+    _prefers_one_sided_all2all.cache_clear()
+    try:
+        default_factory = get_field(ParallelConfig, "all2all_backend").default_factory
+        assert default_factory() == expected
+    finally:
+        _prefers_one_sided_all2all.cache_clear()
+
+
+def test_one_sided_all2all_default_requires_expert_parallel(monkeypatch):
+    """The all2all backend is only used by expert parallelism, so the GB200
+    default must not leak into non-EP deployments."""
+    from vllm.config.parallel import _prefers_one_sided_all2all
+
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+    _prefers_one_sided_all2all.cache_clear()
+    try:
+        assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+        assert (
+            ParallelConfig(enable_expert_parallel=True).all2all_backend
+            == "flashinfer_nvlink_one_sided"
+        )
+    finally:
+        _prefers_one_sided_all2all.cache_clear()
+
+
+def test_one_sided_all2all_default_falls_back_without_flashinfer(monkeypatch):
+    """FlashInferNVLinkOneSidedManager asserts on the missing module, so an
+    image without it must degrade instead of failing startup."""
+    from vllm.config.parallel import _prefers_one_sided_all2all
+
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: False
+    )
+    _prefers_one_sided_all2all.cache_clear()
+    try:
+        config = ParallelConfig(enable_expert_parallel=True)
+        assert config.all2all_backend == "allgather_reducescatter"
+    finally:
+        _prefers_one_sided_all2all.cache_clear()
 
 
 @pytest.mark.parametrize(

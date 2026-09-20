@@ -13,7 +13,25 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
+from vllm.config import (
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed import get_ep_group
+from vllm.distributed.device_communicators.all2all import (
+    AgRsAll2AllManager,
+    All2AllManagerBase,
+    FlashInferNVLinkOneSidedManager,
+)
+from vllm.distributed.device_communicators.base_device_communicator import (
+    DeviceCommunicatorBase,
+)
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -22,6 +40,125 @@ from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
+
+
+@pytest.fixture
+def cuda_host(monkeypatch):
+    """Resolve the all2all default as it would on a datacenter Blackwell host,
+    where only a Grace CPU distinguishes GB200/GB300 from x86 HGX B200/B300."""
+    from vllm.config.parallel import _prefers_one_sided_all2all
+
+    def apply(cpu_arch: CpuArchEnum) -> None:
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+        monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
+        # `is_device_capability_family` is a classmethod, so it reads the
+        # capability off the class rather than the instance patched above.
+        monkeypatch.setattr(
+            type(current_platform),
+            "get_device_capability",
+            staticmethod(lambda device_id=0: DeviceCapability(major=10, minor=0)),
+        )
+        _prefers_one_sided_all2all.cache_clear()
+
+    yield apply
+    _prefers_one_sided_all2all.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "expected_backend"),
+    [
+        pytest.param(
+            CpuArchEnum.ARM,
+            "flashinfer_nvlink_one_sided",
+            marks=pytest.mark.skipif(
+                not has_flashinfer_nvlink_one_sided(),
+                reason="FlashInfer NVLink one-sided not available",
+            ),
+        ),
+        (CpuArchEnum.X86, "allgather_reducescatter"),
+    ],
+)
+def test_default_ep_communicator_uses_platform_all2all_backend(
+    monkeypatch, cuda_host, cpu_arch, expected_backend
+):
+    def init_device_communicator(
+        self,
+        cpu_group,
+        device,
+        device_group,
+        unique_name,
+        global_ranks,
+        global_world_size,
+        *,
+        use_all2all,
+    ):
+        self.cpu_group = cpu_group
+        self.device = device
+        self.device_group = device_group
+        self.unique_name = unique_name
+        self.world_size = 1
+        self.use_all2all = unique_name.startswith("ep:") and use_all2all
+        self.all2all_backend = get_current_vllm_config().parallel_config.all2all_backend
+        self.all2all_manager = None
+
+    def init_all2all_manager(self, cpu_group, tcp_store_group=None):
+        # The real base __init__ needs DP/TP groups, which aren't initialized
+        # here. Set only what the manager subclasses read on construction.
+        self.cpu_group = cpu_group
+        self.rank = 0
+        self.world_size = 1
+
+    cuda_host(cpu_arch)
+    monkeypatch.setattr(DeviceCommunicatorBase, "__init__", init_device_communicator)
+    monkeypatch.setattr(All2AllManagerBase, "__init__", init_all2all_manager)
+
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(enable_expert_parallel=True)
+    )
+    with set_current_vllm_config(vllm_config):
+        device_comm_cls = CudaCommunicator
+        device_communicator = device_comm_cls(
+            cpu_group=object(),
+            device=torch.device("cuda:0"),
+            device_group=object(),
+            unique_name="ep:test",
+            use_all2all=True,
+        )
+
+    assert device_communicator.all2all_backend == expected_backend
+    if expected_backend == "flashinfer_nvlink_one_sided":
+        assert isinstance(
+            device_communicator.all2all_manager, FlashInferNVLinkOneSidedManager
+        )
+    else:
+        assert isinstance(device_communicator.all2all_manager, AgRsAll2AllManager)
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "expected_backend"),
+    [
+        (CpuArchEnum.ARM, "flashinfer_nvlink_one_sided"),
+        (CpuArchEnum.X86, "allgather_reducescatter"),
+    ],
+)
+def test_engine_args_resolves_all2all_backend_default(
+    monkeypatch, cuda_host, cpu_arch, expected_backend
+):
+    """`EngineArgs` mirrors this field from `ParallelConfig`, and
+    `create_engine_config()` passes the value straight back. The default must
+    therefore arrive as a resolved string; leaking a `FieldInfo` through makes
+    every launch without `--all2all-backend` fail config validation."""
+    cuda_host(cpu_arch)
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+
+    backend = EngineArgs().all2all_backend
+
+    assert backend == expected_backend
+    config = ParallelConfig(all2all_backend=backend, enable_expert_parallel=True)
+    assert config.all2all_backend == expected_backend
+
 
 # ---------------------------------------------------------------------------
 # Helpers
