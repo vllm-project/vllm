@@ -9,12 +9,6 @@ class EngineGenerateError(VLLMServerError):
     pass
 
 
-class EnginePausedError(VLLMServerError):
-    """Raised when a request arrives while generation is paused. Retryable."""
-
-    pass
-
-
 class EngineDeadError(VLLMServerError):
     """Raised when the EngineCore dies. Unrecoverable."""
 

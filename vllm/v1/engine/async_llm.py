@@ -21,6 +21,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.exceptions import (
+    EnginePausedError,
     GracefulHTTPError,
     MaxQueuedTokensError,
     QueueOverflowError,
@@ -47,11 +48,7 @@ from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import (
-    EngineDeadError,
-    EngineGenerateError,
-    EnginePausedError,
-)
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -334,8 +331,12 @@ class AsyncLLM(EngineClient):
         Raises:
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
+            EnginePausedError: If generation is paused in a rejecting mode.
 
         """
+        if self._reject_while_paused is not None:
+            raise EnginePausedError(self._reject_while_paused)
+
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
             current_requests = (
@@ -532,10 +533,7 @@ class AsyncLLM(EngineClient):
 
     def _reject_if_paused(self) -> None:
         if self._reject_while_paused is not None:
-            raise EnginePausedError(
-                f"Generation is paused (mode={self._reject_while_paused!r}); "
-                "retry after resume."
-            )
+            raise EnginePausedError(self._reject_while_paused)
 
     async def _add_request(
         self,
@@ -550,7 +548,7 @@ class AsyncLLM(EngineClient):
         ):
             self.check_admission(request_id=request.request_id)
 
-        # Past every await in the submission path, so a late pause is caught.
+        # Last checkpoint before the RPC; a pause landing during the send is not.
         self._reject_if_paused()
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
@@ -641,7 +639,10 @@ class AsyncLLM(EngineClient):
                 if not cancelled:
                     # Send empty final request to indicate that inputs have
                     # finished. Don't send if cancelled (session was aborted).
-                    await self._add_request(final_req, None, None, 0, queue)
+                    try:
+                        await self._add_request(final_req, None, None, 0, queue)
+                    except EnginePausedError as error:
+                        queue.put(InputStreamError(error))
 
         # Ensure output handler is running.
         self._run_output_handler()
@@ -760,10 +761,6 @@ class AsyncLLM(EngineClient):
         except EngineDeadError:
             if self.log_requests:
                 logger.info("Request %s failed (engine dead).", request_id)
-            raise
-
-        # Paused; the caller owns the retry.
-        except EnginePausedError:
             raise
 
         # Request validation error or admission control rejection.
@@ -934,6 +931,8 @@ class AsyncLLM(EngineClient):
         All mode handling (abort / wait / keep) and cache clearing is done
         in the engine. ``abort`` and ``wait`` reject new requests with a
         retryable ``EnginePausedError``; ``keep`` accepts and queues them.
+        If this call fails, admission stays closed: call
+        :meth:`resume_generation` to reopen it.
 
         Args:
             mode: How to handle in-flight requests:
@@ -1049,10 +1048,6 @@ class AsyncLLM(EngineClient):
         except EngineDeadError:
             if self.log_requests:
                 logger.info("Request %s failed (engine dead).", request_id)
-            raise
-
-        # Paused; the caller owns the retry.
-        except EnginePausedError:
             raise
 
         # Request validation error or admission control rejection.

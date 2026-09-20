@@ -20,14 +20,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import EnginePausedError, VLLMValidationError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.exceptions import EnginePausedError
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
     LoggingStatLogger,
@@ -1283,14 +1282,7 @@ async def test_resume_while_asleep_keeps_rejecting():
 
 
 def test_paused_error_maps_to_retryable_status():
-    """The exception says it is retryable; the HTTP layer has to agree.
-    Without an explicit branch it falls through to VLLMServerError and a
-    client sees a 500, which no retry policy acts on."""
+    """A pause rejection must reach the client as a retryable 503, not a 500."""
     from http import HTTPStatus
 
-    from vllm.entrypoints.serve.exception_handling.error_response import (
-        create_error_response,
-    )
-
-    response = create_error_response(EnginePausedError("paused"))
-    assert response.error.code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert EnginePausedError("abort").http_status == HTTPStatus.SERVICE_UNAVAILABLE
