@@ -16,6 +16,49 @@ Measured on MI355X, TP8, conc=1, DSpark MTP depth 6, 1200 s:
 Accuracy is unchanged. The noise floor of a 1200 s conc=1 arm is roughly 1%,
 so +1.55% is real but not precise; a 3600 s run tightens it to about 0.6%.
 
+## Quick start
+
+You need 8x MI355X (or another ROCm GPU with aiter) for TP8, the
+`moonshotai/Kimi-K3` base checkpoint, the `Inferact/Kimi-K3-DSpark` draft model
+for MTP, and ~12 GB of free disk.
+
+**This directory ships no quantized weights.** The PR makes a mixed mxfp4+fp8
+checkpoint servable; you build the checkpoint yourself in step 1.
+
+```bash
+# 1. build the overlay (CPU only, ~12 GB, under an hour)
+python build_overlay.py --src /path/to/Kimi-K3 \
+                        --dst /path/to/Kimi-K3-fp8se \
+                        --target shared_experts
+
+# 2. verify it will actually be served as fp8 -- do not skip this
+python verify_overlay.py --overlay /path/to/Kimi-K3-fp8se \
+                         --target shared_experts
+
+# 3. serve (full flag list under "Run the conc=1 agentic workload")
+export VLLM_ROCM_USE_AITER=1
+vllm serve /path/to/Kimi-K3-fp8se --load-format safetensors \
+    --tensor-parallel-size 8 ...
+
+# 4. confirm the layers were really delegated -- expect 184
+grep -c 'delegated to CompressedTensorsLinearMethod' server.log
+```
+
+Then drive an agentic workload at **concurrency 1** for at least 1200 s and
+read interactivity p90. Gate accuracy separately on the full 1319 GSM8k
+questions with `"rejection_sample_method":"block"`.
+
+Three things decide whether this works at all:
+
+* **`--load-format safetensors` is mandatory.** `fastsafetensors` has no
+  tensor-level index hook and will silently serve the original bf16 weights.
+* **`VLLM_ROCM_USE_AITER=1`** routes the fp8 linear to aiter.
+* **Step 4 returning 0** means you are measuring the baseline, not the change.
+  184 rather than 276 is correct: vLLM fuses `gate_proj`+`up_proj` into a
+  single `gate_up_proj`.
+
+Each step is expanded below.
+
 ## Scope: quantize only `shared_experts`
 
 This is the entire recommendation, and it is deliberately narrow. Three other
