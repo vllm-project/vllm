@@ -191,9 +191,6 @@ class Worker(WorkerBase):
         "CPU",
         "CUDA",
     )
-    SUPPORTED_TORCH_PROFILER_ACTIVITIES: ClassVar[frozenset[TorchProfilerActivity]] = (
-        frozenset(DEFAULT_TORCH_PROFILER_ACTIVITIES)
-    )
     SUPPORTED_PROFILER_KINDS: ClassVar[frozenset[ProfilerKind]] = frozenset(
         ("torch", "cuda", "proton")
     )
@@ -1278,12 +1275,10 @@ class Worker(WorkerBase):
             if configured is None
             else tuple(configured)
         )
-        unsupported = set(activities) - self.SUPPORTED_TORCH_PROFILER_ACTIVITIES
+        unsupported = set(activities).difference(self.DEFAULT_TORCH_PROFILER_ACTIVITIES)
         if unsupported:
             unsupported_names = ", ".join(sorted(unsupported))
-            supported_names = ", ".join(
-                sorted(self.SUPPORTED_TORCH_PROFILER_ACTIVITIES)
-            )
+            supported_names = ", ".join(sorted(self.DEFAULT_TORCH_PROFILER_ACTIVITIES))
             raise ValueError(
                 f"Unsupported torch profiler activities for "
                 f"{type(self).__name__}: {unsupported_names}. "

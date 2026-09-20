@@ -116,6 +116,10 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
         wrapper.stop()
 
     assert len(traces) == 2
+    for run, trace in enumerate(traces):
+        assert {
+            event.name for event in trace.events() if event.name.startswith("run_")
+        } == {f"run_{run}"}
 
 
 @pytest.mark.parametrize(
@@ -165,20 +169,6 @@ def test_torch_profiler_activities_require_torch_profiler():
 
 
 @pytest.mark.parametrize(
-    ("worker_type", "expected"),
-    [
-        (Worker, ("CPU", "CUDA")),
-        (XPUWorker, ("CPU", "XPU")),
-    ],
-)
-def test_worker_resolves_platform_default_activities(worker_type, expected):
-    worker = object.__new__(worker_type)
-    config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
-
-    assert worker._resolve_torch_profiler_activities(config) == expected
-
-
-@pytest.mark.parametrize(
     ("worker_type", "activities"),
     [
         (Worker, ["XPU"]),
@@ -198,16 +188,24 @@ def test_worker_rejects_unsupported_activities_at_startup(worker_type, activitie
 
 
 @pytest.mark.parametrize(
-    ("worker_type", "expected"),
+    ("worker_type", "activities", "expected"),
     [
-        (Worker, ("CPU", "CUDA")),
-        (XPUWorker, ("CPU", "XPU")),
+        (Worker, None, ("CPU", "CUDA")),
+        (XPUWorker, None, ("CPU", "XPU")),
+        (Worker, ["CUDA"], ("CUDA",)),
+        (XPUWorker, ["XPU"], ("XPU",)),
+        (Worker, ["CPU"], ("CPU",)),
+        (XPUWorker, ["CPU"], ("CPU",)),
     ],
 )
-def test_worker_creates_platform_torch_profiler(worker_type, expected):
+def test_worker_creates_platform_torch_profiler(worker_type, activities, expected):
     worker = object.__new__(worker_type)
     worker.local_rank = 0
-    config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/tmp/mock",
+        torch_profiler_activities=activities,
+    )
 
     with patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper:
         profiler = worker._create_profiler(config, "rank0")
@@ -218,26 +216,6 @@ def test_worker_creates_platform_torch_profiler(worker_type, expected):
         worker_name="rank0",
         local_rank=0,
         activities=expected,
-    )
-
-
-def test_worker_forwards_configured_torch_profiler_activities():
-    worker = object.__new__(Worker)
-    worker.local_rank = 0
-    config = ProfilerConfig(
-        profiler="torch",
-        torch_profiler_dir="/tmp/mock",
-        torch_profiler_activities=["CUDA"],
-    )
-
-    with patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper:
-        worker._create_profiler(config, "rank0")
-
-    wrapper.assert_called_once_with(
-        config,
-        worker_name="rank0",
-        local_rank=0,
-        activities=("CUDA",),
     )
 
 

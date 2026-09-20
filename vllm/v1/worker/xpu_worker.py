@@ -29,9 +29,6 @@ class XPUWorker(Worker):
         "CPU",
         "XPU",
     )
-    SUPPORTED_TORCH_PROFILER_ACTIVITIES: ClassVar[frozenset[TorchProfilerActivity]] = (
-        frozenset(DEFAULT_TORCH_PROFILER_ACTIVITIES)
-    )
     SUPPORTED_PROFILER_KINDS: ClassVar[frozenset[ProfilerKind]] = frozenset(("torch",))
 
     def __init__(
