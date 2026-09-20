@@ -19,7 +19,6 @@ from openai.types.responses import (
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
-from openai.types.shared.custom_tool_input_format import Grammar as CustomToolGrammar
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -56,23 +55,11 @@ def custom_tool_parameters() -> dict[str, Any]:
     }
 
 
-def custom_tool_description(tool: CustomTool) -> str | None:
-    """Fold a grammar format into the description: the payload is generated
-    inside the model's tool-call envelope, so the grammar cannot be enforced."""
-    parts = [tool.description] if tool.description else []
-    if isinstance(tool.format, CustomToolGrammar):
-        parts.append(
-            f"The payload must conform to this {tool.format.syntax} grammar:\n"
-            f"{tool.format.definition}"
-        )
-    return "\n\n".join(parts) or None
-
-
 def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
     return {
         "type": "function",
         "name": tool.name,
-        "description": custom_tool_description(tool),
+        "description": tool.description,
         "parameters": custom_tool_parameters(),
     }
 

@@ -5,6 +5,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+import partial_json_parser
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionMessageToolCallParam,
@@ -30,6 +31,7 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai.types.responses.tool import Tool
+from partial_json_parser.core.options import Allow
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -61,91 +63,35 @@ def encode_custom_tool_input(payload: str) -> str:
     return json.dumps({CUSTOM_TOOL_INPUT_KEY: payload}, ensure_ascii=False)
 
 
+def _custom_tool_payload(parsed: Any) -> str | None:
+    if not isinstance(parsed, dict):
+        return None
+    value = parsed.get(CUSTOM_TOOL_INPUT_KEY)
+    if not isinstance(value, str) and len(parsed) == 1:
+        value = next(iter(parsed.values()))
+    return value if isinstance(value, str) else None
+
+
 def decode_custom_tool_input(arguments: str) -> str:
     """Payload of a completed shim call; bare text is passed through."""
     try:
-        parsed = json.loads(arguments)
+        payload = _custom_tool_payload(json.loads(arguments))
     except ValueError:
         return arguments
-    if isinstance(parsed, dict):
-        value = parsed.get(CUSTOM_TOOL_INPUT_KEY)
-        if not isinstance(value, str) and len(parsed) == 1:
-            value = next(iter(parsed.values()))
-        if isinstance(value, str):
-            return value
-    return arguments
-
-
-_JSON_SIMPLE_ESCAPES = {
-    '"': '"',
-    "\\": "\\",
-    "/": "/",
-    "b": "\b",
-    "f": "\f",
-    "n": "\n",
-    "r": "\r",
-    "t": "\t",
-}
-
-
-def _decode_unicode_escape(buffer: str, i: int) -> tuple[str, int] | None:
-    """Decode ``\\uXXXX`` at ``buffer[i]``, joining a complete surrogate pair."""
-
-    def code_at(pos: int) -> int | None:
-        if pos + 6 > len(buffer) or buffer[pos : pos + 2] != "\\u":
-            return None
-        try:
-            return int(buffer[pos + 2 : pos + 6], 16)
-        except ValueError:
-            return None
-
-    code = code_at(i)
-    if code is None:
-        return None
-    if not 0xD800 <= code <= 0xDBFF:
-        return chr(code), i + 6
-    if i + 8 <= len(buffer) and buffer[i + 6 : i + 8] != "\\u":
-        return chr(code), i + 6
-    low = code_at(i + 6)
-    if low is None:
-        return None
-    if not 0xDC00 <= low <= 0xDFFF:
-        return chr(code), i + 6
-    return chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)), i + 12
+    return arguments if payload is None else payload
 
 
 def decode_custom_tool_input_prefix(arguments: str) -> str:
     """Longest decodable payload prefix of partial shim arguments, so that
     streamed ``custom_tool_call_input`` deltas stay a prefix of the final input."""
-    key = json.dumps(CUSTOM_TOOL_INPUT_KEY)
-    key_at = arguments.find(key)
-    colon = arguments.find(":", key_at + len(key)) if key_at >= 0 else -1
-    start = arguments.find('"', colon + 1) if colon >= 0 else -1
-    if start < 0:
+    try:
+        parsed = partial_json_parser.loads(arguments, Allow.STR | Allow.OBJ)
+    except ValueError:
         return ""
-    out: list[str] = []
-    i, n = start + 1, len(arguments)
-    while i < n:
-        ch = arguments[i]
-        if ch == '"':
-            break
-        if ch != "\\":
-            out.append(ch)
-            i += 1
-            continue
-        if i + 1 >= n:
-            break
-        escaped = arguments[i + 1]
-        if escaped in _JSON_SIMPLE_ESCAPES:
-            out.append(_JSON_SIMPLE_ESCAPES[escaped])
-            i += 2
-            continue
-        decoded = _decode_unicode_escape(arguments, i) if escaped == "u" else None
-        if decoded is None:
-            break
-        out.append(decoded[0])
-        i = decoded[1]
-    return "".join(out)
+    payload = _custom_tool_payload(parsed) or ""
+    if payload and "\ud800" <= payload[-1] <= "\udbff":
+        payload = payload[:-1]
+    return payload
 
 
 def _item_type(item: ResponseInputOutputItem) -> str | None:

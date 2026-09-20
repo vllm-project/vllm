@@ -35,7 +35,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
-from vllm.tool_parsers.utils import custom_tool_description, custom_tool_parameters
+from vllm.tool_parsers.utils import custom_tool_parameters
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -212,8 +212,8 @@ def _dump_tool_for_xgrammar(
         return {"type": "function", "function": function}
     if isinstance(tool, CustomTool):
         function = {"name": tool.name, "parameters": custom_tool_parameters()}
-        if (description := custom_tool_description(tool)) is not None:
-            function["description"] = description
+        if tool.description is not None:
+            function["description"] = tool.description
         return {"type": "function", "function": function}
     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
     if isinstance(tool, ChatCompletionToolsParam):

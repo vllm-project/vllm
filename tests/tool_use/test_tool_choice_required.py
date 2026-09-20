@@ -417,15 +417,6 @@ class TestCustomToolShim:
         assert tool_dict["parameters"] == custom_tool_parameters()
         assert tool_dict["parameters"]["required"] == ["input"]
 
-    def test_grammar_format_is_described(self):
-        tool = CustomTool(
-            type="custom",
-            name="emit_command",
-            format={"type": "grammar", "syntax": "lark", "definition": 'start: "pwd"'},
-        )
-        [tool_dict] = iter_response_function_tool_dicts([tool])
-        assert tool_dict["description"].endswith('lark grammar:\nstart: "pwd"')
-
     def test_forced_tool_choice_sees_custom_tool(self):
         tools = [CustomTool(type="custom", name="emit_command"), FUNCTION_TOOL]
         schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
