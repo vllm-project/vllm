@@ -13,6 +13,7 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.muse_glimmer_utils import (
     REASONING_RECIPIENT,
     advance_emitted,
+    channel_seed,
     current_assistant_turn,
     flush_open_body,
     framing_start,
@@ -79,13 +80,8 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         return []
 
     def _seeded_text(self, text: str) -> str:
-        # Mirrors `_channel_seed` in vllm/parser/muse_glimmer.py (kept separate
-        # to avoid a circular import): "" is an open untagged channel.
-        if self._initial_recipient is None:
-            return text
-        if self._initial_recipient == "":
-            return f"<|message|>{text}"
-        return f"to={self._initial_recipient}<|message|>{text}"
+        seed = channel_seed(self._initial_recipient)
+        return text if seed is None else seed + text
 
     def get_streaming_fallback_content(
         self,
@@ -167,12 +163,11 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             reasoning = safe_open_body(reasoning)
         flip_delta = ""
         if self._emitted_content_pre_flip is None:
-            # First framed delta: the segmenter drops the pre-header region,
-            # so flush whatever the unframed fallback had held back of it
-            # (nothing when the stream was framed from the start), then
-            # re-anchor -- framed content never continues the unframed
-            # prefix; a shared prefix is coincidence.
-            pre = safe_unframed_tail(seeded[: framing_start(seeded)])
+            # First framed delta: the segmenter drops the pre-header region.
+            # The region is frozen now, so flush it verbatim -- minus the
+            # trailing whitespace the unframed path never streams -- then
+            # re-anchor: framed content never continues the unframed prefix.
+            pre = seeded[: framing_start(seeded)].rstrip()
             flip_delta, self._emitted_content_pre_flip = advance_emitted(
                 self._emitted_content, pre
             )

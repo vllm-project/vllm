@@ -740,7 +740,7 @@ def test_overlong_recipient_name_never_forms_a_header(tokenizer):
     _reasoning, content, tools = parser.parse(
         f" to={name}<|message|>the answer<|eot|>", request
     )
-    assert tools is None or tools == []
+    assert tools == []
     assert content == "the answer"
 
 
@@ -943,6 +943,21 @@ def test_flip_delta_flushes_held_pre_header_text(tokenizer):
     for chunks in ([text], ["x", text[1:]], ["xy", text[2:]]):
         _r, content, _t = drive(tokenizer, chunks)
         assert content == "xyans"
+
+
+def test_flip_flushes_fragment_tailed_pre_header_text(tokenizer):
+    # Pre-header prose ending in a ` to=…`/partial-marker fragment is frozen
+    # at the flip: it flushes verbatim (minus trailing whitespace), identically
+    # under any chunking. (The `to=calc`/`to=b` channels are tool channels:
+    # their bodies are not content.)
+    cases = [
+        ("x to to=user<|message|>y<|eot|>", "x toy"),
+        ("x to=a to=user<|message|>c<|eot|>", "x to=ac"),
+        ("<|eo to=calc<|message|>body<|eot|>", "<|eo"),
+    ]
+    for text, expected in cases:
+        assert drive_tokenwise(tokenizer, text) == ("", expected, [])
+        assert drive(tokenizer, [text]) == ("", expected, [])
 
 
 def test_unframed_stream_recovers_quoted_framing_at_finish(tokenizer):

@@ -17,6 +17,7 @@ from vllm.parser.abstract_parser import DelegatingParser, StreamState
 from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
+    channel_seed,
     current_assistant_turn,
     flush_open_body,
     has_complete_channel,
@@ -28,15 +29,6 @@ from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
-
-def _channel_seed(recipient: str | None) -> str | None:
-    """Seed text for a generation continuing the prompt's open channel."""
-    if recipient is None:
-        return None
-    if recipient == "":
-        return "<|message|>"
-    return f"to={recipient}<|message|>"
 
 
 class MuseGlimmerParser(DelegatingParser):
@@ -113,7 +105,7 @@ class MuseGlimmerParser(DelegatingParser):
                     recipient = reasoner._initial_recipient
                 else:
                     recipient = self._prompt_open_recipient(prompt_token_ids)
-                seed = _channel_seed(recipient)
+                seed = channel_seed(recipient)
                 if seed is not None:
                     state.previous_text = seed
                 state.prompt_reasoning_checked = True
@@ -142,11 +134,6 @@ class MuseGlimmerParser(DelegatingParser):
         (any non-`self` channel, including `to=user`).
         """
         return isinstance(self._tool_parser, MuseGlimmerToolParser)
-
-    def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
-    ) -> bool:
-        return self.is_reasoning_end(input_ids)
 
     def _is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]

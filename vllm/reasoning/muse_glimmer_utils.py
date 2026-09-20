@@ -22,7 +22,7 @@ USER_RECIPIENT = "user"
 _MAX_RECIPIENT_LEN = 1024
 _RECIPIENT_CHAR = r"A-Za-z0-9_.\-"
 _RECIPIENT = rf"[{_RECIPIENT_CHAR}]{{1,{_MAX_RECIPIENT_LEN}}}"
-# A still-growing partial name, allowed one extra byte past the cap.
+# A still-growing partial name; empty is allowed so a lone ` to=` holds.
 _RECIPIENT_PARTIAL = rf"[{_RECIPIENT_CHAR}]{{0,{_MAX_RECIPIENT_LEN}}}"
 MSG_HEADER_RE = re.compile(
     r"(?:<\|start\|>\s*assistant)?[^\S\n]*"
@@ -399,6 +399,15 @@ def visible_channels(
         content_open,
         reasoning_open,
     )
+
+
+def channel_seed(recipient: str | None) -> str | None:
+    """Seed text for a generation continuing the prompt's open channel."""
+    if recipient is None:
+        return None
+    if recipient == "":
+        return "<|message|>"
+    return f"to={recipient}<|message|>"
 
 
 def advance_emitted(emitted: str, current: str) -> tuple[str, str]:

@@ -400,11 +400,11 @@ class MuseGlimmerToolParser(ToolParser):
             flip_delta = ""
             if self._emitted_content_pre_flip is None:
                 # First framed delta: the segmenter drops the pre-header
-                # region, so flush whatever the unframed fallback had held
-                # back of it (nothing when the stream was framed from the
-                # start), then re-anchor -- framed content never continues
-                # the unframed prefix; a shared prefix is coincidence.
-                pre = safe_unframed_tail(current_text[: framing_start(current_text)])
+                # region. The region is frozen now, so flush it verbatim --
+                # minus the trailing whitespace the unframed path never
+                # streams -- then re-anchor: framed content never continues
+                # the unframed prefix.
+                pre = current_text[: framing_start(current_text)].rstrip()
                 flip_delta, self._emitted_content_pre_flip = advance_emitted(
                     self._emitted_content, pre
                 )
