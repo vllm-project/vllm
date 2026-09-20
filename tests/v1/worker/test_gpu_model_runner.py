@@ -69,6 +69,27 @@ NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.parametrize("is_dflash", [False, True])
+def test_draft_context_limit_warning(monkeypatch, is_dflash):
+    runner = SimpleNamespace(
+        num_spec_tokens=3,
+        effective_drafter_max_model_len=128,
+        speculative_config=Mock(use_dflash=Mock(return_value=is_dflash)),
+    )
+    warning = Mock()
+    monkeypatch.setattr(gpu_model_runner_module.logger, "warning_once", warning)
+    fits = GPUModelRunner._input_fits_in_drafter
+    assert not fits(runner, None)
+    metadata = SimpleNamespace(max_seq_len=125 - int(is_dflash))
+    assert fits(runner, metadata)
+    warning.assert_not_called()
+    metadata.max_seq_len += 1
+    assert not fits(runner, metadata)
+    warning.assert_called_once()
+    assert "entire batch" in warning.call_args.args[0]
+    assert warning.call_args.args[1] == 128
+
+
 @pytest.fixture(autouse=True)
 def _restore_default_dtype():
     """Several tests here set the process-wide default dtype to float16 and
