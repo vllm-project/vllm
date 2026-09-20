@@ -262,19 +262,20 @@ class Scheduler:
     def submit(
         self,
         job_id: JobId,
-        state: Any,
-        tasks: list[Any],
-        make_batch_fn: Callable,
+        pre_batched: list[tuple],
+        n_tasks: int,
         is_load: bool,
     ) -> int:
+        """Register a pre-batched job and return the number of threads to wake.
+
+        pre_batched must be built by make_batches() outside the lock before
+        calling submit() under the lock.
         """
-        Submit job and return number of threads to wake up.
-        """
-        self._jobs[job_id] = (state, tasks, make_batch_fn, is_load)
+        self._jobs[job_id] = pre_batched
         if is_load:
-            self._load_job_q.put(job_id, len(tasks))
+            self._load_job_q.put(job_id, n_tasks)
         else:
-            self._store_job_q.put(job_id, len(tasks))
+            self._store_job_q.put(job_id, n_tasks)
 
         # TODO(varun): unfortunate! - wake selectively
         return self._n_read_threads + self._n_write_threads
@@ -316,46 +317,57 @@ class Scheduler:
             yield tasks[start : start + bs]
             start += bs
 
-    def _maybe_populate_work_q(
-        self, work_q: deque, job_q: JobQueue, n_batch_threads: int
-    ):
+    def make_batches(
+        self,
+        state: Any,
+        tasks: list[Any],
+        make_batch_fn: Callable,
+        is_load: bool,
+    ) -> list[tuple]:
+        """Build work-queue-ready items from raw tasks.
+
+        Must be called outside the condition lock — list-slicing and
+        make_batch_fn closure construction are O(n_tasks) and must not
+        block other threads waiting on the condition variable.
+        """
+        n_threads = (
+            self._n_read_batch_threads if is_load else self._n_write_batch_threads
+        )
+        return [
+            (make_batch_fn(b), len(b), state)
+            for b in self._batch_tasks(tasks, n_threads)
+        ]
+
+    def _maybe_populate_work_q(self, work_q: deque, job_q: JobQueue):
+        """Move the next job's pre-batched items into work_q.
+
+        O(n_batch_threads) deque appends — no batching or closure
+        construction under the lock.
+        """
         if work_q:
             return
         job_id = job_q.get()
         if job_id is None:
             return
-
-        work_item = self._jobs.pop(job_id)
-        state, tasks, make_batch_fn, _ = work_item
-        for b in self._batch_tasks(tasks, n_batch_threads):
-            work_q.append((make_batch_fn(b), len(b), state))
-        return
+        work_q.extend(self._jobs.pop(job_id))
 
     def fetch_work(self, load_priority: bool):
         is_read_thread = load_priority
         if is_read_thread:
-            self._maybe_populate_work_q(
-                self._load_q, self._load_job_q, self._n_read_batch_threads
-            )
+            self._maybe_populate_work_q(self._load_q, self._load_job_q)
             if self._load_q:
                 return self._load_q.popleft()
             if self._read_threads_can_write:
-                self._maybe_populate_work_q(
-                    self._store_q, self._store_job_q, self._n_write_batch_threads
-                )
+                self._maybe_populate_work_q(self._store_q, self._store_job_q)
                 if self._store_q:
                     return self._store_q.popleft()
             return None
         else:
-            self._maybe_populate_work_q(
-                self._store_q, self._store_job_q, self._n_write_batch_threads
-            )
+            self._maybe_populate_work_q(self._store_q, self._store_job_q)
             if self._store_q:
                 return self._store_q.popleft()
             if self._write_threads_can_read:
-                self._maybe_populate_work_q(
-                    self._load_q, self._load_job_q, self._n_read_batch_threads
-                )
+                self._maybe_populate_work_q(self._load_q, self._load_job_q)
                 if self._load_q:
                     return self._load_q.popleft()
             return None

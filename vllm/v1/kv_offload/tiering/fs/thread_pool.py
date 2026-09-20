@@ -140,18 +140,22 @@ class DualQueueThreadPool:
         n_tasks: int,
         is_load: bool,
     ) -> None:
-        """Batch `tasks` and append (fn, state, batch_size) entries to `queue`."""
+        """Pre-batch tasks outside the lock, then hand off to the scheduler."""
         if n_tasks == 0:
             self._finished_q.append((job_id, True, 0.0))
             return
         state = JobState(job_id, n_tasks)
-        task_lst = list(tasks)  # Materialize tasks out of self._condition
+        task_lst = list(tasks)
         assert len(task_lst) == n_tasks, "Unaccounted tasks"
+        # Build batches before acquiring the lock: list-slicing and
+        # make_batch_fn closures are O(n_tasks) and must not hold up
+        # other threads waiting on the condition variable.
+        pre_batched = self._scheduler.make_batches(
+            state, task_lst, make_batch_fn, is_load
+        )
         with self._condition:
             self._inflight_jobs += 1
-            n_wake = self._scheduler.submit(
-                job_id, state, task_lst, make_batch_fn, is_load
-            )
+            n_wake = self._scheduler.submit(job_id, pre_batched, n_tasks, is_load)
             self._condition.notify(n_wake)
 
     def enqueue_load(

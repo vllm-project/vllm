@@ -60,12 +60,10 @@ def _submit_load(
     job_id: int,
     tasks: list[Any],
 ) -> int:
+    state = object()
+    pre_batched = scheduler.make_batches(state, tasks, _identity_batch, is_load=True)
     return scheduler.submit(
-        job_id=job_id,
-        state=object(),
-        tasks=tasks,
-        make_batch_fn=_identity_batch,
-        is_load=True,
+        job_id=job_id, pre_batched=pre_batched, n_tasks=len(tasks), is_load=True
     )
 
 
@@ -74,12 +72,10 @@ def _submit_store(
     job_id: int,
     tasks: list[Any],
 ) -> int:
+    state = object()
+    pre_batched = scheduler.make_batches(state, tasks, _identity_batch, is_load=False)
     return scheduler.submit(
-        job_id=job_id,
-        state=object(),
-        tasks=tasks,
-        make_batch_fn=_identity_batch,
-        is_load=False,
+        job_id=job_id, pre_batched=pre_batched, n_tasks=len(tasks), is_load=False
     )
 
 
