@@ -1427,8 +1427,10 @@ def init_test_distributed_environment(
         get_current_vllm_config_or_none,
         set_current_vllm_config,
     )
+    from vllm.platforms import current_platform
 
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    backend = current_platform.dist_backend
 
     if data_parallel_size > 1:
         # For DP we need to set a common DP master port
@@ -1449,6 +1451,7 @@ def init_test_distributed_environment(
                 rank=rank % tp_pp_world,
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank if local_rank >= 0 else rank,
+                backend=backend,
             )
             ensure_model_parallel_initialized(tp_size, pp_size)
         return
@@ -1460,6 +1463,7 @@ def init_test_distributed_environment(
             rank=rank,
             distributed_init_method=distributed_init_method,
             local_rank=local_rank,
+            backend=backend,
         )
         ensure_model_parallel_initialized(tp_size, pp_size)
     else:
@@ -1470,6 +1474,7 @@ def init_test_distributed_environment(
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
+                backend=backend,
             )
             ensure_model_parallel_initialized(tp_size, pp_size)
 
