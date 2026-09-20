@@ -55,6 +55,22 @@ def test_dynamic_multi_image_inputs_accept_tensor_split_sizes():
     assert [output.shape for output in outputs] == [(2, 2), (3, 2)]
 
 
+def test_dynamic_image_parser_accepts_tensor_metadata():
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    object.__setattr__(model, "dynamic_resolution", True)
+    object.__setattr__(model, "patch_size", 16)
+
+    image_input = model._parse_and_validate_image_input(
+        pixel_values_flat=torch.zeros(1, 3, 16, 16),
+        imgs_sizes=torch.tensor([[16, 16]]),
+        num_tokens_per_image=torch.tensor([1]),
+    )
+
+    assert image_input is not None
+    assert image_input.imgs_sizes == [(16, 16)]
+    assert image_input.num_tokens_per_image == [1]
+
+
 class _TextOnlyMultiModalConfig:
     def get_limit_per_prompt(self, modality: str) -> int:
         return 0
