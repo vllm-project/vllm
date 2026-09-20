@@ -6,6 +6,7 @@ import time
 import uuid
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -22,7 +23,10 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.gpu_worker import (
+    CPUOffloadingWorker,
+    compute_sub_block_ptrs,
+)
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 NUM_GPU_BLOCKS = [64]
@@ -63,6 +67,59 @@ def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     assert gpu_worker._select_swap_blocks_fn(
         refs, gpu_to_cpu=False, host_memory_is_pinned=False
     ) is (ops.swap_blocks_batch)
+
+
+def _ptr_tensor(num_blocks: int, blocks_per_chunk: int) -> torch.Tensor:
+    # A plain CPU tensor is enough: the function only reads data_ptr(),
+    # stride(0) and shape.
+    return torch.empty((num_blocks, 64 * blocks_per_chunk), dtype=torch.uint8)
+
+
+@pytest.mark.parametrize("blocks_per_chunk", [1, 3])
+def test_compute_sub_block_ptrs_accepts_boundary_ids(blocks_per_chunk: int) -> None:
+    """Ids 0 and num_blocks - 1 are valid and map to the expected addresses."""
+    num_blocks = 8
+    tensor = _ptr_tensor(num_blocks, blocks_per_chunk)
+    base, stride = tensor.data_ptr(), tensor.stride(0)
+    page = tensor.shape[1] // blocks_per_chunk
+    block_ids = np.array([0, num_blocks - 1], dtype=np.int64)
+    output = np.empty(2 * blocks_per_chunk, dtype=np.uint64)
+
+    compute_sub_block_ptrs(block_ids, blocks_per_chunk, output, tensor)
+
+    expected = [
+        base + b * stride + j * page for b in block_ids for j in range(blocks_per_chunk)
+    ]
+    assert output.tolist() == expected
+
+
+@pytest.mark.parametrize("blocks_per_chunk", [1, 3])
+@pytest.mark.parametrize("bad_id", [-1, 8, 25600])
+def test_compute_sub_block_ptrs_rejects_out_of_range_ids(
+    blocks_per_chunk: int, bad_id: int
+) -> None:
+    """An id outside [0, num_blocks) raises instead of producing a pointer
+    outside the tensor, on both the 1:1 and the sub-block expansion paths."""
+    num_blocks = 8
+    tensor = _ptr_tensor(num_blocks, blocks_per_chunk)
+    block_ids = np.array([0, bad_id, 1], dtype=np.int64)
+    output = np.empty(len(block_ids) * blocks_per_chunk, dtype=np.uint64)
+
+    with pytest.raises(ValueError, match=rf"Block id {bad_id} is out of range"):
+        compute_sub_block_ptrs(block_ids, blocks_per_chunk, output, tensor)
+
+
+def test_compute_sub_block_ptrs_checks_only_used_ids_on_fast_path() -> None:
+    """With blocks_per_chunk == 1 only the first len(output) ids are turned
+    into pointers, so ids past that are neither used nor checked."""
+    tensor = _ptr_tensor(8, 1)
+    block_ids = np.array([3, 5, 99], dtype=np.int64)
+    output = np.empty(2, dtype=np.uint64)
+
+    compute_sub_block_ptrs(block_ids, 1, output, tensor)
+
+    base, stride = tensor.data_ptr(), tensor.stride(0)
+    assert output.tolist() == [base + 3 * stride, base + 5 * stride]
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
