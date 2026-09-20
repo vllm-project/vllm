@@ -7,6 +7,7 @@ from vllm.config.parallel import EPLBPolicyOption
 from .abstract import (
     AbstractEplbPolicy,
     EplbPlan,
+    EplbPolicyState,
     EplbRebalanceContext,
     EplbTopology,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "AbstractEplbPolicy",
     "DefaultEplbPolicy",
     "EplbPlan",
+    "EplbPolicyState",
     "EplbRebalanceContext",
     "EplbTopology",
     "EPLB_POLICIES",
