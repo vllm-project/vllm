@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from argparse import Namespace
+from copy import deepcopy
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any
@@ -83,6 +84,40 @@ def _build_serving_tokenization(engine: AsyncLLM) -> ServingTokenization:
         chat_template=None,
         chat_template_content_format="auto",
     )
+
+
+def test_tokenize_chat_materializes_tool_calls():
+    request = TokenizeChatRequest(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "user",
+                "content": "What is the weather in Shanghai?",
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup_weather",
+                            "arguments": '{"city":"Shanghai"}',
+                        },
+                    }
+                ],
+            },
+        ],
+    )
+
+    assistant_message = request.messages[1]
+    assert isinstance(assistant_message, dict)
+
+    tool_calls = assistant_message.get("tool_calls")
+    assert isinstance(tool_calls, list)
+
+    deepcopy(request.messages)
 
 
 @pytest.mark.asyncio

@@ -125,6 +125,19 @@ class TokenizeChatRequest(OpenAIBaseModel):
             )
         return data
 
+    @model_validator(mode="after")
+    def _materialize_tool_calls_after(self) -> "TokenizeChatRequest":
+        """Convert Pydantic ValidatorIterator wrappers back to lists."""
+        for msg in self.messages:
+            if not isinstance(msg, dict):
+                continue
+
+            tool_calls = msg.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                msg["tool_calls"] = list(tool_calls)
+
+        return self
+
     def build_chat_params(
         self,
         default_template: str | None,
