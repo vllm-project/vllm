@@ -868,6 +868,33 @@ def test_sparse_attn_decode_scrubs_untrusted_cache_by_default() -> None:
     assert torch.equal(actual, torch.zeros_like(actual))
 
 
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_attn_decode_trusted_flag_without_extra_metadata() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_triton,
+    )
+
+    device = torch.device("cuda")
+    block_size = 4
+    main_cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
+    indices = torch.empty(0, dtype=torch.int32, device=device)
+    indptr = torch.zeros(2, dtype=torch.int32, device=device)
+    actual = _rocm_sparse_attn_decode_ragged_triton(
+        q=torch.ones(1, 1, HEAD_DIM, dtype=torch.bfloat16, device=device),
+        main_cache=main_cache,
+        main_indices=indices,
+        main_indptr=indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=main_cache,
+        extra_cache_nan_free=True,
+    )
+    assert torch.equal(actual, torch.zeros_like(actual))
+
+
 @pytest.mark.parametrize("on_gfx950", [False, True])
 @torch.inference_mode()
 def test_rocm_ragged_graph_buffer_view_tracks_source_width(

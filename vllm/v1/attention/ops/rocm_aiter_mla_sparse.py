@@ -3413,10 +3413,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         and extra_indices is not None
         and extra_indptr is not None
     )
-    assert not extra_cache_nan_free or (_ON_GFX950 and has_extra), (
-        "extra_cache_nan_free requires a gfx950 compressed cache with trusted "
-        "canonical-writer provenance"
-    )
+    extra_cache_nan_free = extra_cache_nan_free and _ON_GFX950 and has_extra
     if has_extra:
         assert extra_cache is not None and extra_indices is not None
         if direct_extra:
