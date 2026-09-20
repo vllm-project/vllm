@@ -79,6 +79,26 @@ setup_buildx_builder() {
     docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 }
 
+export_kernel_symbol_map() {
+    # Only when the build asked for it (nightly/post-merge). The map was
+    # produced inside the csrc-build stage during the main bake; this second
+    # bake of the scratch stage is a cache hit that just writes the file out.
+    if [[ "${VLLM_KERNEL_SYMBOL_MAP:-0}" != "1" ]]; then
+        return 0
+    fi
+    echo "--- :world_map: Exporting kernel symbol map"
+    local out_dir="${BUILD_TMP_DIR}/kernel-symbol-map"
+    mkdir -p "${out_dir}"
+    if docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --progress plain \
+        --set "kernel-symbol-map.output=type=local,dest=${out_dir}" kernel-symbol-map \
+        && [[ -s "${out_dir}/kernel_symbol_map.json.gz" ]]; then
+        ls -la "${out_dir}"
+        (cd "${out_dir}" && buildkite-agent artifact upload "kernel_symbol_map.json.gz")
+    else
+        echo "kernel symbol map export failed; continuing without it" >&2
+    fi
+}
+
 annotate_image_tags() {
     .buildkite/scripts/annotate-image-build.sh \
         "${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}"
@@ -319,5 +339,6 @@ if [[ "${BUILD_STATUS}" -ne 0 ]]; then
 fi
 
 echo "--- :white_check_mark: Build complete"
+export_kernel_symbol_map || true
 
 annotate_image_tags

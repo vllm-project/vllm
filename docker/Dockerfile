@@ -477,6 +477,22 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 #################### EXTENSIONS BUILD IMAGE ####################
 # Build DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
+# Kernel symbol map for CI test selection: which source file produced each GPU
+# kernel symbol, read from the objects this stage just compiled. Only when
+# VLLM_KERNEL_SYMBOL_MAP=1 (nightly), and placed after the compile layers so
+# their cache is untouched. Never fails the build; an empty map is a signal.
+ARG VLLM_KERNEL_SYMBOL_MAP=""
+COPY tools/ci/kernel_symbol_map.py tools/ci/kernel_symbol_map.py
+RUN if [ "${VLLM_KERNEL_SYMBOL_MAP}" = "1" ]; then \
+        mkdir -p dist && python3 tools/ci/kernel_symbol_map.py \
+            --build-root build --source-root . --out dist/kernel_symbol_map.json.gz; \
+    else echo "Skipping kernel symbol map (VLLM_KERNEL_SYMBOL_MAP != 1)"; fi
+
+# Exported on its own by the CI bake target of the same name (ci-infra
+# docker/ci.hcl) with output=type=local, so the map becomes a build artifact.
+FROM scratch AS kernel-symbol-map
+COPY --from=csrc-build /workspace/dist/kernel_symbol_map.json.gz /kernel_symbol_map.json.gz
+
 FROM base AS extensions-build
 ARG TARGETARCH
 ARG CUDA_VERSION
