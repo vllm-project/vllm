@@ -430,6 +430,7 @@ class ServingTokens(GenerateBaseServing):
         prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
+        last_res = None
 
         include_usage, include_continuous_usage = should_include_usage(
             request.stream_options, False
@@ -437,6 +438,7 @@ class ServingTokens(GenerateBaseServing):
 
         try:
             async for res in result_generator:
+                last_res = res
                 if first_iteration:
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
@@ -448,9 +450,6 @@ class ServingTokens(GenerateBaseServing):
                     num_generated_tokens = [0] * len(res.outputs)
                     first_iteration = False
 
-                spec_stats = (
-                    build_spec_decoding_metrics(res) if sampling_params.n == 1 else None
-                )
                 for output in res.outputs:
                     i = output.index
                     delta_token_ids = output.token_ids
@@ -460,10 +459,9 @@ class ServingTokens(GenerateBaseServing):
                     self._raise_if_error(finish_reason, request_id)
 
                     # Still emit a terminal empty chunk while prompt metadata
-                    # or request metrics are pending.
+                    # is pending, so zero-token completions deliver it.
                     if not delta_token_ids and (
-                        finish_reason is None
-                        or (prompt_token_ids is None and spec_stats is None)
+                        finish_reason is None or prompt_token_ids is None
                     ):
                         continue
 
@@ -496,8 +494,6 @@ class ServingTokens(GenerateBaseServing):
                             )
                         ],
                     )
-                    if spec_stats is not None:
-                        chunk.request_spec_decode_stats = spec_stats
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids
                         chunk.mm_placeholders = request._response_mm_placeholders
@@ -530,10 +526,16 @@ class ServingTokens(GenerateBaseServing):
                 )
 
             if include_usage:
+                spec_stats = (
+                    build_spec_decoding_metrics(last_res)
+                    if sampling_params.n == 1
+                    else None
+                )
                 final_chunk = GenerateStreamResponse(
                     request_id=request_id,
                     choices=[],
                     usage=final_usage_info,
+                    request_spec_decode_stats=spec_stats,
                 )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 

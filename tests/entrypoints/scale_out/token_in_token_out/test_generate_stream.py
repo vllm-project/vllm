@@ -347,6 +347,7 @@ async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
         sampling_params=SamplingParams(max_tokens=1),
         model=MODEL_NAME,
         stream=stream,
+        stream_options=StreamOptions(include_usage=True) if stream else None,
     )
 
     response = await serving.serve_tokens(request)
@@ -368,7 +369,10 @@ async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
 
 
 @pytest.mark.asyncio
-async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output():
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output(
+    include_usage,
+):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
     metrics.observe(num_draft_tokens=3, num_accepted=2)
@@ -390,14 +394,17 @@ async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output():
         sampling_params=SamplingParams(max_tokens=1),
         model=MODEL_NAME,
         stream=True,
+        stream_options=StreamOptions(include_usage=include_usage),
     )
 
     chunks = [chunk async for chunk in await serving.serve_tokens(request)]
     data_chunks = [chunk for chunk in _parse_sse_chunks(chunks) if chunk != "[DONE]"]
 
-    assert len(data_chunks) == 2
-    assert data_chunks[1]["choices"][0]["token_ids"] == []
-    assert data_chunks[1]["request_spec_decode_stats"]["num_draft_tokens"] == 3
+    assert data_chunks[0].get("request_spec_decode_stats") is None
+    assert len(data_chunks) == 1 + int(include_usage)
+    if include_usage:
+        assert data_chunks[1]["choices"] == []
+        assert data_chunks[1]["request_spec_decode_stats"]["num_draft_tokens"] == 3
 
 
 @pytest.mark.asyncio
@@ -437,6 +444,7 @@ async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
         sampling_params=SamplingParams(max_tokens=1, n=2),
         model=MODEL_NAME,
         stream=stream,
+        stream_options=StreamOptions(include_usage=True) if stream else None,
     )
 
     response = await serving.serve_tokens(request)

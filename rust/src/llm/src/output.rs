@@ -10,9 +10,10 @@ use enum_as_inner::EnumAsInner;
 use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
-use vllm_engine_core_client::protocol::OpaqueValue;
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
-use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
+};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
@@ -49,7 +50,7 @@ pub struct CollectedGenerateOutput {
     /// Sampling support sets aligned one-to-one with generated token positions.
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics from the terminal output.
-    pub spec_decode_metrics: Option<OpaqueValue>,
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -164,7 +165,7 @@ pub struct GenerateOutput {
     /// Sampling support sets aligned one-to-one with `token_ids`.
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
-    pub spec_decode_metrics: Option<OpaqueValue>,
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 impl GenerateOutput {

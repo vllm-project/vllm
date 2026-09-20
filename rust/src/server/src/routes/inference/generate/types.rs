@@ -7,7 +7,7 @@ use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
-use vllm_engine_core_client::protocol::OpaqueValue;
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_text::SamplingParams;
 
 use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOptions, Usage};
@@ -85,7 +85,7 @@ pub(super) struct GenerateStreamResponse {
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
-    pub request_spec_decode_stats: Option<OpaqueValue>,
+    pub request_spec_decode_stats: Option<SpecDecodeMetrics>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
@@ -98,7 +98,56 @@ pub(super) struct GenerateResponse {
     pub mm_placeholders: Option<MultiModalPlaceholders>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
-    pub request_spec_decode_stats: Option<OpaqueValue>,
+    pub request_spec_decode_stats: Option<SpecDecodeMetrics>,
+}
+
+/// Mirrors the Python vLLM `SpeculativeDecodingMetrics` class.
+///
+/// Derived from the raw engine accumulator the same way as Python
+/// `RequestSpecDecodeMetrics.to_dict`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(super) struct SpecDecodeMetrics {
+    pub mean_acceptance_length: f64,
+    pub draft_acceptance_rate: f64,
+    pub acceptance_histogram: Vec<u64>,
+    pub num_spec_steps: u64,
+    pub num_accepted_draft_tokens: u64,
+    pub num_draft_tokens: u64,
+    pub num_spec_tokens: u64,
+    pub per_step_accepted: Option<Vec<u64>>,
+    pub per_step_drafted: Option<Vec<u64>>,
+}
+
+impl From<RequestSpecDecodeMetrics> for SpecDecodeMetrics {
+    fn from(raw: RequestSpecDecodeMetrics) -> Self {
+        let num_spec_steps: u64 = raw.histogram.iter().sum();
+        let num_accepted_draft_tokens: u64 =
+            (0u64..).zip(&raw.histogram).map(|(accepted, count)| accepted * count).sum();
+        let ratio = |num: u64, den: u64| {
+            if den == 0 {
+                0.0
+            } else {
+                num as f64 / den as f64
+            }
+        };
+        let detailed = !raw.per_step_accepted.is_empty();
+        Self {
+            mean_acceptance_length: if num_spec_steps == 0 {
+                1.0
+            } else {
+                1.0 + ratio(num_accepted_draft_tokens, num_spec_steps)
+            },
+            draft_acceptance_rate: ratio(num_accepted_draft_tokens, raw.num_draft_tokens),
+            acceptance_histogram: raw.histogram,
+            num_spec_steps,
+            num_accepted_draft_tokens,
+            num_draft_tokens: raw.num_draft_tokens,
+            num_spec_tokens: raw.num_spec_tokens,
+            per_step_accepted: detailed.then_some(raw.per_step_accepted),
+            per_step_drafted: detailed.then_some(raw.per_step_drafted),
+        }
+    }
 }
 
 pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInfo>>;
