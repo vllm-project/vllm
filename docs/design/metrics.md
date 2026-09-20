@@ -24,20 +24,44 @@ The mental model is that server-level metrics help explain the values of request
 In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/metrics` endpoint using the `vllm:` prefix, for example:
 
 - `vllm:num_requests_running` (Gauge) - Number of requests currently running.
+- `vllm:num_requests_waiting` (Gauge) - Number of requests currently waiting.
 - `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
 - `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
+- `vllm:mm_cache_queries` (Counter) - (For multimodal models) Number of multimodal cache queries.
+- `vllm:mm_cache_hits` (Counter) - (For multimodal models) Number of multimodal cache hits.
+- `vllm:num_preemptions_total` (Counter) - Number of preemptions.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
+- `vllm:iteration_tokens_total` (Histogram) - Histogram of tokens processed in each engine step.
+- `vllm:cache_config_info` (Gauge) - Information about the cache configuration.
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
+- `vllm:request_params_n` (Histogram) - Histogram of request parameter n.
+- `vllm:request_params_max_tokens` - (Histogram) - Histogram of max_tokens parameter in requests.
 - `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
 - `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency (time between consecutive streamed outputs).
 - `vllm:request_time_per_output_token_seconds` (Histogram) - Per-request Time Per Output Token (TPOT).
 - `vllm:e2e_request_latency_seconds` (Histogram) - End-to-end request latency.
+- `vllm:request_queue_time_seconds` (Histogram) - Time spent in the queue.
+- `vllm:request_inference_time_seconds` (Histogram) - Request inference time.
 - `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
 - `vllm:request_decode_time_seconds` (Histogram) - Request decode time.
+
+These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
+
+#### Multi-Modal Preprocessing Metrics (APIServer)
+
+These metrics are defined in the APIServer process and measure the time spent
+in multi-modal preprocessing *before* the request reaches the engine. They
+are independent of the EngineCore metrics above.
+
+- `vllm:mm_media_download_latency_seconds` (Histogram, label: `media_type`) - HTTP media download latency per media item.
+- `vllm:mm_media_decode_latency_seconds` (Histogram, label: `media_type`) - Media decode (`load_bytes`) latency per media item.
+- `vllm:mm_media_download_bytes` (Histogram, label: `media_type`) - Downloaded media size in bytes per media item.
+- `vllm:mm_resolve_items_latency_seconds` (Histogram) - Total multi-modal resolve latency per request (all concurrent downloads + decodes).
+- `vllm:mm_preprocessing_total_latency_seconds` (Histogram) - Total preprocessing latency per request batch (render + tokenize).
 
 These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
 
