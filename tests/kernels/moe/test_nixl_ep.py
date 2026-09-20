@@ -225,11 +225,10 @@ def test_nixl_microbatches_capture_and_replay(
                 (torch.arange(n, device="cuda") + step + rank) % 8
             )
             expected = (inputs["input_ids"][:real, None] * 4 + 3).to(output.dtype)
-            rows = (
-                stage_decode_tokens(batch, (), slots, state.slices)
-                if real <= last_start
-                else None
-            )
+            if real <= last_start:
+                rows = stage_decode_tokens(batch, (), slots, state.slices)
+            else:
+                rows = None
             graph.replay()
             if rows is not None:
                 output[:real] = output[rows]

@@ -88,8 +88,6 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-        if num_ubatches < 1:
-            raise ValueError("NIXL EP requires at least one microbatch")
         self.handles: list[tuple | None] = [None] * num_ubatches
         self.num_dispatchers_ = num_dispatchers
         self.expert_capacity = expert_capacity

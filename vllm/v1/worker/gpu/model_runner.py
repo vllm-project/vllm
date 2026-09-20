@@ -1964,6 +1964,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
+        routed_experts_token_indices = (
+            ubatch_state.staged_rows if ubatch_state is not None else None
+        )
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
@@ -1975,6 +1978,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
+            routed_experts_token_indices=routed_experts_token_indices,
         )
 
         if not self.is_last_pp_rank:
@@ -2004,6 +2008,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
+        routed_experts_token_indices = (
+            self.execute_model_state.routed_experts_token_indices
+        )
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2069,7 +2076,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
-            pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
+            pending_aux_output = self.aux_output_connector.prepare_output(
+                input_batch, routed_experts_token_indices
+            )
 
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
@@ -2306,6 +2315,7 @@ class ExecuteModelState(NamedTuple):
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
+    routed_experts_token_indices: torch.Tensor | None
 
 
 class BatchReqState(NamedTuple):

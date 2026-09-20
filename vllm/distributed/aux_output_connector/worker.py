@@ -135,7 +135,11 @@ class AuxOutputWorkerConnector:
             vllm_config.max_concurrent_batches,
         )
 
-    def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
+    def prepare_output(
+        self,
+        input_batch: InputBatch,
+        token_indices: torch.Tensor | None = None,
+    ) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
         if self._buffer is None or self._step_metadata is None:
             return None
@@ -143,12 +147,17 @@ class AuxOutputWorkerConnector:
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
+        routed_experts_gpu = (
+            self._capturer.snapshot_routing_data(num_rows)
+            if token_indices is None
+            else self._capturer.snapshot_routing_data(num_rows, token_indices)
+        )
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,
             token_starts=input_batch.num_computed_tokens_np,
             query_start_loc=query_start_loc,
-            routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
+            routed_experts_gpu=routed_experts_gpu,
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
