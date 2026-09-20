@@ -885,27 +885,32 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
+        topk_indices = None
         topk_lens = None
         topk_ragged_indices = None
         topk_ragged_indptr = None
         if not swa_only:
-            (
-                topk_ragged_indices,
-                topk_ragged_indptr,
-                topk_lens,
-            ) = self._decode_topk_ragged(
-                swa_metadata=swa_metadata,
-                attn_metadata=attn_metadata,
-                num_decodes=num_decodes,
-                num_decode_tokens=num_decode_tokens,
-            )
+            assert self.topk_indices_buffer is not None
+            if _ON_GFX950:
+                topk_indices = self.topk_indices_buffer[:num_decode_tokens]
+            else:
+                (
+                    topk_ragged_indices,
+                    topk_ragged_indptr,
+                    topk_lens,
+                ) = self._decode_topk_ragged(
+                    swa_metadata=swa_metadata,
+                    attn_metadata=attn_metadata,
+                    num_decodes=num_decodes,
+                    num_decode_tokens=num_decode_tokens,
+                )
 
         rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
             swa_only=swa_only,
-            topk_indices=None,
+            topk_indices=topk_indices,
             topk_lens=topk_lens,
             swa_indices=swa_metadata.decode_swa_indices,
             swa_lens=swa_metadata.decode_swa_lens,
@@ -913,6 +918,19 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             swa_ragged_indptr=swa_metadata.decode_swa_ragged_indptr,
             topk_ragged_indices=topk_ragged_indices,
             topk_ragged_indptr=topk_ragged_indptr,
+            topk_token_to_req_indices=(
+                swa_metadata.token_to_req_indices if _ON_GFX950 else None
+            ),
+            topk_is_valid_token=(
+                swa_metadata.is_valid_token[:num_decode_tokens]
+                if _ON_GFX950 and swa_metadata.is_valid_token is not None
+                else None
+            ),
+            topk_block_table=(
+                attn_metadata.block_table[:num_decodes]
+                if _ON_GFX950 and attn_metadata is not None
+                else None
+            ),
             attn_sink=self.attn_sink,
             scale=self.scale,
             head_dim=self.head_dim,

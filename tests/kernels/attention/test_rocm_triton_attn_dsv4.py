@@ -1066,6 +1066,74 @@ def test_sparse_attn_decode_split_k_kernel(
 
 @requires_gfx950
 @torch.inference_mode()
+def test_sparse_attn_decode_gfx950_direct_dense_topk(monkeypatch) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(41)
+    block_size = 4
+    num_queries, num_heads, width = 3, 3, 8
+    q = (
+        torch.randn(
+            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        * 0.125
+    )
+    main_cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
+    main_indices = torch.empty(0, dtype=torch.int32, device=device)
+    main_indptr = torch.zeros(num_queries + 1, dtype=torch.int32, device=device)
+    extra_kv = torch.randn(24, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
+    logical = torch.tensor(
+        [
+            [0, 3, 5, -1, -1, -1, -1, -1],
+            [1, 7, 2, 4, -1, -1, -1, -1],
+            [6, 0, -1, -1, -1, -1, -1, -1],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    token_to_req = torch.tensor([2, 0, 1], dtype=torch.int32, device=device)
+    valid_token = torch.tensor([True, False, True], device=device)
+    block_table = torch.tensor(
+        [[0, 1], [2, 3], [4, 5]], dtype=torch.int32, device=device
+    )
+    rows = [[16, 19, 21], [], [14, 8]]
+    ragged, indptr = _ragged_from_rows(rows, device)
+
+    expected = mod._rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices,
+        main_indptr=main_indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=ragged,
+        extra_indptr=indptr,
+    )
+    actual = mod._rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices,
+        main_indptr=main_indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=logical,
+        extra_token_to_req=token_to_req,
+        extra_valid_token=valid_token,
+        extra_block_table=block_table,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_gfx950
+@torch.inference_mode()
 def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> None:
     device = torch.device("cuda")
     part_m = torch.full(
