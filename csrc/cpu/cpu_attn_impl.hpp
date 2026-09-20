@@ -956,6 +956,28 @@ void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
   std::printf("%s", ss.str().c_str());
 }
 
+// This allows us to store probabilities in a packed format
+// for GEMM implementations that need packed A.
+template <typename attention_impl_t, typename = void>
+struct ProbabilityTokenStore {
+  using prob_buffer_t = typename attention_impl_t::prob_buffer_t;
+  static constexpr int32_t TokenStride = 1;
+
+  FORCE_INLINE static void store_probabilities(
+      prob_buffer_t* __restrict__ probability, const vec_op::FP32Vec16& values,
+      const int32_t, const int64_t) {
+    using prob_buffer_vec_t = typename VecTypeTrait<prob_buffer_t>::vec_t;
+    prob_buffer_vec_t output_vec(values);
+    output_vec.save(probability);
+  }
+};
+
+template <typename attention_impl_t>
+struct ProbabilityTokenStore<
+    attention_impl_t,
+    std::void_t<typename attention_impl_t::ProbabilityTokenStore>>
+    : attention_impl_t::ProbabilityTokenStore {};
+
 template <typename attention_impl_t>
 class AttentionMainLoop {
  public:
@@ -966,6 +988,7 @@ class AttentionMainLoop {
   using partial_output_buffer_t =
       typename attention_impl_t::partial_output_buffer_t;
   using prob_buffer_t = typename attention_impl_t::prob_buffer_t;
+  using probability_token_store_t = ProbabilityTokenStore<attention_impl_t>;
 
   static constexpr int64_t max_q_head_num_per_iter =
       attention_impl_t::MaxQHeadNumPerIteration;
@@ -974,6 +997,8 @@ class AttentionMainLoop {
   static constexpr int64_t headdim_alignment =
       attention_impl_t::HeadDimAlignment;
   static constexpr int64_t head_dim = attention_impl_t::HeadDim;
+  static constexpr int32_t probability_token_stride =
+      probability_token_store_t::TokenStride;
   static constexpr ISA ISAType = attention_impl_t::ISAType;
   static constexpr bool scale_on_logits =
       attention_impl_t::scale_on_logits;  // apply scale on logits, otherwise
@@ -1152,8 +1177,6 @@ class AttentionMainLoop {
                 ? kv_tile_token_num
                 : kv_tile_token_num *
                       (sizeof(logits_buffer_t) / sizeof(prob_buffer_t));
-        constexpr int64_t prob_buffer_elem_size =
-            prequantize_probabilities ? sizeof(uint8_t) : sizeof(prob_buffer_t);
         partial_output_buffer_t* curr_partial_q_buffer = partial_q_buffer;
         bool accum_c = !is_first_iter;
         for (int32_t block_idx = start_block_idx; block_idx < end_block_idx;
@@ -1187,9 +1210,7 @@ class AttentionMainLoop {
           remaining_group_num -= curr_group_num_in_block;
           curr_group_offset = 0;
           curr_group_num_in_block = token_group_num_per_block;
-          curr_prob_buffer = reinterpret_cast<pv_prob_buffer_t*>(
-              reinterpret_cast<uint8_t*>(curr_prob_buffer) +
-              curr_token_num * prob_buffer_elem_size);
+          curr_prob_buffer += curr_token_num * probability_token_stride;
           curr_partial_q_buffer = partial_q_buffer;
           accum_c = true;
         }
@@ -1262,7 +1283,6 @@ class AttentionMainLoop {
           std::is_same_v<query_t, c10::Half>;
 #endif
 
-      using prob_buffer_vec_t = typename VecTypeTrait<prob_buffer_t>::vec_t;
       constexpr bool prequantize_probabilities = []() {
         if constexpr (requires { tile_gemm_t::prequantize_probabilities; }) {
           return tile_gemm_t::prequantize_probabilities;
@@ -1331,12 +1351,6 @@ class AttentionMainLoop {
               vec = fast_exp(vec);
             }
 
-            if constexpr (prequantize_probabilities) {
-              vec.save(curr_logits_buffer_iter);
-            } else {
-              prob_buffer_vec_t output_vec(vec);
-              output_vec.save(curr_prob_buffer_iter);
-            }
 #else
             vec.save(curr_logits_buffer_iter);
             for (int32_t k = 0; k < 16; ++k) {
@@ -1345,10 +1359,19 @@ class AttentionMainLoop {
             vec = vec_op::FP32Vec16(curr_logits_buffer_iter);
 #endif
 
+            if constexpr (prequantize_probabilities) {
+              vec.save(curr_logits_buffer_iter);
+            } else {
+              probability_token_store_t::store_probabilities(
+                  curr_prob_buffer_iter, vec, i,
+                  logits_buffer_stride * sizeof(logits_buffer_t) /
+                      sizeof(prob_buffer_t));
+            }
+
             sum_vec = sum_vec + vec;
 
             curr_logits_buffer_iter += 16;
-            curr_prob_buffer_iter += 16;
+            curr_prob_buffer_iter += 16 * probability_token_stride;
           }
           if constexpr (prequantize_probabilities) {
             tile_gemm_t::quantize_probability_row(
