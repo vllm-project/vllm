@@ -274,6 +274,19 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
         )
 
     client = engine_client(raw_request)
+
+    # Sleeping discards or offloads the weight storage, and a paused engine is
+    # not serving, so hashing or rewriting the weights is meaningless: digests
+    # would describe freed memory and reset would write to it. Callers wake up
+    # and resume before checking, which is what a weight-update cycle does.
+    # Checked before the per-action request validation so that every action
+    # reports the engine state rather than a missing argument.
+    if await client.is_paused():
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT.value,
+            detail="weight_checker requires an awake, unpaused engine",
+        )
+
     baseline: dict[str, str] | None = None
     if action == "compare":
         baseline = body.get("baseline")
@@ -282,16 +295,6 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
                 status_code=HTTPStatus.BAD_REQUEST.value,
                 detail="action='compare' requires a 'baseline' object",
             )
-
-    # Sleeping discards or offloads the weight storage, and a paused engine is
-    # not serving, so hashing or rewriting the weights is meaningless: digests
-    # would describe freed memory and reset would write to it. Callers wake up
-    # and resume before checking, which is what a weight-update cycle does.
-    if await client.is_paused():
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT.value,
-            detail="weight_checker requires an awake, unpaused engine",
-        )
 
     if action == "reset":
         # Overwrite every weight-bearing tensor with random values on the GPU
