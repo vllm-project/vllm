@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Split shifted mHC pre so coefficient generation can overlap the sublayer."""
 
+from functools import partial
+
 import torch
 
 # GB200 TP4/FlashInfer improves through 16 tokens; larger screens tie or regress.
@@ -43,19 +45,20 @@ def mhc_pre_delayed_overlap(
     if x is None:
         x = residual.view(n, hc * hidden)
     assert x.is_contiguous()
-    splits = compute_mhc_pre_num_splits(x.shape[1], n) if n else 1
     post = torch.empty((n, hc), device=residual.device, dtype=torch.float32)
     comb = torch.empty((n, hc * hc), device=residual.device, dtype=torch.float32)
     next_pre = torch.empty_like(post)
     layer_input = torch.empty((n, hidden), device=residual.device, dtype=torch.bfloat16)
+    outputs = post.unsqueeze(-1), comb.view(n, hc, hc), layer_input, next_pre
+    if n == 0:
+        return outputs
+    splits = compute_mhc_pre_num_splits(x.shape[1], n)
     mix = torch.empty(
         (splits, n, hc * (hc + 2)), device=residual.device, dtype=torch.float32
     )
     sqr = torch.empty((splits, n), device=residual.device, dtype=torch.float32)
-    outputs = post.unsqueeze(-1), comb.view(n, hc, hc), layer_input, next_pre
-    if n == 0:
-        return outputs
-    args = (
+    epilogue = partial(
+        MHC_PRE_NORM_KERNEL,
         mix,
         sqr,
         hc_scale,
@@ -67,11 +70,7 @@ def mhc_pre_delayed_overlap(
         norm_weight,
         pre_mix if pre_mix is not None else post,
         next_pre,
-        # Stand-in for the aux buffer the fused epilogue writes: split modes
-        # never enable write_aux, so it is only there to fill the signature.
-        layer_input,
-    )
-    fields = dict(
+        layer_input,  # Unused aux output in split modes.
         hidden_size=hidden,
         rms_eps=rms_eps,
         hc_pre_eps=hc_pre_eps,
@@ -85,15 +84,15 @@ def mhc_pre_delayed_overlap(
         rms_numel=x.shape[1],
     )
     main = torch.cuda.current_stream()
-    # Prioritize input readiness for small SP shards before releasing statistics.
+    # Prioritize input readiness for small batches before releasing statistics.
     if n <= 8:
-        MHC_PRE_NORM_KERNEL(*args, **fields, split_mode="input")
+        epilogue(split_mode="input")
     stream.wait_stream(main)
     with torch.cuda.stream(stream):
         tf32_hc_prenorm_gemm(x, fn, mix, sqr, splits)
-        MHC_PRE_NORM_KERNEL(*args, **fields, split_mode="stats")
-    for tensor in (residual, x, fn, hc_scale, hc_base, mix, sqr, post, comb, next_pre):
+        epilogue(split_mode="stats")
+    for tensor in (x, fn, hc_scale, hc_base, mix, sqr, post, comb, next_pre):
         tensor.record_stream(stream)
     if n > 8:
-        MHC_PRE_NORM_KERNEL(*args, **fields, split_mode="input")
+        epilogue(split_mode="input")
     return outputs
