@@ -170,7 +170,9 @@ def sparse_attn_indexer_kpool(
                 # writes on the aux stream, overlapping the current stream's
                 # topk-buffer fill and gather/logits preparation (SGLang's
                 # _can_overlap_prefill). Runs under CUDA graph capture or
-                # breakable graphs stay single-streamed.
+                # breakable graphs stay single-streamed. is_cuda() keeps the
+                # dispatcher's non-ROCm fallbacks (XPU, where aux_stream() is
+                # None) sequential; the AMD copy has no overlap at all.
                 if (
                     not has_decode
                     and current_platform.is_cuda()

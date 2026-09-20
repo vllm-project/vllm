@@ -2,22 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
-import contextlib
-
 import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops  # noqa: F401  # registers the torch.ops._C kernels
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import (
-    eager_break_during_capture,
-    is_in_breakable_cuda_graph,
-)
-from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
-from vllm.forward_context import (
-    get_forward_context,
-    is_forward_context_available,
-)
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import get_current_vllm_config_or_none
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.models.glm5next.amd.ops import kpool_compress as kpool_ops
@@ -36,8 +28,6 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
-    aux_stream,
-    current_stream,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
@@ -46,13 +36,6 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
-
-
-def _capturing_cudagraph() -> bool:
-    return (
-        is_forward_context_available()
-        and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
-    )
 
 
 @eager_break_during_capture
@@ -149,7 +132,6 @@ def sparse_attn_indexer_kpool(
     if k is not None:
         k = k[:num_tokens]
 
-    aux_compress = None
     if not skip_k_cache_insert:
         assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
         if index_kpool > 1 and gate_score is not None and compress_ape is not None:
@@ -165,54 +147,33 @@ def sparse_attn_indexer_kpool(
             if n_prefill > 0:
                 # decode tokens are batched first; prefill tokens follow.
                 prefill_slice = slice(num_decode_tokens, num_tokens)
-                # Eager pure-prefill batches run the compress + tail-seed
-                # writes on the aux stream, overlapping the current stream's
-                # topk-buffer fill and gather/logits preparation (SGLang's
-                # _can_overlap_prefill). Runs under CUDA graph capture or
-                # breakable graphs stay single-streamed.
-                if (
-                    not has_decode
-                    and current_platform.is_cuda()
-                    and not _capturing_cudagraph()
-                    and not is_in_breakable_cuda_graph()
-                ):
-                    aux_compress = aux_stream()
-                    assert aux_compress is not None
-                    aux_compress.wait_stream(current_stream())
-                    write_stream: contextlib.AbstractContextManager = torch.cuda.stream(
-                        aux_compress
-                    )
-                else:
-                    aux_compress = None
-                    write_stream = contextlib.nullcontext()
-                with write_stream:
-                    kpool_ops.kpool_compress_tokens_and_write_cache(
-                        kv_cache,
-                        k[prefill_slice],
-                        gate_score[prefill_slice],
-                        compress_ape,
-                        slot_mapping[prefill_slice],
-                        index_kpool,
-                        head_dim,
-                        round_scale=(scale_fmt is not None),
-                    )
-                    # Persist each request's incomplete prefill pool so decode
-                    # can finish it, including after PD transfer. Tail slots
-                    # use ``pos % kpool`` within the request's tail block.
-                    # Processing only the batch's trailing tokens would miss
-                    # all but the last request in a multi-request prefill.
-                    if tail_kv_cache is not None and tail_prefix is not None:
-                        tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
-                        if tail_meta is not None:
-                            assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
-                            kpool_ops.kpool_seed_tail_cache(
-                                tail_kv_cache,
-                                k[prefill_slice],
-                                gate_score[prefill_slice],
-                                tail_meta.slot_mapping[prefill_slice],
-                                index_kpool,
-                                head_dim,
-                            )
+                kpool_ops.kpool_compress_tokens_and_write_cache(
+                    kv_cache,
+                    k[prefill_slice],
+                    gate_score[prefill_slice],
+                    compress_ape,
+                    slot_mapping[prefill_slice],
+                    index_kpool,
+                    head_dim,
+                    round_scale=(scale_fmt is not None),
+                )
+                # Persist each request's incomplete prefill pool so decode can
+                # finish it, including after PD transfer. Tail slots use
+                # ``pos % kpool`` within the request's tail block. Processing
+                # only the batch's trailing tokens would miss all but the last
+                # request in a multi-request prefill.
+                if tail_kv_cache is not None and tail_prefix is not None:
+                    tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
+                    if tail_meta is not None:
+                        assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
+                        kpool_ops.kpool_seed_tail_cache(
+                            tail_kv_cache,
+                            k[prefill_slice],
+                            gate_score[prefill_slice],
+                            tail_meta.slot_mapping[prefill_slice],
+                            index_kpool,
+                            head_dim,
+                        )
         else:
             # standard: per-token fp8 quant + scatter (all tokens).
             assert scale_fmt is not None
@@ -275,9 +236,6 @@ def sparse_attn_indexer_kpool(
             values_spec,
             scales_spec,
         )
-        if aux_compress is not None:
-            # The gather below reads the pools the compress path just wrote.
-            current_stream().wait_stream(aux_compress)
         for chunk in prefill_metadata.chunks if not short_prefill else ():
             k_quant = k_quant_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
