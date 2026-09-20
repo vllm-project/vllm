@@ -18,10 +18,10 @@ use self::unified::unified_event_stream;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
 use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
-use crate::parser::ParserSelection;
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
 use crate::parser::unified::UnifiedParserFactory;
+use crate::parser::{ParserSelection, ToolStrictLevel};
 use crate::request::{ChatRequest, ChatTool};
 use crate::{Error, Result as ChatResult};
 
@@ -49,6 +49,7 @@ impl DefaultChatOutputProcessor {
         tokenizer: DynTokenizer,
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
+        tool_strict_level: ToolStrictLevel,
     ) -> ChatResult<Self> {
         let parser = if let Some(parser) = Self::resolve_optional_unified_parser(
             request.tools(),
@@ -77,6 +78,7 @@ impl DefaultChatOutputProcessor {
             request,
             parser.structural_tag_builder(),
             parser.scoped_structural_tag_builder(),
+            tool_strict_level,
         )?;
 
         if parser.preserve_special_tokens() {
@@ -195,7 +197,7 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::DefaultChatOutputProcessor;
-    use crate::parser::ParserSelection;
+    use crate::parser::{ParserSelection, ToolStrictLevel};
     use crate::request::ChatRequest;
 
     fn tokenizer() -> Arc<TestTokenizer> {
@@ -217,6 +219,7 @@ mod tests {
             tokenizer(),
             &selection,
             &selection,
+            ToolStrictLevel::Auto,
         )
         .unwrap();
     }
@@ -231,6 +234,7 @@ mod tests {
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Auto,
+            ToolStrictLevel::Auto,
         )
         .unwrap();
     }
@@ -248,6 +252,7 @@ mod tests {
                 tokenizer(),
                 tool,
                 reasoning,
+                ToolStrictLevel::Auto,
             )
             .unwrap();
         }
@@ -262,6 +267,7 @@ mod tests {
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Explicit("gemma4".to_string()),
+            ToolStrictLevel::Auto,
         ) {
             Ok(_) => panic!("expected mixed Gemma4 parser selection to fail"),
             Err(error) => error,
