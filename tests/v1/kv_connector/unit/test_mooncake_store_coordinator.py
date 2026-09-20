@@ -700,29 +700,3 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     # The final 256-token segment has no lookahead block, so EAGLE falls back
     # to the previous aligned boundary instead of consuming all 768 tokens.
     assert hit == 512
-
-
-def test_excluded_group_does_not_constrain_external_hit():
-    """An ephemeral draft group must not participate in hit convergence."""
-    groups = [
-        KVCacheGroupSpec(["target"], _full(16)),
-        KVCacheGroupSpec(["draft"], _full(16), is_eagle_group=True),
-    ]
-    coord = MooncakeStoreCoordinator(
-        groups,
-        scheduler_block_size=16,
-        hash_block_size=16,
-        excluded_group_ids={1},
-    )
-    hashes = _hashes(4)
-    target_only = {(0, bytes(block_hash)) for block_hash in hashes}
-
-    masks, hit = coord.find_longest_cache_hit(
-        hashes,
-        max_length=64,
-        cached_block_pool=ExternalCachedBlockPool(16, target_only),
-    )
-
-    assert hit == 64
-    assert masks[0] == [True] * 4
-    assert masks[1] == []

@@ -83,7 +83,6 @@ class MooncakeStoreCoordinator:
         use_eagle: bool = False,
         retention_interval: int | None = None,
         dcp_world_size: int = 1,
-        excluded_group_ids: set[int] | None = None,
     ) -> None:
         # Mirrors core's resolve_kv_cache_block_sizes: the hash unit only has
         # to divide groups that participate in prefix caching. Non-shareable
@@ -104,7 +103,6 @@ class MooncakeStoreCoordinator:
             if g.kv_cache_spec.prefix_cacheable
         ), "scheduler_block_size must be a multiple of each group's block_size"
         self.kv_cache_groups = kv_cache_groups
-        self.excluded_group_ids = frozenset(excluded_group_ids or ())
         self.mamba_group_ids = {
             group_id
             for group_id, group in enumerate(kv_cache_groups)
@@ -134,8 +132,6 @@ class MooncakeStoreCoordinator:
         """
         attention_groups: list[StoreSpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
-            if i in self.excluded_group_ids:
-                continue
             # Skip groups that opt out of prefix caching (e.g. GLM-5.3-Flash
             # kpool tail): per-request scratch, never shareable, so they must
             # not participate in hit lookup. Mirrors core's

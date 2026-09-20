@@ -2261,7 +2261,7 @@ def test_worker_is_hma_required_from_kv_cache_groups(
     assert store_worker._is_hma_required is expected_is_hma_required
 
 
-def test_worker_init_excludes_dsv41_dspark_draft_group(monkeypatch):
+def test_worker_init_skips_non_cacheable_dsv41_dspark_swa(monkeypatch):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -2294,15 +2294,15 @@ def test_worker_init_excludes_dsv41_dspark_draft_group(monkeypatch):
         kv_cache_groups=[
             KVCacheGroupSpec(["target"], spec),
             KVCacheGroupSpec(["target_swa"], replay_spec),
-            KVCacheGroupSpec(["draft"], spec, is_eagle_group=True),
+            KVCacheGroupSpec(["draft"], replay_spec, is_eagle_group=True),
         ],
     )
 
     store_worker = worker.MooncakeStoreWorker(vllm_config, kv_cache_config)
 
-    assert store_worker._excluded_group_ids == {1}
-    assert store_worker._group_participates == (True, False)
-    assert store_worker.coord.excluded_group_ids == {1}
+    assert [group.layer_names for group in store_worker._kv_cache_groups] == [
+        ["target"]
+    ]
     assert [group.group_ids for group in store_worker.coord.attention_groups] == [[0]]
 
 
@@ -2336,39 +2336,6 @@ def test_worker_init_rejects_dsv41_dspark_without_bounded_replay(monkeypatch):
 
     with pytest.raises(ValueError, match="requires bounded SWA replay"):
         worker.MooncakeStoreWorker(vllm_config, kv_cache_config)
-
-
-def test_worker_init_keeps_non_dsv41_dspark_eagle_group(monkeypatch):
-    store = MagicMock()
-    store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch)
-    monkeypatch.setattr(
-        worker.MooncakeStoreConfig,
-        "load_from_config",
-        staticmethod(lambda: _make_config()),
-    )
-    vllm_config = _make_vllm_config()
-    vllm_config.speculative_config = SimpleNamespace(
-        use_dspark=lambda: True,
-        use_eagle_block_drop=lambda: True,
-    )
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    kv_cache_config = KVCacheConfig(
-        num_blocks=10,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["target"], spec),
-            KVCacheGroupSpec(["draft"], spec, is_eagle_group=True),
-        ],
-    )
-
-    store_worker = worker.MooncakeStoreWorker(vllm_config, kv_cache_config)
-
-    assert store_worker._excluded_group_ids == set()
-    assert store_worker._group_participates == (True, True)
-    assert store_worker.coord.use_eagle
-    assert store_worker.coord.eagle_group_ids == {0, 1}
 
 
 def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
@@ -3517,10 +3484,6 @@ def _register_with_mocked_threads(
 def _refresh_group_tp_replication_factors(
     worker: mooncake_store_worker.MooncakeStoreWorker,
 ) -> None:
-    worker._group_participates = tuple(
-        group_id not in worker._excluded_group_ids
-        for group_id in range(len(worker._kv_cache_groups))
-    )
     worker._group_tp_replication_factors = (
         worker._compute_group_tp_replication_factors()
     )
@@ -3576,8 +3539,6 @@ def _make_bare_worker(
     worker.store_replicate_config = SimpleNamespace()
     worker.enable_group_semantics = False
     worker._supports_group_ids = False
-    worker._excluded_group_ids = set()
-    worker._group_participates = (True,)
     worker._kv_connector_stats_lock = threading.Lock()
     worker.kv_connector_stats = MooncakeStoreConnectorStats()
 
