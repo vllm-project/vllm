@@ -35,6 +35,9 @@ class CPUWorker(Worker):
     DEFAULT_TORCH_PROFILER_ACTIVITIES: ClassVar[tuple[TorchProfilerActivity, ...]] = (
         "CPU",
     )
+    SUPPORTED_TORCH_PROFILER_ACTIVITIES: ClassVar[frozenset[TorchProfilerActivity]] = (
+        frozenset(DEFAULT_TORCH_PROFILER_ACTIVITIES)
+    )
     SUPPORTED_PROFILER_KINDS: ClassVar[frozenset[ProfilerKind]] = frozenset(("torch",))
 
     def __init__(
