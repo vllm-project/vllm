@@ -567,9 +567,18 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
 
 def choice_as_grammar(choice: list[str]) -> str:
     def escape_ebnf_string(s: str) -> str:
-        """Escape special characters in a EBNF string."""
-        # Escape double quotes and backslashes
-        return re.sub(r'(["\\])', r"\\\1", s)
+        """Escape EBNF literals, including raw LF, CR, and NUL terminators."""
+        escapes = {"\\": r"\\", '"': r"\"", "\n": r"\n", "\r": r"\r", "\t": r"\t"}
+
+        def escape_char(ch: str) -> str:
+            if ch in escapes:
+                return escapes[ch]
+            # Escape remaining C0 controls (U+0000-U+001F) and DEL (U+007F).
+            if ord(ch) < 0x20 or ord(ch) == 0x7F:
+                return f"\\u{ord(ch):04x}"
+            return ch
+
+        return "".join(escape_char(ch) for ch in s)
 
     escaped_choices = (escape_ebnf_string(c) for c in choice)
     grammar = "root ::= " + " | ".join(f'"{c}"' for c in escaped_choices)
