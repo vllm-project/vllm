@@ -121,7 +121,7 @@ Commands:
             bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
             leader --ray_cluster_size=2;
             vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8
-            --pipeline-parallel-size 2
+            --pipeline-parallel-size 2 --distributed-executor-backend ray
         ```
 
         Worker:
@@ -277,7 +277,7 @@ Save one of the following manifests to `modelserving.yaml`:
                           - sh
                           - -c
                           - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
-                            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2"
+                            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray"
                         resources:
                           limits:
                             nvidia.com/gpu: "8"
