@@ -4,6 +4,7 @@
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -1388,11 +1389,9 @@ def test_dummy_inputs_scheduler_budget(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
     )
-    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
-
-    kwargs = {}
+    scheduler_config = None
     if chunked_prefill is not None:
-        kwargs["scheduler_config"] = SchedulerConfig(
+        scheduler_config = SchedulerConfig(
             max_model_len=max_model_len,
             is_encoder_decoder=False,
             max_num_batched_tokens=8192,
@@ -1400,5 +1399,8 @@ def test_dummy_inputs_scheduler_budget(
             enable_chunked_prefill=chunked_prefill,
         )
 
-    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    with patch.object(processor, "apply", return_value={"prompt_token_ids": [7]}):
+        result = processor.get_dummy_mm_inputs(
+            {"image": 1}, scheduler_config=scheduler_config
+        )
     assert len(result["prompt_token_ids"]) == expected_seq_len
