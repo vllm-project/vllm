@@ -1114,11 +1114,11 @@ def test_sparse_attn_decode_gfx950_direct_dense_topk(monkeypatch) -> None:
         extra_indices=ragged,
         extra_indptr=indptr,
     )
-    actual = mod._rocm_sparse_attn_decode_ragged_triton(
+    actual = mod._rocm_sparse_attn_decode_triton(
         q=q,
         main_cache=main_cache,
-        main_indices=main_indices,
-        main_indptr=main_indptr,
+        main_indices=main_indices.reshape(num_queries, 0),
+        main_lengths=torch.zeros(num_queries, dtype=torch.int32, device=device),
         scale=HEAD_DIM**-0.5,
         attn_sink=None,
         nope_head_dim=NOPE_HEAD_DIM,
