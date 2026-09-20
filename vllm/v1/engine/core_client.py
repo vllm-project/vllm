@@ -1287,11 +1287,7 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("is_sleeping")
 
     async def compute_weight_checksums_all_async(self) -> list[dict[str, str]]:
-        """Return checksums from every engine this client manages.
-
-        Each engine owns its own workers, so querying only core_engines[0]
-        would let an update that missed the other engines pass verification.
-        """
+        """Return checksums from every engine this client manages."""
         return await asyncio.gather(
             *[
                 self._call_utility_async("compute_weight_checksums", engine=engine)

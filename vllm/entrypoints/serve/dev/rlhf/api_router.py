@@ -234,27 +234,7 @@ async def weight_info(raw_request: Request):
 
 @router.post("/weight_checker")
 async def weight_checker(raw_request: Request) -> JSONResponse:
-    """Checksum, reset, or compare model weights.
-
-    The endpoint keeps no state: with more than one API worker process, a
-    request lands on an arbitrary process, so the caller holds the baseline.
-
-    Request body::
-
-        {"action": "checksum"} -> return SHA-256 digests of all weights
-        {"action": "reset"}    -> overwrite GPU weights with random values
-        {"action": "compare", "baseline": {name: hex_str}}
-                               -> diff current weights against the baseline
-
-    Responses (all 200 on success):
-
-    * **checksum**: ``{"checksums": {name: hex_str}}``
-    * **reset**:    ``{"status": "reset"}``
-    * **compare**:  ``{"match": bool, "mismatches": [str]}``
-
-    Sleep level 2 drops the weight storage, so a paused or sleeping engine
-    returns HTTP 409. The RL workflow is in docs/features/weight_checker.md.
-    """
+    """Checksum, reset, or compare model weights."""
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as exc:
