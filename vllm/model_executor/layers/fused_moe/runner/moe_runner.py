@@ -338,7 +338,11 @@ class MoERunner(MoERunnerInterface):
             self._shared_experts._set_moe_config(new_moe_config)
 
     def _warn_if_gate_hooks_are_bypassed(self) -> None:
-        """Warn once if gate fusion is silently bypassing the gate's hooks.
+        """Warn if gate fusion is silently bypassing the gate's hooks.
+
+        Called from the one-shot weight-fusion path, so this costs nothing per
+        forward and runs after weight loading, when instrumentation is normally
+        already attached.
 
         Under gate fusion the router logits are produced by an ``F.linear``
         against the combined weight, so the ``gate`` module itself is never
@@ -374,6 +378,7 @@ class MoERunner(MoERunnerInterface):
         """
         if self._combined_gate_weight is None:
             assert self.gate is not None and self.shared_expert_gate is not None
+            self._warn_if_gate_hooks_are_bypassed()
             self._combined_gate_weight = torch.cat(
                 [self.gate.weight, self.shared_expert_gate.weight],
                 dim=0,
@@ -925,7 +930,6 @@ class MoERunner(MoERunnerInterface):
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
             if self._fse_fuse_gate:
-                self._warn_if_gate_hooks_are_bypassed()
                 self._maybe_fuse_gate_weights()
                 router_logits = F.linear(hidden_states, self._combined_gate_weight)
             else:
