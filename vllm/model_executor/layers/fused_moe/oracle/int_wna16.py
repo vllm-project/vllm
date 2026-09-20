@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_moe_marlin_supports_config,
+    explain_moe_marlin_unsupported,
     marlin_act_int8_process_scales,
     marlin_moe_padded_intermediate,
     marlin_moe_permute_scales,
@@ -189,10 +189,11 @@ def _backend_incompatibility_reason(
         else:
             return "Marlin not supported for this layer"
 
-        if not check_moe_marlin_supports_config(
+        unsupported = explain_moe_marlin_unsupported(
             moe_config, group_size, allow_tile_padding
-        ):
-            return "Marlin not supported for this layer"
+        )
+        if unsupported is not None:
+            return unsupported
 
     if not allow_marlin and backend in (
         WNA16MoEBackend.MARLIN,
