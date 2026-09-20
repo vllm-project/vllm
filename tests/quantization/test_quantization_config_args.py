@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for QuantizationConfigArgs parsing."""
 
+from unittest.mock import Mock
+
 import pytest
 
 from vllm.config.quantization import (
@@ -9,6 +11,11 @@ from vllm.config.quantization import (
     QuantizationConfigArgs,
     QuantSpec,
     resolve_quantization_config,
+)
+from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+    _find_matching_targets,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -32,6 +39,10 @@ def test_quant_spec_accepts_quant_key_directly():
     spec = QuantSpec(weight=kFp8StaticTensorSym)
     assert spec.weight is kFp8StaticTensorSym
     assert spec.activation is None
+
+
+def test_quant_spec_string_representation_uses_quantization_name():
+    assert str(QuantSpec(weight="mxfp4")) == "mxfp4"
 
 
 def test_quant_spec_rejects_unknown_name():
@@ -70,6 +81,11 @@ def test_args_accepts_dict_form():
     assert args.moe == QuantSpec(weight=None, activation=kMxfp8Dynamic)
 
 
+def test_targets_reject_non_string_keys():
+    with pytest.raises(ValueError, match="targets keys must be strings"):
+        QuantizationConfigArgs._validate_targets({123: "mxfp8"})
+
+
 # ---- resolve_quantization_config -----------------------------------------
 
 
@@ -77,6 +93,12 @@ def test_resolve_shorthand_only_populates_both_slots():
     args = resolve_quantization_config("fp8_per_block", None)
     assert args.linear == QuantSpec(weight=kFp8Static128BlockSym)
     assert args.moe == QuantSpec(weight=kFp8Static128BlockSym)
+
+
+@pytest.mark.parametrize("quantization", ["mxfp4", "mxfp8"])
+def test_resolve_colliding_shorthand_is_deferred(quantization: str):
+    """Checkpoint metadata determines whether an MXFP shorthand is online."""
+    assert resolve_quantization_config(quantization, None) is None
 
 
 def test_resolve_int8_shorthand_leaves_linear_unset():
@@ -106,12 +128,9 @@ def test_resolve_merges_explicit_over_shorthand():
     assert args.moe == QuantSpec(weight=kFp8StaticTensorSym)
 
 
-def test_resolve_rejects_quantization_config_with_non_shorthand_quant():
-    # If --quantization names something other than an online shorthand,
-    # quantization_config is not allowed via this path (checkpoint quant
-    # paths read it directly off ModelConfig instead).
-    with pytest.raises(ValueError, match="quantization_config is only supported"):
-        resolve_quantization_config("gptq", {"linear": "fp8_per_block"})
+def test_resolve_quantization_config_with_checkpoint_quantization():
+    args = resolve_quantization_config("gptq", {"linear": "fp8_per_block"})
+    assert args == QuantizationConfigArgs(linear="fp8_per_block")
 
 
 # ---- QUANT_KEY_NAMES coverage --------------------------------------------
@@ -132,3 +151,64 @@ def test_static_block_weight_paired_with_dynamic_block_activation():
     spec = QuantSpec(weight="fp8_per_block_static", activation="fp8_per_block_dynamic")
     assert spec.weight == kFp8Static128BlockSym
     assert spec.activation == kFp8Dynamic128Sym
+
+
+def test_targets_allow_distinct_patterns_with_the_same_shorthand():
+    layer_name = "model.layers.0.self_attn.qkv_proj"
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    targets = {
+        r"re:.*\.q_proj$": "mxfp8",
+        r"re:.*\.k_proj$": "mxfp8",
+        r"re:.*\.v_proj$": "mxfp8",
+    }
+
+    matches = _find_matching_targets(layer_name, targets, fused_mapping)
+    assert len(matches) == 1
+    assert targets[matches[0]] == "mxfp8"
+
+
+def test_targets_reject_overlapping_patterns():
+    targets = {
+        r"re:.*o_proj": "fp8_per_tensor",
+        "model.layers.0.self_attn.o_proj": "fp8_per_block",
+    }
+
+    with pytest.raises(ValueError, match="multiple quantization_config.targets"):
+        _find_matching_targets("model.layers.0.self_attn.o_proj", targets)
+
+
+def test_targets_reject_partially_matched_fused_layer():
+    targets = {r"re:.*q_proj": "fp8_per_tensor"}
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    with pytest.raises(ValueError, match="unmatched shards"):
+        _find_matching_targets(
+            "model.layers.0.self_attn.qkv_proj", targets, fused_mapping
+        )
+
+
+def test_targets_reject_fused_shards_with_different_schemes():
+    targets = {
+        r"re:.*\.q_proj$": "fp8_per_tensor",
+        r"re:.*\.k_proj$": "fp8_per_block",
+        r"re:.*\.v_proj$": "fp8_per_tensor",
+    }
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    with pytest.raises(ValueError, match="different quantization_config.targets"):
+        _find_matching_targets(
+            "model.layers.0.self_attn.qkv_proj", targets, fused_mapping
+        )
+
+
+def test_targets_reject_moe_only_shorthand_for_linear_layer():
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(
+            targets={"model.layers.0.self_attn.o_proj": "nvfp4_per_token"}
+        )
+    )
+
+    with pytest.raises(ValueError, match="does not define a QuantSpec"):
+        config.resolve_quant_method_cls(
+            Mock(spec=LinearBase), "model.layers.0.self_attn.o_proj"
+        )

@@ -7,10 +7,16 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SchedulerConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.processing.context import InputProcessingContext
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.parse import MultiModalDataParser
+from vllm.multimodal.processing.context import (
+    InputProcessingContext,
+    overlay_modality_mm_kwargs,
+)
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     PlaceholderFeaturesInfo,
@@ -26,6 +32,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.utils.collection_utils import flatten_2d_lists
 
+from ..models.utils import build_model_context
 from .utils import random_image
 
 pytestmark = pytest.mark.cpu_test
@@ -962,8 +969,7 @@ def test_hf_processor_call_kwargs(
 
 
 def test_apply_matches_no_match_exits_quickly():
-    """
-    Test that _apply_matches exits quickly when no matches are found.
+    """Test that _apply_matches exits quickly when no matches are found.
 
     Previously, _apply_matches had O(n²) behavior when no match was found
     because it would increment start_idx by 1 each iteration while
@@ -1021,8 +1027,7 @@ def test_iter_token_matches_rejects_negative_start_idx():
 
 
 def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
-    """
-    Test that placeholder scanning stays linear under adversarial candidates.
+    """Test that placeholder scanning stays linear under adversarial candidates.
 
     The fast-forward scan must not rescan the prompt tail per position when
     one candidate's first token never occurs (forcing a full search) while
@@ -1055,8 +1060,7 @@ def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
     ],
 )
 def test_find_mm_placeholders_stops_at_missing_item(prompt):
-    """
-    Test that the scan returns no placeholders once it fails to find
+    """Test that the scan returns no placeholders once it fails to find
     an item's placeholder, leaving later items unresolved.
     """
     result = find_mm_placeholders(
@@ -1073,8 +1077,7 @@ def test_find_mm_placeholders_stops_at_missing_item(prompt):
 
 
 class _FakeTokenizer:
-    """
-    Character-level tokenizer where "foo" merges into one token differently
+    """Character-level tokenizer where "foo" merges into one token differently
     depending on whether it is followed by "d", like BPE merging "foo" in
     "food" across the search-text boundary.
     """
@@ -1139,8 +1142,7 @@ def _text_fallback_processor() -> BaseMultiModalProcessor:
 
 
 def test_apply_prompt_updates_falls_back_to_text_matching():
-    """
-    Test that the fallback in `_apply_prompt_updates` finds targets that
+    """Test that the fallback in `_apply_prompt_updates` finds targets that
     tokenize differently inside the prompt ("foo" in "food").
     """
     processor = _text_fallback_processor()
@@ -1160,8 +1162,7 @@ def test_apply_prompt_updates_falls_back_to_text_matching():
 
 
 def test_apply_prompt_updates_falls_back_with_prefix_target():
-    """
-    Test that `PromptIndexTargets.prefix` targets are resolved against the
+    """Test that `PromptIndexTargets.prefix` targets are resolved against the
     decoded text in the fallback path of `_apply_prompt_updates`.
     """
     processor = _text_fallback_processor()
@@ -1186,8 +1187,7 @@ def test_apply_prompt_updates_falls_back_with_prefix_target():
 
 
 def test_apply_prompt_updates_falls_back_with_index_targets():
-    """
-    Test that the text resolvers of `PromptIndexTargets.start`/`end`
+    """Test that the text resolvers of `PromptIndexTargets.start`/`end`
     match against the decoded text when another item forces the
     fallback in `_apply_prompt_updates`.
     """
@@ -1205,3 +1205,194 @@ def test_apply_prompt_updates_falls_back_with_index_targets():
 
     assert new_token_ids == [200, 201, ord("d"), 9]
     assert [p.tokens for p in placeholders["image"]] == [[200, 201], [9]]
+
+
+@pytest.mark.skip_global_cleanup
+def test_overlay_modality_mm_kwargs_scoped_video_does_not_leak_to_image():
+    """HF-style videos_kwargs must overlay only when modality is video."""
+    video_size = {"longest_edge": 469762048, "shortest_edge": 4096}
+    kwargs = {"videos_kwargs": {"size": video_size}}
+
+    assert overlay_modality_mm_kwargs(kwargs, None) == kwargs
+    assert "size" not in overlay_modality_mm_kwargs(kwargs, "image")
+    assert overlay_modality_mm_kwargs(kwargs, "video")["size"] == video_size
+
+
+@pytest.mark.skip_global_cleanup
+def test_overlay_modality_mm_kwargs_flat_size_stays_shared():
+    """A flat size override keeps the current shared-namespace behavior."""
+    size = {"longest_edge": 469762048, "shortest_edge": 4096}
+    kwargs = {"size": size}
+
+    for modality in (None, "image", "video"):
+        assert overlay_modality_mm_kwargs(kwargs, modality)["size"] == size
+
+
+@pytest.mark.skip_global_cleanup
+def test_overlay_modality_mm_kwargs_scoped_wins_over_flat_for_modality():
+    """A nested videos_kwargs size wins over a flat size for video reads."""
+    kwargs = {
+        "size": {"longest_edge": 1},
+        "videos_kwargs": {"size": {"longest_edge": 2}},
+        "images_kwargs": {"size": {"longest_edge": 3}},
+    }
+
+    assert overlay_modality_mm_kwargs(kwargs, "video")["size"] == {"longest_edge": 2}
+    assert overlay_modality_mm_kwargs(kwargs, "image")["size"] == {"longest_edge": 3}
+    assert overlay_modality_mm_kwargs(kwargs, None)["size"] == {"longest_edge": 1}
+
+
+@pytest.mark.skip_global_cleanup
+def test_overlay_modality_mm_kwargs_ignores_non_mapping_scoped_value():
+    kwargs = {"images_kwargs": "not-a-dict", "size": {"longest_edge": 1}}
+    assert overlay_modality_mm_kwargs(kwargs, "image")["size"] == {"longest_edge": 1}
+
+
+@pytest.mark.skip_global_cleanup
+def test_mm_processor_kwargs_merge_then_overlay_preserves_scoping():
+    """Configured videos_kwargs overlay only for video reads after merge."""
+    from vllm.config.multimodal import MultiModalConfig
+
+    size = {"longest_edge": 469762048, "shortest_edge": 4096}
+    mm_config = MultiModalConfig(mm_processor_kwargs={"videos_kwargs": {"size": size}})
+    merged = mm_config.merge_mm_processor_kwargs({})
+    assert overlay_modality_mm_kwargs(merged, "video")["size"] == size
+    assert "size" not in overlay_modality_mm_kwargs(merged, "image")
+    assert "size" not in overlay_modality_mm_kwargs(merged, None)
+
+
+def test_processor_inputs_hashes_partial_uuids():
+    rng = np.random.RandomState(0)
+    images = [random_image(rng, min_wh=8, max_wh=9) for _ in range(2)]
+    inputs = ProcessorInputs(
+        prompt=[],
+        mm_data_items=MultiModalDataParser().parse_mm_data({"image": images}),
+        mm_uuid_items={"image": ["image-uuid", None]},
+    )
+
+    assert inputs.get_mm_hashes("test-model", "blake3") == {
+        "image": [
+            "image-uuid",
+            MultiModalHasher.hash_kwargs(
+                "blake3", model_id="test-model", image=images[1]
+            ),
+        ]
+    }
+
+
+def test_processor_inputs_hashes_scope_kwargs_by_modality():
+    """Changing one modality's options must not invalidate another item."""
+    rng = np.random.RandomState(0)
+    mm_data_items = MultiModalDataParser().parse_mm_data(
+        {
+            "image": [random_image(rng, min_wh=8, max_wh=9)],
+            "video": [np.zeros((2, 8, 8, 3), dtype=np.uint8)],
+        }
+    )
+    mm_uuid_items = {"image": ["image-uuid"], "video": ["video-uuid"]}
+
+    def get_hashes(video_frames: int, image_size: int, video_size: int):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=mm_data_items,
+            mm_uuid_items=mm_uuid_items,
+            media_io_kwargs={"video": {"num_frames": video_frames}},
+            hf_processor_mm_kwargs={
+                "images_kwargs": {"size": {"longest_edge": image_size}},
+                "videos_kwargs": {"size": {"longest_edge": video_size}},
+            },
+        ).get_mm_hashes("test-model", "blake3")
+
+    base = get_hashes(video_frames=4, image_size=224, video_size=224)
+    changed_video = get_hashes(video_frames=16, image_size=224, video_size=448)
+    changed_image = get_hashes(video_frames=4, image_size=448, video_size=224)
+
+    assert changed_video["image"] == base["image"]
+    assert changed_video["video"] != base["video"]
+    assert changed_image["image"] != base["image"]
+    assert changed_image["video"] == base["video"]
+
+
+def test_processor_inputs_hashes_ignore_unrelated_kwargs():
+    """An image-only request ignores video-only processing configuration."""
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    inputs = ProcessorInputs(
+        prompt=[],
+        mm_data_items=MultiModalDataParser().parse_mm_data({"image": [image]}),
+        mm_uuid_items={"image": ["image-uuid"]},
+        media_io_kwargs={"video": {"num_frames": 16}},
+        hf_processor_mm_kwargs={"videos_kwargs": {"size": {"longest_edge": 448}}},
+    )
+
+    assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        # Shifting the key/value boundary: both flatten to the dotted key
+        # "mm_processor_kwargs.abc" followed by no value bytes.
+        ({"ab": "c"}, {"a": "bc"}),
+        # A nested mapping and a caller-supplied dotted key flatten alike.
+        ({"size": {"shortest_edge": 224}}, {"size.shortest_edge": 224}),
+        # A sequence and a mapping keyed by stringified indices flatten alike.
+        ({"fps": [2, 4]}, {"fps": {"0": 2, "1": 4}}),
+        # None contributes the key alone, which a zero-byte value also does.
+        ({"video_pruning_rate": None}, {"video_pruning_rate": ""}),
+        # An empty container contributes nothing, as does omitting the key.
+        ({"size": {}}, {}),
+    ],
+)
+def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
+    """Distinct processor kwargs must not share a multi-modal hash.
+
+    ``hf_processor_mm_kwargs`` is per-request input, so both the keys and the
+    values here are caller-controlled. The hash is the identity of the
+    processor cache entry and is mixed into the prefix-cache block key, so two
+    requests sharing one is a cross-request cache hit.
+    """
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    mm_data_items = MultiModalDataParser().parse_mm_data({"image": [image]})
+
+    def hash_with(hf_processor_mm_kwargs):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        ).get_mm_hashes("test-model", "blake3")["image"][0]
+
+    assert hash_with(left) != hash_with(right)
+
+
+@pytest.mark.parametrize(
+    ("chunked_prefill", "max_model_len", "expected_seq_len"),
+    [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
+)
+def test_dummy_inputs_scheduler_budget(
+    chunked_prefill, max_model_len, expected_seq_len
+):
+    ctx = build_model_context(
+        "llava-hf/llava-v1.6-mistral-7b-hf",
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": 1},
+    )
+    ctx.model_config.max_model_len = max_model_len
+
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
+
+    kwargs = {}
+    if chunked_prefill is not None:
+        kwargs["scheduler_config"] = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1,
+            enable_chunked_prefill=chunked_prefill,
+        )
+
+    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    assert len(result["prompt_token_ids"]) == expected_seq_len

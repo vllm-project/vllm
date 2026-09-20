@@ -131,10 +131,13 @@ def FusedMoEFactory(
     apply_routed_scale_to_output: bool = False,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
     runner_cls: type[MoERunner] | None = None,
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
+    skip_padding: bool = False,
 ) -> MoERunner:
     """Factory function for creating MoE execution pipeline.
 
@@ -149,6 +152,11 @@ def FusedMoEFactory(
     Note: Mixtral uses w1, w2, and w3 for gate, up, and down_proj. We
     copy that naming convention here and handle any remapping in the
     load_weights function in each model implementation.
+
+    Args:
+        intermediate_pad: Padding added to the intermediate size, if any.
+        swiglu_alpha: Optional alpha parameter for the SwiGLU activation.
+        swiglu_beta: Optional beta parameter for the SwiGLU activation.
 
     Args:
         num_experts: Number of experts in the model (global count)
@@ -199,13 +207,18 @@ def FusedMoEFactory(
                                       output instead of topk_weights
         zero_expert_type: Type of zero expert handling
         hash_indices_table: Hash table for expert indices
+        bias_vl: Vision routing bias for image tokens (Deepseek V4)
+        image_sentinel_lo: First of five consecutive in-vocab image sentinel
+            ids (0 = vision routing disabled)
         runner_cls: Custom MoERunner class (None = use default MoERunner)
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
+        skip_padding: Whether grouped routing should invalidate padding rows.
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
+
     """
     vllm_config = get_current_vllm_config()
 
@@ -297,6 +310,7 @@ def FusedMoEFactory(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            skip_padding=(skip_padding and moe_parallel_config.use_deepep_v2_kernels),
             # Fused shared-expert slot weight. With apply_routed_scale_to_output
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net
@@ -313,6 +327,8 @@ def FusedMoEFactory(
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
         )
 
     if params_dtype is None:
@@ -341,6 +357,7 @@ def FusedMoEFactory(
         moe_backend=vllm_config.kernel_config.moe_backend,
         router_logits_dtype=router_logits_dtype,
         max_num_tokens=max_num_batched_tokens,
+        elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
         activation=moe_activation,

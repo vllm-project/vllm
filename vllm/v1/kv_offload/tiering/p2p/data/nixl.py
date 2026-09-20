@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
-"""
+"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL."""
 
 from __future__ import annotations
 
 import itertools
 from collections.abc import Iterable
 from typing import Any, NamedTuple
+
+import numpy as np
 
 from vllm.distributed.nixl_utils import NixlWrapper as _NixlAgent
 from vllm.distributed.nixl_utils import nixl_agent_config as _NixlAgentConfig
@@ -178,9 +178,9 @@ class NixlTransport(DataTransport):
         handle = self._agent.make_prepped_xfer(
             "WRITE",
             self._local_dlist,
-            local_idxs,
+            np.asarray(local_idxs, dtype=np.int32),
             remote_dlist,
-            remote_idxs,
+            np.asarray(remote_idxs, dtype=np.int32),
         )
         self._agent.transfer(handle)
         transfer_id = next(self._next_id)

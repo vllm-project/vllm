@@ -8,8 +8,10 @@ use thiserror_ext::AsReport as _;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
+use super::{ChatRenderer, RenderedPrompt};
+use crate::EffortValue;
 use crate::error::{Error, Result};
+use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantToolCall};
 
@@ -35,6 +37,7 @@ const MAX_REASONING_EFFORT: f64 = 0.99;
 pub struct InklingChatRenderer {
     tokenizer: DynTokenizer,
     special: InklingSpecialTokenIds,
+    default_template_kwargs: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,9 +81,16 @@ impl InklingSpecialTokenIds {
 }
 
 impl InklingChatRenderer {
-    pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
+    pub fn new(
+        tokenizer: DynTokenizer,
+        default_template_kwargs: HashMap<String, Value>,
+    ) -> Result<Self> {
         let special = InklingSpecialTokenIds::resolve(tokenizer.as_ref())?;
-        Ok(Self { tokenizer, special })
+        Ok(Self {
+            tokenizer,
+            special,
+            default_template_kwargs,
+        })
     }
 
     fn write_text_tokens(&self, out: &mut Vec<u32>, text: &str) -> Result<()> {
@@ -150,11 +160,6 @@ impl InklingChatRenderer {
     }
 
     fn write_reasoning_effort(&self, out: &mut Vec<u32>, effort: f64) -> Result<()> {
-        if !(0.0..=MAX_REASONING_EFFORT).contains(&effort) {
-            return Err(Error::ChatTemplate(format!(
-                "Inkling reasoning_effort must be in [0.0, 0.99], got {effort}"
-            )));
-        }
         let formatted = format!("{effort:.2}");
         let effort = formatted.trim_end_matches('0').trim_end_matches('.');
         let effort = if matches!(effort, "0" | "-0") {
@@ -294,11 +299,18 @@ impl ChatRenderer for InklingChatRenderer {
 
         let mut out = Vec::new();
         let mut tool_call_id_to_name = HashMap::new();
-        let effective_template_kwargs = request_template_kwargs(request);
+        let reasoning = resolve_reasoning(ReasoningControl::resolve(
+            request,
+            &self.default_template_kwargs,
+        )?)?;
+        let effective_template_kwargs = reasoning.template_kwargs(request);
         let tools = rendered_tools(request);
         self.write_tool_declarations(&mut out, &tools)?;
-        let mut reasoning_effort =
-            resolve_reasoning_effort(effective_template_kwargs.get("reasoning_effort"));
+        let mut reasoning_effort = if reasoning.is_enabled() {
+            reasoning.effort().and_then(EffortValue::as_f64)
+        } else {
+            Some(0.0)
+        };
 
         for message in &request.messages {
             if !matches!(
@@ -346,17 +358,39 @@ impl ChatRenderer for InklingChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::TokenIds(out),
+            media_order: None,
             effective_template_kwargs,
         })
     }
 }
 
-fn resolve_reasoning_effort(value: Option<&Value>) -> Option<f64> {
+fn resolve_reasoning(control: ReasoningControl) -> Result<ReasoningControl> {
+    let control = control.fallback(ReasoningControl::enabled("high"));
+    if !control.is_enabled() {
+        return Ok(control);
+    }
+    let effort = resolve_reasoning_effort(control.effort());
+    if let Some(effort) = effort {
+        if !(0.0..=MAX_REASONING_EFFORT).contains(&effort) {
+            return Err(Error::InvalidReasoningEffort(format!(
+                "Inkling reasoning_effort must be in [0.0, 0.99], got {effort}"
+            )));
+        }
+        if effort == 0.0 {
+            return Ok(ReasoningControl::Disabled);
+        }
+    }
+    Ok(ReasoningControl::Enabled {
+        effort: effort.map(EffortValue::try_from).transpose()?,
+    })
+}
+
+fn resolve_reasoning_effort(value: Option<&EffortValue>) -> Option<f64> {
     let Some(value) = value else {
         return Some(0.9);
     };
     match value {
-        Value::String(name) => match name.as_str() {
+        EffortValue::String(name) => match name.as_str() {
             "none" => Some(0.0),
             "minimal" => Some(0.1),
             "low" => Some(0.2),
@@ -365,8 +399,7 @@ fn resolve_reasoning_effort(value: Option<&Value>) -> Option<f64> {
             "xhigh" | "max" => Some(0.99),
             _ => None,
         },
-        Value::Number(number) => number.as_f64(),
-        _ => None,
+        EffortValue::Number(number) => number.as_f64(),
     }
 }
 
