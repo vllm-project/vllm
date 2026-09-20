@@ -22,7 +22,7 @@ use llm_multimodal::{
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
     ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
     PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
-    VisionProcessorRegistry,
+    VisionPreprocessingContext, VisionProcessorRegistry,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -536,6 +536,26 @@ impl MultimodalModelInfo {
             Modality::ImageEmbeds => None,
         }
     }
+    fn vision_preprocessing_context(
+        &self,
+        prompt_token_ids: &[u32],
+        max_model_len: Option<usize>,
+    ) -> VisionPreprocessingContext {
+        let placeholder_ids = [
+            self.image.as_ref().map(|support| support.placeholder.marker_token_id),
+            self.video.as_ref().map(|support| support.placeholder.marker_token_id),
+            self.audio.as_ref().map(|support| support.placeholder.marker_token_id),
+        ];
+        let text_prompt_length = prompt_token_ids
+            .iter()
+            .filter(|&&token_id| !placeholder_ids.contains(&Some(token_id)))
+            .count();
+        VisionPreprocessingContext {
+            model_config: self.context.config.clone(),
+            max_model_len,
+            text_prompt_length,
+        }
+    }
 }
 
 /// Finalize a rendered chat prompt into text-generation input.
@@ -548,6 +568,7 @@ pub(crate) async fn finalize_rendered_prompt(
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
+    max_model_len: Option<usize>,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
     if media_parts.is_empty() {
@@ -562,7 +583,14 @@ pub(crate) async fn finalize_rendered_prompt(
             .map_err(|error| multimodal!("{error}"))?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
-    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
+    let prepared = info
+        .prepare_multimodal(
+            media_parts,
+            &mut prompt_token_ids,
+            model_dtype,
+            max_model_len,
+        )
+        .await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
 }
@@ -752,18 +780,27 @@ impl MultimodalModelInfo {
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         if media_parts_len == 0 {
             return Ok(Vec::new());
         }
         self.validate_mm_limits(&media_parts)?;
+        let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared
-                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_images(
+                    fetched.images,
+                    fetched.image_uuids,
+                    model_dtype,
+                    vision_context,
+                )
+                .await?,
+            );
         }
         if !fetched.videos.is_empty() {
             prepared
@@ -1002,6 +1039,22 @@ mod tests {
         assert_ne!(
             info.image.as_ref().unwrap().placeholder.marker_token_id,
             info.video.as_ref().unwrap().placeholder.marker_token_id,
+        );
+    }
+
+    #[test]
+    fn vision_preprocessing_context_uses_runtime_budget_and_text_tokens() {
+        let info = qwen3_vl_info();
+        let context = info.vision_preprocessing_context(
+            &[11, QWEN3_IMAGE_PAD_ID, 12, QWEN3_VIDEO_PAD_ID, 13],
+            Some(4096),
+        );
+
+        assert_eq!(context.max_model_len, Some(4096));
+        assert_eq!(context.text_prompt_length, 3);
+        assert_eq!(
+            context.model_config["model_type"],
+            serde_json::json!("qwen3_vl")
         );
     }
 
