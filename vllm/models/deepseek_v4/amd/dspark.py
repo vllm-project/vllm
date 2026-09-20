@@ -47,6 +47,7 @@ from vllm.model_executor.models.qwen3_dspark import (
     DSparkMarkovHead,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.sink import load_padded_attn_sink
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -452,8 +453,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 break
             else:
                 if "attn_sink" in name:
-                    narrow = loaded_weight[head_start:head_end]
-                    params_dict[name][: narrow.shape[0]].copy_(narrow)
+                    load_padded_attn_sink(
+                        params_dict[name],
+                        loaded_weight,
+                        head_start,
+                        head_end,
+                    )
                     loaded_params.add(name)
                     continue
                 if ".shared_experts.w2" in name:
