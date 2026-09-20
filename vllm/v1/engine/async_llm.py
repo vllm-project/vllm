@@ -384,6 +384,7 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        reasoning_markers: tuple[str, str] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
         if self.errored:
@@ -474,6 +475,8 @@ class AsyncLLM(EngineClient):
             request.reasoning_ended = reasoning_ended
         if reasoning_parser_kwargs is not None:
             request.reasoning_parser_kwargs = reasoning_parser_kwargs
+        if reasoning_markers is not None:
+            request.reasoning_markers = reasoning_markers
 
         self.input_processor.assign_request_id(request)
 
@@ -670,6 +673,7 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        reasoning_markers: tuple[str, str] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
@@ -711,6 +715,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_markers=reasoning_markers,
             )
 
             # The output_handler task pushes items into the queue.
