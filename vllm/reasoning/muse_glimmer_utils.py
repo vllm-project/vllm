@@ -410,6 +410,19 @@ def channel_seed(recipient: str | None) -> str | None:
     return f"to={recipient}<|message|>"
 
 
+def strip_frozen_tail(text: str) -> str:
+    """Trim a frozen unframed region's tail for the flip flush.
+
+    Mirrors what the unframed streaming path never surfaces: a trailing
+    end-marker run (framing, not content) and trailing whitespace. Anything
+    else -- partial markers, ` to=…` fragments -- is dead text now that the
+    region can no longer grow, and stays. The whitespace class must be the
+    ``regex`` module's ``\\s`` (as in safe_unframed_tail): ``str.rstrip()``
+    also eats U+001C-U+001F, which the streaming path keeps.
+    """
+    return re.sub(r"\s+$", "", TRAILING_MSG_END_RE.sub("", text))
+
+
 def advance_emitted(emitted: str, current: str) -> tuple[str, str]:
     """Return ``(delta, new_emitted)`` for a body that must only ever grow.
 

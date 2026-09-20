@@ -960,6 +960,18 @@ def test_flip_flushes_fragment_tailed_pre_header_text(tokenizer):
         assert drive(tokenizer, [text]) == ("", expected, [])
 
 
+def test_flip_flush_matches_streaming_whitespace_class(tokenizer):
+    # The frozen pre-header region flushes with the streaming path's exact
+    # whitespace/marker rules: U+001C-U+001F are NOT whitespace there, and a
+    # trailing end marker is framing and drops.
+    for text, expected in [
+        ("a\x1c to=user<|message|>body<|eot|>", "a\x1cbody"),
+        ("abc<|eom|><|start|>assistant to=user<|message|>y<|eot|>", "abcy"),
+    ]:
+        assert drive_tokenwise(tokenizer, text) == ("", expected, [])
+        assert drive(tokenizer, [text]) == ("", expected, [])
+
+
 def test_unframed_stream_recovers_quoted_framing_at_finish(tokenizer):
     # Quoted framing in unframed (e.g. grammar-shaped JSON) text stalls the
     # stream while it might be a header, then flushes whole at finish.

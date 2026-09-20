@@ -75,6 +75,7 @@ from vllm.reasoning.muse_glimmer_utils import (
     iter_messages,
     safe_open_body,
     safe_unframed_tail,
+    strip_frozen_tail,
     visible_channels,
 )
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -400,11 +401,11 @@ class MuseGlimmerToolParser(ToolParser):
             flip_delta = ""
             if self._emitted_content_pre_flip is None:
                 # First framed delta: the segmenter drops the pre-header
-                # region. The region is frozen now, so flush it verbatim --
-                # minus the trailing whitespace the unframed path never
-                # streams -- then re-anchor: framed content never continues
-                # the unframed prefix.
-                pre = current_text[: framing_start(current_text)].rstrip()
+                # region. The region is frozen now, so flush it verbatim
+                # minus the tail the unframed path never streams (end
+                # markers, whitespace), then re-anchor: framed content never
+                # continues the unframed prefix.
+                pre = strip_frozen_tail(current_text[: framing_start(current_text)])
                 flip_delta, self._emitted_content_pre_flip = advance_emitted(
                     self._emitted_content, pre
                 )
