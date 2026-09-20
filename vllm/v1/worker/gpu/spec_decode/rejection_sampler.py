@@ -154,6 +154,7 @@ class RejectionSampler:
         idx_mapping_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        seq_lens_upper_bound_np: np.ndarray,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -163,6 +164,7 @@ class RejectionSampler:
             pos,
             draft_sampled,
             expanded_local_pos,
+            seq_lens_upper_bound_np,
             use_head_dtype=True,
         )
         sampled, num_sampled = rejection_sample(
@@ -230,6 +232,7 @@ class RejectionSampler:
             input_batch.idx_mapping_np,
             input_batch.expanded_idx_mapping,
             input_batch.expanded_local_pos,
+            input_batch.seq_lens_cpu_upper_bound.numpy()[: input_batch.num_reqs],
         )
         # Stored logits are never scaled, so processed reporting divides by the
         # request temperature while the scorer loads them.
