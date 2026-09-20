@@ -17,7 +17,6 @@ from vllm.distributed.eplb.eplb_state import (
     _node_count_with_rank_mapping,
 )
 from vllm.distributed.eplb.policy import (
-    AbstractEplbPolicy,
     DefaultEplbPolicy,
     EplbPlan,
     EplbPolicyState,
@@ -109,12 +108,12 @@ def test_platform_rejects_unknown_communicator():
         Platform.check_and_update_eplb_config(config)
 
 
-def test_async_planner_uses_state_hook():
+def test_async_rebalance_uses_state_entry_point():
     load_window = torch.tensor([[[3, 1]]])
     old_map = torch.tensor([[0, 1]])
     new_map = torch.tensor([[1, 0]])
     plan = EplbPlan(new_map)
-    state = SimpleNamespace(plan_rebalance=Mock(return_value=plan))
+    state = SimpleNamespace(rebalance_experts=Mock(return_value=plan))
     model_state = SimpleNamespace(
         eplb_stats=SimpleNamespace(
             global_expert_load_window=load_window,
@@ -136,8 +135,8 @@ def test_async_planner_uses_state_hook():
     ):
         assert run_rebalance_experts(model_state, state, old_map, stream) is plan
 
-    assert state.plan_rebalance.call_args.args[0] is model_state
-    context = state.plan_rebalance.call_args.args[1]
+    assert state.rebalance_experts.call_args.args[0] is model_state
+    context = state.rebalance_experts.call_args.args[1]
     assert isinstance(context, EplbRebalanceContext)
     assert context.load_window_cpu is load_window
     assert context.physical_to_logical_map_cpu is old_map
@@ -148,18 +147,7 @@ def test_async_planner_uses_state_hook():
     assert context.cpu_group is cpu_group
 
 
-def test_policy_planner_adapts_temporal_window_to_legacy_contract():
-    class LegacyPolicy(AbstractEplbPolicy):
-        received_args = None
-
-        def plan_rebalance(self, context, policy_state):
-            return self._plan_from_legacy(context)
-
-        @classmethod
-        def rebalance_experts(cls, *args):
-            cls.received_args = args
-            return torch.tensor([[1, 0]])
-
+def test_default_policy_rebalances_from_temporal_window():
     context = EplbRebalanceContext(
         load_window_cpu=torch.tensor([[[3, 1]], [[4, 2]]]),
         physical_to_logical_map_cpu=torch.tensor([[0, 1]]),
@@ -168,11 +156,16 @@ def test_policy_planner_adapts_temporal_window_to_legacy_contract():
         cpu_group=Mock(),
     )
 
-    plan = LegacyPolicy().plan_rebalance(context, EplbPolicyState())
+    policy = DefaultEplbPolicy()
+    with patch.object(
+        policy,
+        "_rebalance_from_weights",
+        return_value=torch.tensor([[1, 0]]),
+    ) as rebalance_from_weights:
+        plan = policy.rebalance_experts(context, EplbPolicyState())
 
-    assert LegacyPolicy.received_args is not None
     weight, num_replicas, num_groups, num_nodes, num_ranks, old_map = (
-        LegacyPolicy.received_args
+        rebalance_from_weights.call_args.args
     )
     torch.testing.assert_close(weight, torch.tensor([[7, 3]]))
     assert (num_replicas, num_groups, num_nodes, num_ranks) == (2, 1, 1, 2)
@@ -209,35 +202,35 @@ def test_eplb_state_creates_one_shared_policy():
 def test_state_rejects_invalid_policy_target(target):
     state = EplbState.__new__(EplbState)
     plan = EplbPlan(target)
-    state.policy = SimpleNamespace(plan_rebalance=Mock(return_value=plan))
+    state.policy = SimpleNamespace(rebalance_experts=Mock(return_value=plan))
     model_state = SimpleNamespace(policy_state=object())
 
     with pytest.raises(ValueError, match="CPU int32 or int64"):
-        state.plan_rebalance(model_state, Mock())
+        state.rebalance_experts(model_state, Mock())
 
 
 def test_state_accepts_cpu_integer_policy_target():
     state = EplbState.__new__(EplbState)
     plan = EplbPlan(torch.zeros(1, 1, dtype=torch.int32))
-    state.policy = SimpleNamespace(plan_rebalance=Mock(return_value=plan))
+    state.policy = SimpleNamespace(rebalance_experts=Mock(return_value=plan))
     model_state = SimpleNamespace(policy_state=object())
 
-    assert state.plan_rebalance(model_state, Mock()) is plan
+    assert state.rebalance_experts(model_state, Mock()) is plan
 
 
 def test_shared_policy_receives_each_models_own_state():
     state = EplbState.__new__(EplbState)
     plan = EplbPlan(torch.zeros(1, 1, dtype=torch.int64))
-    state.policy = SimpleNamespace(plan_rebalance=Mock(return_value=plan))
+    state.policy = SimpleNamespace(rebalance_experts=Mock(return_value=plan))
     first_state = object()
     second_state = object()
     first_context = Mock()
     second_context = Mock()
 
-    state.plan_rebalance(SimpleNamespace(policy_state=first_state), first_context)
-    state.plan_rebalance(SimpleNamespace(policy_state=second_state), second_context)
+    state.rebalance_experts(SimpleNamespace(policy_state=first_state), first_context)
+    state.rebalance_experts(SimpleNamespace(policy_state=second_state), second_context)
 
-    assert [call.args for call in state.policy.plan_rebalance.call_args_list] == [
+    assert [call.args for call in state.policy.rebalance_experts.call_args_list] == [
         (first_context, first_state),
         (second_context, second_state),
     ]
