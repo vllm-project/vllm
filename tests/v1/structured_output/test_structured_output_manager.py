@@ -15,6 +15,7 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 TOKENIZER = "gpt2"
+THINK_START = "\t"  # reasoning-start marker (single GPT-2 token)
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
 EOS = "<|eos|>"  # resolved to tokenizer.eos_token_id
 JSON_SCHEMA = '{"type": "object"}'
@@ -412,3 +413,103 @@ def test_initial_constraint_activation(
         structured_req = request.structured_output_request
         assert structured_req is not None
         assert structured_req.reasoner is None
+
+
+class MockStartAwareReasoner:
+    """Reasoner whose prompt-side state depends on a start marker.
+
+    Mirrors `BaseThinkingReasoningParser`: `is_reasoning_end()` scans backwards
+    and returns False both inside an open reasoning block and when the prompt
+    contains no reasoning tokens at all.
+    """
+
+    def __init__(self, tokenizer, start: int, end: int, start_str: str | None):
+        self.start = start
+        self.end = end
+        self.reasoning_start_str = start_str
+        self.vocab = {start_str: start} if start_str else {}
+
+    def is_reasoning_end(self, input_ids):
+        for token_id in reversed(list(input_ids)):
+            if token_id == self.start:
+                return False
+            if token_id == self.end:
+                return True
+        return False
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids):
+        return self.end in delta_ids
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    ("prefix_tokens", "expect_constrained"),
+    [
+        pytest.param((THINK_START,), False, id="prompt_opens_reasoning"),
+        pytest.param((THINK_START, THINK_END), True, id="prompt_closes_reasoning"),
+        pytest.param((), True, id="prompt_has_no_reasoning_tokens"),
+    ],
+)
+def test_constraint_applies_when_prompt_never_opens_reasoning(
+    tokenizer,
+    backend: str,
+    prefix_tokens: tuple[str, ...],
+    expect_constrained: bool,
+):
+    """A prompt with no reasoning markers must be constrained immediately.
+
+    A `/v1/completions` prompt renders no chat template, so it contains neither
+    a reasoning-start nor a reasoning-end token and no reasoning-end token will
+    ever arrive. Waiting for one leaves the request unconstrained for its whole
+    completion.
+    """
+    start_id = _single_token(tokenizer, THINK_START)
+    end_id = _single_token(tokenizer, THINK_END)
+
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=None,
+        reasoning_parser_kwargs={
+            "start": start_id,
+            "end": end_id,
+            "start_str": THINK_START,
+        },
+    )
+    manager.reasoner_cls = MockStartAwareReasoner
+    request.prompt_token_ids = [
+        _single_token(tokenizer, t) for t in prefix_tokens
+    ]
+
+    open_brace = _single_token(tokenizer, "{")
+    z = _single_token(tokenizer, "z")
+    validated = manager.validate_tokens(request, [open_brace, z])
+
+    if expect_constrained:
+        assert validated == [open_brace]
+    else:
+        assert validated == [open_brace, z]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_parser_without_start_marker_keeps_waiting(tokenizer, backend: str):
+    """A parser that exposes no start marker must behave as before."""
+    start_id = _single_token(tokenizer, THINK_START)
+    end_id = _single_token(tokenizer, THINK_END)
+
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=None,
+        reasoning_parser_kwargs={
+            "start": start_id,
+            "end": end_id,
+            "start_str": None,
+        },
+    )
+    manager.reasoner_cls = MockStartAwareReasoner
+    request.prompt_token_ids = []
+
+    open_brace = _single_token(tokenizer, "{")
+    z = _single_token(tokenizer, "z")
+    assert manager.validate_tokens(request, [open_brace, z]) == [open_brace, z]
