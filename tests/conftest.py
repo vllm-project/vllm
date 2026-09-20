@@ -241,7 +241,7 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="nccl",
+                backend="gloo" if current_platform.is_cpu() else "nccl",
             )
             initialize_model_parallel(1, 1)
             yield
@@ -901,13 +901,10 @@ class HfRunner:
             # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
             # where vllm worker processes are still alive and holding GPU
             # memory when hf_runner.__exit__ is called.
-            from tests.utils import (
-                get_physical_device_indices,
-                record_gpu_memory_usage_stats,
-            )
+            from tests.utils import record_gpu_memory_usage_stats
 
             if (device_count := current_platform.device_count()) > 0:
-                devices = get_physical_device_indices(devices=list(range(device_count)))
+                devices = list(range(device_count))
                 mem_usage_stats = record_gpu_memory_usage_stats(devices=devices)
                 self.threshold_ratios = {
                     device: 0.05 + mem_used / mem_tot
@@ -935,7 +932,7 @@ def hf_runner():
 
 
 def _default_block_size() -> int:
-    if torch.xpu.is_available():
+    if current_platform.is_xpu():
         return 64
     if current_platform.is_cpu():
         return 128

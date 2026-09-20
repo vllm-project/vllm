@@ -17,14 +17,19 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
-if has_triton_kernels():
+_triton_kernels_version = get_triton_kernels_version()
+
+if _triton_kernels_version is not None:
     try:
-        from triton_kernels.matmul_ogs import PrecisionConfig
+        if _triton_kernels_version == "3.8":
+            from triton_kernels.matmul import PrecisionConfig
+        else:
+            from triton_kernels.matmul_ogs import PrecisionConfig
     except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -1080,6 +1085,10 @@ class FusedMoEParallelConfig:
     def use_deepep_v2_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_v2"
 
+    @property
+    def use_moonep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "moonep"
+
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
@@ -1304,6 +1313,8 @@ class FusedMoEConfig:
 
     # Set by __post_init__
     intermediate_size_per_partition: int = -1
+    # Use the allocated width as the checkpoint TP stride, including for scales.
+    tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
 
@@ -1465,6 +1476,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_v2_kernels(self):
         return self.moe_parallel_config.use_deepep_v2_kernels
+
+    @property
+    def use_moonep_kernels(self):
+        return self.moe_parallel_config.use_moonep_kernels
 
     @property
     def needs_round_robin_routing_tables(self):
