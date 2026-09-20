@@ -597,8 +597,18 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     )
 
 
-def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
+@pytest.mark.parametrize(
+    "exclude_pattern",
+    [
+        "model.language_model.layers.1.ple.ple_embedding.ngram_embedding",
+        "*.ngram_embedding",
+    ],
+)
+def test_ple_fp8_embedding_supports_mixed_precision_config(
+    exclude_pattern: str,
+) -> None:
     prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    nvfp4_prefix = "model.language_model.layers.2.ple.ple_embedding.ngram_embedding"
     quant_config = ModelOptMixedPrecisionConfig.from_config(
         {
             "quantization": {
@@ -607,9 +617,7 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
                 "group_size": 16,
                 "quantized_layers": {
                     prefix: {"quant_algo": "FP8"},
-                    "model.language_model.layers.2.moe.gate_proj": {
-                        "quant_algo": "NVFP4"
-                    },
+                    nvfp4_prefix: {"quant_algo": "NVFP4"},
                 },
             }
         }
@@ -622,8 +630,16 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
     assert isinstance(
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,
-            "model.language_model.layers.2.moe.gate_proj",
+            "model.language_model.layers.3.ple.ple_embedding.ngram_embedding",
         ),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+    with pytest.raises(NotImplementedError, match="NVFP4"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, nvfp4_prefix)
+
+    quant_config.exclude_modules = [exclude_pattern]
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
 
