@@ -121,6 +121,8 @@ def test_hc_collapse_rms_norm_matches_separate_ops(num_tokens):
         expected = (expected * torch.rsqrt(variance + 1e-6) * weight.float()).to(
             x.dtype
         )
+    else:
+        expected = expected.to(x.dtype)
     actual = torch.ops.vllm.hc_collapse_rms_norm_triton(x, pre, weight, 1e-6)
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
