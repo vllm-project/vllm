@@ -154,9 +154,9 @@ class TestFlexKVConnectorDelegation:
         connector.save_kv_layer("layer_0", kv_layer, attn_meta)
         impl.save_kv_layer.assert_called_once_with("layer_0", kv_layer, attn_meta)
 
-    def test_wait_for_save(self, connector_and_impl):
+    def test_finalize_saves(self, connector_and_impl):
         connector, impl = connector_and_impl
-        connector.wait_for_save()
+        connector.finalize_saves()
         impl.wait_for_save.assert_called_once()
 
     def test_get_finished(self, connector_and_impl):

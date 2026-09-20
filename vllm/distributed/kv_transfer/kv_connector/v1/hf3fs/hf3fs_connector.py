@@ -611,7 +611,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         """HF3FSConnector does not do layerwise saving."""
         pass
 
-    def wait_for_save(self) -> None:
+    def finalize_saves(self) -> None:
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, HF3FSConnectorMetadata):
             logger.error("Invalid metadata type: %s", type(metadata))

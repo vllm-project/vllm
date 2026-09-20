@@ -4181,7 +4181,7 @@ def test_finished_request_retires_after_final_store(defer_finalize):
     with patch.object(torch.cuda, "Event"):
         if defer_finalize:
             w.get_finished({"req-a"}, meta)
-        w.wait_for_save(meta)
+        w.finalize_saves(meta)
         if not defer_finalize:
             w.get_finished({"req-a"}, meta)
 
@@ -4212,7 +4212,7 @@ def test_putting_consumer_queues_decode_save():
 
     with patch.object(torch.cuda, "Event") as event_cls:
         event = event_cls.return_value
-        w.wait_for_save(meta)
+        w.finalize_saves(meta)
 
     event.record.assert_called_once_with()
     send_thread.add_request.assert_called_once_with(req)

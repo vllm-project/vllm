@@ -134,7 +134,7 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
         # This connector doesn't save KV cache (benchmarking only)
         pass
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         # This connector doesn't save KV cache (benchmarking only)
         pass
 

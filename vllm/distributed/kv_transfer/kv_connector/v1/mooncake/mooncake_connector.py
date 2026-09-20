@@ -619,7 +619,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         """MooncakeConnector does not save explicitly."""
         pass
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         pass
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:

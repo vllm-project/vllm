@@ -2029,7 +2029,7 @@ class MooncakeStoreWorker:
 
         assert self.load_async, "load_async must be True for better performance."
 
-    def wait_for_save(self, metadata: MooncakeStoreConnectorMetadata):
+    def finalize_saves(self, metadata: MooncakeStoreConnectorMetadata):
         """Issue async stores with CUDA event synchronization.
 
         Runs after the forward launch for compute-I/O overlap.
@@ -2056,7 +2056,7 @@ class MooncakeStoreWorker:
     ) -> tuple[set[str], set[str]]:
         """Get completed send/recv request IDs.
 
-        Loads are issued in start_load_kv() and stores in wait_for_save().
+        Loads are issued in start_load_kv() and stores in finalize_saves().
         """
         if self._capacity_only:
             return set(), set()

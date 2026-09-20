@@ -353,14 +353,14 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
 
         return None
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         if self.mode != MoRIIOMode.WRITE or get_role() != ROLE.PRODUCER:
             return
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MoRIIOConnectorMetadata), (
             "Connector metadata not initialized yet"
         )
-        self.connector_worker.wait_for_save(self._connector_metadata)
+        self.connector_worker.finalize_saves(self._connector_metadata)
 
     def shutdown(self):
         if self.connector_worker is not None:
@@ -2495,7 +2495,7 @@ class MoRIIOConnectorWorker:
 
         self._reqs_to_send.update(metadata.reqs_to_send)
 
-    def wait_for_save(self, metadata: MoRIIOConnectorMetadata):
+    def finalize_saves(self, metadata: MoRIIOConnectorMetadata):
         if self.mode == MoRIIOMode.WRITE and self.is_producer:
             for layer_name, kv_layer in self.kv_caches.items():
                 self.save_kv_layer(metadata, layer_name, kv_layer, None)

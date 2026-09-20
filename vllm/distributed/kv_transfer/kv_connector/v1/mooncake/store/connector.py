@@ -346,11 +346,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # No layerwise support - no-op
         return
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
-        self.connector_worker.wait_for_save(metadata)
+        self.connector_worker.finalize_saves(metadata)
 
     def get_finished(
         self, finished_req_ids: set[str]

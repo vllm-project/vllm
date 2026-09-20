@@ -214,11 +214,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: "AttentionMetadata",
         **kwargs: Any,
     ) -> None:
-        pass  # Always save asynchronously, issued in wait_for_save()
+        pass  # Always save asynchronously, issued in finalize_saves()
 
-    def wait_for_save(self) -> None:
+    def finalize_saves(self) -> None:
         if self.worker_handler is not None:
-            self.worker_handler.wait_for_save()
+            self.worker_handler.finalize_saves()
 
     def get_finished(
         self,

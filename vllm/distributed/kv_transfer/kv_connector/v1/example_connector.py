@@ -258,7 +258,7 @@ class ExampleConnector(KVConnectorBase_V1):
                     tensors = {"kv_cache": kv_cache.detach().cpu()}
                 safetensors.torch.save_file(tensors, filename)
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         return
 
     def get_num_new_matched_tokens(

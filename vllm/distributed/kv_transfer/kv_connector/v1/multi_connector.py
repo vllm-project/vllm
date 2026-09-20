@@ -320,9 +320,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         for c in self._connectors:
-            c.wait_for_save()
+            c.finalize_saves()
 
     def get_finished(
         self, finished_req_ids: set[str]
