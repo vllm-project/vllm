@@ -90,6 +90,9 @@ def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
         ({"diffusion_max_steps": True}, "positive integer"),
         ({"diffusion_read_only": "yes"}, "boolean"),
         ({"diffusion_read_only": 2}, "boolean"),
+        ({"diffusion_pinned": "0,1"}, "list of canvas positions"),
+        ({"diffusion_pinned": [0, True]}, "list of canvas positions"),
+        ({"diffusion_pinned": [0]}, "needs a diffusion_seed_canvas"),
     ],
 )
 def test_diffusion_rejects_bad_extra_args(extra_args: dict, match: str):
@@ -152,11 +155,41 @@ def test_diffusion_canvas_length_sizes_the_seed_and_the_read():
         _verify_diffusion(params, canvas_length=8)
 
 
+def test_diffusion_pinned_positions_stay_inside_the_canvas():
+    seed = [0] * 8
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={"diffusion_seed_canvas": seed, "diffusion_pinned": [7, 8]}
+            ),
+            canvas_length=8,
+        )
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={"diffusion_seed_canvas": seed, "diffusion_pinned": [-1]}
+            )
+        )
+    # A narrower request canvas bounds the positions.
+    with pytest.raises(VLLMValidationError, match="inside the canvas"):
+        _verify_diffusion(
+            SamplingParams(
+                extra_args={
+                    "diffusion_canvas_length": 4,
+                    "diffusion_seed_canvas": seed[:4],
+                    "diffusion_pinned": [4],
+                }
+            ),
+            canvas_length=8,
+        )
+
+
 def test_diffusion_accepts_extra_args():
     params = SamplingParams(
         extra_args={
             "diffusion_seed_canvas": list(range(8)),
-            "diffusion_max_steps": 1,
+            "diffusion_pinned": [0, 1, 7],
+            "diffusion_max_steps": 4,
             "diffusion_read_only": True,
         }
     )

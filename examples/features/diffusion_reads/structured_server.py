@@ -404,6 +404,17 @@ def canvas_width(template):
     return min(CANVAS_LEN, -(-need // CANVAS_STEP) * CANVAS_STEP)
 
 
+def pin_xargs(template, slots, steps):
+    """Past one denoise step the template must be held, or accept/renoise
+    rewrites it: pin every canvas position that is not an answer slot."""
+    if steps <= 1:
+        return {}
+    free = {s["pos"] for s in slots}
+    return {
+        "diffusion_pinned": [p for p in range(canvas_width(template)) if p not in free]
+    }
+
+
 def build_canvas(template, slots, seed):
     rng = random.Random(seed)
     canvas = list(template) + [TURN_CLOSE]
@@ -545,6 +556,7 @@ def one_read(
             "diffusion_canvas_length": canvas_width(template),
             "diffusion_max_steps": schema["steps"],
             "diffusion_read_only": True,
+            **pin_xargs(template, slots, schema["steps"]),
         },
     }
     d = upstream_chat(body)
@@ -593,6 +605,7 @@ def one_read_continuation(schema, template, slots, prompt_ids, seed):
             "diffusion_canvas_length": canvas_width(template),
             "diffusion_max_steps": schema["steps"],
             "diffusion_read_only": True,
+            **pin_xargs(template, slots, schema["steps"]),
         },
     }
     d = upstream_completions(body)

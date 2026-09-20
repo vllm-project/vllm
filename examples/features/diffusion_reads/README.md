@@ -8,6 +8,7 @@ left as noise, one denoise step gives a distribution over each slot. These
 | field | type | meaning |
 | --- | --- | --- |
 | `diffusion_seed_canvas` | `list[int]`, exactly `canvas_length` ids | replaces the random initial canvas after prefill |
+| `diffusion_pinned` | `list[int]` of canvas positions | held at their seed value on every denoise step, so a read past one step keeps its template |
 | `diffusion_max_steps` | `int` | denoise steps before the canvas is emitted |
 | `diffusion_read_only` | `bool` | emit the argmax canvas as soon as the cap is reached, end the request there, and return temperature-1 logprobs at every position |
 

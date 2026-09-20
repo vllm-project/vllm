@@ -1079,9 +1079,11 @@ class SamplingParams(
 
         On the GPU a seed id outside the vocabulary is a device-side assert.
         ``diffusion_seed_canvas``: token ids, one per canvas position, that
-        replace the random canvas after prefill. ``diffusion_max_steps``:
-        denoise steps per canvas. ``diffusion_read_only``: end the request
-        on the first canvas that converges.
+        replace the random canvas after prefill. ``diffusion_pinned``: canvas
+        positions held at their seed value on every denoise step.
+        ``diffusion_max_steps``: denoise steps per canvas.
+        ``diffusion_read_only``: end the request on the first canvas that
+        converges.
         """
         extra = self.extra_args
         if not extra:
@@ -1124,6 +1126,28 @@ class SamplingParams(
                 raise VLLMValidationError(
                     "diffusion_seed_canvas must hold exactly "
                     f"{expected_len} ids, got {len(seed)}.",
+                    parameter="extra_args",
+                )
+
+        pins = extra.get("diffusion_pinned")
+        if pins is not None:
+            if not isinstance(pins, (list, tuple)) or not all(
+                isinstance(p, int) and not isinstance(p, bool) for p in pins
+            ):
+                raise VLLMValidationError(
+                    "diffusion_pinned must be a list of canvas positions.",
+                    parameter="extra_args",
+                )
+            if seed is None:
+                raise VLLMValidationError(
+                    "diffusion_pinned needs a diffusion_seed_canvas to hold.",
+                    parameter="extra_args",
+                )
+            if any(
+                p < 0 or (expected_len is not None and p >= expected_len) for p in pins
+            ):
+                raise VLLMValidationError(
+                    "diffusion_pinned positions must lie inside the canvas.",
                     parameter="extra_args",
                 )
 

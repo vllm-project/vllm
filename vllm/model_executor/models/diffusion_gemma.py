@@ -392,6 +392,8 @@ def _compiled_sample_step(
     history: torch.Tensor,  # [max_num_reqs, ST, CL]
     history_len_tensor: torch.Tensor,  # [max_num_reqs]
     max_steps_tensor: torch.Tensor,  # [max_num_reqs] int32, per-slot step cap
+    pin_mask: torch.Tensor,  # [max_num_reqs, CL] bool, positions held at the seed
+    seed_canvas: torch.Tensor,  # [max_num_reqs, CL]
     # Output tensors (modified in-place)
     sampled: torch.Tensor,  # [num_reqs, CL]
     num_sampled: torch.Tensor,  # [num_reqs]
@@ -480,8 +482,11 @@ def _compiled_sample_step(
         0, vocab_size, (num_decode, CL), device=device, dtype=canvas.dtype
     )
 
-    # Compute denoise canvas (accept/renoise)
+    # Compute denoise canvas (accept/renoise). Pinned positions keep the seed.
     denoise_canvas = torch.where(eb_mask, new_tokens, random_tokens)
+    denoise_canvas = torch.where(
+        pin_mask[decode_slots], seed_canvas[decode_slots], denoise_canvas
+    )
 
     # Canvas: commit → random reinit, denoise → accept/renoise result
     canvas[decode_slots] = torch.where(
@@ -554,7 +559,11 @@ def _compiled_sample_step(
                 soft_embeds, group_name=tp_group_name
             )
         soft_embeds = soft_embeds * normalizer
-        sc_embeds[decode_slots] = (soft_embeds * sc_keep).to(sc_embeds.dtype)
+        # A pinned position holds its seed token as input. Zero its soft embed
+        # too, or the model's own prediction there reaches the next step
+        # through self-conditioning.
+        sc_pin = (~pin_mask[decode_slots]).unsqueeze(-1)
+        sc_embeds[decode_slots] = (soft_embeds * sc_keep * sc_pin).to(sc_embeds.dtype)
     else:
         # Every slot in this tile ends after this step, so the soft embed
         # would never be read. The matmul is a full pass over the vocabulary
@@ -650,6 +659,12 @@ class DiffusionGemmaRequestStates:
         )
         self.has_seed = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
         self.seeded_slots: set[int] = set()
+        # Pinned positions keep their seed value on every denoise step, so a
+        # multi-step read denoises the canvas the request seeded.
+        self.pin_mask = torch.zeros(
+            max_num_reqs, canvas_length, dtype=torch.bool, device=device
+        )
+        self.pinned_slots: set[int] = set()
         # Read-only slots emit on their converging step and skip the commit
         # forward.
         self.read_only = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
@@ -692,6 +707,8 @@ class DiffusionGemmaRequestStates:
         self.max_steps[slot_idx].fill_(self.max_denoising_steps)
         self.has_seed[slot_idx].fill_(False)
         self.seeded_slots.discard(slot_idx)
+        self.pin_mask[slot_idx].fill_(False)
+        self.pinned_slots.discard(slot_idx)
         self.read_only[slot_idx].fill_(False)
         self.read_only_slots.discard(slot_idx)
         self.single_step_slots.discard(slot_idx)
@@ -704,6 +721,7 @@ class DiffusionGemmaRequestStates:
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
         self.seeded_slots.discard(slot_idx)
+        self.pinned_slots.discard(slot_idx)
         self.read_only_slots.discard(slot_idx)
         self.single_step_slots.discard(slot_idx)
 
@@ -715,6 +733,15 @@ class DiffusionGemmaRequestStates:
         )
         self.has_seed[slot_idx].fill_(True)
         self.seeded_slots.add(slot_idx)
+
+    def set_pins(self, slot_idx: int, positions: list[int]) -> None:
+        """Hold ``positions`` of the slot's seed canvas through every denoise
+        step. Validated against the request's canvas width upstream."""
+        self.pin_mask[slot_idx].fill_(False)
+        self.pin_mask[
+            slot_idx, async_tensor_h2d(positions, dtype=torch.int64, device=self.device)
+        ] = True
+        self.pinned_slots.add(slot_idx)
 
     def set_read_only(self, slot_idx: int) -> None:
         self.read_only[slot_idx].fill_(True)
@@ -1125,6 +1152,9 @@ class DiffusionSampler:
                     f"got {len(seed)}"
                 )
             states.set_seed_canvas(req_idx, seed)
+        pins = extra.get("diffusion_pinned")
+        if pins and seed is not None:
+            states.set_pins(req_idx, [int(p) for p in pins])
         if extra.get("diffusion_read_only"):
             states.set_read_only(req_idx)
 
@@ -1386,6 +1416,8 @@ class DiffusionSampler:
                     states.accepted_canvas_history[:, :, :W],
                     states.accepted_canvas_history_len,
                     states.max_steps,
+                    states.pin_mask[:, :W],
+                    states.seed_canvas[:, :W],
                     # Output
                     sampled[:, :W],
                     num_sampled,

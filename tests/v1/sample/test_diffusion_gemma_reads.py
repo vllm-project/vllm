@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-request DiffusionGemma state behind structured reads: seed canvases,
-read-only slots and the per-slot step cap."""
+pinned positions, read-only slots and the per-slot step cap."""
 
 import numpy as np
 import pytest
@@ -115,6 +115,7 @@ def _denoise_once(
     slots: list[int],
     compute_sc: bool = True,
     width: int = CL,
+    embed_weight: torch.Tensor | None = None,
 ) -> None:
     """One compiled denoise step over ``slots`` with flat logits, so nothing
     converges by stability or confidence and only the step cap can end it.
@@ -136,11 +137,17 @@ def _denoise_once(
         states.is_encoder_phase,
         states.confident,
         states.self_conditioning_embeds[:, :width],
-        torch.zeros(VOCAB, 4, device=device),
+        (
+            torch.zeros(VOCAB, 4, device=device)
+            if embed_weight is None
+            else embed_weight
+        ),
         torch.tensor(1.0, device=device),
         states.accepted_canvas_history[:, :, :width],
         states.accepted_canvas_history_len,
         states.max_steps,
+        states.pin_mask[:, :width],
+        states.seed_canvas[:, :width],
         torch.zeros(n, CL, dtype=torch.int32, device=device)[:, :width],
         torch.zeros(n, dtype=torch.int32, device=device),
         torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device),
@@ -158,6 +165,39 @@ def _denoise_once(
         tp_group_name="",
         compute_sc=compute_sc,
     )
+
+
+def test_pinned_positions_hold_their_seed_through_a_step():
+    states = _states()
+    states.add_request(0)
+    states.is_encoder_phase[0] = False
+    seed = list(range(10, 10 + CL))
+    states.set_seed_canvas(0, seed)
+    states.canvas[0] = torch.tensor(seed, device="cuda")
+    states.set_pins(0, [0, 1, 2, 3])
+
+    # Flat logits accept nothing, so every free position is renoised.
+    _denoise_once(states, [0], embed_weight=torch.ones(VOCAB, 4, device="cuda"))
+
+    assert states.canvas[0, :4].tolist() == seed[:4]
+    # The soft embed is zero at pinned positions and non-zero elsewhere.
+    sc = states.self_conditioning_embeds[0]
+    assert not sc[:4].any()
+    assert sc[4:].any()
+
+
+def test_add_request_clears_pins():
+    states = _states()
+    states.add_request(0)
+    states.set_seed_canvas(0, [1] * CL)
+    states.set_pins(0, [2, 3])
+    assert states.pinned_slots == {0}
+    assert states.pin_mask[0].tolist() == [False, False, True, True] + [False] * 4
+
+    states.add_request(0)
+
+    assert not states.pinned_slots
+    assert not states.pin_mask[0].any()
 
 
 def test_single_step_tile_skips_self_conditioning():
