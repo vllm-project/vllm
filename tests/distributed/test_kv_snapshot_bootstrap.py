@@ -59,6 +59,15 @@ def test_cpu_only_block_retains_gpu_metadata():
     assert consume(list(snap.export())) == consume(history)
 
 
+def test_unknown_parent_tier_update_exports_a_closed_chain():
+    snap = KVCacheSnapshot()
+    source = store([1])
+    update = store([1], parent=99)
+    update.medium = "CPU"
+    snap.apply([source, remove([1]), update])
+    assert consume(list(snap.export())) == Counter({("CPU", None, 1): 1})
+
+
 def test_duplicate_references_survive_one_remove():
     snap = KVCacheSnapshot()
     history = [store([1]), store([1]), remove([1])]

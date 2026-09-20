@@ -149,22 +149,33 @@ class KVCacheSnapshot:
             )
             if parent_sources:
                 dependencies.add(next(reversed(parent_sources)))
-        if not event.token_ids:
+            else:
+                dependencies.update(self._dependency(h) for h in event.block_hashes)
+                event = msgspec.structs.replace(
+                    event, parent_block_hash=None, token_ids=[]
+                )
+        elif not event.token_ids:
             dependencies.update(self._dependency(h) for h in event.block_hashes)
         # Account conservatively for decoded integers, containers and wire data.
         cost = 512 + 64 * (len(event.block_hashes) + len(event.token_ids))
         cost += len(msgspec.msgpack.encode(event))
-        self._collect(self.MAX_METADATA_BYTES - cost)
-        if self._metadata_bytes + cost > self.MAX_METADATA_BYTES:
-            raise ValueError("Snapshot metadata budget exceeded")
-        if self._references + len(event.block_hashes) > self.MAX_REFERENCES:
-            raise ValueError("Snapshot reference budget exceeded")
+        dependencies_tuple = tuple(sorted(dependencies))
+        for dep in dependencies_tuple:
+            self._acquire(dep)
+        try:
+            self._collect(self.MAX_METADATA_BYTES - cost)
+            if self._metadata_bytes + cost > self.MAX_METADATA_BYTES:
+                raise ValueError("Snapshot metadata budget exceeded")
+            if self._references + len(event.block_hashes) > self.MAX_REFERENCES:
+                raise ValueError("Snapshot reference budget exceeded")
+        except Exception:
+            for dep in dependencies_tuple:
+                self._release(dep)
+            raise
         source_id = self._next_id
         self._next_id += 1
-        self._sources[source_id] = _Source(event, tuple(dependencies), cost)
+        self._sources[source_id] = _Source(event, dependencies_tuple, cost)
         self._metadata_bytes += cost
-        for dep in dependencies:
-            self._acquire(dep)
         if event.token_ids:
             for h in event.block_hashes:
                 self._known.setdefault(self._metadata_hash(h), {})[source_id] = None
@@ -333,8 +344,11 @@ class KVEventSnapshotRecorder:
     def _drain(self, decoder: msgspec.msgpack.Decoder) -> None:
         # A finite FIFO cut: future arrivals cannot postpone this snapshot.
         for _ in range(self._inbox.qsize()):
-            seq, payload = self._inbox.get_nowait()
             with self._lock:
+                try:
+                    seq, payload = self._inbox.get_nowait()
+                except queue.Empty:
+                    break
                 self._pending_bytes -= len(payload)
             if self._failed.is_set():
                 continue

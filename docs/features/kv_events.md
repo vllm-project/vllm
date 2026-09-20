@@ -93,6 +93,11 @@ partial removals do not change sparse-token or canonical-block alignment.
 residency and its reconstruction metadata remain. Consumers must apply the same
 tier semantics to the subsequent live stream.
 
+A store whose parent metadata has expired is retained only when every reported
+block already has reconstruction metadata. The snapshot represents that event
+as a tokenless tier update after its retained source event. Other missing-parent
+stores invalidate the recorder because their prefix hashes cannot be rebuilt.
+
 ## Limits and failure behavior
 
 The recorder starts with the publisher and receives each immutable encoded batch
