@@ -56,16 +56,33 @@ class EngramConfig:
     memory without per-step Engram DP collectives. Requires sufficient
     /dev/shm capacity and a shared IPC namespace."""
 
+    sp_shared_memory: bool = False
+    """Share full CPU tables across same-host TP ranks and look up SP-local
+    tokens directly. Initial support requires DSV4.1, DP1/PP1, MRV2 and SP.
+    Disabled by default; the existing head-sharded path remains unchanged."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
+        if self.sp_shared_memory and (
+            not self.cpu_offload or self.dp_shared_memory or self.embedding_across_dp
+        ):
+            raise ValueError(
+                "sp_shared_memory requires cpu_offload and excludes DP storage modes."
+            )
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
         from vllm.platforms import current_platform
 
+        if self.sp_shared_memory and (
+            model_config is None
+            or model_config.architecture != "DeepseekV41ForCausalLM"
+            or model_config.enable_sleep_mode
+        ):
+            raise ValueError("sp_shared_memory requires DSV4.1 without sleep mode.")
         field = (
             _NGRAM_LAYER_FIELDS.get(model_config.architecture)
             if model_config is not None
@@ -84,6 +101,18 @@ class EngramConfig:
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
+        if self.sp_shared_memory and (
+            parallel_config.tensor_parallel_size <= 1
+            or parallel_config.pipeline_parallel_size != 1
+            or parallel_config.data_parallel_size != 1
+            or parallel_config.decode_context_parallel_size != 1
+            or parallel_config.prefill_context_parallel_size != 1
+            or parallel_config.use_ubatching
+            or parallel_config.enable_elastic_ep
+        ):
+            raise ValueError(
+                "sp_shared_memory requires TP>1, DP1/PP1, no CP or microbatching."
+            )
         if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
@@ -100,14 +129,23 @@ class EngramConfig:
 
     def verify_load_config(self, load_config: "LoadConfig") -> None:
         """Shared tables require a loader that invokes parameter weight callbacks."""
-        if self.dp_shared_memory and load_config.load_format not in (
+        if (
+            self.dp_shared_memory or self.sp_shared_memory
+        ) and load_config.load_format not in (
             "auto",
             "safetensors",
             "pt",
         ):
             raise ValueError(
-                "dp_shared_memory requires load_format 'auto', "
+                "Shared Engram storage requires load_format 'auto', "
                 f"'safetensors' or 'pt'; got {load_config.load_format!r}."
+            )
+
+        if self.sp_shared_memory and load_config.model_loader_extra_config.get(
+            "enable_multithread_load", False
+        ):
+            raise ValueError(
+                "sp_shared_memory requires single-threaded weight loading."
             )
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
