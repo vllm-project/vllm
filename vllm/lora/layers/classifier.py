@@ -21,30 +21,37 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
         # Preserve ordinary LoRA A/B support for classification heads.
         super().create_lora_weights(max_loras, lora_config, model_config)
 
-        max_num_labels = lora_config.max_lora_num_labels or self.output_size
+        self.max_lora_num_labels = lora_config.max_lora_num_labels or self.output_size
+        self.padded_num_labels = max(self.output_size, self.max_lora_num_labels)
         self.full_weight_stacked = torch.zeros(
             max_loras,
             1,
-            max_num_labels,
+            self.padded_num_labels,
             self.input_size,
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
         self.full_bias_stacked = torch.zeros(
             max_loras,
-            max_num_labels,
+            self.padded_num_labels,
             dtype=self.base_layer.params_dtype,
             device=self.device,
         )
         self.full_module_enabled = torch.zeros(
             max_loras, dtype=torch.bool, device=self.device
         )
-        self.max_num_labels = max_num_labels
+        # Zero marks an unused slot; positive values are unpadded label counts.
+        self.full_module_num_labels = [0] * max_loras
+        self._output_lora_indices: tuple[int, ...] = ()
+
+    def set_output_mapping(self, slot_indices: tuple[int, ...]) -> None:
+        self._output_lora_indices = slot_indices
 
     def reset_module_to_save(self, index: int) -> None:
         self.full_weight_stacked[index].zero_()
         self.full_bias_stacked[index].zero_()
         self.full_module_enabled[index] = False
+        self.full_module_num_labels[index] = 0
 
     def set_module_to_save(
         self,
@@ -53,20 +60,33 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
         bias: torch.Tensor | None,
     ) -> None:
         self.reset_module_to_save(index)
-        self.full_weight_stacked[index, 0].copy_(weight, non_blocking=True)
+        num_labels = weight.size(0)
+        self.full_weight_stacked[index, 0, :num_labels].copy_(weight, non_blocking=True)
         if bias is not None:
-            self.full_bias_stacked[index].copy_(bias, non_blocking=True)
+            self.full_bias_stacked[index, :num_labels].copy_(bias, non_blocking=True)
+        self.full_module_num_labels[index] = num_labels
         self.full_module_enabled[index] = True
 
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_: torch.Tensor) -> torch.Tensor | list[torch.Tensor]:
         # TODO base_result maybe don't need compute truly.
         base_result = super().forward(input_)
         base_result = base_result[0] if isinstance(base_result, tuple) else base_result
 
+        slot_indices = self._output_lora_indices
+        assert len(slot_indices) == base_result.size(0), (
+            "Classification rows do not match LoRA request mapping"
+        )
+        num_labels = [
+            self.full_module_num_labels[index] if index >= 0 else 0
+            for index in slot_indices
+        ]
+
+        if not any(num_labels):
+            return base_result
+
         output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
         output[:, : self.output_size].copy_(base_result)
-
-        full_output = self.punica_wrapper.apply_lora_full_linear(
+        self.punica_wrapper.apply_lora_full_linear(
             output,
             input_.to(self.full_weight_stacked.dtype),
             self.full_weight_stacked,
@@ -74,8 +94,12 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
             self.full_module_enabled,
         )
 
-        if full_output is not None:
-            output = full_output
+        # Rows without a full head keep the base classifier output size.
+        num_labels = [size or self.output_size for size in num_labels]
+        if len(set(num_labels)) == 1:
+            return output[:, : num_labels[0]]
+
+        output = [output[row, :size] for row, size in enumerate(num_labels)]
         return output
 
     def _apply_lora_to_output(
