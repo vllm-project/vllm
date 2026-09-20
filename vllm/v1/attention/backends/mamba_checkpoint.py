@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -14,8 +15,49 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
-    compute_mamba_prefill_checkpoints,
+    get_mamba_prefill_checkpoint_position,
+    is_mamba_prefill_checkpoint_valid,
 )
+
+
+def compute_mamba_prefill_checkpoints(
+    seq_lens: list[int],
+    query_lens: list[int],
+    hash_block_size: int,
+    mamba_block_size: int,
+    checkpoint_alignment: int | None,
+    drop_eagle_block: bool,
+) -> tuple[list[int], list[int]]:
+    """Per-row internal prefill checkpoint offsets and cache block columns.
+
+    Backends call this instead of re-deriving the rules, so they decline in
+    lockstep with the scheduler and ``MambaManager``: allocating a checkpoint
+    block without writing it leaves the prefix cache serving uninitialized
+    state.
+
+    Returns:
+        ``(offsets, cols)``: the checkpoint's offset into each row's query and
+        its block-table column. ``0`` and ``-1`` mean the row has none.
+
+    """
+    offsets: list[int] = []
+    cols: list[int] = []
+    for seq_len, query_len in zip(seq_lens, query_lens):
+        query_start = seq_len - query_len
+        position = get_mamba_prefill_checkpoint_position(
+            seq_len, hash_block_size, drop_eagle_block=drop_eagle_block
+        )
+        valid = is_mamba_prefill_checkpoint_valid(
+            query_start=query_start,
+            query_end=seq_len,
+            checkpoint_position=position,
+            hash_block_size=hash_block_size,
+            mamba_block_size=mamba_block_size,
+            checkpoint_alignment=checkpoint_alignment,
+        )
+        offsets.append(position - query_start if valid else 0)
+        cols.append(cdiv(seq_len, mamba_block_size) - 2 if valid else -1)
+    return offsets, cols
 
 
 @dataclass
