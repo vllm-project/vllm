@@ -58,13 +58,6 @@ def _trust_dsv4_extra_cache_nan_free(
     )
 
 
-def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
-    lengths = lengths.to(dtype=torch.int32).contiguous()
-    indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
-    torch.cumsum(lengths, dim=0, out=indptr[1:])
-    return indptr
-
-
 def apply_pre_quantized_block_scaled_mm(
     linear: torch.nn.Module,
     x_fp8: torch.Tensor,
@@ -255,6 +248,34 @@ def combine_topk_swa_indices(
 
 
 @triton.jit
+def _compute_topk_lens_and_indptr_kernel(
+    topk_lens_ptr,
+    topk_indptr_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    topk,
+    is_valid_token_ptr,
+    num_tokens,
+    BLOCK_TOPK: tl.constexpr,
+):
+    running = tl.zeros((), dtype=tl.int32)
+    tl.store(topk_indptr_ptr, running)
+    for token_idx in tl.range(0, num_tokens):
+        offsets = tl.arange(0, BLOCK_TOPK)
+        local_idx = tl.load(
+            topk_indices_ptr + token_idx * topk_indices_stride + offsets,
+            mask=offsets < topk,
+            other=-1,
+        )
+        count = tl.sum((local_idx >= 0).to(tl.int32), axis=0)
+        is_valid_token = tl.load(is_valid_token_ptr + token_idx)
+        count = tl.where(is_valid_token, count, 0)
+        running += count
+        tl.store(topk_lens_ptr + token_idx, count)
+        tl.store(topk_indptr_ptr + token_idx + 1, running)
+
+
+@triton.jit
 def _compute_topk_lens_kernel(
     topk_lens_ptr,
     topk_indices_ptr,
@@ -278,6 +299,21 @@ def _compute_topk_lens_kernel(
         count += tl.sum((local_idx >= 0).to(tl.int32), axis=0)
 
     tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
+
+
+@triton.jit
+def _build_topk_indptr_kernel(
+    topk_lens_ptr,
+    topk_indptr_ptr,
+    num_tokens,
+    BLOCK_ROWS: tl.constexpr,
+):
+    rows = tl.arange(0, BLOCK_ROWS)
+    mask = rows < num_tokens
+    lengths = tl.load(topk_lens_ptr + rows, mask=mask, other=0)
+    inclusive = tl.cumsum(lengths, axis=0)
+    tl.store(topk_indptr_ptr, 0)
+    tl.store(topk_indptr_ptr + rows + 1, inclusive, mask=mask)
 
 
 @triton.jit
@@ -334,16 +370,35 @@ def compute_global_topk_ragged_indices_and_indptr(
     topk = topk_indices.shape[1]
 
     topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
-    _compute_topk_lens_kernel[(num_tokens,)](
-        topk_lens,
-        topk_indices,
-        topk_indices.stride(0),
-        topk,
-        is_valid_token,
-        TRITON_BLOCK_SIZE=1024,
+    topk_indptr = torch.empty(
+        num_tokens + 1, dtype=torch.int32, device=topk_indices.device
     )
-
-    topk_indptr = _build_indptr_from_lengths(topk_lens)
+    if num_tokens <= 8:
+        _compute_topk_lens_and_indptr_kernel[(1,)](
+            topk_lens,
+            topk_indptr,
+            topk_indices,
+            topk_indices.stride(0),
+            topk,
+            is_valid_token,
+            num_tokens,
+            BLOCK_TOPK=triton.next_power_of_2(max(topk, 1)),
+        )
+    else:
+        _compute_topk_lens_kernel[(num_tokens,)](
+            topk_lens,
+            topk_indices,
+            topk_indices.stride(0),
+            topk,
+            is_valid_token,
+            TRITON_BLOCK_SIZE=1024,
+        )
+        _build_topk_indptr_kernel[(1,)](
+            topk_lens,
+            topk_indptr,
+            num_tokens,
+            BLOCK_ROWS=triton.next_power_of_2(num_tokens),
+        )
     global_topk_ragged = torch.empty(
         num_tokens * topk,
         dtype=torch.int32,
