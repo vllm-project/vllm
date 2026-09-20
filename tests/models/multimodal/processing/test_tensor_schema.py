@@ -218,8 +218,14 @@ def test_model_tensor_schema(model_id: str):
 
     factories = model_cls._processor_factory
 
+    # Capture helpers return capture-buffer containers (e.g.
+    # EncoderCudaGraphCaptureInputs), not TensorSchema mm inputs.
+    capture_helpers = {"prepare_encoder_cudagraph_capture_inputs"}
+
     inputs_parse_methods = []
     for attr_name in dir(model_cls):
+        if attr_name in capture_helpers:
+            continue
         attr = getattr(model_cls, attr_name)
         if hasattr(attr, "__annotations__"):
             return_type = attr.__annotations__.get("return", None)
