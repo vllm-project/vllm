@@ -324,9 +324,9 @@ class AXK1Attention(nn.Module):
         assert config.rope_parameters is not None
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
 
         self.rotary_emb = get_rope(
@@ -400,8 +400,7 @@ class AXK1Attention(nn.Module):
 
 
 class AXK1MLAAttention(nn.Module):
-    """
-    Main reference: DeepseekV2 paper, and FlashInfer Implementation
+    """Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
 
         For more info see MLACommonImpl in:
@@ -497,9 +496,9 @@ class AXK1MLAAttention(nn.Module):
         assert config.rope_parameters is not None
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
 
         self.rotary_emb = get_rope(
