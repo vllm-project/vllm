@@ -61,7 +61,7 @@ class IpcModelLoader(BaseModelLoader):
 
     - socket_path: explicit daemon socket path. Defaults to a per-GPU path
       derived from the physical GPU uuid and the cache role
-      (``load_config.weight_cache_is_draft_model``).
+      (``load_config.weight_cache_draft_model_idx``).
     - socket_dir: directory containing the daemon sockets.
     - mode: "zero_copy" (default) or "copy".
     - fallback: fall back to disk loading when the daemon is unavailable or
@@ -79,9 +79,8 @@ class IpcModelLoader(BaseModelLoader):
         extra_config = copy(load_config.model_loader_extra_config or {})
         self.socket_path: str | None = extra_config.pop("socket_path", None)
         self.socket_dir: str | None = extra_config.pop("socket_dir", None)
-        self.is_draft_model = load_config.weight_cache_is_draft_model
         self.draft_model_idx = load_config.weight_cache_draft_model_idx
-        if self.is_draft_model and self.socket_path is not None:
+        if self.draft_model_idx is not None and self.socket_path is not None:
             raise ValueError(
                 "socket_path cannot be combined with the draft weight cache role; "
                 "use socket_dir so the target and draft sockets are derived "
@@ -283,7 +282,6 @@ class IpcModelLoader(BaseModelLoader):
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
-            is_draft_model=self.is_draft_model,
             draft_model_idx=self.draft_model_idx,
         )
         return self._request_state(cache_config)
@@ -339,7 +337,6 @@ class IpcModelLoader(BaseModelLoader):
         return get_socket_path(
             get_current_device_uuid(),
             self.socket_dir,
-            is_draft_model=self.is_draft_model,
             draft_model_idx=self.draft_model_idx,
         )
 
@@ -368,7 +365,6 @@ class IpcModelLoader(BaseModelLoader):
             self.load_config,
             load_format="auto",
             model_loader_extra_config={},
-            weight_cache_is_draft_model=False,
             weight_cache_draft_model_idx=None,
         )
 

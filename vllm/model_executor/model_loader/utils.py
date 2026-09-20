@@ -49,7 +49,7 @@ def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
     draft falls back to disk loading instead of being sent to the target
     daemon with a mismatching fingerprint.
     """
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
+    from vllm.model_executor.model_loader.weight_cache.utils import (
         caches_draft_model,
     )
 
@@ -61,11 +61,7 @@ def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
     if load_config.load_format != "ipc_cache":
         return load_config
     if caches_draft_model(speculative_config):
-        return replace(
-            load_config,
-            weight_cache_is_draft_model=True,
-            weight_cache_draft_model_idx=0,
-        )
+        return replace(load_config, weight_cache_draft_model_idx=0)
     return replace(load_config, load_format="auto", model_loader_extra_config={})
 
 

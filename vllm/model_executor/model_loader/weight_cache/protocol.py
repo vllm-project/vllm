@@ -20,15 +20,19 @@ import stat
 import struct
 import tempfile
 from dataclasses import dataclass, fields
-from typing import Any, TypeGuard
+from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import ModelConfig, SpeculativeConfig
+from vllm.config import ModelConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    format_socket_role_suffix,
+    normalize_draft_model_idx,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
 )
@@ -128,60 +132,19 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
     )
 
 
-# Speculative methods whose draft model the daemon caches in its own group.
-# Other drafts keep loading from disk in the engine.
-WEIGHT_CACHE_DRAFT_METHODS = frozenset({"mtp", "eagle", "eagle3"})
-
-# Python-side flags that weight loading sets on EAGLE-style drafts; the engine
-# never runs load_weights for cached models, so the daemon ships them.
-EXPORTED_MODEL_ATTRS = ("has_own_embed_tokens", "has_own_lm_head")
-
-
-def export_model_attrs(model: Any) -> dict[str, bool]:
-    return {
-        name: bool(getattr(model, name))
-        for name in EXPORTED_MODEL_ATTRS
-        if hasattr(model, name)
-    }
-
-
-def caches_draft_model(
-    speculative_config: SpeculativeConfig | None,
-) -> TypeGuard[SpeculativeConfig]:
-    """Whether the daemon serves the speculative draft as a separate role."""
-    return (
-        speculative_config is not None
-        and speculative_config.method in WEIGHT_CACHE_DRAFT_METHODS
-        and speculative_config.draft_model_config is not None
-    )
-
-
-def normalize_draft_model_idx(draft_model_idx: int | None) -> int:
-    return -1 if draft_model_idx is None else draft_model_idx
-
-
-def format_daemon_role(
-    is_draft_model: bool = False, draft_model_idx: int | None = None
-) -> str:
-    """Socket-name suffix distinguishing the draft daemon group from the target."""
-    if not is_draft_model:
-        return ""
-    return f"_draft{draft_model_idx if draft_model_idx is not None else 0}"
-
-
 def get_socket_path(
     gpu_uuid: str,
     socket_dir: str | None = None,
     *,
-    is_draft_model: bool = False,
     draft_model_idx: int | None = None,
 ) -> str:
+    """Socket path of a daemon group; ``draft_model_idx`` None is the target."""
     directory = get_socket_dir(socket_dir)
     return os.path.join(
         directory,
         SOCKET_NAME_TEMPLATE.format(
             gpu_uuid=gpu_uuid,
-            role=format_daemon_role(is_draft_model, draft_model_idx),
+            role=format_socket_role_suffix(draft_model_idx),
         ),
     )
 
@@ -325,8 +288,8 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
-    is_draft_model: bool = False
     draft_model_idx: int = -1
+    """Daemon group the weights come from; -1 is the target model."""
 
     @classmethod
     def from_model_config(
@@ -335,7 +298,6 @@ class WeightCacheKey:
         tp_size: int,
         tp_rank: int,
         *,
-        is_draft_model: bool = False,
         draft_model_idx: int | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
@@ -363,7 +325,6 @@ class WeightCacheKey:
             quant_config_hash=_hash_quant_config(quant_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
-            is_draft_model=is_draft_model,
             draft_model_idx=normalize_draft_model_idx(draft_model_idx),
         )
 

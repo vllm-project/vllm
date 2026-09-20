@@ -212,7 +212,7 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
 def test_weight_cache_caches_mtp_and_eagle_drafts():
     from types import SimpleNamespace
 
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
+    from vllm.model_executor.model_loader.weight_cache.utils import (
         caches_draft_model,
     )
 
@@ -235,7 +235,7 @@ def test_weight_cache_exports_eagle_ownership_flags():
     decide whether to share the target's embed/lm_head travel with the state."""
     import torch
 
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
+    from vllm.model_executor.model_loader.weight_cache.utils import (
         export_model_attrs,
     )
 
@@ -249,7 +249,7 @@ def test_weight_cache_target_and_draft_use_distinct_sockets(tmp_path):
     from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
 
     target_path = get_socket_path("GPU-abc", str(tmp_path))
-    draft_path = get_socket_path("GPU-abc", str(tmp_path), is_draft_model=True)
+    draft_path = get_socket_path("GPU-abc", str(tmp_path), draft_model_idx=0)
 
     assert target_path != draft_path
     assert draft_path.endswith("GPU-abc_draft0.sock")
@@ -281,17 +281,16 @@ def test_draft_load_config_under_ipc_cache():
 
     mtp = get_draft_load_config(cfg("mtp"))
     assert mtp.load_format == "ipc_cache"
-    assert mtp.weight_cache_is_draft_model
     assert mtp.weight_cache_draft_model_idx == 0
     assert mtp.model_loader_extra_config == {"fallback": False}
 
     eagle = get_draft_load_config(cfg("eagle3"))
     assert eagle.load_format == "ipc_cache"
-    assert eagle.weight_cache_is_draft_model
+    assert eagle.weight_cache_draft_model_idx == 0
 
     dflash = get_draft_load_config(cfg("dflash"))
     assert dflash.load_format == "auto"
-    assert not dflash.weight_cache_is_draft_model
+    assert dflash.weight_cache_draft_model_idx is None
     assert dflash.model_loader_extra_config == {}
 
     assert get_draft_load_config(cfg("mtp", explicit)) is explicit
