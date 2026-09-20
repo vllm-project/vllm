@@ -9,10 +9,14 @@ Parser (via parse) and properly builds response output items.
 import json
 from collections.abc import Sequence
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_function_tool_call_output_item import (
+    ResponseFunctionToolCallOutputItem,
+)
+from openai.types.responses.response_output_item import McpCall
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -162,10 +166,9 @@ class _JsonParsingTool(Tool):
     async def get_result(self, context):
         raise NotImplementedError
 
-    async def get_result_parsable_context(self, context):
+    async def get_result_parsable_context(self, context, tool_call):
         self.called = True
-        last_msg = context.response_messages[-1]
-        json.loads(last_msg.arguments)
+        json.loads(tool_call.arguments)
         return []
 
 
@@ -236,7 +239,7 @@ def _make_context(parser_cls, **overrides):
 
 def _make_tool_context(tool_case, tool_session, arguments):
     tool_name, session_name, _, _ = tool_case
-    ctx = _make_context(None)
+    ctx = _make_context(None, available_tools=[session_name])
     tool_call = ResponseFunctionToolCall(
         id=f"fc_{tool_name}",
         call_id=f"call_{tool_name}",
@@ -247,6 +250,20 @@ def _make_tool_context(tool_case, tool_session, arguments):
     ctx.response_messages.append(tool_call)
     ctx._tool_sessions[session_name] = tool_session
     return ctx, tool_call
+
+
+def _make_builtin_tool_call(
+    name: str, call_id: str, arguments: dict | str
+) -> ResponseFunctionToolCall:
+    return ResponseFunctionToolCall(
+        id=f"fc_{call_id}",
+        call_id=call_id,
+        type="function_call",
+        name=name,
+        arguments=(
+            json.dumps(arguments) if not isinstance(arguments, str) else arguments
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +510,284 @@ async def test_invalid_builtin_tool_json_raises_when_retry_disabled(
         assert tool_session.called
     else:
         tool_session.call_tool.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [
+            _make_builtin_tool_call(
+                "web_search_preview", "call_search", {"query": "vLLM"}
+            ),
+            _make_builtin_tool_call(
+                "code_interpreter", "call_python", {"code": "print(42)"}
+            ),
+        ],
+        [
+            _make_builtin_tool_call(
+                "code_interpreter", "call_python", {"code": "print(42)"}
+            ),
+            _make_builtin_tool_call(
+                "web_search_preview", "call_search", {"query": "vLLM"}
+            ),
+        ],
+    ],
+)
+@pytest.mark.asyncio
+async def test_call_tool_executes_all_parallel_builtin_calls_in_order(tool_calls):
+    browser = MagicMock()
+    browser.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(text="search result")])
+    )
+    python = MagicMock()
+    python.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(text="python result")])
+    )
+    context = _make_context(None, available_tools=["browser", "python"])
+    context.response_messages.extend(tool_calls)
+    context._tool_sessions = {"browser": browser, "python": python}
+
+    assert context.need_builtin_tool_call()
+    outputs = await context.call_tool()
+
+    browser.call_tool.assert_awaited_once_with("search", {"query": "vLLM"})
+    python.call_tool.assert_awaited_once_with("python", {"code": "print(42)"})
+    assert [output.call_id for output in outputs] == [
+        tool_call.call_id for tool_call in tool_calls
+    ]
+
+
+@pytest.mark.asyncio
+async def test_call_tool_executes_multiple_calls_on_same_session():
+    browser = MagicMock()
+    browser.call_tool = AsyncMock(
+        side_effect=[
+            SimpleNamespace(content=[SimpleNamespace(text="first result")]),
+            SimpleNamespace(content=[SimpleNamespace(text="second result")]),
+        ]
+    )
+    tool_calls = [
+        _make_builtin_tool_call("web_search_preview", "call_first", {"query": "first"}),
+        _make_builtin_tool_call(
+            "web_search_preview", "call_second", {"query": "second"}
+        ),
+    ]
+    context = _make_context(None, available_tools=["browser"])
+    context.response_messages.extend(tool_calls)
+    context._tool_sessions = {"browser": browser}
+
+    outputs = await context.call_tool()
+
+    assert browser.call_tool.await_args_list == [
+        call("search", {"query": "first"}),
+        call("search", {"query": "second"}),
+    ]
+    assert [output.output for output in outputs] == ["first result", "second result"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_parallel_call_returns_retry_and_continues(monkeypatch):
+    monkeypatch.setattr(
+        responses_context.envs, "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", True
+    )
+    browser = MagicMock()
+    browser.call_tool = AsyncMock()
+    python = MagicMock()
+    python.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(text="python result")])
+    )
+    tool_calls = [
+        _make_builtin_tool_call("web_search_preview", "call_invalid", _INVALID_JSON),
+        _make_builtin_tool_call(
+            "code_interpreter", "call_valid", {"code": "print(42)"}
+        ),
+    ]
+    context = _make_context(None, available_tools=["browser", "python"])
+    context.response_messages.extend(tool_calls)
+    context._tool_sessions = {"browser": browser, "python": python}
+
+    outputs = await context.call_tool()
+
+    browser.call_tool.assert_not_called()
+    python.call_tool.assert_awaited_once_with("python", {"code": "print(42)"})
+    assert [output.call_id for output in outputs] == [
+        "call_invalid",
+        "call_valid",
+    ]
+    assert "Error parsing tool arguments as JSON" in outputs[0].output
+    assert outputs[1].output == "python result"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_does_not_cross_generation_boundary():
+    initial_call = _make_builtin_tool_call(
+        "web_search_preview", "call_initial", {"query": "initial"}
+    )
+    current_call = _make_builtin_tool_call(
+        "web_search_preview", "call_current", {"query": "current"}
+    )
+    browser = MagicMock()
+    browser.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(text="current result")])
+    )
+    context = _make_context(
+        None,
+        response_messages=[initial_call],
+        available_tools=["browser"],
+    )
+    context.response_messages.append(current_call)
+    context._tool_sessions = {"browser": browser}
+
+    outputs = await context.call_tool()
+    context.append_tool_output(outputs)
+
+    browser.call_tool.assert_awaited_once_with("search", {"query": "current"})
+    assert [output.call_id for output in outputs] == ["call_current"]
+    assert not context.need_builtin_tool_call()
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [
+            _make_builtin_tool_call(
+                "web_search_preview", "call_search", {"query": "vLLM"}
+            ),
+            _make_builtin_tool_call(
+                "get_weather", "call_weather", {"location": "Paris"}
+            ),
+        ],
+        [
+            _make_builtin_tool_call(
+                "get_weather", "call_weather", {"location": "Paris"}
+            ),
+            _make_builtin_tool_call(
+                "web_search_preview", "call_search", {"query": "vLLM"}
+            ),
+        ],
+    ],
+)
+def test_mixed_builtin_and_client_tool_turn_is_rejected(tool_calls):
+    context = _make_context(None, available_tools=["browser"])
+    context.response_messages.extend(tool_calls)
+
+    with pytest.raises(ValueError, match="cannot mix"):
+        context.need_builtin_tool_call()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_builtin_call_ids_are_rejected_before_dispatch():
+    browser = MagicMock()
+    browser.call_tool = AsyncMock()
+    python = MagicMock()
+    python.call_tool = AsyncMock()
+    tool_calls = [
+        _make_builtin_tool_call(
+            "web_search_preview", "call_duplicate", {"query": "vLLM"}
+        ),
+        _make_builtin_tool_call(
+            "code_interpreter", "call_duplicate", {"code": "print(42)"}
+        ),
+    ]
+    context = _make_context(None, available_tools=["browser", "python"])
+    context.response_messages.extend(tool_calls)
+    context._tool_sessions = {"browser": browser, "python": python}
+
+    with pytest.raises(ValueError, match="must be unique"):
+        await context.call_tool()
+
+    browser.call_tool.assert_not_called()
+    python.call_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_runtime_failure_stops_later_tool_dispatch():
+    browser = MagicMock()
+    browser.call_tool = AsyncMock(
+        side_effect=[
+            SimpleNamespace(content=[SimpleNamespace(text="first result")]),
+            RuntimeError("tool failed"),
+            SimpleNamespace(content=[SimpleNamespace(text="third result")]),
+        ]
+    )
+    tool_calls = [
+        _make_builtin_tool_call(
+            "web_search_preview", f"call_{index}", {"query": str(index)}
+        )
+        for index in range(3)
+    ]
+    context = _make_context(None, available_tools=["browser"])
+    context.response_messages.extend(tool_calls)
+    context._tool_sessions = {"browser": browser}
+
+    with pytest.raises(RuntimeError, match="tool failed"):
+        await context.call_tool()
+
+    assert browser.call_tool.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_local_tool_receives_each_parallel_call_explicitly():
+    processed_code = []
+
+    async def process(message):
+        processed_code.append(message.content[0].text)
+        yield SimpleNamespace(content=[SimpleNamespace(text="result")])
+
+    python_tool = object.__new__(HarmonyPythonTool)
+    python_tool.python_tool = MagicMock(process=process)
+    tool_calls = [
+        _make_builtin_tool_call("code_interpreter", "call_first", {"code": "print(1)"}),
+        _make_builtin_tool_call(
+            "code_interpreter", "call_second", {"code": "print(2)"}
+        ),
+    ]
+    context = _make_context(None, available_tools=["python"])
+    context.response_messages.extend(tool_calls)
+    context._tool_sessions = {"python": python_tool}
+
+    outputs = await context.call_tool()
+
+    assert processed_code == ["print(1)", "print(2)"]
+    assert [output.call_id for output in outputs] == [
+        "call_first",
+        "call_second",
+    ]
+
+
+def test_make_response_output_items_pairs_parallel_results_by_call_id():
+    tool_calls = [
+        _make_builtin_tool_call("web_search_preview", "call_search", {"query": "vLLM"}),
+        _make_builtin_tool_call(
+            "code_interpreter", "call_python", {"code": "print(42)"}
+        ),
+    ]
+    tool_outputs = [
+        ResponseFunctionToolCallOutputItem(
+            id="fco_search",
+            call_id="call_search",
+            type="function_call_output",
+            output="search result",
+            status="completed",
+        ),
+        ResponseFunctionToolCallOutputItem(
+            id="fco_python",
+            call_id="call_python",
+            type="function_call_output",
+            output="python result",
+            status="completed",
+        ),
+    ]
+    context = _make_context(None)
+    context.response_messages.extend([*tool_calls, *tool_outputs])
+
+    outputs = context.make_response_output_items()
+
+    assert all(isinstance(output, McpCall) for output in outputs)
+    assert [(output.name, output.output) for output in outputs] == [
+        ("web_search_preview", "search result"),
+        ("code_interpreter", "python result"),
+    ]
 
 
 # ---------------------------------------------------------------------------
