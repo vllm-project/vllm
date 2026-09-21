@@ -101,6 +101,9 @@ from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.reload.frozen import FrozenWeights
+
 logger = init_logger(__name__)
 
 
@@ -208,6 +211,7 @@ class Worker(WorkerBase):
             self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._frozen_weights: FrozenWeights | None = None
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
@@ -249,6 +253,8 @@ class Worker(WorkerBase):
 
         # Save the buffers before level 2 sleep
         if level == 2:
+            if self._frozen_weights is not None:
+                self._frozen_weights.save()
             model = self.model_runner.model
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
@@ -287,6 +293,8 @@ class Worker(WorkerBase):
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
+        if wake_weights and self._frozen_weights is not None:
+            self._frozen_weights.restore()
         if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
@@ -514,6 +522,13 @@ class Worker(WorkerBase):
             get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
+            if self.vllm_config.weight_transfer_config.frozen_weight_modules:
+                from vllm.model_executor.model_loader.reload.frozen import FrozenWeights
+
+                self._frozen_weights = FrozenWeights(
+                    self.model_runner.get_model(),
+                    self.vllm_config.weight_transfer_config.frozen_weight_modules,
+                )
             self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
                 self.vllm_config.weight_transfer_config,
                 self.vllm_config,

@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.reload.frozen import FrozenWeights
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -67,6 +68,75 @@ class _AliasedBufferLayer(torch.nn.Module):
         self.register_buffer(
             "weight_view", self.weight.detach().view(-1), persistent=False
         )
+
+
+def test_frozen_module_stays_materialized_during_reload():
+    """Omitting a frozen table must not move it to meta or accept updates."""
+    model = torch.nn.ModuleDict(
+        {"table": torch.nn.Embedding(4, 2), "projection": torch.nn.Linear(2, 2)}
+    )
+    record_metadata_for_reloading(model)
+    frozen = FrozenWeights(model, ["table"])
+    table = model.table.weight
+    expected = table.detach().clone()
+    frozen.save()
+    assert frozen.backups == {}  # Host-resident weights need no second CPU copy.
+    initialize_layerwise_reload(model)
+    assert model.table.weight is table
+    torch.testing.assert_close(table, expected)
+    assert model.projection.weight.is_meta
+    with pytest.raises(ValueError, match="Cannot reload a frozen weight"):
+        table.weight_loader(table, torch.zeros_like(table))
+
+
+def test_frozen_module_rejects_alias_to_mutable_weight():
+    """An update through a tied mutable name would invalidate the frozen copy."""
+    model = torch.nn.ModuleDict(
+        {"table": torch.nn.Embedding(4, 2), "projection": torch.nn.Linear(2, 4)}
+    )
+    model.projection.weight = model.table.weight
+    with pytest.raises(ValueError, match="aliases mutable parameter"):
+        FrozenWeights(model, ["table"])
+
+
+def test_frozen_module_rejects_misspelled_selection():
+    model = torch.nn.ModuleDict({"table": torch.nn.Embedding(4, 2)})
+    with pytest.raises(ValueError, match="matched nothing"):
+        FrozenWeights(model, ["missing_table"])
+
+
+def test_frozen_module_rejects_mutable_buffer_alias():
+    model = torch.nn.ModuleDict({"table": torch.nn.Embedding(4, 2)})
+    model.register_buffer("alias", model.table.weight.detach())
+    with pytest.raises(ValueError, match="aliases mutable buffer"):
+        FrozenWeights(model, ["table"])
+
+
+def test_frozen_module_rejects_storage_rebinding():
+    model = torch.nn.ModuleDict({"table": torch.nn.Embedding(4, 2)})
+    frozen = FrozenWeights(model, ["table"])
+    model.table.weight.data = model.table.weight.detach().clone()
+    with pytest.raises(RuntimeError, match="storage was replaced"):
+        frozen.restore()
+
+
+def test_frozen_checkpoint_names_use_model_mapper():
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    model = torch.nn.ModuleDict({"table": torch.nn.Embedding(4, 2)})
+    model.hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"checkpoint_table.": "table.", "ignored.": None}
+    )
+    frozen = FrozenWeights(model, ["table"])
+    assert frozen.checkpoint_names(
+        ["checkpoint_table.weight", "projection.weight", "ignored.weight"]
+    ) == {"checkpoint_table.weight"}
+
+
+def test_frozen_module_rejects_whole_model_pattern():
+    model = torch.nn.ModuleDict({"table": torch.nn.Embedding(4, 2)})
+    with pytest.raises(ValueError, match="entire model"):
+        FrozenWeights(model, ["*"])
 
 
 class _ParentAliasedChildBufferLayer(torch.nn.Module):

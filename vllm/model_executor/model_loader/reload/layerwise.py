@@ -101,7 +101,7 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         info = get_layerwise_info(layer)
 
         # Skip if the layer has already been initialized
-        if info.can_load():
+        if getattr(layer, "_vllm_frozen_weights", False) or info.can_load():
             continue
 
         # Save current tensors for later copying
@@ -241,6 +241,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
 
     for layer in model.modules():
+        if getattr(layer, "_vllm_frozen_weights", False):
+            continue
         info = get_layerwise_info(layer)
         if not info.can_load():
             info.reset()

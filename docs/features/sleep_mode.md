@@ -74,6 +74,26 @@ llm.wake_up(tags=["weights"])
 llm.wake_up(tags=["kv_cache"])
 ```
 
+#### Retaining frozen weights during RLHF updates
+
+Set `weight_transfer_config.frozen_weight_modules` to runtime module-name glob
+patterns for submodules whose parameters never change during training. These
+are vLLM module names, not checkpoint keys; do not infer them from
+`requires_grad=False`, which is also used for ordinary inference weights.
+
+With level 2 sleep, their GPU parameters are copied to pageable CPU memory once.
+`wake_up(tags=["weights"])` restores them in place and keeps the CPU copies for
+later cycles. Already CPU-resident parameters are reused without another copy.
+Budget host memory for these retained local shards alongside trainer offload.
+Level 1 retains its existing full-weight backup behavior.
+
+The sender must omit the corresponding checkpoint tensors. Layerwise reload
+leaves the selected modules intact, and their parameter loaders reject incoming
+updates. Use the model's checkpoint-name mapping and validate the sender/receiver
+exclusion sets before transfer. Restart the instance to change frozen weights;
+direct writes that bypass weight loaders are unsupported. Selection applies to
+the target model, not a separately instantiated draft model.
+
 #### Release only KV cache memory
 
 `LLM.release_kv_cache_memory()` discards KV cache physical memory while keeping model weights resident. It requires a completed pause and all executor memory to be resident: full sleep, partial wake-up, and repeated release without restoring memory are rejected. Requests retained with `mode="keep"` are recomputed after wake-up.
