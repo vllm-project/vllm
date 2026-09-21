@@ -26,6 +26,26 @@ def _store_sparse_kv_row_offset_kernel(slot_ptr, output_ptr, stride: tl.constexp
     tl.store(output_ptr, _sparse_kv_row_offset(slot, stride))
 
 
+def _fit_kpool_indices_reference(
+    token_indices: torch.Tensor, topk_tokens: int
+) -> torch.Tensor:
+    history = token_indices[:, :topk_tokens]
+    tail = token_indices[:, topk_tokens:]
+    valid_history = (history >= 0).sum(dim=1)
+    valid_tail = (tail >= 0).sum(dim=1)
+    keep_history = torch.minimum(valid_history, topk_tokens - valid_tail)
+
+    columns = torch.arange(topk_tokens, device=token_indices.device).unsqueeze(0)
+    tail_offsets = columns - keep_history.unsqueeze(1)
+    tail_values = torch.gather(
+        tail, 1, tail_offsets.clamp(min=0, max=tail.shape[1] - 1)
+    )
+    output = torch.where(columns < keep_history.unsqueeze(1), history, tail_values)
+    valid_output = columns < (keep_history + valid_tail).unsqueeze(1)
+    return torch.where(valid_output, output, -1)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
 def test_fit_kpool_indices_preserves_tail_and_best_history():
     token_indices = torch.tensor(
         [
@@ -34,6 +54,7 @@ def test_fit_kpool_indices_preserves_tail_and_best_history():
             [-1, -1, -1, -1, -1, -1, -1, -1],
         ],
         dtype=torch.int32,
+        device="cuda",
     )
 
     fitted = fit_kpool_indices_to_aiter(token_indices, topk_tokens=6)
@@ -43,6 +64,30 @@ def test_fit_kpool_indices_preserves_tail_and_best_history():
         [10, 9, 8, 100, -1, -1],
         [-1, -1, -1, -1, -1, -1],
     ]
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+@pytest.mark.parametrize(
+    ("num_tokens", "topk_tokens", "tail_width"),
+    [(1, 4, 1), (7, 6, 2), (13, 128, 128), (3, 2048, 128)],
+)
+def test_fit_kpool_indices_matches_eager_reference(num_tokens, topk_tokens, tail_width):
+    """The Triton fit must reproduce the eager packing rule exactly."""
+    generator = torch.Generator(device="cpu").manual_seed(topk_tokens + num_tokens)
+    width = topk_tokens + tail_width
+    token_indices = torch.randint(
+        0, 4096, (num_tokens, width), dtype=torch.int32, generator=generator
+    )
+    valid = torch.rand((num_tokens, width), generator=generator) < 0.5
+    valid[0] = False
+    valid[-1] = True
+    token_indices = torch.where(valid, token_indices, -1).cuda()
+
+    fitted = fit_kpool_indices_to_aiter(token_indices, topk_tokens=topk_tokens)
+
+    torch.testing.assert_close(
+        fitted, _fit_kpool_indices_reference(token_indices, topk_tokens)
+    )
 
 
 def test_fit_kpool_indices_exact_width_is_noop():
