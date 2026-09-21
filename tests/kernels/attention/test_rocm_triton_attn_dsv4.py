@@ -878,6 +878,36 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
     assert mod._decode_gfx950_num_splits(512, 1, 128, 7812) == 1
 
 
+@torch.inference_mode()
+def test_decode_num_splits_gfx950_fills_waves(monkeypatch) -> None:
+    """Split counts sharing a wave count should walk the fewest iterations.
+
+    Extra splits inside an already-paid-for wave cost nothing but shorten every
+    workgroup's BLOCK_K walk, so the DSv4.1-Flash geometry (128 SWA + 512 topk)
+    at 96 rows must take the 4 splits that fill 3 waves at 5 iterations rather
+    than the 3 splits that fill the same 3 waves at 8.
+    """
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    monkeypatch.setattr(mod, "_decode_cu_count", lambda: 256)
+    flash = dict(avg_main_len=128.0, avg_extra_len=512.0, block_k=32)
+
+    assert mod._decode_gfx950_num_splits(96, 2, **flash) == 4
+    # A single head block at twice the rows is the same workgroup count.
+    assert mod._decode_gfx950_num_splits(192, 1, **flash) == 4
+    # Batches too small for the old base >= 16 gate still shed idle splits:
+    # 16 and 32 splits walk the same 2 iterations in one wave, so 16 wins.
+    assert mod._decode_gfx950_num_splits(1, 2, **flash) == 16
+
+    # Refining must never buy iterations with an extra wave.
+    for rows in (1, 6, 24, 40, 48, 96, 128, 192, 512):
+        for heads_blocks in (1, 2):
+            base = rows * heads_blocks
+            splits = mod._decode_gfx950_num_splits(rows, heads_blocks, **flash)
+            plain = min(32, max(1, -(-2 * 256 // base)))
+            assert (base * splits + 255) // 256 <= (base * plain + 255) // 256
+
+
 @requires_split_decode_arch
 @pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8])
 @pytest.mark.parametrize("with_extra", [True, False])

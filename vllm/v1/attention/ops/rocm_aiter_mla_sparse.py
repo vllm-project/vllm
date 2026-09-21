@@ -3072,6 +3072,51 @@ def _decode_num_splits(
     return best_splits
 
 
+def _decode_refine_splits(
+    base: int,
+    cu: int,
+    splits: int,
+    avg_main_len: float,
+    avg_extra_len: float,
+    block_k: int,
+    max_splits: int = 32,
+) -> int:
+    """Trade split count against iteration count inside one wave count.
+
+    Wave count sets how many times the device has to drain and per-workgroup
+    BLOCK_K iterations set how long each drain takes, so among split counts
+    that occupy the same number of waves the one walking the fewest iterations
+    is strictly cheaper: the extra splits ride along in waves that are already
+    paid for. Among those, the smallest split count leaves the least reduce
+    work.
+
+    Batch 96 at 2 head blocks is the case this exists for: 3 splits and 4
+    splits both fill 3 waves, but 3 splits walks 8 iterations per workgroup
+    against 5 for 4 splits.
+    """
+    if avg_main_len <= 0 and avg_extra_len <= 0:
+        return splits
+
+    def waves(s: int) -> int:
+        return (base * s + cu - 1) // cu
+
+    def partial_iters(s: int) -> int:
+        return _decode_partial_iters(avg_main_len, avg_extra_len, s, block_k)
+
+    target_waves = waves(splits)
+    best, best_iters = splits, partial_iters(splits)
+    for cand in range(splits + 1, max_splits + 1):
+        if waves(cand) != target_waves:
+            break  # wave count only grows from here
+        cand_iters = partial_iters(cand)
+        if cand_iters < best_iters:
+            best, best_iters = cand, cand_iters
+    for cand in range(1, best):
+        if waves(cand) == target_waves and partial_iters(cand) == best_iters:
+            return cand
+    return best
+
+
 def _decode_gfx950_num_splits(
     num_queries: int,
     heads_blocks: int,
@@ -3094,25 +3139,17 @@ def _decode_gfx950_num_splits(
         and num_splits > 4
         and _decode_partial_iters(avg_main_len, avg_extra_len, 4, block_k) <= 3
     ):
-        return 4
-    if 16 <= base < 64:
+        num_splits = 4
+    elif 16 <= base < 64:
         one_wave_splits = max(1, cu // base)
         one_wave_iters = _decode_partial_iters(
             avg_main_len, avg_extra_len, one_wave_splits, block_k
         )
         target_waves = 1 if one_wave_iters <= 9 else 2
         num_splits = min(num_splits, max(1, target_waves * cu // base))
-    if base >= 16 and num_splits > 1:
-        target_waves = (base * num_splits + cu - 1) // cu
-        target_iters = _decode_partial_iters(
-            avg_main_len, avg_extra_len, num_splits, block_k
-        )
-        for splits in range(1, num_splits):
-            waves = (base * splits + cu - 1) // cu
-            iters = _decode_partial_iters(avg_main_len, avg_extra_len, splits, block_k)
-            if waves == target_waves and iters == target_iters:
-                return splits
-    return num_splits
+    return _decode_refine_splits(
+        base, cu, num_splits, avg_main_len, avg_extra_len, block_k
+    )
 
 
 def _rocm_sparse_attn_decode_ragged_triton(
