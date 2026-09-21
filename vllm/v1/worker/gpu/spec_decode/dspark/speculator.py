@@ -427,25 +427,10 @@ class DSparkSpeculator(DFlashSpeculator):
                 realized_scores=self._realized_scores[:num_reqs],
                 sample_idx_mapping=self.sample_idx_mapping[:num_sample],
                 d2t=self._markov_walk_d2t,
-        for i in range(n_spec):
-            markov_embed = self.model.markov_embed(prev)
-            if self.use_confidence_head:
-                confidence_markov_embeds.append(markov_embed)
-            logits_i = self.model.apply_markov_bias_gathered(
-                markov_embed,
-                base_logits[:, i],
-                base_values[:, i],
-                draft_indices[:, i],
             )
-            draft_sampled_i = self._sample_logits(
-                logits_i, idx_map[:, i], sample_pos[:, i], i
-            )
-
-        if self.enable_adaptive_verification:
-            assert self._markov_walk_embeds is not None
 
         if self.use_confidence_head:
-
+            assert self._markov_walk_embeds is not None
             confidence = self.model.compute_confidence(
                 sample_hidden, self._markov_walk_embeds[:num_reqs].flatten(0, 1)
             )
