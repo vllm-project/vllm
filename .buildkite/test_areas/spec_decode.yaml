@@ -25,9 +25,9 @@ steps:
     - pytest -v -s -m 'not slow_test' v1/spec_decode
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) V1 Spec Decode"
+      label: ":amd: (MI300) V1 Spec Decode"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -113,9 +113,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Spec Decode Speculators + MTP"
+      label: ":amd: (MI300) Spec Decode Speculators + MTP"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 75
       depends_on:
       - image-build-amd

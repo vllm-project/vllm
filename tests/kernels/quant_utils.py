@@ -181,12 +181,15 @@ def native_per_token_group_quant_fp8(
     return x_q, x_s
 
 
-def native_per_token_group_quant_int8(x, group_size, eps=1e-10, dtype=torch.int8):
+def native_per_token_group_quant_int8(
+    x, group_size, eps=1e-10, dtype=torch.int8, *, round_to_nearest=True
+):
     """Function to perform per-token-group quantization on an input tensor
     `x` using native torch.
 
     It converts the tensor values into int8 values and returns the
     quantized tensor along with the scaling factor used for quantization.
+    Per-token quantization rounds to nearest; block quantization truncates.
     """
     assert x.shape[-1] % group_size == 0, (
         "the last dimension of `x` must be divisible by `group_size`"
@@ -201,9 +204,10 @@ def native_per_token_group_quant_int8(x, group_size, eps=1e-10, dtype=torch.int8
     # Use float32 for scale calculation for stability
     amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
     x_s = amax / int8_max
-    x_q = (
-        (x_.to(torch.float32) / x_s).round().clamp(min=int8_min, max=int8_max).to(dtype)
-    )  # Round before clamping
+    x_q = x_.to(torch.float32) / x_s
+    if round_to_nearest:
+        x_q = x_q.round()
+    x_q = x_q.clamp(min=int8_min, max=int8_max).to(dtype)
     x_q = x_q.reshape(x.shape)
     x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size,))
 
