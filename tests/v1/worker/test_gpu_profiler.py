@@ -17,6 +17,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.profiler import _is_uri_path
+from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
     ProtonProfilerWrapper,
@@ -26,6 +27,7 @@ from vllm.profiler.wrapper import (
     validate_worker_profiler_config,
 )
 from vllm.v1.core.sched.output import CachedRequestData
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_worker import XPUWorker
@@ -171,6 +173,28 @@ def test_torch_profiler_activities_require_torch_profiler():
 
 
 @pytest.mark.parametrize(
+    ("profiler", "activities", "ignore_frontend", "expected"),
+    [
+        ("torch", None, False, True),
+        ("torch", ["CPU"], False, True),
+        ("torch", ["CPU", "CUDA"], False, True),
+        ("torch", ["CUDA"], False, False),
+        ("torch", ["CPU"], True, False),
+        ("cuda", None, False, False),
+    ],
+)
+def test_profile_frontend(profiler, activities, ignore_frontend, expected, tmp_path):
+    config = ProfilerConfig(
+        profiler=profiler,
+        torch_profiler_dir=str(tmp_path) if profiler == "torch" else "",
+        torch_profiler_activities=activities,
+        ignore_frontend=ignore_frontend,
+    )
+
+    assert config.profile_frontend is expected
+
+
+@pytest.mark.parametrize(
     ("device_type", "activities"),
     [
         ("cuda", ["XPU"]),
@@ -256,14 +280,58 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
         patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"),
         patch("vllm.profiler.wrapper.TorchProfilerWrapper") as wrapper,
     ):
-        worker.profile()
+        worker.profile(
+            profile_prefix="first",
+            delay_iterations=5,
+            max_iterations=2,
+        )
         worker.profile(is_start=False)
-        worker.profile()
+        worker.profile(profile_prefix="second")
 
     assert worker.profiler is wrapper.return_value
     wrapper.assert_called_once()
-    assert wrapper.return_value.start.call_count == 2
+    assert wrapper.return_value.set_output_name.call_args_list == [
+        call("first_rank0"),
+        call("second_rank0"),
+    ]
+    assert wrapper.return_value.start.call_args_list == [
+        call(delay_iterations=5, max_iterations=2),
+        call(delay_iterations=None, max_iterations=None),
+    ]
     wrapper.return_value.stop.assert_called_once_with()
+
+
+def test_executor_profile_only_forwards_supplied_override_kwargs():
+    executor = MagicMock()
+
+    Executor.profile(executor, True, "default")
+    Executor.profile(
+        executor,
+        True,
+        "bounded",
+        delay_iterations=5,
+        max_iterations=2,
+    )
+
+    assert executor.collective_rpc.call_args_list == [
+        call("profile", args=(True, "default"), kwargs=None),
+        call(
+            "profile",
+            args=(True, "bounded"),
+            kwargs={"delay_iterations": 5, "max_iterations": 2},
+        ),
+    ]
+
+
+def test_worker_rejects_invalid_profile_prefix():
+    worker = object.__new__(Worker)
+    worker.profiler = None
+    worker.profiler_config = ProfilerConfig(
+        profiler="torch", torch_profiler_dir="/tmp/mock"
+    )
+
+    with pytest.raises(ValueError, match="profile_prefix"):
+        worker.profile(profile_prefix="../trace")
 
 
 def test_immediate_start_stop(default_profiler_config):
@@ -386,19 +454,38 @@ def test_delayed_start_and_max_iters(default_profiler_config):
     assert profiler.stop_call_count == 1
 
 
-def test_idempotency(default_profiler_config):
-    """Test that calling start/stop multiple times doesn't break logic."""
+def test_duplicate_start_is_rejected(default_profiler_config):
     profiler = ConcreteWorkerProfiler(default_profiler_config)
 
-    # Double Start
     profiler.start()
-    profiler.start()
-    assert profiler.start_call_count == 1  # Should only start once
+    with pytest.raises(ProfilerAlreadyActiveError):
+        profiler.start()
+    assert profiler.start_call_count == 1
 
-    # Double Stop
     profiler.stop()
     profiler.stop()
-    assert profiler.stop_call_count == 1  # Should only stop once
+    assert profiler.stop_call_count == 1
+
+
+def test_session_bounds_override_and_reset_to_defaults():
+    profiler = ConcreteWorkerProfiler(
+        ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/tmp/mock",
+            delay_iterations=3,
+            max_iterations=4,
+        )
+    )
+
+    profiler.start(delay_iterations=1, max_iterations=2)
+    assert profiler._delay_iters == 1
+    assert profiler._max_iters == 2
+    profiler.stop()
+
+    profiler.start()
+    assert profiler._delay_iters == 3
+    assert profiler._max_iters == 4
+    profiler.stop()
 
 
 def test_step_inactive(default_profiler_config):
@@ -844,7 +931,8 @@ class TestProtonProfilerWrapper:
         wrapper, proton = make_proton_wrapper(tmp_path, proton)
 
         wrapper.start()
-        wrapper.start()
+        with pytest.raises(ProfilerAlreadyActiveError):
+            wrapper.start()
         wrapper.stop()
         wrapper.start()
         wrapper.stop()
@@ -959,7 +1047,8 @@ class TestProtonProfilerWrapper:
         wrapper.set_output_name("first")
         wrapper.start()
         wrapper.set_output_name("duplicate")
-        wrapper.start()
+        with pytest.raises(ProfilerAlreadyActiveError):
+            wrapper.start()
         for _ in range(delay):
             wrapper.step()
         wrapper.stop()
@@ -1072,7 +1161,9 @@ def test_gpu_worker_creates_proton_profiler():
         Worker.profile(worker)
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
-    worker.profiler.start.assert_called_once_with()
+    worker.profiler.start.assert_called_once_with(
+        delay_iterations=None, max_iterations=None
+    )
 
 
 @_requires_cuda_for_proton
@@ -1118,7 +1209,9 @@ def test_gpu_worker_reuses_cuda_graph_proton_session():
         Worker.profile(worker, is_start=False)
 
     worker.profiler.set_output_name.assert_called_once_with("first_rank1")
-    worker.profiler.start.assert_called_once_with()
+    worker.profiler.start.assert_called_once_with(
+        delay_iterations=None, max_iterations=None
+    )
     worker.profiler.stop.assert_called_once_with()
 
 

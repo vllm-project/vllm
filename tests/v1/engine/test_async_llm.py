@@ -4,6 +4,7 @@
 import asyncio
 import time
 from contextlib import ExitStack
+from http import HTTPStatus
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 import vllm.v1.engine.async_llm as async_llm_module
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.config import VllmConfig
+from vllm.config import ProfilerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -20,7 +21,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import ProfilerAlreadyActiveError, VLLMValidationError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -93,6 +94,7 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
     vllm_config.scheduler_config.stream_interval = 1
     vllm_config.profiler_config.profiler = "cuda"
     vllm_config.profiler_config.ignore_frontend = False
+    vllm_config.profiler_config.profile_frontend = False
     engine_core = _mock_async_llm_dependencies(monkeypatch)
 
     engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
@@ -104,7 +106,9 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
     asyncio.run(profile())
 
     assert engine.profiler is None
-    engine_core.profile_async.assert_has_awaits([call(True, None), call(False)])
+    engine_core.profile_async.assert_has_awaits(
+        [call(True, None, None, None), call(False)]
+    )
 
 
 def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
@@ -116,6 +120,7 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     vllm_config.profiler_config.profiler = "torch"
     vllm_config.profiler_config.ignore_frontend = False
     vllm_config.profiler_config.torch_profiler_activities = ["CUDA"]
+    vllm_config.profiler_config.profile_frontend = False
     _mock_async_llm_dependencies(monkeypatch)
     profiler = MagicMock()
     monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
@@ -124,6 +129,64 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
 
     assert engine.profiler is None
     profiler.assert_not_called()
+
+
+def test_profile_forwards_session_overrides_and_rejects_duplicate_start(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config.profiler_config.profile_frontend = False
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    async def profile():
+        await engine.start_profile(
+            "session",
+            delay_iterations=5,
+            max_iterations=2,
+        )
+        with pytest.raises(ProfilerAlreadyActiveError) as exc_info:
+            await engine.start_profile("duplicate")
+        assert exc_info.value.http_status == HTTPStatus.CONFLICT
+        await engine.stop_profile()
+
+    asyncio.run(profile())
+
+    engine_core.profile_async.assert_has_awaits(
+        [call(True, "session", 5, 2), call(False)]
+    )
+
+
+def test_frontend_profiler_ignores_worker_iteration_bounds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config.profiler_config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_activities=["CPU", "CUDA"],
+        delay_iterations=5,
+        max_iterations=2,
+        wait_iterations=3,
+        warmup_iterations=1,
+    )
+    _mock_async_llm_dependencies(monkeypatch)
+    profiler = MagicMock()
+    monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    frontend_config = profiler.call_args.args[0]
+    assert frontend_config.delay_iterations == 0
+    assert frontend_config.max_iterations == 0
+    assert frontend_config.wait_iterations == 0
+    assert frontend_config.warmup_iterations == 0
+    assert engine.profiler is profiler.return_value
 
 
 async def generate(

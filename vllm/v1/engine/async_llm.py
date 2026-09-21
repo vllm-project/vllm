@@ -13,6 +13,8 @@ import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.config.kv_events import KVEventsConfig
+from vllm.config.profiler import validate_profile_prefix
+from vllm.config.utils import replace
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -23,6 +25,7 @@ from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
+    ProfilerAlreadyActiveError,
     QueueOverflowError,
     VLLMClientError,
     VLLMValidationError,
@@ -208,21 +211,32 @@ class AsyncLLM(EngineClient):
             pass
 
         self.profiler = profiler
-        configured_activities = vllm_config.profiler_config.torch_profiler_activities
-        if (
-            vllm_config.profiler_config.profiler == "torch"
-            and not vllm_config.profiler_config.ignore_frontend
-            and (configured_activities is None or "CPU" in configured_activities)
-        ):
+        self._frontend_profiler_injected = profiler is not None
+        self._frontend_profiler_enabled = (
+            self._frontend_profiler_injected
+            or vllm_config.profiler_config.profile_frontend is True
+        )
+        self._frontend_profiler_running = False
+        self._profile_session_active = False
+        if self._frontend_profiler_enabled and not self._frontend_profiler_injected:
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
                 profiler_dir,
             )
-            worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
-            self.profiler = TorchProfilerWrapper(
+            self._frontend_profiler_worker_name = (
+                f"{socket.gethostname()}_{os.getpid()}.async_llm"
+            )
+            frontend_profiler_config = replace(
                 vllm_config.profiler_config,
-                worker_name=worker_name,
+                delay_iterations=0,
+                max_iterations=0,
+                wait_iterations=0,
+                warmup_iterations=0,
+            )
+            self.profiler = TorchProfilerWrapper(
+                frontend_profiler_config,
+                worker_name=self._frontend_profiler_worker_name,
                 local_rank=0,
                 activities=["CPU"],
             )
@@ -1055,17 +1069,44 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
-    async def start_profile(self, profile_prefix: str | None = None) -> None:
-        coros = [self.engine_core.profile_async(True, profile_prefix)]
-        if self.profiler is not None:
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        if self._profile_session_active:
+            raise ProfilerAlreadyActiveError()
+        if profile_prefix is not None:
+            validate_profile_prefix(profile_prefix)
+
+        self._profile_session_active = True
+        coros = [
+            self.engine_core.profile_async(
+                True,
+                profile_prefix,
+                delay_iterations,
+                max_iterations,
+            )
+        ]
+        if self.profiler is not None and not self._frontend_profiler_running:
+            if not self._frontend_profiler_injected:
+                worker_name = self._frontend_profiler_worker_name
+                if profile_prefix is not None:
+                    worker_name = f"{profile_prefix}_{worker_name}"
+                self.profiler.set_output_name(worker_name)
             coros.append(asyncio.to_thread(self.profiler.start))
         await asyncio.gather(*coros)
+        self._frontend_profiler_running = self.profiler is not None
 
     async def stop_profile(self) -> None:
         coros = [self.engine_core.profile_async(False)]
-        if self.profiler is not None:
+        if self.profiler is not None and self._frontend_profiler_running:
             coros.append(asyncio.to_thread(self.profiler.stop))
         await asyncio.gather(*coros)
+        self._frontend_profiler_running = False
+        self._profile_session_active = False
 
     async def reset_mm_cache(self) -> None:
         # Join the background MM warmup first: the mm_processor_cache is not
