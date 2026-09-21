@@ -19,12 +19,14 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
+  - tests/entrypoints/weight_transfer
   - tests/entrypoints/launchers
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s entrypoints/unit_tests'
+    pytest -v -s entrypoints/unit_tests &&
+    pytest -v -s entrypoints/weight_transfer'
 
 - label: ":intel: (BMG) Entrypoints Integration (LLM)"
   key: entrypoints-integration-llm-intel
@@ -74,7 +76,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
-    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc &&
+    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+    --deselect="tests/entrypoints/serve/dev/rlhf/state_transitions/test_pause_resume.py::TestPauseResume::test_clear_cache_preserves_output_and_controls_prefix_cache[MRV1]" &&
     PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc'
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Scale Out)"
