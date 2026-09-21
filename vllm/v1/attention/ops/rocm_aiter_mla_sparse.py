@@ -2670,7 +2670,6 @@ def _sparse_attn_decode_gfx950_partial_kernel(
         extra_start = 0
         extra_len = 0
 
-
     if ADAPTIVE_SPLITS:
         main_start = tl.load(main_indptr_ptr + query_idx)
         main_end = tl.load(main_indptr_ptr + query_idx + 1)

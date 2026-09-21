@@ -1258,9 +1258,7 @@ def test_sparse_attn_decode_gfx950_derives_exact_direct_lengths(monkeypatch) -> 
             q=q,
             main_cache=main_cache,
             main_indices=main_indices.reshape(num_queries, 0),
-            main_lengths=torch.zeros(
-                num_queries, dtype=torch.int32, device=device
-            ),
+            main_lengths=torch.zeros(num_queries, dtype=torch.int32, device=device),
             scale=HEAD_DIM**-0.5,
             attn_sink=None,
             nope_head_dim=NOPE_HEAD_DIM,
