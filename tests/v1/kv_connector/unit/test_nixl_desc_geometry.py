@@ -23,7 +23,7 @@ import torch
 from .utils import create_vllm_config
 
 
-def _make_packed_mla_worker(
+def _make_packed_mla_view_worker(
     layouts,
     block_stride,
     *,
@@ -110,7 +110,7 @@ def test_packed_mla_pp1_preserves_whole_row_transfers(push, num_layers):
 
     layouts = {f"L{i}": (i * 128, 128) for i in range(num_layers)}
     stride = num_layers * 128
-    worker, raw = _make_packed_mla_worker(layouts, stride, push=push)
+    worker, raw = _make_packed_mla_view_worker(layouts, stride, push=push)
     assert worker._registered_descs == [[(raw.data_ptr(), raw.nbytes, 0, "")]]
     assert worker.src_blocks_data.tolist() == [
         [raw.data_ptr() + block * stride, stride, 0] for block in range(4)
@@ -133,13 +133,13 @@ def test_packed_mla_pp1_preserves_whole_row_transfers(push, num_layers):
 def test_packed_push_compatibility_hash_uses_all_backends_in_stable_order(
     remote_backends, compatible
 ):
-    producer, _ = _make_packed_mla_worker(
+    producer, _ = _make_packed_mla_view_worker(
         {"L0": (0, 128)},
         128,
         pp_size=2,
         backend_names=("FLASHMLA", "INDEXER"),
     )
-    consumer, _ = _make_packed_mla_worker(
+    consumer, _ = _make_packed_mla_view_worker(
         {"L0": (0, 128)}, 128, backend_names=remote_backends
     )
     assert (producer.compat_hash == consumer.compat_hash) is compatible
@@ -155,13 +155,13 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
 
     # Different cache groups overlay pages of different sizes at the same address.
     # PP also changes both the placement and the stride of the matching D pages.
-    producer, p_raw = _make_packed_mla_worker(
+    producer, p_raw = _make_packed_mla_view_worker(
         {"L2": (0, 128), "L2.swa": (0, 64), "L3": (128, 64)},
         192,
         num_blocks=p_num_blocks,
         pp_size=2,
     )
-    consumer, d_raw = _make_packed_mla_worker(
+    consumer, d_raw = _make_packed_mla_view_worker(
         {"L0": (0, 128), "L2": (128, 128), "L2.swa": (0, 64), "L3": (64, 64)},
         256,
         num_blocks=d_num_blocks,
@@ -218,7 +218,7 @@ def test_packed_mla_rejects_unequal_block_sizes_before_peer_registration(
         NixlAgentMetadata,
     )
 
-    producer, _ = _make_packed_mla_worker({"L0": (0, 128)}, 128, pp_size=2)
+    producer, _ = _make_packed_mla_view_worker({"L0": (0, 128)}, 128, pp_size=2)
     metadata = msgspec.msgpack.decode(
         producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
