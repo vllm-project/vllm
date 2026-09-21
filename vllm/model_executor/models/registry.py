@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Whenever you add an architecture to this page, please also update
+"""Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
 
@@ -350,11 +349,19 @@ _MULTIMODAL_MODELS = {
         "AudioFlamingo3ForConditionalGeneration",
     ),
     "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
+    "BailingMoeV3VLForConditionalGeneration": (
+        "bailing_moe_v3_vl",
+        "BailingMoeV3VLForConditionalGeneration",
+    ),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "Cohere2VisionForConditionalGeneration": (
         "cohere2_vision",
         "Cohere2VisionForConditionalGeneration",
+    ),
+    "CohereCompassForConditionalGeneration": (
+        "cohere_compass",
+        "CohereCompassForConditionalGeneration",
     ),
     "Cosmos3ForConditionalGeneration": ("cosmos3", "Cosmos3ForConditionalGeneration"),
     "Cosmos3EdgeForConditionalGeneration": (
@@ -367,6 +374,10 @@ _MULTIMODAL_MODELS = {
     "DeepseekV4ForConditionalGeneration": (
         "vllm.models.deepseek_v4",
         "DeepseekV4ForConditionalGeneration",
+    ),
+    "DeepseekV41ForCausalLM": (
+        "vllm.models.deepseek_v41",
+        "DeepseekV41ForCausalLM",
     ),
     "Dots3NoteForCausalLM": (
         "vllm.models.dots3_note",
@@ -520,6 +531,9 @@ _MULTIMODAL_MODELS = {
     "MossAudioModel": ("moss_audio", "MossAudioModel"),
     "HfMoondream": ("moondream3", "Moondream3ForCausalLM"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
@@ -629,6 +643,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "MuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DFlashMuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
+    "DSparkV41DraftModel": (
+        "vllm.models.deepseek_v41",
+        "DSparkDeepseekV4ForCausalLM",
+    ),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "Qwen3OmniDSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "K3DSparkModel": (
@@ -694,6 +712,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo3ForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -908,9 +927,7 @@ class _BaseRegisteredModel(ABC):
 
 @dataclass(frozen=True)
 class _RegisteredModel(_BaseRegisteredModel):
-    """
-    Represents a model that has already been imported in the main process.
-    """
+    """Represents a model that has already been imported in the main process."""
 
     interfaces: _ModelInfo
     model_cls: type[nn.Module]
@@ -931,9 +948,7 @@ class _RegisteredModel(_BaseRegisteredModel):
 
 @dataclass(frozen=True)
 class _LazyRegisteredModel(_BaseRegisteredModel):
-    """
-    Represents a model that has not been imported in the main process.
-    """
+    """Represents a model that has not been imported in the main process."""
 
     module_name: str
     class_name: str
@@ -998,7 +1013,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             return None
 
     def _save_modelinfo_to_cache(self, mi: _ModelInfo, module_hash: str) -> None:
-        """save dictionary json file to cache"""
+        """Save dictionary json file to cache."""
         from vllm.model_executor.model_loader.weight_utils import atomic_writer
 
         try:
@@ -1108,8 +1123,7 @@ class _ModelRegistry:
         model_arch: str,
         model_cls: type[nn.Module] | str,
     ) -> None:
-        """
-        Register an external model to be used in vLLM.
+        """Register an external model to be used in vLLM.
 
         `model_cls` can be either:
 
@@ -1253,7 +1267,12 @@ class _ModelRegistry:
                     "'auto_map' (relevant if the model is custom)."
                 )
 
-        if not model_module.is_backend_compatible():
+        assert issubclass(model_module, transformers.PreTrainedModel)
+        transformers_model_cls: type[transformers.PreTrainedModel] = model_module
+        if not (
+            transformers_model_cls.is_backend_compatible()
+            or transformers_model_cls._can_set_attn_implementation()
+        ):
             if model_config.model_impl != "transformers":
                 return None
 
@@ -1309,6 +1328,7 @@ class _ModelRegistry:
                     return (model_info, arch)
         elif model_config.model_impl == "terratorch":
             model_info = self._try_inspect_model_cls("Terratorch")
+            assert model_info is not None
             return (model_info, "Terratorch")
 
         # Fallback to transformers impl (after resolving convert_type)

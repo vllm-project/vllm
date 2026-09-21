@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
@@ -23,11 +24,16 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     convert_to_unquantized_kernel_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
+    unquantized_round_up_hidden_size_and_intermediate_size,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -48,6 +54,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
             moe_config=self.moe,
         )
+        # MoonEP replaces the named parameters with its [E+B] gate/down
+        # split and keeps the up projection outside the parameter registry,
+        # so a pre-processed (e.g. ipc_cache) load cannot reconstruct it.
+        self.supports_pre_processed_weights = (
+            self.unquantized_backend != UnquantizedMoeBackend.MOONEP
+        )
 
     @property
     def supports_eplb(self) -> bool:
@@ -62,10 +74,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        unpadded_intermediate = self.moe.intermediate_size_per_partition_unpadded
+        assert unpadded_intermediate is not None
         if self.moe.is_act_and_mul:
             w13_up_dim = 2 * intermediate_size_per_partition
         else:
             w13_up_dim = intermediate_size_per_partition
+        unpadded_hidden = self.moe.hidden_dim_unpadded
+        assert unpadded_hidden is not None
+        unpadded_up = unpadded_intermediate * (2 if self.moe.is_act_and_mul else 1)
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.empty(
@@ -78,6 +95,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
+        w13_weight.weight_loader_numel = num_experts * unpadded_up * unpadded_hidden
         if self.moe.has_bias:
             w13_bias = torch.nn.Parameter(
                 torch.zeros(num_experts, w13_up_dim, dtype=params_dtype),
@@ -85,6 +103,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
             layer.register_parameter("w13_bias", w13_bias)
             set_weight_attrs(w13_bias, extra_weight_attrs)
+            w13_bias.weight_loader_numel = num_experts * unpadded_up
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(
             torch.empty(
@@ -97,6 +116,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        w2_weight.weight_loader_numel = (
+            num_experts * unpadded_hidden * unpadded_intermediate
+        )
         if self.moe.has_bias:
             w2_bias = torch.nn.Parameter(
                 torch.zeros(num_experts, hidden_size, dtype=params_dtype),
@@ -104,6 +126,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
+            w2_bias.weight_loader_numel = num_experts * unpadded_hidden
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size,
+            intermediate_size_per_partition,
+            act_dtype,
+            moe_parallel_config,
+        )
+        return unquantized_round_up_hidden_size_and_intermediate_size(
+            self.unquantized_backend, hidden_size, intermediate_size_per_partition
+        )
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
@@ -135,6 +175,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             moe_config=layer.moe_config,
             w13_weight=w13,
             w2_weight=w2,
+            layer=layer,
         )
         # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
@@ -153,27 +194,36 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # optional w{13,2}_bias references and SwiGLU gate params. Since
             # weight updates mutate those bias tensors in place, the kernel
             # does not need to be re-built.
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            assert self.moe_quant_config is not None
-            assert self.experts_cls is not None
-            self.moe_kernel = make_unquantized_moe_kernel(
-                quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                backend=self.unquantized_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-            )
+            self._init_moe_kernel(layer)
 
-            if self.unquantized_backend == UnquantizedMoeBackend.CPU:
-                # The CPU experts need the layer itself for the setup that
-                # convert_to_unquantized_kernel_format cannot express, since
-                # it only sees the two weight tensors: padding and prepacking
-                # into the grouped-gemm layout (bias included), and capturing
-                # the router config that monolithic apply() cannot carry.
-                self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+            # No-op by default. Experts that need the layer itself for setup
+            # convert_to_unquantized_kernel_format cannot express override
+            # it: CPU prepacks into its grouped-gemm layout and captures the
+            # router config; MoonEP picks up the [E+B] weight layout for
+            # prefetch and the up projection.
+            assert self.moe_kernel is not None
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
+    def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
+        """Build the MoE kernel from the layer's current (shuffled) weights."""
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_unquantized_moe_kernel(
+            quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            backend=self.unquantized_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
+
+        if is_weights_pre_processed():
+            # Weights are already in runtime format; rebuild the kernel only.
+            self._init_moe_kernel(layer)
+            return
 
         # Padding may allocate a same-shaped strided view. Copy it back instead
         # of rebinding `.data`, since CUDA graphs capture the parameter storage

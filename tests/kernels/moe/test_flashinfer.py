@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import multiprocessing
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -21,7 +24,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    view_as_block_major_k,
+)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+    TrtLlmFp8ExpertsModular,
     TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
@@ -30,6 +37,15 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
@@ -422,3 +438,329 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     assert w13_converted.shape[0] == num_experts
     assert w2_converted.shape[0] == num_experts
+    assert w13_converted.data_ptr() == w13.data_ptr()
+    assert w2_converted.data_ptr() == w2.data_ptr()
+
+
+@pytest.mark.parametrize("is_gated_act_gemm", [True, False])
+def test_convert_moe_weights_to_flashinfer_trtllm_block_layout_values(
+    is_gated_act_gemm,
+):
+    from flashinfer.fused_moe.core import (
+        _maybe_get_cached_w3_w1_permute_indices,
+        get_w2_permute_indices_with_cache,
+    )
+
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    )
+
+    num_experts, intermediate, hidden = 2, 256, 256
+    w13_multiplier = 2 if is_gated_act_gemm else 1
+    w13 = torch.randn(
+        (num_experts, w13_multiplier * intermediate, hidden),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    w2 = torch.randn(
+        (num_experts, hidden, intermediate),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    def _reference_block_layout(
+        weight: torch.Tensor,
+        is_w13: bool,
+        cache: dict[torch.Size, torch.Tensor],
+    ) -> torch.Tensor:
+        outputs = []
+        for expert in weight:
+            expert_uint8 = expert.view(torch.uint8)
+            if is_w13:
+                indices = _maybe_get_cached_w3_w1_permute_indices(
+                    cache,
+                    expert_uint8,
+                    128,
+                    is_gated_act_gemm=is_gated_act_gemm,
+                )
+                if is_gated_act_gemm:
+                    indices = (indices + expert_uint8.shape[0] // 2) % (
+                        expert_uint8.shape[0]
+                    )
+            else:
+                indices = get_w2_permute_indices_with_cache(
+                    cache,
+                    expert_uint8,
+                    128,
+                )
+            rows, cols = expert_uint8.shape
+            blocks = expert_uint8.view(rows, cols // 128, 128).permute(1, 0, 2)
+            outputs.append(torch.index_select(blocks, 1, indices.to(weight.device)))
+        return torch.stack(outputs).view(torch.bfloat16)
+
+    reference_cache: dict[torch.Size, torch.Tensor] = {}
+    expected_w13 = _reference_block_layout(w13, is_w13=True, cache=reference_cache)
+    expected_w2 = _reference_block_layout(w2, is_w13=False, cache=reference_cache)
+    w13_ptr = w13.data_ptr()
+    w2_ptr = w2.data_ptr()
+
+    actual_w13, actual_w2 = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        {},
+        w13,
+        w2,
+        is_gated_act_gemm=is_gated_act_gemm,
+    )
+
+    assert actual_w13.data_ptr() == w13_ptr
+    assert actual_w2.data_ptr() == w2_ptr
+    assert torch.equal(actual_w13, expected_w13)
+    assert torch.equal(actual_w2, expected_w2)
+
+
+def _make_unquantized_flashinfer_test_layer(
+    monkeypatch, intermediate, is_gated, *, device="cuda"
+):
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=256,
+        intermediate_size=intermediate,
+        activation=MoEActivation.SILU if is_gated else MoEActivation.RELU2_NO_MUL,
+    )
+    moe_config.intermediate_size_per_partition = (intermediate + 127) // 128 * 128
+    method = object.__new__(UnquantizedFusedMoEMethod)
+    method.moe = moe_config
+    method.unquantized_backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
+    method.moe_kernel = None
+    mock_kernel = MagicMock()
+    monkeypatch.setattr(
+        method,
+        "_init_moe_kernel",
+        lambda _: setattr(method, "moe_kernel", mock_kernel),
+    )
+
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+    with torch.device(device):
+        method.create_weights(
+            layer,
+            num_experts=2,
+            hidden_size=256,
+            intermediate_size_per_partition=moe_config.intermediate_size_per_partition,
+            params_dtype=torch.bfloat16,
+        )
+    return method, layer
+
+
+@pytest.mark.parametrize("intermediate", [192, 256])
+@pytest.mark.parametrize("is_gated", [True, False])
+def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
+    monkeypatch, intermediate, is_gated
+):
+    """Each raw reload clears padding left dirty by prior in-place conversion."""
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    )
+
+    method, layer = _make_unquantized_flashinfer_test_layer(
+        monkeypatch, intermediate, is_gated
+    )
+    w13_shape, w2_shape = layer.w13_weight.shape, layer.w2_weight.shape
+    padded = w2_shape[-1]
+    w13_ptr = layer.w13_weight.data_ptr()
+    w2_ptr = layer.w2_weight.data_ptr()
+    load_numel = (
+        layer.w13_weight.weight_loader_numel,
+        layer.w2_weight.weight_loader_numel,
+    )
+
+    for _ in range(2):
+        reloaded_w13 = torch.randn_like(layer.w13_weight)
+        reloaded_w2 = torch.randn_like(layer.w2_weight)
+        reloaded_w13[:, intermediate:padded].zero_()
+        if is_gated:
+            reloaded_w13[:, padded + intermediate :].zero_()
+        reloaded_w2[:, :, intermediate:].zero_()
+        expected_w13, expected_w2 = (
+            convert_moe_weights_to_flashinfer_trtllm_block_layout(
+                {},
+                reloaded_w13.clone(),
+                reloaded_w2.clone(),
+                is_gated_act_gemm=is_gated,
+            )
+        )
+
+        # The loader writes only logical checkpoint slices, not padding.
+        layer.w13_weight.fill_(float("nan"))
+        layer.w2_weight.fill_(float("nan"))
+        layer.w13_weight[:, :intermediate].copy_(reloaded_w13[:, :intermediate])
+        if is_gated:
+            layer.w13_weight[:, padded : padded + intermediate].copy_(
+                reloaded_w13[:, padded : padded + intermediate]
+            )
+        layer.w2_weight[:, :, :intermediate].copy_(reloaded_w2[:, :, :intermediate])
+        method.process_weights_after_loading(layer)
+
+        assert layer.w13_weight.shape == w13_shape
+        assert layer.w2_weight.shape == w2_shape
+        assert layer.w13_weight.data_ptr() == w13_ptr
+        assert layer.w2_weight.data_ptr() == w2_ptr
+        assert (
+            layer.w13_weight.weight_loader_numel,
+            layer.w2_weight.weight_loader_numel,
+        ) == load_numel
+        kernel_w13 = view_as_block_major_k(layer.w13_weight)
+        kernel_w2 = view_as_block_major_k(layer.w2_weight)
+        assert torch.equal(kernel_w13, expected_w13)
+        assert torch.equal(kernel_w2, expected_w2)
+
+
+def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+    from vllm.model_executor.utils import weights_already_processed
+
+    torch.accelerator.set_device_index(device_index)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        method, layer = _make_unquantized_flashinfer_test_layer(
+            monkeypatch, 192, is_gated=True, device="meta"
+        )
+        loader = object.__new__(IpcModelLoader)
+        loader.mode = mode
+        loader._apply_entries(layer, entries, {}, device_index)
+        pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
+
+        # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.
+        with weights_already_processed():
+            method.process_weights_after_loading(layer)
+        assert method.moe_kernel is not None
+        actual = (
+            view_as_block_major_k(layer.w13_weight),
+            view_as_block_major_k(layer.w2_weight),
+        )
+        for weight, reference, pointer in zip(actual, expected, pointers):
+            assert weight.data_ptr() == pointer
+            assert torch.equal(weight.cpu(), reference)
+        # Cross-process addresses need not match; writes prove sharing/isolation.
+        with torch.no_grad():
+            for weight in actual:
+                weight.fill_(1.0)
+        torch.accelerator.synchronize()
+
+
+@pytest.mark.parametrize("cache_ndim", [3, 4])
+@pytest.mark.parametrize("mode", ["copy", "zero_copy"])
+def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
+    monkeypatch, cache_ndim, mode
+):
+    """A spawned IPC consumer restores views without transient method state."""
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
+
+    method, layer = _make_unquantized_flashinfer_test_layer(
+        monkeypatch, 192, is_gated=True, device="meta"
+    )
+    packed = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        {},
+        torch.randn_like(layer.w13_weight, device="cuda"),
+        torch.randn_like(layer.w2_weight, device="cuda"),
+    )
+    expected = [weight.cpu() for weight in packed]
+    entries = {}
+    for name, weight in zip(("w13_weight", "w2_weight"), packed):
+        cached = weight.view_as(getattr(layer, name)) if cache_ndim == 3 else weight
+        entries[name] = TensorEntry.from_tensor(cached, kind="param")
+    consumer = multiprocessing.get_context("spawn").Process(
+        target=_check_flashinfer_ipc_weights,
+        args=(
+            entries,
+            expected,
+            mode,
+            torch.accelerator.current_device_index(),
+        ),
+    )
+    consumer.start()
+    try:
+        # Keep producer allocations alive until the consumer releases its views.
+        consumer.join(timeout=180)
+        assert not consumer.is_alive(), "IPC consumer timed out"
+        assert consumer.exitcode == 0, "IPC consumer failed; see child traceback"
+        for source, reference in zip(packed, expected):
+            expected_source = (
+                torch.ones_like(reference) if mode == "zero_copy" else reference
+            )
+            assert torch.equal(source.cpu(), expected_source)
+    finally:
+        if consumer.is_alive():
+            consumer.terminate()
+            consumer.join(timeout=10)
+            if consumer.is_alive():
+                consumer.kill()
+                consumer.join(timeout=10)
+        consumer.close()
+
+
+@pytest.mark.parametrize(
+    ("weight_key", "activation_key", "activation", "expected"),
+    [
+        (kMxfp8Static, kMxfp8Dynamic, MoEActivation.SILU, True),
+        (kFp8Static128BlockSym, kFp8Dynamic128Sym, MoEActivation.SILU, True),
+        (
+            kFp8Static128BlockSym,
+            kFp8Dynamic128Sym,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            True,
+        ),
+        (kFp8StaticTensorSym, kFp8DynamicTensorSym, MoEActivation.SILU, False),
+        # FlashInfer takes the clamp only with a SwiGLU activation.
+        (
+            kFp8Static128BlockSym,
+            kFp8Dynamic128Sym,
+            MoEActivation.RELU2_NO_MUL,
+            False,
+        ),
+    ],
+)
+def test_trtllm_fp8_swiglu_clamp_support(
+    weight_key: QuantKey,
+    activation_key: QuantKey,
+    activation: MoEActivation,
+    expected: bool,
+):
+    """FlashInfer >= 0.6.18 applies the SwiGLU clamp for both block-scaled
+    kernels with a SwiGLU activation (DeepSeek-V4 sets swiglu_limit); the
+    per-tensor kernel has no clamp, and Relu2 rejects the parameters."""
+
+    class _Experts(TrtLlmFp8ExpertsModular):
+        @staticmethod
+        def _supports_current_device() -> bool:
+            return True
+
+        @staticmethod
+        def _supports_quant_scheme(
+            weight_key: QuantKey | None, activation_key: QuantKey | None
+        ) -> bool:
+            return True
+
+    moe_config = make_dummy_moe_config()
+    moe_config.swiglu_limit = 7.0
+    moe_config.activation = activation
+
+    supported, reason = _Experts.is_supported_config(
+        _Experts,
+        moe_config,
+        weight_key,
+        activation_key,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported == expected, reason
+    if not expected:
+        assert "SwiGLU" in reason
