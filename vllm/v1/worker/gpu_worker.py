@@ -393,20 +393,38 @@ class Worker(WorkerBase):
                 "call wake_up(tags=['weights']) first."
             )
 
-    def _abort_weight_update_session(self) -> None:
-        """Drop the active update session after a refused update or finish.
+    def _abort_weight_update_session(self, is_draft: bool | None = None) -> None:
+        """Drop the active update session after a refused or failed update.
 
-        The trainer has to wake the weights and start the update again from
-        ``start_weight_update``: after a level-2 sleep the chunks already
-        received are gone, so the session cannot simply be resumed.
+        The engine gets to put back whatever it moved aside while it still
+        points at the session's target model; a failure there is logged, so the
+        error that ended the update stays the one the caller sees. The trainer
+        has to start again from ``start_weight_update``: chunks already received
+        are not replayed, and after a level-2 sleep they are gone.
+
+        Args:
+            is_draft: Whether the session targets the draft model. Defaults to
+                the active session's target; start_weight_update passes it
+                because its session is not recorded yet.
+
         """
         assert self.weight_transfer_engine is not None
+        if is_draft is None:
+            is_draft = self._weight_update_is_draft
         self._weight_update_active = False
-        self.weight_transfer_engine.reset_weight_update_target()
-        if self._weight_update_is_draft and (
-            (draft_model := self.get_draft_model()) is not None
-        ):
-            restore_quantized_lm_heads(draft_model, refresh=False)
+        try:
+            self.weight_transfer_engine.abort_weight_update()
+        # A BaseException (e.g. KeyboardInterrupt) is left to propagate; the
+        # target is still reset in `finally`.
+        except Exception:
+            logger.exception(
+                "Could not restore the model after the failed weight update; "
+                "it may be left partially loaded."
+            )
+        finally:
+            self.weight_transfer_engine.reset_weight_update_target()
+            if is_draft and (draft_model := self.get_draft_model()) is not None:
+                restore_quantized_lm_heads(draft_model, refresh=False)
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
@@ -1600,9 +1618,7 @@ class Worker(WorkerBase):
                 share_source_lm_heads(draft_model)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
-            self.weight_transfer_engine.reset_weight_update_target()
-            if draft_model is not None:
-                restore_quantized_lm_heads(draft_model, refresh=False)
+            self._abort_weight_update_session(is_draft=is_draft)
             raise
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
@@ -1646,12 +1662,7 @@ class Worker(WorkerBase):
                     local_update_info = update_info
                 self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
-                self._weight_update_active = False
-                self.weight_transfer_engine.reset_weight_update_target()
-                if self._weight_update_is_draft and (
-                    (draft_model := self.get_draft_model()) is not None
-                ):
-                    restore_quantized_lm_heads(draft_model, refresh=False)
+                self._abort_weight_update_session()
                 raise
 
     def finish_weight_update(self) -> None:
@@ -1672,7 +1683,11 @@ class Worker(WorkerBase):
             raise
 
         with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            except BaseException:
+                self._abort_weight_update_session()
+                raise
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
             if self._weight_update_is_draft and (
