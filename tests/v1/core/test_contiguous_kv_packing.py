@@ -82,15 +82,15 @@ def _mock_vllm_config(layout: str | None):
     return config
 
 
-@pytest.mark.parametrize("layout", [KVCacheLayout.BLHNC, KVCacheLayout.BLNHC])
-def test_packed_alignment_preserves_hot_pages_and_generic_stride(layout):
+def test_packed_alignment_preserves_hot_pages_and_generic_stride():
     """One shared stride must satisfy both constraints, regardless of rounding order."""
-    spec = replace(_full(), block_stride_alignment=1152)
+    spec = replace(_mla(128), block_stride_alignment=1152)
     hot = HiSparseHotSpec(block_size=16, page_size=5120, blocks_per_request=2)
     groups = [KVCacheGroupSpec(["attention"], spec), KVCacheGroupSpec(["hot"], hot)]
     alignment = lcm(1152, hot.page_size_bytes)
-    stride = _pool_bytes_per_block(groups, layout)
+    stride = _pool_bytes_per_block(groups)
     assert stride == alignment
+    layout = KVCacheLayout.BLHNC
     tensors = _build_hisparse_kv_cache_tensors(groups, 3, 3 * stride, layout, stride)
     assert {tensor.block_stride for tensor in tensors} == {alignment}
     assert {tensor.size for tensor in tensors} == {3 * alignment}

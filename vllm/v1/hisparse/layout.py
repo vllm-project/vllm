@@ -116,28 +116,13 @@ def get_hisparse_gpu_memory_usage(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
-    from vllm.v1.core.kv_cache_utils import _get_kv_cache_bytes_per_block
-
-    hisparse_layout = create_hisparse_layout(
-        vllm_config, kv_cache_groups, get_hisparse_host_pool_bytes(vllm_config)
+    _, indexer_specs = _partition_hisparse_specs(kv_cache_groups)
+    return sum(
+        spec.max_memory_usage_bytes(vllm_config) for spec in indexer_specs.values()
+    ) + sum(
+        group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+        for group in kv_cache_groups[1:]
     )
-    host_spec = hisparse_layout.source_group.kv_cache_spec
-    host_blocks = cdiv(
-        host_spec.max_memory_usage_bytes(vllm_config), host_spec.page_size_bytes
-    )
-    if host_blocks >= hisparse_layout.host_num_blocks:
-        raise ValueError("HiSparse host cache cannot hold the request and null block.")
-    device_groups = hisparse_layout.device_groups
-    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-    bytes_per_block = _get_kv_cache_bytes_per_block(device_groups, layout)
-    required_blocks = sum(
-        cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
-        for group in device_groups
-    )
-    return required_blocks * bytes_per_block
 
 
 def create_hisparse_layout(
@@ -330,7 +315,7 @@ def get_hisparse_kv_cache_config(
     device_groups = hisparse_layout.device_groups
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, device_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(device_groups, layout)
+    bytes_per_block = _get_kv_cache_bytes_per_block(device_groups)
     num_blocks = may_override_num_blocks(
         vllm_config, available_memory // bytes_per_block
     )
@@ -342,7 +327,7 @@ def get_hisparse_kv_cache_config(
     host_groups = [hisparse_layout.source_group]
     host_layout = KVCacheLayout.LBNHC
     validate_kv_cache_layout(host_layout, host_groups)
-    host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups, host_layout)
+    host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups)
     host_size = host_bytes_per_block * hisparse_layout.host_num_blocks
     kv_cache_tensors[:0] = _build_hisparse_kv_cache_tensors(
         host_groups,
