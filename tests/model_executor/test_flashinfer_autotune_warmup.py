@@ -7,49 +7,13 @@ from typing import Any
 from unittest.mock import Mock, call, patch
 
 import pytest
-import torch
 
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
-    _warmup_flashinfer_mxfp8_tactics,
 )
 
 pytestmark = pytest.mark.cpu_test
-
-
-def test_mxfp8_warmup_executes_cached_tactics_once_per_shape():
-    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
-        FlashInferCutedslMxfp8LinearKernel,
-    )
-
-    kernel = Mock(spec=FlashInferCutedslMxfp8LinearKernel)
-    first = SimpleNamespace(
-        weight=torch.empty(128, 256), quant_method=SimpleNamespace(kernel=kernel)
-    )
-    duplicate = SimpleNamespace(weight=first.weight, quant_method=first.quant_method)
-    other = SimpleNamespace(
-        weight=torch.empty(256, 128), scheme=SimpleNamespace(kernel=kernel)
-    )
-    runner = _make_runner([object(), first, duplicate, other], max_tokens=3)
-    runner.model_config = SimpleNamespace(dtype=torch.bfloat16)
-    observed = []
-    kernel.apply_weights.side_effect = lambda layer, x: observed.append(
-        (id(layer), tuple(x.shape), x.dtype)
-    )
-
-    with patch(
-        "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets",
-        return_value=(1, 2, 3),
-    ) as get_buckets:
-        _warmup_flashinfer_mxfp8_tactics(runner)
-
-    get_buckets.assert_called_once_with(3)
-    assert observed == [
-        (id(layer), (n, layer.weight.shape[0]), torch.bfloat16)
-        for layer in (first, other)
-        for n in (1, 2, 3)
-    ]
 
 
 class _FakeMoERunner:

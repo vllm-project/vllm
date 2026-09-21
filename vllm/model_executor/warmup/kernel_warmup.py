@@ -255,10 +255,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
-    if worker.vllm_config.kernel_config.enable_jit_warmup and has_flashinfer():
-        with torch.inference_mode():
-            _warmup_flashinfer_mxfp8_tactics(worker.model_runner)
-
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
     # and is not a pooling model
@@ -402,37 +398,6 @@ def _run_flashinfer_bf16_autotune_dummy_run(
             randomize_inputs=True,
             **({"skip_attn": True} if skip_attn else {}),
         )
-
-
-def _warmup_flashinfer_mxfp8_tactics(runner: "GPUModelRunner") -> None:
-    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
-        FlashInferCutedslMxfp8LinearKernel,
-    )
-    from vllm.utils.flashinfer import flashinfer_get_hybrid_num_tokens_buckets
-
-    buckets = flashinfer_get_hybrid_num_tokens_buckets(
-        runner.scheduler_config.max_num_batched_tokens
-    )
-    seen = set()
-    for module in runner.get_model().modules():
-        for holder_name in ("quant_method", "scheme"):
-            kernel = getattr(getattr(module, holder_name, None), "kernel", None)
-            if not isinstance(kernel, FlashInferCutedslMxfp8LinearKernel):
-                continue
-            weight = module.weight
-            key = (weight.shape, weight.stride(), weight.device)
-            if key in seen:
-                continue
-            seen.add(key)
-            # Loading cached tactics does not compile their CuTe-DSL kernels.
-            # Execute each bucket once, sharing work across identical layers.
-            for num_tokens in buckets:
-                x = torch.zeros(
-                    (num_tokens, weight.shape[0]),
-                    device=weight.device,
-                    dtype=runner.model_config.dtype,
-                )
-                kernel.apply_weights(module, x)
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
