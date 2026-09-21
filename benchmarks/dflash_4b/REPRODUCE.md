@@ -44,6 +44,9 @@ GPU memory, CPU speed, driver, and dependency differences can affect results.
 The payloads are identical to those used in the original comparison; only random session UUIDs have been replaced by deterministic IDs.
 The dataset comes from OpenAI's `grade-school-math` repository; its MIT license is included in `GSM8K_LICENSE`.
 AIPerf selects the workload using the same inputs-json configuration for every run, with 20 warmups and 200 measured requests.
+Requests set `max_completion_tokens=256` and do not set `ignore_eos=true` in either engine.
+Therefore, 256 is a maximum, not a guaranteed output length: generation can stop earlier on an EOS (end-of-sequence) token.
+Setting `ignore_eos=true` in both engines would enforce generation up to the token limit, but would change the workload from the original comparison.
 Sampling parameters are omitted, matching the original requests; the engines use their model defaults, so this is not a deterministic generation or accuracy test.
 
 Both checkpoints are pinned:
