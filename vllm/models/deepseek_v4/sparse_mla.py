@@ -242,6 +242,11 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 decode_threshold=self.reorder_batch_threshold or 1,
             )
         )
+        # Per-ubatch metadata can carry numpy ints; Triton cannot specialize
+        # numpy scalars, so normalize before they reach the kernel.
+        num_decodes = int(num_decodes)
+        num_decode_tokens = int(num_decode_tokens)
+        num_prefill_tokens = int(num_prefill_tokens)
 
         num_total = num_decode_tokens + num_prefill_tokens
         if num_total == 0:
@@ -321,6 +326,10 @@ def build_c128a_topk_metadata(
     Returns views of the buffers.
     """
     num_tokens = positions.shape[0]
+    # Triton cannot specialize numpy scalars (e.g. from per-ubatch metadata).
+    num_decode_tokens = int(num_decode_tokens)
+    max_compressed_tokens = int(max_compressed_tokens)
+    block_size = int(block_size)
     num_prefill_tokens = num_tokens - num_decode_tokens
     assert max_compressed_tokens % _C128A_TOPK_ALIGNMENT == 0
     assert (
