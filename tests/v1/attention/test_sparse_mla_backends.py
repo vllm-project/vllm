@@ -138,6 +138,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
         req_id_per_token=torch.zeros(1, dtype=torch.int32),
         block_table=torch.zeros((1, 1), dtype=torch.int32),
         block_size=1,
+        num_decode_tokens=1,
     )
     recorded_scale = None
 
@@ -3139,15 +3140,14 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     physical_topk = topk + 10
     valid_counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=device)
     kernel_shapes: list[torch.Size] = []
+    kernel_kwargs: list[dict] = []
 
     def convert_decode(self, *args, **kwargs):  # noqa: ARG001
         return physical_topk, valid_counts
 
-    def prepare_kernel(self, *args, **kwargs):  # noqa: ARG001
-        pass
-
-    def run_kernel(self, q, cache, indices, counts):  # noqa: ARG001
+    def run_kernel(self, q, cache, indices, counts, **kwargs):  # noqa: ARG001
         kernel_shapes.append(q.shape)
+        kernel_kwargs.append(kwargs)
         return q[..., :1], None
 
     cache_handle = SimpleNamespace(
@@ -3162,21 +3162,23 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     )
     impl = object.__new__(FlashInferMLASparseImpl)
     impl.topk_indices_buffer = topk
+    impl.dcp_world_size = 1
     impl.index_group = index_group
     impl.index_group_index = 0
-    impl._prepare_mqa_kernel = MethodType(prepare_kernel, impl)
-    impl._run_mqa_kernel = MethodType(run_kernel, impl)
-    metadata = SimpleNamespace(num_decode_tokens=num_tokens)
+    impl._forward_mqa_kernel = MethodType(run_kernel, impl)
+    metadata = SimpleNamespace(num_decode_tokens=num_tokens, block_size=64)
+    layer = SimpleNamespace(layer_name="mqa")
 
     output, lse = FlashInferMLASparseImpl.forward_mqa(
         impl,
         q,
         torch.empty(1, device=device),
         metadata,
-        SimpleNamespace(),
+        layer,
     )
 
     assert kernel_shapes == [q.shape]
+    assert kernel_kwargs == [{"layer": layer, "block_size": 64, "is_decode": True}]
     assert output.shape == (num_tokens, 2, 1)
     assert lse is None
 
@@ -3197,9 +3199,10 @@ def test_flashattn_hisparse_decode_uses_index_group():
     )
     impl = object.__new__(FlashAttnMLASparseImpl)
     impl.topk_indices_buffer = topk
+    impl.dcp_world_size = 1
     impl.index_group = index_group
     impl.index_group_index = 0
-    impl._run_mqa_kernel = MagicMock(return_value=q_nope[..., :1])
+    impl._forward_mqa_kernel = MagicMock(return_value=(q_nope[..., :1], None))
     metadata = SimpleNamespace(num_decode_tokens=num_tokens, block_size=64)
 
     output, lse = FlashAttnMLASparseImpl.forward_mqa(
@@ -3213,7 +3216,7 @@ def test_flashattn_hisparse_decode_uses_index_group():
     assert output.shape == (num_tokens, 2, 1)
     assert lse is None
     index_group.convert_decode_logical_to_physical_topk.assert_called_once()
-    impl._run_mqa_kernel.assert_called_once()
+    impl._forward_mqa_kernel.assert_called_once()
 
 
 def test_flashinfer_sm120_hisparse_decode_uses_index_group():
@@ -3250,6 +3253,363 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     assert lse is None
     index_group.convert_decode_logical_to_physical_topk.assert_called_once()
     impl._run_mqa_kernel.assert_called_once()
+
+
+@pytest.mark.parametrize("backend", ["fa3", "flashinfer"])
+def test_sparse_mqa_consumes_decode_before_prefill_reuses_indices(monkeypatch, backend):
+    """Preparing a later portion must not overwrite unconsumed decode indices."""
+    import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
+
+    num_tokens, topk_tokens = 4, 128
+    q_nope = torch.zeros(num_tokens, 16, 512)
+    q_rope = torch.zeros(num_tokens, 16, 64)
+    kv_cache = torch.zeros(1, 1, 576)
+    topk_indices = torch.zeros(num_tokens, topk_tokens, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_decode_tokens=2,
+        block_size=1,
+        block_table=torch.zeros((num_tokens, 1), dtype=torch.int32),
+    )
+    physical = torch.full((2, topk_tokens), 3, dtype=torch.int32)
+    counts = torch.full((2,), topk_tokens, dtype=torch.int32)
+    group = object.__new__(HiSparseMLAIndexGroup)
+    group.physical_kv_cache = MagicMock(return_value=kv_cache)
+    group.convert_decode_logical_to_physical_topk = MagicMock(
+        return_value=(physical, counts)
+    )
+    group.cache = MagicMock(
+        return_value=SimpleNamespace(all_context_pages_resident=False)
+    )
+    group.stage_prefill_rows = MagicMock(
+        return_value=(kv_cache, metadata.block_table, torch.zeros(2))
+    )
+
+    def convert_prefill(*args, **kwargs):
+        physical.fill_(7)
+        return physical, counts
+
+    monkeypatch.setattr(
+        sparse_mla, "triton_convert_req_index_to_global_index", convert_prefill
+    )
+
+    lanes: list[bool] = []
+
+    def run_kernel(q, cache, indices, counts, *, is_decode, **kwargs):  # noqa: ARG001
+        lanes.append(is_decode)
+        out = indices[:, :1].clone().view(-1, 1, 1).expand(-1, 16, 512)
+        return out, None
+
+    impl_cls = FlashAttnMLASparseImpl if backend == "fa3" else FlashInferMLASparseImpl
+    impl = object.__new__(impl_cls)
+    impl.topk_indices_buffer = topk_indices
+    impl.index_group = group
+    impl.index_group_index = 0
+    impl.dcp_world_size = 1
+    impl._forward_mqa_kernel = run_kernel
+
+    out, lse = impl.forward_mqa((q_nope, q_rope), kv_cache, metadata, None)
+    assert lse is None
+    assert lanes == [True, False]
+    assert out.shape == (num_tokens, 16, 512)
+    assert (out[:2] == 3).all()
+    assert (out[2:] == 7).all()
+
+
+@pytest.mark.parametrize("layer_index", [0, 1])
+def test_flashattn_plain_path_converts_through_index_group(monkeypatch, layer_index):
+    """FA3's plain path converts once per group; a follower reuses the buffer."""
+    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa3_module
+
+    device = torch.device(DEVICE_TYPE)
+    num_tokens, topk_tokens, lora, rope, block_size = 3, 8, 4, 2, 4
+    kv_cache = torch.arange(
+        2 * block_size * (lora + rope), dtype=torch.bfloat16, device=device
+    ).view(2, block_size, lora + rope)
+    logical = torch.zeros(num_tokens, topk_tokens, dtype=torch.int32, device=device)
+    group = index_group_module.SparseMLAIndexGroup(
+        logical_topk_indices=logical,
+        physical_topk_indices=torch.full_like(logical, 9),
+        valid_topk_counts=torch.ones(num_tokens, dtype=torch.int32, device=device),
+        request_ids=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        side_stream=torch.Stream(device=device),
+        logical_topk_ready=torch.Event(),
+        physical_topk_ready=torch.Event(),
+        has_indexer=False,
+        num_layers=2,
+    )
+    converts: list[int] = []
+
+    def convert(req_ids, block_table, topk, **kwargs):  # noqa: ARG001
+        converts.append(kwargs["BLOCK_STRIDE_ROWS"])
+        kwargs["out"].fill_(5)
+        kwargs["valid_counts_out"].fill_(topk_tokens)
+
+    monkeypatch.setattr(
+        index_group_module, "triton_convert_req_index_to_global_index", convert
+    )
+    recorded: dict = {}
+
+    def fake_kernel(**kwargs):
+        recorded.update(kwargs)
+        return torch.zeros(num_tokens, 2, lora, device=device)
+
+    monkeypatch.setattr(fa3_module, "flash_attn_varlen_func", fake_kernel)
+
+    impl = object.__new__(FlashAttnMLASparseImpl)
+    impl.topk_indices_buffer = logical
+    impl.index_group = group
+    impl.index_group_index = layer_index
+    impl.dcp_world_size = 1
+    impl.kv_lora_rank = lora
+    impl.scale = 0.25
+    q_nope = torch.zeros(num_tokens, 2, lora, device=device)
+    q_rope = torch.zeros(num_tokens, 2, rope, device=device)
+    metadata = SimpleNamespace(
+        num_decode_tokens=0,
+        block_size=block_size,
+        block_table=torch.zeros((num_tokens, 1), dtype=torch.int32, device=device),
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+    )
+
+    out, lse = impl.forward_mqa((q_nope, q_rope), kv_cache, metadata, None)
+
+    # The leading layer converts with the cache's block stride into the group's
+    # buffer; a follower reuses that buffer without converting again.
+    assert converts == ([block_size] if layer_index == 0 else [])
+    assert (recorded["block_table"] == (5 if layer_index == 0 else 9)).all()
+    assert (recorded["seqused_k"] == (topk_tokens if layer_index == 0 else 1)).all()
+    assert recorded["block_table"].data_ptr() == group.physical_topk_indices.data_ptr()
+    assert recorded["seqused_k"].data_ptr() == group.valid_topk_counts.data_ptr()
+    kv_rows = kv_cache.view(-1, lora + rope)
+    assert recorded["q"] is q_rope and recorded["q_v"] is q_nope
+    torch.testing.assert_close(recorded["k"][:, 0, 0], kv_rows[:, lora:])
+    torch.testing.assert_close(recorded["v"][:, 0, 0], kv_rows[:, :lora])
+    torch.testing.assert_close(
+        recorded["cu_seqlens_q"],
+        torch.arange(num_tokens + 1, dtype=torch.int32, device=device),
+    )
+    assert (
+        recorded["max_seqlen_q"],
+        recorded["max_seqlen_k"],
+        recorded["softmax_scale"],
+        recorded["causal"],
+        recorded["fa_version"],
+    ) == (1, topk_tokens, impl.scale, True, 3)
+    assert lse is None and out.shape == (num_tokens, 2, lora)
+
+
+@pytest.mark.parametrize("dcp", [1, 2], ids=["native", "dcp2"])
+@pytest.mark.parametrize(
+    "num_decode_tokens,is_decode", [(3, True), (1, False)], ids=["decode", "mixed"]
+)
+def test_sparse_mqa_plain_lane_wiring(monkeypatch, dcp, num_decode_tokens, is_decode):
+    """The plain lane converts once and hands the hook one whole-batch call."""
+    import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
+
+    num_tokens, topk_tokens, block_size, head_dim = 3, 8, 4, 6
+    # A page whose flat row stride (8) differs from its block size (4): a
+    # converter handed the block size instead would misaddress the flat rows.
+    kv_cache = torch.zeros(2, 8, head_dim)[:, :block_size]
+    # One row longer than the batch, so slicing to num_tokens is observable.
+    topk_buffer = torch.zeros(num_tokens + 1, topk_tokens, dtype=torch.int32)
+    req_id_per_token = torch.zeros(num_tokens + 1, dtype=torch.int32)
+    q = torch.zeros(num_tokens, 2, head_dim)
+    physical = torch.full((num_tokens, topk_tokens), 5, dtype=torch.int32)
+    counts = torch.full((num_tokens,), topk_tokens, dtype=torch.int32)
+    layer = object()
+    metadata = SimpleNamespace(
+        num_decode_tokens=num_decode_tokens,
+        block_size=block_size,
+        block_table=torch.zeros((num_tokens, 1), dtype=torch.int32),
+        req_id_per_token=req_id_per_token,
+        cp_kv_cache_interleave_size=2,
+    )
+    index_filter = MagicMock(return_value=(physical, counts))
+    monkeypatch.setattr(sparse_mla, "triton_filter_and_convert_dcp_index", index_filter)
+
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.topk_indices_buffer = topk_buffer
+    impl.index_group = MagicMock()
+    impl.index_group_index = 0
+    impl.dcp_world_size = dcp
+    impl.dcp_rank = dcp - 1
+    impl._convert_logical_to_physical_topk = MagicMock(return_value=(physical, counts))
+    impl._forward_mqa_kernel = MagicMock(return_value=(q, None))
+
+    out, lse = impl.forward_mqa(q, kv_cache, metadata, layer)
+
+    assert out is q and lse is None
+    if dcp > 1:
+        impl._convert_logical_to_physical_topk.assert_not_called()
+        args, kwargs = index_filter.call_args
+        assert args[0].data_ptr() == req_id_per_token.data_ptr()
+        assert args[0].shape == (num_tokens,)
+        assert args[1] is metadata.block_table
+        assert args[2].data_ptr() == topk_buffer.data_ptr()
+        assert args[2].shape == (num_tokens, topk_tokens)
+        assert kwargs == {
+            "dcp_size": dcp,
+            "dcp_rank": dcp - 1,
+            "cp_kv_cache_interleave_size": 2,
+            "BLOCK_SIZE": block_size,
+            "BLOCK_STRIDE_ROWS": 8,
+            "NUM_TOPK_TOKENS": topk_tokens,
+            "return_valid_counts": True,
+        }
+    else:
+        index_filter.assert_not_called()
+        args, kwargs = impl._convert_logical_to_physical_topk.call_args
+        assert args[0].data_ptr() == topk_buffer.data_ptr()
+        assert args[0].shape == (num_tokens, topk_tokens)
+        assert args[1] is metadata
+        assert kwargs == {"block_stride_rows": 8, "return_valid_counts": True}
+
+    # Identity, not equality: a copy would break the group's buffer stability.
+    hook_args, hook_kwargs = impl._forward_mqa_kernel.call_args
+    assert hook_args[0] is q
+    assert hook_args[1] is kv_cache
+    assert hook_args[2] is physical
+    assert hook_args[3] is counts
+    assert hook_kwargs == {
+        "layer": layer,
+        "block_size": block_size,
+        "is_decode": is_decode,
+    }
+
+
+@pytest.mark.parametrize(
+    "num_decode_tokens,all_resident,lane",
+    [
+        (5, True, "decode"),
+        (0, True, "resident"),
+        (0, False, "staged"),
+        # Fewer prefill rows than decode rows, so the row counts alone cannot
+        # tell the prefill call from the decode call.
+        (2, True, "mixed"),
+    ],
+)
+def test_sparse_mqa_hisparse_lanes(monkeypatch, num_decode_tokens, all_resident, lane):
+    """HiSparse splits a batch into at most one decode and one prefill call."""
+    import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
+
+    num_tokens, topk_tokens, block_size, head_dim = 5, 8, 4, 6
+    num_prefill = num_tokens - num_decode_tokens
+    # Distinct block counts, so the KV tensor a call is handed names its lane.
+    host = torch.zeros(2, block_size, head_dim, dtype=torch.bfloat16)
+    hot = torch.zeros(6, block_size, head_dim, dtype=torch.bfloat16)
+    staged = torch.zeros(3, block_size, head_dim, dtype=torch.bfloat16)
+    topk_buffer = torch.zeros(num_tokens + 1, topk_tokens, dtype=torch.int32)
+    q = torch.arange(num_tokens, dtype=torch.float32).view(num_tokens, 1, 1)
+    layer = object()
+    metadata = SimpleNamespace(
+        num_decode_tokens=num_decode_tokens, block_size=block_size
+    )
+
+    def converted(rows, fill):
+        return (
+            torch.full((rows, topk_tokens), fill, dtype=torch.int32),
+            torch.full((rows,), rows, dtype=torch.int32),
+        )
+
+    decode_ret = converted(num_decode_tokens, 1)
+    resident_ret = converted(num_tokens, 2)
+    staged_ret = converted(num_prefill, 3)
+    req_ids = torch.zeros(num_prefill, dtype=torch.int32)
+    staged_block_table = torch.zeros(1, staged.shape[0], dtype=torch.int32)
+
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.physical_kv_cache = MagicMock(return_value=hot)
+    index_group.cache = MagicMock(
+        return_value=SimpleNamespace(all_context_pages_resident=all_resident)
+    )
+    index_group.convert_decode_logical_to_physical_topk = MagicMock(
+        return_value=decode_ret
+    )
+    index_group.convert_logical_to_physical_topk = MagicMock(return_value=resident_ret)
+    index_group.stage_prefill_rows = MagicMock(
+        return_value=(staged, staged_block_table, req_ids)
+    )
+    convert = MagicMock(return_value=staged_ret)
+    monkeypatch.setattr(sparse_mla, "triton_convert_req_index_to_global_index", convert)
+
+    calls: list[tuple] = []
+
+    def hook(rows, cache, indices, counts, **kwargs):
+        assert kwargs["layer"] is layer and kwargs["block_size"] == block_size
+        is_decode = kwargs["is_decode"]
+        calls.append((rows, cache.data_ptr(), indices, counts, is_decode))
+        return torch.full((rows.shape[0], 1, 1), 1.0 if is_decode else 2.0), None
+
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.topk_indices_buffer = topk_buffer
+    impl.index_group = index_group
+    impl.index_group_index = 0
+    impl.dcp_world_size = 1
+    impl._forward_mqa_kernel = hook
+
+    out, lse = impl.forward_mqa(q, host, metadata, layer)
+
+    assert lse is None
+    # A lane handed the whole batch would concatenate to more rows than this.
+    assert out.shape == (num_tokens, 1, 1)
+    if num_decode_tokens:
+        rows, kv_ptr, indices, counts, is_decode = calls[0]
+        assert is_decode is True
+        assert kv_ptr == hot.data_ptr()
+        # Identity, not equality: a sub-slice would break pointer stability.
+        assert indices is decode_ret[0] and counts is decode_ret[1]
+        assert rows.tolist() == q[:num_decode_tokens].tolist()
+        args, kwargs = index_group.convert_decode_logical_to_physical_topk.call_args
+        assert args[0] == 0
+        assert args[1].data_ptr() == topk_buffer.data_ptr()
+        assert args[1].shape == (num_decode_tokens, topk_tokens)
+        assert args[2] is metadata
+        assert kwargs == {"return_valid_counts": True}
+
+    if lane == "decode":
+        assert [call[-1] for call in calls] == [True]
+        assert (out == 1.0).all()
+        return
+
+    rows, kv_ptr, indices, counts, is_decode = calls[-1]
+    assert is_decode is False
+    assert rows.tolist() == q[num_decode_tokens:].tolist()
+    if lane == "resident":
+        index_group.stage_prefill_rows.assert_not_called()
+        convert.assert_not_called()
+        assert kv_ptr == hot.data_ptr()
+        assert indices is resident_ret[0] and counts is resident_ret[1]
+        args, kwargs = index_group.convert_logical_to_physical_topk.call_args
+        assert args[0] == 0
+        assert args[1].data_ptr() == topk_buffer.data_ptr()
+        assert args[1].shape == (num_tokens, topk_tokens)
+        assert args[2] is metadata
+        # The resident cache carries its own stride, so the group resolves it.
+        assert kwargs == {"block_stride_rows": None, "return_valid_counts": True}
+    else:
+        # Staged and mixed both stage; the resident lane is decode-free only.
+        index_group.convert_logical_to_physical_topk.assert_not_called()
+        assert index_group.stage_prefill_rows.call_args.args == (0, host, metadata)
+        assert kv_ptr == staged.data_ptr()
+        assert indices is staged_ret[0] and counts is staged_ret[1]
+        args, kwargs = convert.call_args
+        assert args[0] is req_ids and args[1] is staged_block_table
+        assert args[2].data_ptr() == topk_buffer[num_decode_tokens:].data_ptr()
+        assert args[2].shape == (num_prefill, topk_tokens)
+        # The staging buffer is densely packed: no block stride to pass on.
+        assert kwargs == {
+            "BLOCK_SIZE": block_size,
+            "NUM_TOPK_TOKENS": topk_tokens,
+            "return_valid_counts": True,
+        }
+
+    if lane == "mixed":
+        assert [call[-1] for call in calls] == [True, False]
+        assert (out[:num_decode_tokens] == 1.0).all()
+        assert (out[num_decode_tokens:] == 2.0).all()
+    else:
+        assert [call[-1] for call in calls] == [False]
+        assert (out == 2.0).all()
 
 
 def test_hisparse_resident_prefill_uses_attention_block_stride():
