@@ -63,7 +63,6 @@ from collections.abc import Callable
 import torch
 
 from vllm.config import (
-    ModelConfig,
     ParallelConfig,
     VllmConfig,
     set_current_vllm_config,
@@ -147,31 +146,6 @@ def export_entries(
     return entries, aliases
 
 
-def get_daemon_model(
-    vllm_config: VllmConfig, model_config: ModelConfig
-) -> torch.nn.Module:
-    """Load the daemon's model, composed from the configured loader.
-
-    Runs the quantization check after model creation but before the slow
-    weight load, so an unsupported method fails fast. Online quantization
-    always fails the check, so load_model's finalize step for it is
-    unnecessary here.
-    """
-    load_config = vllm_config.load_config
-    loader = get_model_loader(load_config)
-    device_config = vllm_config.device_config
-    target_device = torch.device(
-        device_config.device if load_config.device is None else load_config.device
-    )
-    with set_default_torch_dtype(model_config.dtype):
-        with target_device:
-            model = loader.create_model(vllm_config, model_config)
-        check_ipc_quant_support(model)
-        loader.load_weights(model, model_config)
-        process_weights_after_loading(model, model_config, target_device)
-    return model.eval()
-
-
 class WeightCacheDaemon:
     """Per-GPU process that loads one TP shard and serves CUDA IPC handles."""
 
@@ -221,12 +195,36 @@ class WeightCacheDaemon:
         )
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
-            self.model = get_daemon_model(self.vllm_config, self.model_config)
+            self.model = self.get_model()
         logger.info(
             "Weight cache %s daemon rank %d loaded model",
             self.role,
             self.tp_rank,
         )
+
+    def get_model(self) -> torch.nn.Module:
+        """Load the daemon's model, composed from the configured loader.
+
+        Runs the quantization check after model creation but before the slow
+        weight load, so an unsupported method fails fast. Online quantization
+        always fails the check, so load_model's finalize step for it is
+        unnecessary here.
+        """
+        vllm_config = self.vllm_config
+        model_config = self.model_config
+        load_config = vllm_config.load_config
+        loader = get_model_loader(load_config)
+        device_config = vllm_config.device_config
+        target_device = torch.device(
+            device_config.device if load_config.device is None else load_config.device
+        )
+        with set_default_torch_dtype(model_config.dtype):
+            with target_device:
+                model = loader.create_model(vllm_config, model_config)
+            check_ipc_quant_support(model)
+            loader.load_weights(model, model_config)
+            process_weights_after_loading(model, model_config, target_device)
+        return model.eval()
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
         """Serve requests until terminated.
@@ -386,14 +384,7 @@ def _run_daemon(
 
 
 def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:
-    """VllmConfig for the draft daemon group, or None when the draft is not
-    cached.
-
-    Mirrors how the engine loads a draft: the target's VllmConfig with the
-    speculative kernel overrides; the draft's ModelConfig stays on
-    ``speculative_config.draft_model_config`` for the daemon to derive,
-    because draft classes read the target from ``vllm_config.model_config``.
-    """
+    """VllmConfig for the draft daemon group"""
     if not is_draft_model_cacheable(vllm_config.speculative_config):
         return None
     assert vllm_config.speculative_config is not None

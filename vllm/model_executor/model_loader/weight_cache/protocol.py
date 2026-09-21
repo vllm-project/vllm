@@ -20,7 +20,7 @@ import stat
 import struct
 import tempfile
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
@@ -366,6 +366,17 @@ class TensorEntry:
         # have different CUDA_VISIBLE_DEVICES mappings.
         args[6] = device_index
         return rebuild_cuda_tensor(*args)
+
+
+class WeightCacheState(NamedTuple):
+    """Client-side decode of a daemon's get_state response payload."""
+
+    entries: dict[str, TensorEntry]
+    """Model tensors, exported as CUDA IPC handles or shipped by value."""
+    aliases: dict[str, str]
+    """Duplicate (tied) weight names aliased to their canonical entry."""
+    attrs: dict[str, bool]
+    """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:

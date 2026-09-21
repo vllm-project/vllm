@@ -25,9 +25,9 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfigMismatchError,
-    TensorEntry,
     UnsupportedQuantForIPCError,
     WeightCacheKey,
+    WeightCacheState,
     WeightCacheUnavailableError,
     check_ipc_platform_support,
     check_ipc_quant_support,
@@ -117,7 +117,7 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.accelerator.current_device_index()
-        entries, _, _ = self._fetch_entries(model_config)
+        entries = self._fetch_entries(model_config).entries
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -150,11 +150,9 @@ class IpcModelLoader(BaseModelLoader):
                     f"was configured for the "
                     f"{'draft' if self.is_draft else 'target'} group"
                 )
-            entries, aliases, attrs = self._fetch_entries(model_config)
+            state = self._fetch_entries(model_config)
             state_fetched = True
-            return self._build_model(
-                vllm_config, model_config, prefix, entries, aliases, attrs
-            )
+            return self._build_model(vllm_config, model_config, prefix, state)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
@@ -185,9 +183,7 @@ class IpcModelLoader(BaseModelLoader):
         vllm_config: VllmConfig,
         model_config: ModelConfig,
         prefix: str,
-        entries: dict[str, TensorEntry],
-        aliases: dict[str, str],
-        attrs: dict[str, bool],
+        state: WeightCacheState,
     ) -> nn.Module:
         device_config = vllm_config.device_config
         load_device = (
@@ -209,10 +205,10 @@ class IpcModelLoader(BaseModelLoader):
                     prefix=prefix,
                 )
             check_ipc_quant_support(model)
-            self._apply_entries(model, entries, aliases, device_index)
+            self._apply_entries(model, state, device_index)
             # Flags that load_weights would have set (e.g. EAGLE ownership of
             # embed_tokens / lm_head); the daemon ran it, this process did not.
-            for name, value in attrs.items():
+            for name, value in state.attrs.items():
                 setattr(model, name, value)
             # The daemon exports tensors that already went through
             # process_weights_after_loading; re-run it in pre-processed mode
@@ -229,7 +225,7 @@ class IpcModelLoader(BaseModelLoader):
             self._send_release()
         logger.info(
             "Mapped %d tensors from the weight cache daemon (%s mode)",
-            len(entries),
+            len(state.entries),
             self.mode,
         )
         return model.eval()
@@ -237,8 +233,7 @@ class IpcModelLoader(BaseModelLoader):
     def _apply_entries(
         self,
         model: nn.Module,
-        entries: dict[str, TensorEntry],
-        aliases: dict[str, str],
+        state: WeightCacheState,
         device_index: int,
     ) -> None:
         # remove_duplicate=False keeps tied module aliases reachable by name:
@@ -269,7 +264,7 @@ class IpcModelLoader(BaseModelLoader):
                 module.register_buffer(leaf, obj)
             registered[name] = obj
 
-        for name, entry in entries.items():
+        for name, entry in state.entries.items():
             tensor = entry.rebuild(device_index)
             if self.mode == "copy":
                 tensor = tensor.clone()
@@ -278,7 +273,7 @@ class IpcModelLoader(BaseModelLoader):
         # Re-establish tied-weight aliases by registering the *same* object the
         # canonical name resolved to, so parameter identity (and the tie) is
         # preserved instead of allocating uninitialized memory.
-        for alias_name, canonical_name in aliases.items():
+        for alias_name, canonical_name in state.aliases.items():
             obj = registered.get(canonical_name)
             if obj is None:
                 logger.warning(
@@ -289,9 +284,7 @@ class IpcModelLoader(BaseModelLoader):
                 continue
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
-    def _fetch_entries(
-        self, model_config: ModelConfig
-    ) -> tuple[dict[str, TensorEntry], dict[str, str], dict[str, bool]]:
+    def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
@@ -300,9 +293,7 @@ class IpcModelLoader(BaseModelLoader):
         )
         return self._request_state(cache_config)
 
-    def _request_state(
-        self, cache_config: WeightCacheKey
-    ) -> tuple[dict[str, TensorEntry], dict[str, str], dict[str, bool]]:
+    def _request_state(self, cache_config: WeightCacheKey) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:
             send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
             response = recv_msg(conn)
@@ -316,10 +307,10 @@ class IpcModelLoader(BaseModelLoader):
                 f"Weight cache daemon error: {response.get('message')}"
             )
         self._check_gpu_uuid(response.get("gpu_uuid"))
-        return (
-            response["entries"],
-            response.get("aliases", {}),
-            response.get("attrs", {}),
+        return WeightCacheState(
+            entries=response["entries"],
+            aliases=response.get("aliases", {}),
+            attrs=response.get("attrs", {}),
         )
 
     def _connect(self, timeout: float) -> socket.socket:
