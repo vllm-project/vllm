@@ -22,6 +22,7 @@ def _input_processor(server_uses_watermarking: bool = True) -> InputProcessor:
     config = VllmConfig()
     config.model_config = SimpleNamespace(
         try_get_generation_config=lambda: {},
+        logits_processors=None,
         return_sampling_mask=False,
         enable_trace_replay=True,
         is_multimodal_model=False,
