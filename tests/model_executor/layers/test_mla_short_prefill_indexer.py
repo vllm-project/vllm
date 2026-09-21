@@ -366,6 +366,26 @@ def test_select_candidate_blocks_tolerates_empty_rows():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("score", [0.0, float("nan")])
+@pytest.mark.parametrize("start", [0, 3])
+def test_candidate_selection_keeps_valid_blocks_with_nan_scores(score, start):
+    """NaN warmup scores must not turn real blocks into repeated sparse padding."""
+    logits = torch.full((3, 64), score, device="cuda")
+    starts = torch.full((3,), start, device="cuda", dtype=torch.int32)
+    lengths = torch.tensor([0, 17, 35], device="cuda", dtype=torch.int32)
+    out = torch.empty(3, 8, device="cuda", dtype=torch.int32)
+
+    sparse_indexer._select_candidate_blocks(logits, starts, starts + lengths, 8, 8, out)
+
+    for row, count in enumerate([0, 3, 5]):
+        valid = out[row][out[row] >= 0].sort().values
+        torch.testing.assert_close(
+            valid, torch.arange(count, device="cuda", dtype=torch.int32)
+        )
+        assert (out[row] == -1).sum().item() == 8 - count
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
     "width,block_size,k,decode",
     [
@@ -413,7 +433,7 @@ def test_candidate_kernels_preserve_packed_bounds_and_padding(
     top = reduced.topk(min(k, nblocks), dim=-1)
     expected = torch.full((rows, k), -1, device="cuda", dtype=torch.int32)
     expected[:, : top.indices.shape[1]] = torch.where(
-        top.values > -torch.inf, top.indices, -1
+        top.values != -torch.inf, top.indices, -1
     ).int()
     actual = torch.empty(rows, k * 2, device="cuda", dtype=torch.int32)[:, ::2]
     select_candidate_blocks(logits, starts, ends, k, block_size, actual, repeat)
@@ -608,7 +628,10 @@ def test_candidate_blocks_to_sparse_indices_math():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
 @pytest.mark.parametrize("cbk,sbk", [(8, 8), (16, 8), (16, 16)])
-def test_candidate_blocks_to_sparse_indices_matches_reference(cbk: int, sbk: int):
+@pytest.mark.parametrize("end_offset", [0, 1])
+def test_candidate_blocks_to_sparse_indices_matches_reference(
+    cbk: int, sbk: int, end_offset: int
+):
     """The Triton expansion equals the PyTorch reference on production-shaped
     random inputs, including strided (column-sliced) candidate rows and
     strided output buffers."""
@@ -643,7 +666,7 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(cbk: int, sbk: int
         ke,
         cbk,
         sbk,
-        out=(si_buf[:, : num_candidates * ratio], end_buf[::2]),
+        out=(si_buf[:, : num_candidates * ratio], end_buf[end_offset::2]),
     )
     assert torch.equal(got_indices, ref_indices)
     assert torch.equal(got_end, ref_end)
@@ -651,7 +674,7 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(cbk: int, sbk: int
         cand_buf[:, num_candidates:], torch.full_like(cand_buf[:, num_candidates:], -7)
     )
     assert not si_buf[:, num_candidates * ratio :].any()
-    assert not end_buf[1::2].any()
+    assert not end_buf[1 - end_offset :: 2].any()
 
 
 def _skip_unless_sm100_sparse_kernels():
