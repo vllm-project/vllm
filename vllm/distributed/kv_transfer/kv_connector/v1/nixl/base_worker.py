@@ -3031,8 +3031,9 @@ class NixlBaseConnectorWorker:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                     if xfer_state == "DONE":
-                        res = self.nixl_wrapper.get_xfer_telemetry(handle)
-                        self.xfer_stats.record_transfer(res)
+                        telemetry = self._try_get_xfer_telemetry(handle)
+                        if telemetry is not None:
+                            self.xfer_stats.record_transfer(telemetry)
                         self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
@@ -3061,6 +3062,26 @@ class NixlBaseConnectorWorker:
             else:
                 transfers[req_id] = in_progress
         return done_req_ids, failed_req_ids
+
+    def _try_get_xfer_telemetry(self, handle: int):
+        """Return NIXL transfer telemetry, or None when it is unavailable.
+
+        Telemetry is optional. Some NIXL builds are compiled without it and
+        raise from ``get_xfer_telemetry`` even though the agent was created
+        with ``capture_telemetry=True`` -- NIXL logs "telemetry is disabled;
+        ignoring telemetry requested through agent config" and carries on.
+
+        A metrics failure must never fail a transfer that NIXL already
+        reported as DONE, so swallow the error and skip the stats sample.
+        """
+        try:
+            return self.nixl_wrapper.get_xfer_telemetry(handle)
+        except Exception:
+            logger.warning_once(
+                "NIXL transfer telemetry is unavailable; KV transfer stats "
+                "will be omitted. Transfers are unaffected."
+            )
+            return None
 
     def _try_release_xfer_handle(self, req_id: str, handle: int) -> bool:
         """Release a handle, returning False if the caller must retain it."""
