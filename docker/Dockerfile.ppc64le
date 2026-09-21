@@ -71,7 +71,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION" uv build \
       --wheel --out-dir ${WHEEL_DIR} --no-build-isolation && \
     uv pip install "$(echo ${WHEEL_DIR}/vllm*.whl)[tensorizer]" --refresh && \
-    uv pip uninstall -y cmake meson-python scikit-build-core maturin build wheel auditwheel pybind11 nanobind cython setuptools-rust && \
+    uv pip uninstall -y pip cmake meson-python scikit-build-core maturin build wheel auditwheel pybind11 nanobind cython setuptools-rust && \
     # Remove packaged test suites
     find ${VIRTUAL_ENV}/lib64/python${PYTHON_VERSION}/site-packages \
         -type d \( -name tests -o -name test \) -exec rm -rf {} + && \

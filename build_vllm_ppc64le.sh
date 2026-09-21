@@ -113,8 +113,8 @@ python --version
 
 pip install -U pip setuptools-rust
 pip install uv
-pip install "setuptools<70" build wheel cmake auditwheel
-uv pip install "setuptools<70" cython meson-python pybind11 "sympy>=1.13.3" --no-build-isolation
+pip install "setuptools>=78.1.1" build wheel cmake auditwheel
+uv pip install "setuptools>=78.1.1" cython meson-python pybind11 "sympy>=1.13.3" --no-build-isolation
 
 ########################################
 # Rust
@@ -161,7 +161,7 @@ is_available_on_devpi() {
 ########################################
 # Common packages from DevPI
 ########################################
-uv pip install numpy==2.3.5 pillow==12.2.0 --extra-index-url "$IBM_DEVPI_URL"
+uv pip install numpy==2.3.5 pillow --extra-index-url "$IBM_DEVPI_URL"
 try_install_from_devpi "opencv-python-headless==${OPENCV_VERSION}"
 
 ########################################
@@ -328,12 +328,11 @@ fi
 # Xgrammar
 ########################################
 uv pip install \
-   "scikit-build-core==0.11.6" \
-   "pyproject-metadata<0.8" \
+    "scikit-build-core==0.11.6" \
+    "pyproject-metadata<0.8" \
     pathspec \
     packaging \
     distro \
-   "setuptools<70" \
     setuptools_scm \
     cmake \
     ninja \
@@ -410,9 +409,6 @@ uv pip install "${WHEEL_DIR}"/*.whl
 ########################################
 
 sed -i.bak -e 's/.*torch.*//g' pyproject.toml requirements/*.txt
-
-uv pip install "setuptools>=78.1.1" --no-build-isolation
-
 export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig
 
 uv pip install -r requirements/common.txt \
