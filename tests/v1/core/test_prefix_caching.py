@@ -168,6 +168,7 @@ def make_hisparse_kv_cache_config(
     host_num_blocks: int,
     *,
     transfer_device_cache: bool = False,
+    num_resident_groups: int = 1,
 ) -> KVCacheConfig:
     source_spec = FullAttentionSpec(
         block_size=HISPARSE_BLOCK_SIZE,
@@ -210,6 +211,13 @@ def make_hisparse_kv_cache_config(
             enable_kv_transfer=False,
         )
     )
+    for group_idx in range(1, num_resident_groups):
+        groups.extend(
+            replace(
+                group, layer_names=[f"{name}_{group_idx}" for name in group.layer_names]
+            )
+            for group in groups[2:4]
+        )
     return KVCacheConfig(
         num_blocks=num_blocks,
         hisparse_host_num_blocks=host_num_blocks,
@@ -625,7 +633,10 @@ def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
     assert manager.allocate_slots(second, num_new_tokens=16) is not None
 
 
-def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
+@pytest.mark.parametrize("num_resident_groups", [1, 3])
+def test_hisparse_materializes_prefix_without_allocating_hot_blocks(
+    num_resident_groups,
+):
     """A host prefix becomes visible only when every page is durable.
 
     Completing a later page first must not expose a prefix with a hole.
@@ -634,6 +645,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
         32,
         16,
         enable_caching=True,
+        num_resident_groups=num_resident_groups,
     )
     tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
     request = make_request("resident", tokens, HISPARSE_BLOCK_SIZE, sha256)
@@ -675,12 +687,14 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     assert blocks[3] == []
 
 
-def test_hisparse_materialization_respects_per_step_spill_budget():
+@pytest.mark.parametrize("num_resident_groups", [1, 3])
+def test_hisparse_materialization_respects_per_step_spill_budget(num_resident_groups):
     """Prefix publication must not bypass the configured spill batch limit."""
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
         enable_caching=True,
+        num_resident_groups=num_resident_groups,
     )
     coordinator = get_hisparse_coordinator(manager)
     coordinator.max_spill_pages = 1
