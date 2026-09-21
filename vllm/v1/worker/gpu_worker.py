@@ -45,6 +45,7 @@ from vllm.distributed.parallel_state import (
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
+    get_ep_group,
     get_pcp_group,
     get_pp_group,
     get_tp_group,
@@ -315,12 +316,26 @@ class Worker(WorkerBase):
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
 
+    def _weight_checksum_key_prefix(self) -> str:
+        """Return the rank-qualified prefix for this worker's tensor keys.
+
+        Uses ``data_parallel_index`` rather than ``data_parallel_rank``: vLLM
+        resets the latter to 0 in a dense worker, so it cannot tell replicas
+        apart and every dense DP rank would emit the same keys.
+        """
+        pcp_rank = get_pcp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        tp_rank = get_tp_group().rank_in_group
+        ep_rank = (
+            get_ep_group().rank_in_group if self.vllm_config.model_config.is_moe else 0
+        )
+        dp_rank = self.parallel_config.data_parallel_index
+        return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:ep{ep_rank}:"
+
     def compute_weight_checksums(self) -> dict[str, str]:
         """Return SHA-256 digests for every checksum-covered tensor here."""
         return compute_weight_checksums(
-            self.model_runner.model,
-            self.vllm_config,
-            self.parallel_config.data_parallel_rank,
+            self.model_runner.model, self._weight_checksum_key_prefix()
         )
 
     def reset_weights(self) -> None:

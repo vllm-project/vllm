@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-worker weight checksums, their aggregation, and the reset that
-supports verifying a weight update."""
+supports verifying a weight update.
+
+Kept free of vLLM config and distributed state: the caller supplies the rank
+prefix, so the engine, the executor and the API process can all import these
+cheaply.
+"""
 
 import hashlib
 
 import torch
 import torch.nn as nn
-
-from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import (
-    get_ep_group,
-    get_pcp_group,
-    get_pp_group,
-    get_tp_group,
-)
 
 _INTEGER_DTYPES = {
     torch.bool,
@@ -73,24 +70,14 @@ def _randomize_tensor_inplace(tensor: torch.Tensor) -> None:
     tensor.copy_(values)
 
 
-def _rank_prefix(vllm_config: VllmConfig, dp_rank: int) -> str:
-    """Return the rank-qualified key prefix for one worker's tensors."""
-    pcp_rank = get_pcp_group().rank_in_group
-    pp_rank = get_pp_group().rank_in_group
-    tp_rank = get_tp_group().rank_in_group
-    ep_rank = get_ep_group().rank_in_group if vllm_config.model_config.is_moe else 0
-    return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:ep{ep_rank}:"
-
-
-def compute_weight_checksums(
-    model: nn.Module, vllm_config: VllmConfig, dp_rank: int
-) -> dict[str, str]:
+def compute_weight_checksums(model: nn.Module, key_prefix: str) -> dict[str, str]:
     """Return one SHA-256 digest per checksum-covered tensor on this worker.
 
-    Hashing needs host bytes, so each tensor is moved to CPU as one uint8
-    array and passed to hashlib as a buffer.
+    ``key_prefix`` qualifies the keys with this worker's parallel ranks; it is
+    the caller's, because the ranks are worker state. Hashing needs host bytes,
+    so each tensor is moved to CPU as one uint8 array and passed to hashlib as
+    a buffer.
     """
-    prefix = _rank_prefix(vllm_config, dp_rank)
     checksums: dict[str, str] = {}
     for name, tensor in _iter_checksum_targets(model):
         # Reshape first: view(dtype) rejects a 0-dim tensor outright, and a few
@@ -100,7 +87,7 @@ def compute_weight_checksums(
         cpu_uint8 = flat.view(torch.uint8).numpy()
         # Hash the array in place; .tobytes() would copy it a second time.
         raw = memoryview(cpu_uint8)
-        checksums[f"{prefix}{name}"] = hashlib.sha256(raw).hexdigest()
+        checksums[f"{key_prefix}{name}"] = hashlib.sha256(raw).hexdigest()
     return checksums
 
 
