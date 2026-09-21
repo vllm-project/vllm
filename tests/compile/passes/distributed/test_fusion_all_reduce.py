@@ -847,3 +847,103 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         assert backend.op_count(fused_quant_op) == 2
         assert backend.op_count(fused_indexer_op) == 2
         del all_reduce_fusion_pass
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    ("quick_reduce", "fuses_above_the_pool"),
+    [("INT4", True), ("NONE", False)],
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm AITER allreduce-rmsnorm fusion is ROCm-only",
+)
+@pytest.mark.skipif(not IS_AITER_FOUND, reason="aiter is not found")
+def test_rocm_aiter_ar_rms_fusion_ceiling_follows_quickreduce(
+    quick_reduce: str,
+    fuses_above_the_pool: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The AR+RMS ceiling is QuickReduce's workspace, not the custom-AR pool.
+
+    The fused QR+RMSNorm kernel stages through the QuickReduce workspace, so a
+    batch too large for the 64 MiB custom-all-reduce pool is still fusable --
+    at hidden 2048 in bf16 the pool runs out at 16384 tokens while the default
+    workspace holds 524288. The per-group-FP8-quant patterns have no such
+    kernel and keep the pool's ceiling, which is why the pass tracks two.
+
+    With ``VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=NONE`` no QuickReduce
+    communicator comes up, and the pass has to fall back to the pool for
+    everything.
+    """
+    num_processes = 2
+    master_port = get_open_port()
+    torch.multiprocessing.spawn(
+        rocm_aiter_ar_rms_ceiling_on_test_model,
+        args=(num_processes, master_port, quick_reduce, fuses_above_the_pool),
+        nprocs=num_processes,
+    )
+
+
+def rocm_aiter_ar_rms_ceiling_on_test_model(
+    local_rank: int,
+    world_size: int,
+    master_port: int,
+    quick_reduce: str,
+    fuses_above_the_pool: bool,
+):
+    from vllm.config.utils import Range
+
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    torch.set_default_dtype(torch.bfloat16)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
+            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": quick_reduce,
+        }
+    )
+    rocm_aiter_ops.refresh_env_variables()
+
+    init_distributed_environment()
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    )
+    vllm_config.compilation_config.pass_config = PassConfig(fuse_allreduce_rms=True)
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
+    vllm_config.parallel_config.rank = local_rank
+    # Hidden 2048 in bf16 is 4 KiB per token, so the 64 MiB pool is 16384
+    # tokens; the cap has to sit above that to be visible at all.
+    vllm_config.scheduler_config.max_num_batched_tokens = 32768
+    vllm_config.model_config = ModelConfig(
+        model="RedHatAI/Llama-3.2-1B-Instruct-FP8",
+        trust_remote_code=True,
+        dtype=torch.bfloat16,
+        seed=42,
+    )
+    assert vllm_config.model_config.get_hidden_size() == 2048
+
+    with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+        fusion_pass = RocmAiterAllReduceFusionPass(vllm_config)
+        assert not fusion_pass.disabled
+
+        assert fusion_pass.custom_ar_max_token_num == 16384
+        if fuses_above_the_pool:
+            assert fusion_pass.max_token_num == 32768
+            assert fusion_pass.is_applicable_for_range(Range(16384, 32768))
+        else:
+            assert fusion_pass.max_token_num == 16384
+            assert not fusion_pass.is_applicable_for_range(Range(16384, 32768))
+        # Either way the ranges the pool does cover stay fusable.
+        assert fusion_pass.is_applicable_for_range(Range(1, 16384))
+        del fusion_pass

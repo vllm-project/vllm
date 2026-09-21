@@ -300,13 +300,22 @@ class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
         self._pattern_replacements: list[VllmPatternReplacement] = []
 
     @enable_fake_mode
-    def register(self, pr: VllmPatternReplacement) -> None:
+    def register(
+        self,
+        pr: VllmPatternReplacement,
+        pm_pass: PatternMatcherPass | None = None,
+    ) -> None:
+        """Register a pattern, by default into this pass's own matcher.
+
+        ``pm_pass`` lets a pass keep pattern families in separate matchers so
+        it can apply them under different conditions.
+        """
         pm.register_replacement(
             pr.pattern,
             pr.replacement,
             pr.get_inputs(),
             self._trace_fn,
-            self.pm_pass,
+            self.pm_pass if pm_pass is None else pm_pass,
         )
         self._pattern_replacements.append(pr)
 

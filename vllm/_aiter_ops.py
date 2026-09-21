@@ -39,6 +39,29 @@ KB = 1024
 MB = 1024 * KB
 
 
+def _exchange_aiter_qr_handles(ptr: int, world_size: int, group: Any) -> None:
+    """Open every rank's QuickReduce buffer on the AITER communicator ``ptr``.
+
+    ROCm/aiter#4421, in aiter>=0.1.19.post1, moved this handshake into AITER
+    and changed the argument types of the calls it replaces, so prefer AITER's
+    own helper and keep the old calls for installs that predate it.
+    """
+    try:
+        from aiter.dist.device_communicators.quick_all_reduce import (
+            qr_exchange_handles,
+        )
+    except ImportError:
+        import aiter
+
+        handle = aiter.qr_get_handle(ptr)
+        handles = [None] * world_size
+        dist.all_gather_object(handles, handle, group=group)
+        aiter.qr_open_handles(ptr, handles)
+        return
+
+    qr_exchange_handles(ptr, world_size, group)
+
+
 def _get_or_create_aiter_qr_rmsnorm_comm(
     device_comm: Any,
 ) -> tuple[int, int, bool] | None:
@@ -81,11 +104,17 @@ def _get_or_create_aiter_qr_rmsnorm_comm(
 
     try:
         ptr = aiter.init_custom_qr(rank, world_size, qr_max_size)
-        handle = aiter.qr_get_handle(ptr)
-        handles = [None] * world_size
-        dist.all_gather_object(handles, handle, group=group)
-        aiter.qr_open_handles(ptr, handles)
-    except Exception:
+        _exchange_aiter_qr_handles(ptr, world_size, group)
+    except Exception as e:
+        # Not fatal, but silent, and the AITER handle ABI has already moved
+        # under this code once.
+        logger.warning_once(
+            "Fused AITER QuickReduce + RMSNorm is disabled: its communicator "
+            "could not be created (%s: %s). All-reduce and RMSNorm will run "
+            "as separate kernels.",
+            type(e).__name__,
+            e,
+        )
         device_comm._aiter_qr_rmsnorm_comm = False
         return None
 
@@ -1037,6 +1066,31 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     return out, y_scale
 
 
+def _unfused_allreduce_rmsnorm(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    gemma_norm: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Correctness fallback for when no fused collective accepts the input.
+
+    The compile-time ceiling bounds the batch, not every gate the kernels
+    apply at runtime, so an input can reach here that all of them decline.
+    """
+    from vllm import _custom_ops as ops
+    from vllm.distributed import tensor_model_parallel_all_reduce
+
+    # fused_add_rms_norm is in-place; the op this stands in for returns fresh
+    # tensors and leaves its inputs alone.
+    norm_out = tensor_model_parallel_all_reduce(input_).clone()
+    residual_out = residual.clone()
+    # Matches GemmaRMSNorm: the unit offset folded into the weight, in fp32.
+    norm_weight = weight.float() + 1.0 if gemma_norm else weight
+    ops.fused_add_rms_norm(norm_out, residual_out, norm_weight, epsilon)
+    return norm_out, residual_out
+
+
 def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     input_: torch.Tensor,
     residual: torch.Tensor,
@@ -1057,7 +1111,10 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
-            qr_comm is not None
+            # aiter.qr_all_reduce_rmsnorm has no Gemma (1 + weight) variant;
+            # unreachable while the one gemma_norm caller pre-checks 1stage.
+            not gemma_norm
+            and qr_comm is not None
             and not getattr(qr_comm, "disabled", True)
             and hasattr(qr_comm, "should_quick_allreduce")
             and qr_comm.should_quick_allreduce(input_)
@@ -1104,7 +1161,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         use_1stage=use_1stage,
         gemma_norm=gemma_norm,
     )
-    assert result is not None
+    if result is None:
+        return _unfused_allreduce_rmsnorm(input_, residual, weight, epsilon, gemma_norm)
     return result[0], result[1]
 
 
