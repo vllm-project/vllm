@@ -1329,7 +1329,7 @@ class DeepseekV41LLMForCausalLM(
                 self.model.layers, self.model.start_layer, self.model.end_layer
             ):
                 if layer.engram is not None:
-                    layer.engram.embed_tokens.finish_weight_loading()
+                    layer.engram.embed_tokens.collapse_huge_pages()
         return loaded_params
 
     def process_weights_after_loading(self) -> None:

@@ -44,17 +44,6 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 logger = init_logger(__name__)
 
 
-def _collapse_huge_pages(storage: torch.Tensor) -> None:
-    """Best-effort MADV_COLLAPSE (Linux >= 6.1) of pages that faulted small."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.madvise.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
-    if libc.madvise(storage.data_ptr(), storage.numel(), 25) != 0:
-        logger.warning(
-            "Engram MADV_COLLAPSE failed; keeping existing pages: %s",
-            os.strerror(ctypes.get_errno()),
-        )
-
-
 def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     """Register prefaulted huge pages, or return None for pinned-memory fallback."""
     try:
@@ -380,10 +369,18 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
             ),
         )
 
-    def finish_weight_loading(self) -> None:
-        """Collapse pages that faulted small once loading refilled the page cache."""
-        if self._packed is not None:
-            _collapse_huge_pages(self._packed)
+    def collapse_huge_pages(self) -> None:
+        """Best-effort MADV_COLLAPSE (Linux >= 6.1) of pages that faulted small."""
+        if self._packed is None:
+            return
+        addr, num_bytes = self._packed.data_ptr(), self._packed.nbytes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.madvise.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+        if libc.madvise(addr, num_bytes, 25) != 0:
+            logger.warning(
+                "Engram MADV_COLLAPSE failed; keeping existing pages: %s",
+                os.strerror(ctypes.get_errno()),
+            )
 
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self._shared_memory is not None:

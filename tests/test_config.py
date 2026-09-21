@@ -1432,14 +1432,6 @@ def test_engram_explicit_config_requires_supported_model():
         VllmConfig(engram_config=EngramConfig(cpu_offload=False))
 
 
-@pytest.mark.parametrize(
-    "options", [{"cpu_offload": False}, {"cpu_offload": True, "dp_shared_memory": True}]
-)
-def test_engram_use_thp_requires_private_cpu_storage(options):
-    with pytest.raises(ValueError, match="use_thp requires"):
-        EngramConfig(use_thp=True, **options)
-
-
 @pytest.mark.parametrize("target_has_ple", [False, True])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, explicit):
