@@ -475,6 +475,7 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
     runner.adaptive_verification = None
     runner.pooling_runner = None
     runner.encoder_cache = None
+    runner.aux_output_connector = None
 
     def get_prev_sampled_outputs(draft_tokens_to_update):
         assert draft_tokens_to_update is req_states.draft_tokens

@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
@@ -372,6 +373,7 @@ def test_sync_load_failure_shared_blocks_rewinds_all_async_frames(
 def _setup_shared_sync_load_failure(
     *,
     async_scheduling: bool = False,
+    aux_output: bool = False,
     num_sharers: int = 1,
     invalid_block_idx: int = 0,
     num_external_computed_blocks: int = 9,
@@ -395,6 +397,8 @@ def _setup_shared_sync_load_failure(
     scheduler.use_v2_model_runner = True
 
     num_prompt_blocks = 10
+    if aux_output:
+        scheduler.aux_output_connector = AuxOutputSchedulerConnector()
     num_prompt_tokens = num_prompt_blocks * scheduler.block_size
     num_external_computed_tokens = num_external_computed_blocks * scheduler.block_size
     common_prefix_len = num_common_prefix_blocks * scheduler.block_size
@@ -597,8 +601,9 @@ def test_shared_block_recovery_scheduling_boundary_matrix(
         pytest.fail("shared-block recovery dependency did not make progress")
 
 
-def test_shared_block_recovery_reassigns_cancelled_owner():
-    scheduler, owner, (sharer,) = _setup_shared_sync_load_failure()
+@pytest.mark.parametrize("aux_output", [False, True])
+def test_shared_block_recovery_reassigns_cancelled_owner(aux_output: bool):
+    scheduler, owner, (sharer,) = _setup_shared_sync_load_failure(aux_output=aux_output)
     owner_block_ids = scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0]
     sharer_block_ids = scheduler.kv_cache_manager.get_block_ids(sharer.request_id)[0]
     owner_only_block_id = next(
@@ -618,6 +623,11 @@ def test_shared_block_recovery_reassigns_cancelled_owner():
     )
     recovery = scheduler.schedule()
     assert recovery.num_scheduled_tokens == {sharer.request_id: 32}
+    if aux_output:
+        assert recovery.aux_output_connector_metadata is not None
+        assert recovery.aux_output_connector_metadata.finished_requests == (
+            owner.request_id,
+        )
 
 
 @pytest.mark.parametrize("invalid_block_idx", [0, 2])
@@ -749,8 +759,9 @@ def test_shared_block_recovery_orders_partially_shared_repair_chain():
     assert boundary_frame.num_scheduled_tokens.get(sharer.request_id, 0) > 0
 
 
-def test_shared_block_recovery_transfers_partially_repaired_owner():
-    scheduler, owner, (sharer,) = _setup_shared_sync_load_failure()
+@pytest.mark.parametrize("aux_output", [False, True])
+def test_shared_block_recovery_transfers_partially_repaired_owner(aux_output: bool):
+    scheduler, owner, (sharer,) = _setup_shared_sync_load_failure(aux_output=aux_output)
 
     owner_frame = scheduler.schedule()
     _update_prefill_frame(scheduler, owner_frame, [owner])
@@ -768,6 +779,11 @@ def test_shared_block_recovery_transfers_partially_repaired_owner():
     )
     recovery = scheduler.schedule()
     assert recovery.num_scheduled_tokens.get(sharer.request_id, 0) > 0
+    if aux_output:
+        assert recovery.aux_output_connector_metadata is not None
+        assert recovery.aux_output_connector_metadata.finished_requests == (
+            owner.request_id,
+        )
 
 
 def test_shared_block_recovery_does_not_rewind_after_confirmed_owner_exit():
