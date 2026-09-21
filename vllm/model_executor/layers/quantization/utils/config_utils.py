@@ -72,6 +72,7 @@ def is_shared_expert_quant_fse_compatible(
         return True, None
 
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         is_layer_skipped,
@@ -234,6 +235,21 @@ def is_shared_expert_quant_fse_compatible(
             return (
                 False,
                 "FP8 ignores routed and shared experts inconsistently at "
+                f"{shared_expert_prefix}",
+            )
+
+        return True, None
+
+    if isinstance(quant_config, ModelOptMxFp8Config):
+        expert_excluded = quant_config.is_layer_excluded(expert_prefix)
+        if any(
+            quant_config.is_layer_excluded(f"{shared_expert_prefix}.{projection_name}")
+            != expert_excluded
+            for projection_name in projection_names
+        ):
+            return (
+                False,
+                "MXFP8 excludes routed and shared experts inconsistently at "
                 f"{shared_expert_prefix}",
             )
 
