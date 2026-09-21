@@ -19,7 +19,7 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from .mega_mhc import (
     NO_FP8_OUTPUTS,
     MegaMhcFp8Outputs,
-    is_mega_mhc_supported,
+    can_use_mega_mhc,
     mhc_shifted_post_pre_deep_gemm,
 )
 
@@ -244,13 +244,8 @@ def mhc_shifted_post_pre(
         )
         return residual, *pre_outputs, aux, NO_FP8_OUTPUTS
 
-    if (
-        pre_mix is not None
-        and norm_weight is not None
-        and not capture_aux
-        and x.shape[0] <= 1 << 20
-        and is_mega_mhc_supported(x.shape[1], residual.shape[1])
-    ):
+    if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
+        assert pre_mix is not None and norm_weight is not None
         (
             new_residual,
             new_post_mix,
