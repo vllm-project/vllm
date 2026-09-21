@@ -69,6 +69,7 @@ from vllm.model_executor.models.transformers.utils import (
     init_on_device_without_buffers,
     log_replacement,
     named_state,
+    remove_noop_dynamic_rope_update,
     replace_conv_class,
     replace_embedding_class,
     replace_linear_class,
@@ -182,6 +183,13 @@ class Base(
         self.pipeline_parallel()
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
+        # Drop the rope frequency update where it cannot change anything, so the
+        # device sync it performs does not block compilation or graph capture.
+        # Only the decoder qualifies: `max_model_len` bounds its positions, not
+        # the positions any encoder is given.
+        remove_noop_dynamic_rope_update(
+            self.model.get_decoder(), self.model_config.max_model_len
+        )
         # Create attention instances for KV cache allocation
         self._create_attention_instances()
 
