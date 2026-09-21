@@ -104,7 +104,7 @@ def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
     assert model_config.multimodal_config is None
 
     assert model_config._supports_multimodal_for_mm_prefix() is True
-    assert not hasattr(model_config, "_supports_multimodal_inputs_cached")
+    assert not model_config._supports_multimodal_inputs_cache
 
 
 def test_language_model_only_disables_via_supports_multimodal_inputs():
