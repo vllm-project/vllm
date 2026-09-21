@@ -61,10 +61,9 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
-    CudaProfilerWrapper,
-    ProtonProfilerWrapper,
-    TorchProfilerWrapper,
     create_graph_capture_profiler,
+    create_worker_profiler,
+    validate_worker_profiler_config,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -98,6 +97,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
+from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
@@ -221,6 +221,7 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
+        validate_worker_profiler_config(self.profiler_config)
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
@@ -302,6 +303,9 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
@@ -772,7 +776,10 @@ class Worker(WorkerBase):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
-        if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        if (
+            self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and has_compiled_submodule(self.model_runner.get_model())
+        ):
             # warm up sizes that are not in cudagraph capture sizes,
             # but users still want to compile for better performance,
             # e.g. for the max-num-batched token size in chunked prefill.
@@ -1031,7 +1038,7 @@ class Worker(WorkerBase):
             return nullcontext()
 
         self.profiler.step()
-        if not self.profiler.is_running:
+        if not self.profiler.should_annotate:
             return nullcontext()
 
         iteration_details = compute_iteration_details(scheduler_output)
@@ -1255,7 +1262,6 @@ class Worker(WorkerBase):
             )
 
         if is_start:
-            profiler_type = self.profiler_config.profiler
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
 
@@ -1267,36 +1273,16 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
-            if profiler_type == "proton" and self.profiler is not None:
+            if self.profiler_config.profiler == "proton" and self.profiler is not None:
                 self.profiler.set_output_name(trace_name)
 
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
-                if profiler_type == "torch":
-                    self.profiler = TorchProfilerWrapper(
-                        self.profiler_config,
-                        worker_name=trace_name,
-                        local_rank=self.local_rank,
-                        activities=["CPU", "CUDA"],
-                    )
-                    logger.debug(
-                        "Starting torch profiler with trace name: %s", trace_name
-                    )
-                elif profiler_type == "cuda":
-                    self.profiler = CudaProfilerWrapper(self.profiler_config)
-                    logger.debug("Starting CUDA profiler")
-                elif profiler_type == "proton":
-                    self.profiler = ProtonProfilerWrapper(
-                        self.profiler_config, worker_name=trace_name
-                    )
-                    logger.debug(
-                        "Starting Proton profiler with trace name: %s", trace_name
-                    )
-                else:
-                    # Config validation should prevent this code being reached
-                    raise ValueError(
-                        f"Invalid profiler value of {self.profiler_config.profiler}"
-                    )
+                self.profiler = create_worker_profiler(
+                    self.profiler_config,
+                    worker_name=trace_name,
+                    local_rank=self.local_rank,
+                )
 
             self.profiler.start()
         else:
@@ -1445,7 +1431,7 @@ class Worker(WorkerBase):
                 if isinstance(update_info, list):
                     parallel_config = self.vllm_config.parallel_config
                     local_update_info = update_info[
-                        parallel_config.data_parallel_rank * parallel_config.world_size
+                        parallel_config.data_parallel_index * parallel_config.world_size
                         + self.rank
                     ]
                 else:
