@@ -27,6 +27,7 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.plugins.model_metadata import MetadataSource
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -430,6 +431,11 @@ class ModelConfig:
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
+    metadata_source: MetadataSource | None = field(
+        default=None, repr=False, compare=False
+    )
+    """Original source data for process-local metadata preparation."""
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -442,6 +448,7 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
+            "metadata_source",
             "convert",
             "tokenizer",
             "tokenizer_mode",

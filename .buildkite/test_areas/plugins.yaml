@@ -44,6 +44,7 @@ steps:
   - pip uninstall vllm_add_dummy_endpoint_plugin -y
   # end endpoint plugins test
   # other tests continue here:
+  - pytest -v -s plugins_tests/test_model_metadata.py
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
