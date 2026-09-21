@@ -135,15 +135,15 @@ def get_socket_path(
     gpu_uuid: str,
     socket_dir: str | None = None,
     *,
-    draft_model_idx: int | None = None,
+    is_draft: bool = False,
 ) -> str:
-    """Socket path of a daemon group; ``draft_model_idx`` None is the target."""
+    """Socket path of a daemon group; ``is_draft=False`` is the target."""
     directory = get_socket_dir(socket_dir)
     return os.path.join(
         directory,
         SOCKET_NAME_TEMPLATE.format(
             gpu_uuid=gpu_uuid,
-            role=format_socket_role_suffix(draft_model_idx),
+            role=format_socket_role_suffix(is_draft),
         ),
     )
 
@@ -287,8 +287,8 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
-    draft_model_idx: int | None = None
-    """Daemon group the weights come from; None is the target model."""
+    is_draft: bool = False
+    """Daemon group the weights come from; False is the target model."""
 
     @classmethod
     def from_model_config(
@@ -297,7 +297,7 @@ class WeightCacheKey:
         tp_size: int,
         tp_rank: int,
         *,
-        draft_model_idx: int | None = None,
+        is_draft: bool = False,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -324,7 +324,7 @@ class WeightCacheKey:
             quant_config_hash=_hash_quant_config(quant_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
-            draft_model_idx=draft_model_idx,
+            is_draft=is_draft,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:

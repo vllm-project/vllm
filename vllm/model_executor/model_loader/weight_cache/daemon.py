@@ -44,7 +44,7 @@ node.
 
 With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
 starts a draft daemon group that caches the draft model. It uses its own cache
-key, Unix sockets (``*_draft0.sock``) and rendezvous port
+key, Unix sockets (``*_draft.sock``) and rendezvous port
 (``--weight-cache-draft-master-port``, default ``--weight-cache-master-port +
 1``), so each process serves exactly one model role. Other draft types are not
 cached and keep loading from disk in the engine.
@@ -90,9 +90,9 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     verify_peer_is_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
-    caches_draft_model,
     export_model_attrs,
     format_daemon_role,
+    is_draft_model_cacheable,
 )
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -183,7 +183,7 @@ class WeightCacheDaemon:
         local_rank: int,
         distributed_init_method: str,
         socket_dir: str | None = None,
-        draft_model_idx: int | None = None,
+        is_draft: bool = False,
         model_config: ModelConfig | None = None,
     ):
         self.vllm_config = vllm_config
@@ -194,8 +194,8 @@ class WeightCacheDaemon:
         self.local_rank = local_rank
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
-        self.draft_model_idx = draft_model_idx
-        self.role = format_daemon_role(draft_model_idx)
+        self.is_draft = is_draft
+        self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
@@ -203,7 +203,7 @@ class WeightCacheDaemon:
             self.model_config,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
             tp_rank=tp_rank,
-            draft_model_idx=draft_model_idx,
+            is_draft=is_draft,
         )
 
     def load_model(self) -> None:
@@ -304,7 +304,7 @@ class WeightCacheDaemon:
         return get_socket_path(
             get_current_device_uuid(),
             self.socket_dir,
-            draft_model_idx=self.draft_model_idx,
+            is_draft=self.is_draft,
         )
 
     def _handle_connection(self, conn: socket.socket) -> None:
@@ -368,7 +368,7 @@ def _run_daemon(
     distributed_init_method: str,
     socket_dir: str | None,
     ready_queue: "multiprocessing.Queue[tuple[str, int]]",
-    draft_model_idx: int | None = None,
+    is_draft: bool = False,
     model_config: ModelConfig | None = None,
 ) -> None:
     daemon = WeightCacheDaemon(
@@ -377,7 +377,7 @@ def _run_daemon(
         local_rank,
         distributed_init_method,
         socket_dir,
-        draft_model_idx,
+        is_draft,
         model_config,
     )
     daemon.load_model()
@@ -395,8 +395,9 @@ def get_draft_daemon_config(
     ``vllm_config.model_config``.
     """
     speculative_config = vllm_config.speculative_config
-    if not caches_draft_model(speculative_config):
+    if not is_draft_model_cacheable(speculative_config):
         return None
+    assert speculative_config is not None
     return (
         speculative_config.apply_draft_overrides(vllm_config),
         speculative_config.draft_model_config,
@@ -474,10 +475,10 @@ def main() -> None:
     master_port = args.weight_cache_master_port or get_open_port()
     distributed_init_method = get_distributed_init_method(master_addr, master_port)
 
-    # (draft_model_idx, vllm_config, model_config, rendezvous) per daemon
-    # group; the target group has no draft index and no separate model_config.
-    groups: list[tuple[int | None, VllmConfig, ModelConfig | None, str]] = [
-        (None, vllm_config, None, distributed_init_method)
+    # (is_draft, vllm_config, model_config, rendezvous) per daemon group; the
+    # target group is not a draft and has no separate model_config.
+    groups: list[tuple[bool, VllmConfig, ModelConfig | None, str]] = [
+        (False, vllm_config, None, distributed_init_method)
     ]
     draft = get_draft_daemon_config(vllm_config)
     if draft is not None:
@@ -492,7 +493,7 @@ def main() -> None:
             )
         groups.append(
             (
-                0,
+                True,
                 draft_vllm_config,
                 draft_model_config,
                 get_distributed_init_method(master_addr, draft_master_port),
@@ -508,8 +509,8 @@ def main() -> None:
     ]
     procs = []
     expected_ready: set[tuple[str, int]] = set()
-    for draft_model_idx, config, model_config, init_method in groups:
-        role = format_daemon_role(draft_model_idx)
+    for is_draft, config, model_config, init_method in groups:
+        role = format_daemon_role(is_draft)
         for local_rank, global_rank in enumerate(global_ranks):
             expected_ready.add((role, global_rank))
             procs.append(
@@ -522,7 +523,7 @@ def main() -> None:
                         init_method,
                         args.weight_cache_socket_dir,
                         ready_queue,
-                        draft_model_idx,
+                        is_draft,
                         model_config,
                     ),
                     name=f"vllm-weight-cache-{role}-{global_rank}",

@@ -7,7 +7,7 @@ draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
 
-from typing import Any, TypeGuard
+from typing import Any
 
 from vllm.config import SpeculativeConfig
 from vllm.model_executor.models.interfaces import SupportsEagleBase
@@ -29,9 +29,7 @@ def export_model_attrs(model: Any) -> dict[str, bool]:
     }
 
 
-def caches_draft_model(
-    speculative_config: SpeculativeConfig | None,
-) -> TypeGuard[SpeculativeConfig]:
+def is_draft_model_cacheable(speculative_config: SpeculativeConfig | None) -> bool:
     """Whether the daemon serves the speculative draft as a separate role."""
     return (
         speculative_config is not None
@@ -40,13 +38,11 @@ def caches_draft_model(
     )
 
 
-def format_daemon_role(draft_model_idx: int | None) -> str:
-    """Name of a daemon group: the target model, or a draft by index."""
-    return "target" if draft_model_idx is None else f"draft{draft_model_idx}"
+def format_daemon_role(is_draft: bool) -> str:
+    """Name of a daemon group: the target model or the draft."""
+    return "draft" if is_draft else "target"
 
 
-def format_socket_role_suffix(draft_model_idx: int | None) -> str:
-    """Socket-name suffix keeping each draft group distinct from the target."""
-    if draft_model_idx is None:
-        return ""
-    return f"_{format_daemon_role(draft_model_idx)}"
+def format_socket_role_suffix(is_draft: bool) -> str:
+    """Socket-name suffix keeping the draft group distinct from the target."""
+    return "_draft" if is_draft else ""

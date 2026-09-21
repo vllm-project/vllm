@@ -29,6 +29,9 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     set_torchao_reload_attrs,
 )
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    is_draft_model_cacheable,
+)
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.utils import is_weights_pre_processed
@@ -41,28 +44,30 @@ logger = init_logger(__name__)
 
 
 def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
-    """Load config for the speculative draft model.
-
-    An explicit ``draft_load_config`` always wins. Otherwise the draft inherits
-    the target's load config, except under ``ipc_cache``: a cached draft
-    (MTP, EAGLE, EAGLE3) is routed to the daemon's draft group, and any other
-    draft falls back to disk loading instead of being sent to the target
-    daemon with a mismatching fingerprint.
-    """
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        caches_draft_model,
-    )
-
+    """Get load config for the speculative draft model."""
     speculative_config = vllm_config.speculative_config
-    assert speculative_config is not None
-    load_config = vllm_config.load_config
-    if speculative_config.draft_load_config is not None:
+    if (
+        speculative_config is not None
+        and speculative_config.draft_load_config is not None
+    ):
         return speculative_config.draft_load_config
-    if load_config.load_format != "ipc_cache":
+    load_config = vllm_config.load_config
+    if load_config is not None and load_config.load_format != "ipc_cache":
         return load_config
-    if caches_draft_model(speculative_config):
-        return replace(load_config, weight_cache_draft_model_idx=0)
-    return replace(load_config, load_format="auto", model_loader_extra_config={})
+    kwargs = (
+        # Route the draft to the daemon's draft group.
+        {
+            "model_loader_extra_config": {
+                **load_config.model_loader_extra_config,
+                "is_draft": True,
+            }
+        }
+        if is_draft_model_cacheable(speculative_config)
+        # No daemon draft group for this method; load from disk instead of
+        # hitting the target daemon with a mismatching fingerprint.
+        else {"load_format": "auto", "model_loader_extra_config": {}}
+    )
+    return replace(load_config, **kwargs)
 
 
 @instrument(span_name="Initialize model")
