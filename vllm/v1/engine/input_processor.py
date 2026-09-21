@@ -62,7 +62,7 @@ class InputProcessor:
 
         self.renderer = renderer or renderer_from_config(vllm_config)
 
-        self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
+        self.supports_mm_inputs = model_config.supports_multimodal_inputs
         self.mm_encoder_cache_size = 0
         self.skip_prompt_length_check = False
         if self.supports_mm_inputs:
