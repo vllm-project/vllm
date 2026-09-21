@@ -30,6 +30,7 @@ from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
+from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -126,24 +127,17 @@ class InputProcessor:
                 self.speculative_config,
                 self.structured_outputs_config,
                 self.tokenizer,
-                diffusion_config=self.diffusion_config,
             )
 
             self.validate_logits_processors_params(params)
 
-            if (
-                self.diffusion_config is not None
-                and self.model_config.is_diffusion
-                and not self.vllm_config.scheduler_config.async_scheduling
-                and params.extra_args
-            ):
-                width = params.extra_args.get("diffusion_canvas_length")
-                if width is not None and width != self.diffusion_config.canvas_length:
-                    raise VLLMValidationError(
-                        "A diffusion_canvas_length smaller than the served canvas "
-                        "requires --async-scheduling.",
-                        parameter="extra_args",
-                    )
+            if self.diffusion_config is not None and self.model_config.is_diffusion:
+                validate_diffusion_sampling_params(
+                    params,
+                    canvas_length=self.diffusion_config.canvas_length,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
+                )
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:

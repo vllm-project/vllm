@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from vllm import SamplingParams
+from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
 
@@ -62,21 +64,14 @@ def test_verify_leaves_logits_processors_to_admission():
     )
 
 
-@dataclass
-class MockDiffusionConfig:
-    canvas_length: int = 8
-
-
 def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
-    diffusion_config = (
-        MockDiffusionConfig(canvas_length) if canvas_length is not None else None
-    )
-    params.verify(
-        MockModelConfig(is_diffusion=True),
-        None,
-        None,
-        None,
-        diffusion_config=diffusion_config,
+    model_config = MockModelConfig(is_diffusion=True)
+    params.verify(model_config, None, None, None)
+    validate_diffusion_sampling_params(
+        params,
+        canvas_length=canvas_length,
+        vocab_size=model_config.get_vocab_size(),
+        async_scheduling=True,
     )
 
 
@@ -100,7 +95,7 @@ def test_narrow_diffusion_canvas_requires_async_scheduling(
         ),
         speculative_config=None,
         structured_outputs_config=None,
-        diffusion_config=MockDiffusionConfig(canvas_length=8),
+        diffusion_config=DiffusionConfig(canvas_length=8),
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
     )

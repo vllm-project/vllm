@@ -423,6 +423,7 @@ def _compiled_sample_step(
     max_steps_tensor: torch.Tensor,  # [max_num_reqs] int32, per-slot step cap
     pin_mask: torch.Tensor,  # [max_num_reqs, CL] bool, positions held at the seed
     seed_canvas: torch.Tensor,  # [max_num_reqs, CL]
+    read_only: torch.Tensor,  # [max_num_reqs] bool, emit without a commit forward
     # Output tensors (modified in-place)
     sampled: torch.Tensor,  # [num_reqs, CL]
     num_sampled: torch.Tensor,  # [num_reqs]
@@ -540,16 +541,6 @@ def _compiled_sample_step(
     new_hist_len = torch.where(is_denoise, hist_len + 1, hist_len.new_zeros(num_decode))
     history_len_tensor[decode_slots] = new_hist_len
 
-    # Sampled output: commit → emit argmax_canvas, denoise → 0 (pre-zeroed)
-    sampled[decode_idx] = argmax_canvas[decode_slots].to(
-        sampled.dtype
-    ) * is_commit.unsqueeze(1).to(sampled.dtype)
-    # Commit only the real canvas length (== CL except for a canvas truncated
-    # near max_model_len); the padded tail positions are never emitted.
-    num_sampled[decode_idx] = is_commit.to(num_sampled.dtype) * valid_canvas_len.to(
-        num_sampled.dtype
-    )
-
     # ---- Phase 6: Stability + convergence ----
     ref = history[decode_slots, 0]
     mismatch = torch.zeros(num_decode, device=device, dtype=torch.int32)
@@ -565,6 +556,10 @@ def _compiled_sample_step(
     is_encoder_phase[decode_slots] = torch.where(
         is_commit, is_commit.new_zeros(num_decode), converged
     )
+
+    emit = is_commit | (is_denoise & converged & read_only[decode_slots])
+    sampled[decode_idx] = argmax_canvas[decode_slots].to(sampled.dtype) * emit[:, None]
+    num_sampled[decode_idx] = (emit * valid_canvas_len).to(num_sampled.dtype)
 
     # SC soft embedding: store ``probs @ embed_weight`` (the value the next step's
     # self-conditioning MLP consumes) only for slots that will denoise next — i.e.
@@ -607,6 +602,7 @@ def _compiled_sample_step(
     canvas[decode_slots] = torch.where(
         newly_converged, argmax_canvas[decode_slots], canvas[decode_slots]
     )
+    is_encoder_phase[decode_slots] &= ~read_only[decode_slots]
 
     # ---- Phase 7: Copy canvas → draft_tokens for all slots ----
     draft_tokens[all_slots, :CL] = canvas[all_slots]
@@ -696,7 +692,6 @@ class DiffusionGemmaRequestStates:
         self.pin_mask = torch.zeros(
             max_num_reqs, canvas_length, dtype=torch.bool, device=device
         )
-        self.pinned_slots: set[int] = set()
         # Read-only slots emit on their converging step and skip the commit
         # forward.
         self.read_only = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
@@ -740,7 +735,6 @@ class DiffusionGemmaRequestStates:
         self.has_seed[slot_idx].fill_(False)
         self.seeded_slots.discard(slot_idx)
         self.pin_mask[slot_idx].fill_(False)
-        self.pinned_slots.discard(slot_idx)
         self.read_only[slot_idx].fill_(False)
         self.read_only_slots.discard(slot_idx)
         self.single_step_slots.discard(slot_idx)
@@ -753,7 +747,6 @@ class DiffusionGemmaRequestStates:
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
         self.seeded_slots.discard(slot_idx)
-        self.pinned_slots.discard(slot_idx)
         self.read_only_slots.discard(slot_idx)
         self.single_step_slots.discard(slot_idx)
 
@@ -773,7 +766,6 @@ class DiffusionGemmaRequestStates:
         self.pin_mask[
             slot_idx, async_tensor_h2d(positions, dtype=torch.int64, device=self.device)
         ] = True
-        self.pinned_slots.add(slot_idx)
 
     def set_read_only(self, slot_idx: int) -> None:
         self.read_only[slot_idx].fill_(True)
@@ -1446,6 +1438,7 @@ class DiffusionSampler:
                     states.max_steps,
                     states.pin_mask[:, :W],
                     states.seed_canvas[:, :W],
+                    states.read_only,
                     # Output
                     sampled[:, :W],
                     num_sampled,
@@ -1466,10 +1459,11 @@ class DiffusionSampler:
                     compute_sc=compute_sc,
                 )
 
-                # Logprobs for denoise steps that just converged (is_encoder_phase
-                # flipped False→True), stashed per tile so `scaled` is freed each tile.
+                # Stash newly converged logprobs, including reads that emit now.
                 if want_logprobs:
-                    converged_mask = states.is_encoder_phase[tile_slots]
+                    converged_mask = states.is_encoder_phase[tile_slots] | (
+                        num_sampled[decode_idx[sel]] > 0
+                    )
                     just_converged = converged_mask & ~is_committing[sel]
                     if just_converged.any():
                         flat_logits = scaled.reshape(-1, scaled.shape[-1])
@@ -1512,43 +1506,17 @@ class DiffusionSampler:
                             )
             run_start = run_end
 
-        # Read-only slots that converged this step emit their argmax canvas
-        # now, skip the encoder phase, and hand out their logprobs below.
-        emit_now: set[int] = set()
-        if states.read_only_slots and not states.read_only_slots.isdisjoint(
-            decode_slots_np.tolist()
-        ):
-            # Read-only slots never enter the encoder phase, so the flag here
-            # means converged this step.
-            ro_mask = (
-                states.read_only[decode_slots] & states.is_encoder_phase[decode_slots]
-            )
-            if bool(ro_mask.any()):
-                ro_idx = decode_idx[ro_mask]
-                ro_slots = decode_slots[ro_mask]
-                sampled[ro_idx] = states.argmax_canvas[ro_slots].to(sampled.dtype)
-                num_sampled[ro_idx] = valid_canvas_len[ro_mask].to(num_sampled.dtype)
-                states.is_encoder_phase[ro_slots] = False
-                emit_now = set(ro_slots.tolist())
-
-        # Commit steps: is_committing was True at entry. Reassemble previously
-        # stashed logprobs and attach to SamplerOutput.
+        # Only emitting requests consume their stashed logprobs.
         logprobs_tensors = None
-        if (
-            want_logprobs
-            and (emit_now or bool(is_committing.any()))
-            and self._pending_logprobs
-        ):
-            committing_slots = (
-                set(decode_slots_np[is_committing.cpu().numpy()].tolist()) | emit_now
-            )
+        if want_logprobs and self._pending_logprobs:
+            emitting_slots = set(slots_np[num_sampled.cpu().numpy() > 0].tolist())
             parts: list[LogprobsTensors] = []
             cu_gen: list[int] = []
             flat_offset = 0
             for i in range(num_reqs):
                 cu_gen.append(flat_offset)
                 slot = int(slots_np[i])
-                if slot in committing_slots and slot in self._pending_logprobs:
+                if slot in emitting_slots and slot in self._pending_logprobs:
                     lp = self._pending_logprobs.pop(slot)
                     parts.append(lp)
                     flat_offset += lp.logprobs.shape[0]

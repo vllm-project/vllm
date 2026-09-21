@@ -119,7 +119,7 @@ def _denoise_once(
     width: int = CL,
     embed_weight: torch.Tensor | None = None,
     embed_dtype: torch.dtype = torch.float32,
-) -> None:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """One compiled denoise step over ``slots`` with flat logits, so nothing
     converges by stability or confidence and only the step cap can end it.
     ``width`` below CL runs the step on [:, :width] views, as the sampler
@@ -128,6 +128,8 @@ def _denoise_once(
     device = states.device
     decode_slots = torch.tensor(slots, dtype=torch.int64, device=device)
     decode_idx = torch.arange(n, dtype=torch.int64, device=device)
+    sampled = torch.zeros(n, CL, dtype=torch.int32, device=device)[:, :width]
+    num_sampled = torch.zeros(n, dtype=torch.int32, device=device)
     _compiled_sample_step(
         torch.zeros(n * width, VOCAB, device=device),
         decode_slots,
@@ -151,8 +153,9 @@ def _denoise_once(
         states.max_steps,
         states.pin_mask[:, :width],
         states.seed_canvas[:, :width],
-        torch.zeros(n, CL, dtype=torch.int32, device=device)[:, :width],
-        torch.zeros(n, dtype=torch.int32, device=device),
+        states.read_only,
+        sampled,
+        num_sampled,
         torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device),
         max_denoising_steps=float(MAX_STEPS),
         t_min=0.5,
@@ -168,6 +171,7 @@ def _denoise_once(
         tp_group_name="",
         compute_sc=compute_sc,
     )
+    return sampled, num_sampled
 
 
 def test_pinned_positions_hold_their_seed_through_a_step():
@@ -194,12 +198,10 @@ def test_add_request_clears_pins():
     states.add_request(0)
     states.set_seed_canvas(0, [1] * CL)
     states.set_pins(0, [2, 3])
-    assert states.pinned_slots == {0}
     assert states.pin_mask[0].tolist() == [False, False, True, True] + [False] * 4
 
     states.add_request(0)
 
-    assert not states.pinned_slots
     assert not states.pin_mask[0].any()
 
 
@@ -291,3 +293,27 @@ def test_stashes_of_different_widths_join():
     assert not out.logprob_token_ids[:3, 3:].any()
     assert torch.isneginf(out.logprobs[:3, 3:]).all()
     assert torch.equal(out.logprobs[3:], wide.logprobs)
+
+
+@pytest.mark.parametrize("width", [4, CL])
+@pytest.mark.parametrize("steps", [1, 2])
+def test_read_emits_at_convergence_while_generation_waits_for_commit(width, steps):
+    states = _states()
+    for slot in (2, 0):
+        states.add_request(slot)
+        states.is_encoder_phase[slot] = False
+        states.max_steps[slot] = steps
+    states.set_read_only(2)
+
+    for step in range(steps):
+        sampled, counts = _denoise_once(states, [2, 0], width=width)
+        assert counts.tolist() == ([width, 0] if step == steps - 1 else [0, 0])
+
+    assert torch.equal(sampled[0], states.argmax_canvas[2, :width].int())
+    assert not states.is_encoder_phase[2]
+    assert states.is_encoder_phase[0]
+    assert not states.self_conditioning_embeds[2].any()
+
+    sampled, counts = _denoise_once(states, [0], width=width)
+    assert counts.tolist() == [width]
+    assert torch.equal(sampled[0], states.argmax_canvas[0, :width].int())
