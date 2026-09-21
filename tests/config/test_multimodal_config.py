@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -84,45 +85,23 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
     assert fp8_hash != fp8_static_hash
 
 
+_MULTIMODAL_MODEL = "llava-hf/llava-1.5-7b-hf"
+_TEXT_ONLY_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+
 def _make_mm_prefix_model_config(
+    model: str = _MULTIMODAL_MODEL,
     *,
     language_model_only: bool = False,
 ) -> ModelConfig:
-    model_config = MagicMock(spec=ModelConfig)
-    model_config.multimodal_config = MultiModalConfig(
-        language_model_only=language_model_only
-    )
-    # Bind real helper methods onto the mock.
-    model_config._supports_multimodal_for_mm_prefix = (
-        ModelConfig._supports_multimodal_for_mm_prefix.__get__(
-            model_config, ModelConfig
-        )
-    )
-    return model_config
-
-
-@pytest.mark.parametrize("supports_mm", [True, False])
-def test_supports_multimodal_for_mm_prefix_uses_registry(supports_mm: bool):
-    model_config = _make_mm_prefix_model_config()
-
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        return_value=supports_mm,
-    ) as mocked:
-        assert model_config._supports_multimodal_for_mm_prefix() is supports_mm
-        mocked.assert_called_once_with(model_config)
-
-    # Sticky cache — registry must not be consulted again.
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        side_effect=AssertionError("should use cache"),
-    ):
-        assert model_config._supports_multimodal_for_mm_prefix() is supports_mm
+    return ModelConfig(model, language_model_only=language_model_only)
 
 
 def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
-    model_config = _make_mm_prefix_model_config()
-    model_config.multimodal_config = None
+    """A text-only model never builds a multimodal config, so the early
+    return must neither clear mm_prefix nor write the sticky cache."""
+    model_config = _make_mm_prefix_model_config(_TEXT_ONLY_MODEL)
+    assert model_config.multimodal_config is None
 
     assert model_config._supports_multimodal_for_mm_prefix() is True
     assert not hasattr(model_config, "_supports_multimodal_inputs_cached")
@@ -132,11 +111,7 @@ def test_language_model_only_disables_via_supports_multimodal_inputs():
     """language_model_only zeros all limits, so registry reports text-only."""
     model_config = _make_mm_prefix_model_config(language_model_only=True)
 
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        return_value=False,
-    ):
-        assert model_config._supports_multimodal_for_mm_prefix() is False
+    assert model_config._supports_multimodal_for_mm_prefix() is False
 
 
 def test_convertor_clears_mm_prefix_when_multimodal_disabled():
@@ -159,23 +134,19 @@ def test_convertor_clears_mm_prefix_when_multimodal_disabled():
 def test_sticky_cache_survives_text_subconfig_regeneration():
     """with_hf_config deepcopies the cached decision onto text submodules."""
     model_config = _make_mm_prefix_model_config()
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        return_value=False,
-    ):
-        assert model_config._supports_multimodal_for_mm_prefix() is False
+    assert model_config._supports_multimodal_for_mm_prefix() is True
 
-    # Simulate deepcopy onto a Gemma4ForCausalLM-like config that would
-    # otherwise fail registry lookup / return False incorrectly.
-    text_config = _make_mm_prefix_model_config()
-    text_config._supports_multimodal_inputs_cached = (
-        model_config._supports_multimodal_inputs_cached
-    )
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        side_effect=AssertionError("must not re-query registry"),
-    ):
-        assert text_config._supports_multimodal_for_mm_prefix() is False
+    # `with_hf_config` deep-copies this config and swaps `hf_config` for a
+    # text-only submodule (e.g. Gemma4ForCausalLM).
+    text_config = copy.deepcopy(model_config)
+    text_config.hf_config = model_config.hf_text_config
+    assert text_config._supports_multimodal_for_mm_prefix() is True
+
+    # Without the copied cache the submodule architecture has no registered
+    # multimodal processor, so re-querying the registry wrongly settles on
+    # text-only and would clear mm_prefix.
+    del text_config._supports_multimodal_inputs_cache
+    assert text_config._supports_multimodal_for_mm_prefix() is False
 
 
 @pytest.mark.parametrize(

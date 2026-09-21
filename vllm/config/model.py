@@ -915,12 +915,26 @@ class ModelConfig:
         return True
 
     def _cached_supports_multimodal_inputs(self) -> bool:
-        cached = getattr(self, "_supports_multimodal_inputs_cached", None)
-        if cached is not None:
-            return cached
+        cache = getattr(self, "_supports_multimodal_inputs_cache", None)
+        if cache is None:
+            self._supports_multimodal_inputs_cache = cache = {}
+
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            mm_cache_key = None
+        else:
+            mm_cache_key = (
+                mm_config.language_model_only,
+                tuple(mm_config.limit_per_prompt.items()),
+                mm_config.enable_mm_embeds,
+            )
+
+        cache_key = (self.is_multimodal_model, self.runner_type, mm_cache_key)
+        if cache_key in cache:
+            return cache[cache_key]
 
         supports_mm = self._supports_multimodal_inputs()
-        self._supports_multimodal_inputs_cached = supports_mm
+        cache[cache_key] = supports_mm
         return supports_mm
 
     def _supports_multimodal_for_mm_prefix(self) -> bool:
