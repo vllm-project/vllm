@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for breakable-path AllReduce + RMSNorm fusion.
+"""Tests for eager AllReduce + RMSNorm fusion (breakable CUDA graph path).
 
+These helpers are ordinary eager functions, not torch.compile fusions.
 ``fused_allreduce_rms_norm`` must match ``RMSNorm(all_reduce(partial), residual)``.
 ``fused_allreduce_rms_norm_out`` must match ``RMSNorm(all_reduce(partial))``.
 Both the flashinfer/AITER fast path and the unfused fallback are covered by

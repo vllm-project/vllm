@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused all-reduce + residual-add + RMSNorm for breakable CUDA graph paths.
+"""Eager fused all-reduce + residual-add + RMSNorm.
 
-This recovers a fusion that vLLM's torch.compile passes would normally do but
-that cannot fire under a breakable CUDA graph (CompilationMode.NONE).
+Kimi-K3 AMD serving uses vLLM's own compilation:
+``CompilationMode.NONE`` + breakable CUDA/HIP graphs, not torch.compile.
+Write fusions as ordinary eager functions with no compile decorator and no
+``eager_break_during_capture``. If the call sits on the main model stream,
+breakable capture records it as a graph node.
+
+Do not route this through inductor fusion passes or ``@support_torch_compile``.
 """
 
 import torch
@@ -19,34 +24,6 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     flashinfer_trtllm_fused_allreduce_norm,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-
-# Cached zero residual for kernels that require a residual buffer even when
-# the model path is ``RMSNorm(all_reduce(x))`` with no residual add.
-_zero_residual: torch.Tensor | None = None
-
-
-def _get_zero_residual(
-    hidden_states: torch.Tensor, min_numel: int | None = None
-) -> torch.Tensor:
-    """Read-only zeros matching ``hidden_states``, grown to ``min_numel``."""
-    global _zero_residual
-    needed = hidden_states.numel()
-    if min_numel is not None:
-        needed = max(min_numel, needed)
-    buf = _zero_residual
-    if (
-        buf is None
-        or buf.dtype != hidden_states.dtype
-        or buf.device != hidden_states.device
-        or buf.numel() < needed
-    ):
-        buf = torch.zeros(
-            needed,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        _zero_residual = buf
-    return buf[: hidden_states.numel()].view_as(hidden_states)
 
 
 def _flashinfer_fused_ar_rms(
@@ -130,11 +107,11 @@ def fused_allreduce_rms_norm_out(
 ) -> torch.Tensor:
     """All-reduce + (standard) RMSNorm with no residual add.
 
-    Equivalent to ``norm(all_reduce(hidden_states))``. Used by Kimi-K3 latent
-    MoE, which RMSNorms the reduced latent before the up-projection. Fused
-    kernels still require a residual buffer; a cached zero tensor is passed.
-    Prefill-sized tensors miss the AITER 1-stage gate and fall back, matching
-    the unfused QuickReduce + RMSNorm path.
+    Equivalent to ``norm(all_reduce(hidden_states))``. Kimi-K3 latent MoE
+    RMSNorms the reduced latent before the up-projection. Fused kernels still
+    take a residual buffer; a same-shaped zero tensor is passed (eager
+    ``zeros_like``, captured with the surrounding graph). Prefill-sized
+    tensors miss the AITER 1-stage gate and fall back to unfused QR + RMSNorm.
     """
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
@@ -143,17 +120,18 @@ def fused_allreduce_rms_norm_out(
     if flashinfer_trtllm_fused_allreduce_norm is not None:
         ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
         if ok:
-            zero = _get_zero_residual(
-                hidden_states, max_token_num * hidden_states.shape[-1]
-            )
             norm_out, _ = _flashinfer_fused_ar_rms(
-                hidden_states, zero, norm, tp_size, max_token_num
+                hidden_states,
+                torch.zeros_like(hidden_states),
+                norm,
+                tp_size,
+                max_token_num,
             )
             return norm_out
 
     if _can_use_aiter_fused_ar_rms(hidden_states):
         norm_out, _ = _aiter_fused_ar_rms(
-            hidden_states, _get_zero_residual(hidden_states), norm
+            hidden_states, torch.zeros_like(hidden_states), norm
         )
         return norm_out
 
