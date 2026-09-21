@@ -585,10 +585,127 @@ def test_cutlass_subset():
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
+    if capability >= 90:
+        with pytest.raises(
+            RuntimeError, match="requires packed operands; A is not packed"
+        ):
+            ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
+        return
+
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
 
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.int8])
+@pytest.mark.parametrize(
+    ("padded_tensor", "operand"), [("a", "A"), ("b", "B"), ("out", "output")]
+)
+@pytest.mark.skipif(
+    capability < 90,
+    reason="Packed-only validation applies to CUTLASS 3.x.",
+)
+def test_cutlass_c3x_rejects_padded_operand(
+    padded_tensor: str, operand: str, dtype: torch.dtype
+):
+    if dtype == torch.int8 and capability >= 100:
+        pytest.skip("CUTLASS INT8 scaled_mm is not supported on SM100+.")
+
+    big_m = big_n = big_k = 1024
+    m = n = k = 512
+    quantize = to_fp8 if dtype == torch.float8_e4m3fn else to_int8
+
+    a = quantize(torch.randn((m, k), device="cuda") * 5)
+    b = quantize(torch.randn((n, k), device="cuda").t() * 5)
+    out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+
+    if padded_tensor == "a":
+        a = quantize(torch.randn((big_m, big_k), device="cuda") * 5)[:m, :k]
+    elif padded_tensor == "b":
+        b = quantize(torch.randn((big_n, big_k), device="cuda").t() * 5)[:k, :n]
+    else:
+        out = torch.empty((m, big_n), device="cuda", dtype=torch.bfloat16)[:m, :n]
+
+    scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+
+    with pytest.raises(
+        RuntimeError, match=rf"requires packed operands; {operand} is not packed"
+    ):
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
+
+
+@pytest.mark.skipif(
+    capability < 90,
+    reason="Packed-only validation applies to CUTLASS 3.x.",
+)
+def test_cutlass_c3x_accepts_size_one_leading_dimension():
+    m, n, k = 1, 512, 512
+    a_storage = to_fp8(torch.randn(k, device="cuda") * 5)
+    a = a_storage.as_strided((m, k), (1, 1))
+    b = to_fp8(torch.randn((n, k), device="cuda").t() * 5)
+    out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+    scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
+    baseline = baseline_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16, bias=None)
+    torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
+
+
+@pytest.mark.skipif(
+    capability < 90,
+    reason="Packed-only validation applies to CUTLASS 3.x.",
+)
+def test_cutlass_c3x_azp_rejects_padded_operand():
+    big_m = big_k = 1024
+    m = n = k = 512
+    a = to_int8(torch.randn((big_m, big_k), device="cuda") * 5)[:m, :k]
+    b = to_int8(torch.randn((n, k), device="cuda").t() * 5)
+    out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+    scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    azp_adj = torch.zeros(n, device="cuda", dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="requires packed operands; A is not packed"):
+        torch.ops._C.cutlass_scaled_mm_azp(
+            out, a, b, scale_a, scale_b, azp_adj, None, None
+        )
+
+
+@pytest.mark.parametrize(
+    ("misaligned_tensor", "operand"),
+    [("a", "A"), ("b", "B"), ("out", "output")],
+)
+@pytest.mark.skipif(
+    capability < 90,
+    reason="Pointer validation applies to CUTLASS 3.x.",
+)
+def test_cutlass_c3x_rejects_misaligned_pointer(misaligned_tensor: str, operand: str):
+    m = n = k = 512
+    a = to_fp8(torch.randn((m, k), device="cuda") * 5)
+    b = to_fp8(torch.randn((n, k), device="cuda").t() * 5)
+    out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+
+    if misaligned_tensor == "a":
+        a = to_fp8(torch.randn(m * k + 1, device="cuda") * 5)[1:].view(m, k)
+    elif misaligned_tensor == "b":
+        b = to_fp8(torch.randn(n * k + 1, device="cuda") * 5)[1:].view(n, k).t()
+    else:
+        out = torch.empty(m * n + 1, device="cuda", dtype=torch.bfloat16)[1:].view(m, n)
+
+    misaligned = {"a": a, "b": b, "out": out}[misaligned_tensor]
+    assert misaligned.data_ptr() % 16 != 0
+
+    scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"requires 16-byte-aligned pointers; {operand} is misaligned",
+    ):
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
 
 
 # Test to make sure cuda graphs work

@@ -507,7 +507,7 @@ steps:
         2)
           pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
           pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
-          pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+          pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8 or cutlass_c3x or cutlass_subset'
           pytest -v -s tests/kernels/quantization/test_block_fp8.py::test_w8a8_block_fp8_cutlass_matmul
           pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
           pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
