@@ -1,13 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Reasoning parser registration and selection boundary for `vllm-chat`.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
-pub use vllm_reasoning_parser::{
+pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Gemma4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser,
-    KimiReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
-    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
-    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
+    DeepSeekV4ReasoningParser, DeepSeekV41ReasoningParser, Glm45ReasoningParser,
+    Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser, MiniMaxM2ReasoningParser,
+    MiniMaxM3ReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
+    ReasoningError, ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser,
+    Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -19,8 +23,9 @@ pub mod names {
     pub const DEEPSEEK_R1: &str = "deepseek_r1";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
-    pub const GEMMA4: &str = "gemma4";
+    pub const DEEPSEEK_V41: &str = "deepseek_v41";
     pub const GLM45: &str = "glm45";
+    pub const GLM47: &str = "glm47";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const MINIMAX_M2: &str = "minimax_m2";
@@ -33,8 +38,9 @@ pub mod names {
 }
 
 /// Constructor signature for one registered reasoning parser implementation.
-type ReasoningParserCreator =
-    fn(DynTokenizer) -> vllm_reasoning_parser::Result<Box<dyn ReasoningParser>>;
+type ReasoningParserCreator = Arc<
+    dyn Fn(DynTokenizer) -> vllm_parser::reasoning::Result<Box<dyn ReasoningParser>> + Send + Sync,
+>;
 
 /// Registry and model matcher for reasoning parsers.
 pub type ReasoningParserFactory = ParserFactory<ReasoningParserCreator>;
@@ -58,8 +64,9 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
-            .register_parser::<Gemma4ReasoningParser>(names::GEMMA4)
+            .register_parser::<DeepSeekV41ReasoningParser>(names::DEEPSEEK_V41)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
+            .register_parser::<Glm47ReasoningParser>(names::GLM47)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
@@ -72,14 +79,14 @@ impl ReasoningParserFactory {
 
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
+            .register_pattern("deepseek-v4.1", names::DEEPSEEK_V41)
             .register_pattern("deepseek-v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek_v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
-            .register_pattern("gemma-4", names::GEMMA4)
-            .register_pattern("gemma4", names::GEMMA4)
-            .register_pattern("qwen", names::QWEN3)
-            .register_pattern("glm-5", names::GLM45)
-            .register_pattern("glm-4.7", names::GLM45)
+            .register_pattern("qwq", names::DEEPSEEK_R1)
+            .register_pattern("qwen3", names::QWEN3)
+            .register_pattern("glm-5", names::GLM47)
+            .register_pattern("glm-4.7", names::GLM47)
             .register_pattern("glm-4.6", names::GLM45)
             .register_pattern("glm-4.5", names::GLM45)
             .register_pattern("kimi-k2", names::KIMI_K2)
@@ -109,7 +116,7 @@ impl ReasoningParserFactory {
     where
         T: ReasoningParser + 'static,
     {
-        self.register_creator(name, T::create)
+        self.register_creator(name, Arc::new(T::create))
     }
 
     /// Construct a parser from an exact name.
@@ -124,7 +131,7 @@ impl ReasoningParserFactory {
             available_names: self.list(),
         })?;
 
-        creator(tokenizer).map_err(|error| crate::Error::ParserInitialization {
+        creator.as_ref()(tokenizer).map_err(|error| crate::Error::ParserInitialization {
             kind: "reasoning",
             name: name.to_string(),
             error: error.into(),

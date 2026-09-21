@@ -14,7 +14,7 @@ from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.nccl import find_nccl_include_paths
+from vllm.utils.nccl import find_nccl_include_paths, find_nccl_library_paths
 
 logger = init_logger(__name__)
 
@@ -39,7 +39,7 @@ void nccl_free_plug(void* ptr, size_t size, int device, void* stream) {
 _allocator = None
 _allocator_wrapper = None
 _mem_pool = None
-_registered_base_addrs = set()
+_registered_base_addrs: dict[bytes, set] = {}
 _graph_pool_id = None
 _nccl_allocator_failed_to_compile = False
 _cached_pool_snapshot = None
@@ -74,11 +74,15 @@ def compile_nccl_allocator():
         out_dir = tempfile.gettempdir()
         nccl_allocator_libname = "nccl_allocator"
         nccl_include_paths = find_nccl_include_paths()
+        ldflags = ["-l:libnccl.so.2"]
+        nccl_lib_paths = find_nccl_library_paths()
+        if nccl_lib_paths:
+            ldflags = [f"-L{p}" for p in nccl_lib_paths] + ldflags
         load_inline(
             name=nccl_allocator_libname,
             cpp_sources=nccl_allocator_source,
             with_cuda=True,
-            extra_ldflags=["-lnccl"],
+            extra_ldflags=ldflags,
             verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
             is_python_module=False,
             build_directory=out_dir,
@@ -181,11 +185,14 @@ class nccl_symm_mem_context:
         assert _pool is not None
         _cached_pool_snapshot = _pool.snapshot()
         assert self.pynccl_comm is not None
+        comm_key = bytes(self.pynccl_comm.unique_id.internal)
+        if comm_key not in _registered_base_addrs:
+            _registered_base_addrs[comm_key] = set()
         for segment in _cached_pool_snapshot:
-            if segment["address"] not in _registered_base_addrs:
+            if segment["address"] not in _registered_base_addrs[comm_key]:
                 self.pynccl_comm.register_comm_window_raw(
                     segment["address"], segment["total_size"]
                 )
-                _registered_base_addrs.add(segment["address"])
+                _registered_base_addrs[comm_key].add(segment["address"])
         if self.is_graph_capture:
             torch._C._cuda_beginAllocateCurrentThreadToPool(self.device, _graph_pool_id)

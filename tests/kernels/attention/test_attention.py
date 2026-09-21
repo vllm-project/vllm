@@ -14,6 +14,8 @@ from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
@@ -21,16 +23,14 @@ MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
-PARTITION_SIZE = 512
 PARTITION_SIZE_ROCM = 256
-DTYPES = [torch.bfloat16]
+DTYPES = [torch.bfloat16, torch.float16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
+NUM_HEADS = [(32, 8), (40, 40), (64, 8)]  # Arbitrary values for testing
 
-# This should be sync with get_supported_head_sizes() in
-# vllm.v1.attention.ops.paged_attn.PagedAttention
-HEAD_SIZES = [32, 80, 128, 256]
+# Head sizes supported by the ROCm paged attention kernel.
+HEAD_SIZES = [64, 128]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
@@ -111,8 +111,8 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize(
-    "version", ["v1", "v2"] if not current_platform.is_rocm() else ["v1", "v2", "rocm"]
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-only paged attention kernel"
 )
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -125,7 +125,6 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_paged_attention(
     kv_cache_factory,
-    version: str,
     num_seqs: int,
     num_heads: tuple[int, int],
     head_size: int,
@@ -136,21 +135,10 @@ def test_paged_attention(
     seed: int,
     device: str,
 ) -> None:
-    if (kv_cache_dtype == "fp8" and head_size % 16) or (
-        version == "rocm" and head_size not in (64, 128)
+    if current_platform.is_navi() and (
+        kv_cache_dtype == "fp8" or head_size != 128 or block_size != 16 or use_alibi
     ):
         pytest.skip()
-
-    if (
-        version == "rocm"
-        and current_platform.is_navi()
-        and (
-            kv_cache_dtype == "fp8" or head_size != 128 or block_size != 16 or use_alibi
-        )
-    ):
-        pytest.skip()
-
-    global PARTITION_SIZE
 
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -165,18 +153,22 @@ def test_paged_attention(
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
 
-    seq_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
-    seq_lens[-1] = MAX_SEQ_LEN
-    max_seq_len = max(seq_lens)
-    seq_lens = torch.tensor(seq_lens, dtype=torch.int)
+    seq_lens_lst = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    seq_lens_lst[-1] = MAX_SEQ_LEN
+    max_seq_len = max(seq_lens_lst)
+    seq_lens = torch.tensor(seq_lens_lst, dtype=torch.int)
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     block_tables_lst: list[list[int]] = []
-    for _ in range(num_seqs):
+    for seq_idx, seq_len in enumerate(seq_lens_lst):
         block_table = [
-            random.randint(0, NUM_BLOCKS - 1) for _ in range(max_num_blocks_per_seq)
+            random.randint(num_seqs, NUM_BLOCKS - 1)
+            for _ in range(max_num_blocks_per_seq)
         ]
+        # Keep the last block private to this sequence so its padding can be
+        # poisoned without corrupting valid tokens from another sequence.
+        block_table[(seq_len - 1) // block_size] = seq_idx
         block_tables_lst.append(block_table)
 
     block_tables = torch.tensor(block_tables_lst, dtype=torch.int)
@@ -195,14 +187,63 @@ def test_paged_attention(
     )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
-    # Using default kv_scale
-    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    k_scale_value = 0.5 if kv_cache_dtype == "fp8" else 1.0
+    v_scale_value = 0.25 if kv_cache_dtype == "fp8" else 1.0
+    k_scale = torch.tensor(k_scale_value, dtype=torch.float32, device=device)
+    v_scale = torch.tensor(v_scale_value, dtype=torch.float32, device=device)
+
+    if kv_cache_dtype == "fp8":
+        padding_nan = 0x80 if current_platform.is_fp8_fnuz() else 0x7F
+    else:
+        padding_nan = torch.nan
+    for seq_idx, seq_len in enumerate(seq_lens_lst):
+        padding_start = seq_len % block_size
+        if padding_start:
+            last_block_idx = block_tables_lst[seq_idx][seq_len // block_size]
+            value_cache[last_block_idx, :, :, padding_start:] = padding_nan
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    if version == "v1":
-        ops.paged_attention_v1(
+    num_partitions = (max_seq_len + PARTITION_SIZE_ROCM - 1) // PARTITION_SIZE_ROCM
+    assert PARTITION_SIZE_ROCM % block_size == 0
+    num_seqs, num_heads, head_size = output.shape
+    tmp_output = torch.empty(
+        size=(num_seqs, num_heads, num_partitions, head_size),
+        dtype=output.dtype,
+    )
+    exp_sums = torch.empty(
+        size=(num_seqs, num_heads, num_partitions),
+        dtype=torch.float32,
+    )
+    max_logits = torch.empty_like(exp_sums)
+    ops.paged_attention_rocm(
+        output,
+        exp_sums,
+        max_logits,
+        tmp_output,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        seq_lens,
+        None,
+        block_size,
+        max_seq_len,
+        alibi_slopes,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+
+    opcheck(
+        torch.ops._rocm_C.paged_attention,
+        (
             output,
+            exp_sums,
+            max_logits,
+            tmp_output,
             query,
             key_cache,
             value_cache,
@@ -210,155 +251,18 @@ def test_paged_attention(
             scale,
             block_tables,
             seq_lens,
+            None,
             block_size,
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
             k_scale,
             v_scale,
-        )
-
-        opcheck(
-            torch.ops._C.paged_attention_v1,
-            (
-                output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-                0,
-                0,
-                0,
-                64,
-                0,
-            ),
-            cond=(head_size == HEAD_SIZES[0] and block_size == BLOCK_SIZES[0]),
-        )
-
-    elif version in ("v2", "rocm"):
-        if current_platform.is_rocm() and version == "rocm":
-            PARTITION_SIZE = PARTITION_SIZE_ROCM
-
-        num_partitions = (max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE
-        assert PARTITION_SIZE % block_size == 0
-        num_seqs, num_heads, head_size = output.shape
-        tmp_output = torch.empty(
-            size=(num_seqs, num_heads, num_partitions, head_size),
-            dtype=output.dtype,
-        )
-        exp_sums = torch.empty(
-            size=(num_seqs, num_heads, num_partitions),
-            dtype=torch.float32,
-        )
-        max_logits = torch.empty_like(exp_sums)
-        if version == "v2":
-            ops.paged_attention_v2(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-            )
-
-            opcheck(
-                torch.ops._C.paged_attention_v2,
-                (
-                    output,
-                    exp_sums,
-                    max_logits,
-                    tmp_output,
-                    query,
-                    key_cache,
-                    value_cache,
-                    num_kv_heads,
-                    scale,
-                    block_tables,
-                    seq_lens,
-                    block_size,
-                    max_seq_len,
-                    alibi_slopes,
-                    kv_cache_dtype,
-                    k_scale,
-                    v_scale,
-                    0,
-                    0,
-                    0,
-                    64,
-                    0,
-                ),
-                cond=(head_size == HEAD_SIZES[0] and block_size == BLOCK_SIZES[0]),
-            )
-
-        else:
-            ops.paged_attention_rocm(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                seq_lens,
-                None,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-            )
-
-            opcheck(
-                torch.ops._rocm_C.paged_attention,
-                (
-                    output,
-                    exp_sums,
-                    max_logits,
-                    tmp_output,
-                    query,
-                    key_cache,
-                    value_cache,
-                    num_kv_heads,
-                    scale,
-                    block_tables,
-                    seq_lens,
-                    None,
-                    block_size,
-                    max_seq_len,
-                    alibi_slopes,
-                    kv_cache_dtype,
-                    k_scale,
-                    v_scale,
-                ),
-                cond=(head_size == HEAD_SIZES[0] and block_size == BLOCK_SIZES[0]),
-            )
-
-    else:
-        raise AssertionError(f"Unknown version: {version}")
+            None,
+            "f16",
+        ),
+        cond=(head_size == 64 and block_size == BLOCK_SIZES[0]),
+    )
 
     # Run the reference implementation.
     if kv_cache_dtype == "fp8":
@@ -368,14 +272,14 @@ def test_paged_attention(
         dequantized_key_cache = torch.empty(
             size=key_cache_shape, dtype=dtype, device=device
         )
-        ops.convert_fp8(dequantized_key_cache, key_cache)
+        ops.convert_fp8(dequantized_key_cache, key_cache, k_scale_value)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(
             size=value_cache_shape, dtype=dtype, device=device
         )
-        ops.convert_fp8(dequantized_value_cache, value_cache)
+        ops.convert_fp8(dequantized_value_cache, value_cache, v_scale_value)
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)
@@ -457,4 +361,55 @@ def test_num_heads_not_divisible_by_num_kv_heads(attention_cls: type) -> None:
             head_size=head_size,
             scale=scale,
             num_kv_heads=num_kv_heads,
+        )
+
+
+UNSUPPORTED_HEAD_SIZES = [32, 80, 96, 160, 192, 224, 256]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-only paged attention kernel"
+)
+@pytest.mark.parametrize("head_size", UNSUPPORTED_HEAD_SIZES)
+def test_paged_attention_unsupported_head_sizes(
+    kv_cache_factory, head_size: int
+) -> None:
+    """Verify ROCm paged attention rejects unsupported head sizes."""
+    torch.set_default_device("cuda")
+    num_seqs, num_kv_heads, block_size, max_seq_len = 1, 8, 16, 128
+    scale = head_size**-0.5
+
+    query = torch.empty(num_seqs, num_kv_heads, head_size, dtype=torch.bfloat16)
+    key_caches, value_caches = kv_cache_factory(
+        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, "auto", torch.bfloat16, 0
+    )
+    block_tables = torch.zeros(num_seqs, 1, dtype=torch.int32)
+    seq_lens = torch.tensor([max_seq_len], dtype=torch.int32)
+
+    output = torch.empty_like(query)
+    num_partitions = (max_seq_len + PARTITION_SIZE_ROCM - 1) // PARTITION_SIZE_ROCM
+    tmp_output = torch.empty(num_seqs, num_kv_heads, num_partitions, head_size)
+    exp_sums = torch.empty(num_seqs, num_kv_heads, num_partitions, dtype=torch.float32)
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+
+    with pytest.raises(RuntimeError, match="Unsupported head size"):
+        ops.paged_attention_rocm(
+            output,
+            exp_sums,
+            torch.empty_like(exp_sums),
+            tmp_output,
+            query,
+            key_caches[0],
+            value_caches[0],
+            num_kv_heads,
+            scale,
+            block_tables,
+            seq_lens,
+            None,
+            block_size,
+            max_seq_len,
+            None,
+            "auto",
+            k_scale,
+            v_scale,
         )

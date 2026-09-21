@@ -1,0 +1,4 @@
+NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-humming.yaml
+Qwen3.5-35B-A3B-FP8-humming.yaml
+Qwen3-30B-A3B-MXFP4A16-humming.yaml
+gpt-oss-20b-humming.yaml

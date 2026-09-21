@@ -1,42 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Default output processing pipeline.
 
-mod reasoning;
-mod tool;
+mod structural_tag;
+mod unified;
 
 use std::sync::Once;
 
-use futures::{Stream, StreamExt as _};
+use futures::StreamExt as _;
 use tracing::info;
-use trait_set::trait_set;
+use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 
-use self::reasoning::reasoning_event_stream;
-use self::tool::tool_event_stream;
+use self::structural_tag::apply_structural_tag_constraint;
+use self::unified::unified_event_stream;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
-use crate::output::{
-    AssistantEvent, ChatOutputProcessor, ContentEvent, DynChatEventStream,
-    DynDecodedTextEventStream,
-};
-use crate::parser::ParserSelection;
+use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
-use crate::request::{ChatRequest, ChatToolChoice};
+use crate::parser::unified::UnifiedParserFactory;
+use crate::parser::{ParserSelection, ToolStrictLevel};
+use crate::request::{ChatRequest, ChatTool};
 use crate::{Error, Result as ChatResult};
-
-trait_set! {
-    trait ContentEventStream = Stream<Item = Result<ContentEvent>> + Send + 'static;
-}
 
 /// Default request-scoped output processor used by Hugging Face style chat
 /// backends.
 ///
 /// This implementation assumes the backend already emitted decoded text deltas,
-/// then optionally layers reasoning parsing and tool-call parsing before
+/// then optionally layers unified reasoning and tool-call parsing before
 /// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
-    reasoning_parser: Option<Box<dyn ReasoningParser>>,
-    tool_parser: Option<Box<dyn ToolParser>>,
+    parser: Box<dyn UnifiedParser>,
     parallel_tool_calls: bool,
 }
 
@@ -53,29 +49,44 @@ impl DefaultChatOutputProcessor {
         tokenizer: DynTokenizer,
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
+        tool_strict_level: ToolStrictLevel,
     ) -> ChatResult<Self> {
-        let tool_parsing_enabled =
-            matches!(request.tool_choice, ChatToolChoice::Auto) && !request.tools.is_empty();
-        let tool_parser = if tool_parsing_enabled {
-            Some(Self::resolve_tool_parser(
-                request,
-                model_id,
-                tool_call_parser,
-            )?)
+        let parser = if let Some(parser) = Self::resolve_optional_unified_parser(
+            request.tools(),
+            tokenizer.clone(),
+            tool_call_parser.resolve_tool_name(model_id),
+            reasoning_parser.resolve_reasoning_name(model_id),
+        )? {
+            parser
         } else {
-            None
+            let tool_parsing_enabled = request.tool_parsing_enabled();
+            let tool_parser = if tool_parsing_enabled {
+                Some(Self::resolve_tool_parser(
+                    request.tools(),
+                    model_id,
+                    tool_call_parser,
+                )?)
+            } else {
+                None
+            };
+            let reasoning_parser =
+                Self::resolve_optional_reasoning_parser(model_id, tokenizer, reasoning_parser)?;
+            Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
         };
-        let reasoning_parser = Self::resolve_optional_reasoning_parser(
+
+        apply_structural_tag_constraint(
             request,
-            model_id,
-            tokenizer,
-            reasoning_parser,
+            parser.structural_tag_builder(),
+            tool_strict_level,
         )?;
 
+        if parser.preserve_special_tokens() {
+            request.decode_options.skip_special_tokens = false;
+        }
+
         Ok(Self {
-            reasoning_parser,
-            tool_parser,
-            parallel_tool_calls: request.parallel_tool_calls,
+            parser,
+            parallel_tool_calls: request.parallel_tool_calls(),
         })
     }
 
@@ -86,20 +97,19 @@ impl DefaultChatOutputProcessor {
     /// content is treated as opaque text.
     pub fn plain_text_only() -> Self {
         Self {
-            reasoning_parser: None,
-            tool_parser: None,
+            parser: Box::new(CombinedParser::plain_text_only()),
             parallel_tool_calls: true,
         }
     }
 
     fn resolve_tool_parser(
-        request: &mut ChatRequest,
+        tools: &[ChatTool],
         model_id: &str,
         selection: &ParserSelection,
     ) -> ChatResult<Box<dyn ToolParser>> {
         let factory = ToolParserFactory::global();
         let parser_name = match selection {
-            ParserSelection::Auto => factory.resolve_name_for_model(model_id).ok_or_else(|| {
+            ParserSelection::Auto => selection.resolve_tool_name(model_id).ok_or_else(|| {
                 Error::ParserUnavailableForModel {
                     kind: "tool",
                     model_id: model_id.to_string(),
@@ -109,28 +119,44 @@ impl DefaultChatOutputProcessor {
             ParserSelection::Explicit(name) => name.as_str(),
         };
 
-        let parser = factory.create(parser_name, &request.tools)?;
-
-        if parser.preserve_special_tokens() {
-            request.decode_options.skip_special_tokens = false;
-        }
+        let parser = factory.create(parser_name, tools)?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(parser)
     }
 
+    fn resolve_optional_unified_parser(
+        tools: &[ChatTool],
+        tokenizer: DynTokenizer,
+        tool_name: Option<&str>,
+        reasoning_name: Option<&str>,
+    ) -> ChatResult<Option<Box<dyn UnifiedParser>>> {
+        let factory = UnifiedParserFactory::global();
+        let Some(parser_name) =
+            tool_name.into_iter().chain(reasoning_name).find(|name| factory.contains(name))
+        else {
+            return Ok(None);
+        };
+        if tool_name != reasoning_name {
+            return Err(Error::IncompatibleParserSelections {
+                tool: tool_name.unwrap_or("none").to_owned(),
+                reasoning: reasoning_name.unwrap_or("none").to_owned(),
+            });
+        }
+
+        let parser = factory.create(parser_name, tools, tokenizer)?;
+
+        UNIFIED_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using unified parser"));
+        Ok(Some(parser))
+    }
+
     fn resolve_optional_reasoning_parser(
-        request: &mut ChatRequest,
         model_id: &str,
         tokenizer: DynTokenizer,
         selection: &ParserSelection,
     ) -> ChatResult<Option<Box<dyn ReasoningParser>>> {
         let factory = ReasoningParserFactory::global();
-        let parser_name = match selection {
-            ParserSelection::Auto => factory.resolve_name_for_model(model_id),
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name.as_str()),
-        };
+        let parser_name = selection.resolve_reasoning_name(model_id);
 
         let Some(parser_name) = parser_name else {
             REASONING_PARSER_LOG_ONCE.call_once(|| info!("reasoning parsing disabled"));
@@ -139,10 +165,6 @@ impl DefaultChatOutputProcessor {
 
         let parser = factory.create(parser_name, tokenizer)?;
 
-        if parser.preserve_special_tokens() {
-            request.decode_options.skip_special_tokens = false;
-        }
-
         REASONING_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using reasoning parser"));
         Ok(Some(parser))
     }
@@ -150,20 +172,107 @@ impl DefaultChatOutputProcessor {
 
 static TOOL_PARSER_LOG_ONCE: Once = Once::new();
 static REASONING_PARSER_LOG_ONCE: Once = Once::new();
+static UNIFIED_PARSER_LOG_ONCE: Once = Once::new();
 
 impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// Transforms a raw generate-output token stream into structured chat
-    /// events through three sequential stages once text decoding has
+    /// events through two sequential stages once text decoding has
     /// already happened:
     ///
-    /// 1. [`reasoning_event_stream`] — reasoning/content separation
-    /// 2. [`tool_event_stream`] — tool-call parsing
-    /// 3. [`structured_chat_event_stream`] — final block assembly
+    /// 1. [`unified_event_stream`] — reasoning and tool-call parsing
+    /// 2. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
-        let reasoning = reasoning_event_stream(decoded, self.reasoning_parser);
-        let tool = tool_event_stream(reasoning, self.tool_parser);
-        let structured = structured_chat_event_stream(tool, self.parallel_tool_calls);
+        let parsed = unified_event_stream(decoded, self.parser);
+        let structured = structured_chat_event_stream(parsed, self.parallel_tool_calls);
 
         Ok(structured.boxed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use vllm_tokenizer::test_utils::TestTokenizer;
+
+    use super::DefaultChatOutputProcessor;
+    use crate::parser::{ParserSelection, ToolStrictLevel};
+    use crate::request::ChatRequest;
+
+    fn tokenizer() -> Arc<TestTokenizer> {
+        Arc::new(
+            TestTokenizer::new()
+                .with_regular_token("<|channel>", 256)
+                .with_regular_token("<channel|>", 257),
+        )
+    }
+
+    #[test]
+    fn equal_explicit_gemma4_uses_unified_parser() {
+        let mut request = ChatRequest::for_test();
+        let selection = ParserSelection::Explicit("gemma4".to_string());
+
+        DefaultChatOutputProcessor::new(
+            &mut request,
+            "other-model",
+            tokenizer(),
+            &selection,
+            &selection,
+            ToolStrictLevel::Auto,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn auto_auto_gemma4_model_uses_unified_parser() {
+        let mut request = ChatRequest::for_test();
+
+        DefaultChatOutputProcessor::new(
+            &mut request,
+            "google/gemma-4-27b-it",
+            tokenizer(),
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+            ToolStrictLevel::Auto,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn auto_and_explicit_gemma4_selections_use_unified_parser() {
+        let explicit = ParserSelection::Explicit("gemma4".to_string());
+        for (tool, reasoning) in [
+            (&ParserSelection::Auto, &explicit),
+            (&explicit, &ParserSelection::Auto),
+        ] {
+            DefaultChatOutputProcessor::new(
+                &mut ChatRequest::for_test(),
+                "google/gemma-4-27b-it",
+                tokenizer(),
+                tool,
+                reasoning,
+                ToolStrictLevel::Auto,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn conflicting_unified_parser_selections_report_resolved_names() {
+        let mut request = ChatRequest::for_test();
+        let error = match DefaultChatOutputProcessor::new(
+            &mut request,
+            "Qwen/Qwen3-8B",
+            tokenizer(),
+            &ParserSelection::Auto,
+            &ParserSelection::Explicit("gemma4".to_string()),
+            ToolStrictLevel::Auto,
+        ) {
+            Ok(_) => panic!("expected mixed Gemma4 parser selection to fail"),
+            Err(error) => error,
+        };
+
+        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=qwen3_xml, reasoning=gemma4"]
+            .assert_eq(&format!("{error}"));
     }
 }

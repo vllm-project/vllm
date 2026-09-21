@@ -19,8 +19,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetenso
 
 
 class RunaiModelStreamerLoader(BaseModelLoader):
-    """
-    Model loader that can load safetensors
+    """Model loader that can load safetensors
     files from local FS, S3, GCS, or Azure Blob Storage.
     """
 
@@ -47,21 +46,29 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             # Validate every value before mutating os.environ, so a later
             # invalid key cannot leave an earlier one partially applied.
             env_updates: dict[str, str] = {}
-            for key, env_var in (
-                ("concurrency", "RUNAI_STREAMER_CONCURRENCY"),
-                ("memory_limit", "RUNAI_STREAMER_MEMORY_LIMIT"),
-            ):
-                if key in extra_config:
-                    value = extra_config[key]
-                    if (
-                        isinstance(value, bool)
-                        or not isinstance(value, int)
-                        or value <= 0
-                    ):
-                        raise ValueError(
-                            f"{key} must be a positive integer, got {value!r}"
-                        )
-                    env_updates[env_var] = str(value)
+            if "concurrency" in extra_config:
+                concurrency = extra_config["concurrency"]
+                if (
+                    isinstance(concurrency, bool)
+                    or not isinstance(concurrency, int)
+                    or concurrency <= 0
+                ):
+                    raise ValueError(
+                        f"concurrency must be a positive integer, got {concurrency!r}"
+                    )
+                env_updates["RUNAI_STREAMER_CONCURRENCY"] = str(concurrency)
+
+            if "memory_limit" in extra_config:
+                memory_limit = extra_config["memory_limit"]
+                if (
+                    isinstance(memory_limit, bool)
+                    or not isinstance(memory_limit, int)
+                    or memory_limit < -1
+                ):
+                    raise ValueError(
+                        f"memory_limit must be an integer >= -1, got {memory_limit!r}"
+                    )
+                env_updates["RUNAI_STREAMER_MEMORY_LIMIT"] = str(memory_limit)
             os.environ.update(env_updates)
 
             runai_streamer_s3_endpoint = os.getenv("RUNAI_STREAMER_S3_ENDPOINT")
@@ -75,7 +82,6 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
-
         is_object_storage_path = is_runai_obj_uri(model_name_or_path)
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"
@@ -119,7 +125,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
-        """Download model if necessary"""
+        """Download model if necessary."""
         self._prepare_weights(model_config.model, model_config.revision)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:

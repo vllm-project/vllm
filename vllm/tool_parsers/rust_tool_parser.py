@@ -8,17 +8,17 @@ from typing import Any
 from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -224,7 +224,7 @@ class RustToolParser(ToolParser):
                 "Error parsing %s tool call output.", self.rust_parser_name
             )
             return None
-        return output.coalesce_calls(), tool_call_ids
+        return output.coalesce(), tool_call_ids
 
     def extract_tool_calls(
         self,

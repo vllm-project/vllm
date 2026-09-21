@@ -18,6 +18,7 @@ from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     ImageDummyOptions,
+    MultiModalDummyOptions,
     VideoDummyOptions,
 )
 from vllm.distributed import (
@@ -37,7 +38,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
-from .test_common import get_model_ids_to_test, get_text_token_prompts
+from .test_common import get_model_ids_to_test, get_token_prompt
 
 ImageInput = list[Image.Image]
 VideoInput: TypeAlias = (
@@ -98,7 +99,7 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
-        mm_options={},
+        mm_options=MultiModalDummyOptions(),
     )
     mm_items = processor_inputs.mm_data_items
     resized_mm_data = {
@@ -107,10 +108,10 @@ def create_batched_mm_kwargs(
     }
 
     # video metadata will be added back to the resized video data here.
-    text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
+    token_prompt = get_token_prompt(processor, resized_mm_data)
 
     mm_kwargs = processor(
-        prompt=token_prompt if text_prompt is None else text_prompt,
+        prompt=token_prompt,
         mm_items=processor.info.parse_mm_data(resized_mm_data),
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
     )["mm_kwargs"].require_data()
@@ -164,6 +165,15 @@ def test_model_tensor_schema(model_id: str):
             "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
 
+    if (
+        model_id == "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
+        and not current_platform.is_cuda_alike()
+    ):
+        pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
+
+    if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
+        pytest.skip("GLM-5.3-Flash is not supported on XPU")
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
@@ -208,8 +218,14 @@ def test_model_tensor_schema(model_id: str):
 
     factories = model_cls._processor_factory
 
+    # Capture helpers return capture-buffer containers (e.g.
+    # EncoderCudaGraphCaptureInputs), not TensorSchema mm inputs.
+    capture_helpers = {"prepare_encoder_cudagraph_capture_inputs"}
+
     inputs_parse_methods = []
     for attr_name in dir(model_cls):
+        if attr_name in capture_helpers:
+            continue
         attr = getattr(model_cls, attr_name)
         if hasattr(attr, "__annotations__"):
             return_type = attr.__annotations__.get("return", None)
@@ -239,11 +255,13 @@ def test_model_tensor_schema(model_id: str):
             return AudioDummyOptions(count=count)
         return BaseDummyOptions(count=count)
 
-    model_config.get_multimodal_config().limit_per_prompt = {
-        modality: _to_dummy_options(modality, count)
-        for modality, count in limit_mm_per_prompt.items()
-    }
-    processor = factories.build_processor(ctx, cache=None)
+    model_config.get_multimodal_config().limit_per_prompt = MultiModalDummyOptions(
+        {
+            modality: _to_dummy_options(modality, count)
+            for modality, count in limit_mm_per_prompt.items()
+        }
+    )
+    processor = factories.build_processor(ctx)
 
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(model_config, processor):

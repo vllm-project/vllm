@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 import vllm.envs as envs
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.mla.prefill.base import (
     MLADimensions,
     MLAPrefillBackend,
@@ -15,6 +16,7 @@ from vllm.v1.attention.backends.utils import (
     PerLayerParameters,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    log2_lse_to_ln,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -108,15 +110,21 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             return self._global_hyperparameters
 
         from vllm.model_executor.layers.attention.mla_attention import (
-            MLAAttention,
             MLACommonImpl,
         )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
 
+        # Match any layer with an MLA impl, not just the MLAAttention wrapper:
+        # fused MLA modules (Kimi-K3's MultiHeadLatentAttention) register a
+        # different layer type. Keying on impl also excludes linear/KDA layers.
         forward_context = self.vllm_config.compilation_config.static_forward_context
         layer_names = [
             name
             for name, layer in forward_context.items()
-            if isinstance(layer, MLAAttention)
+            if isinstance(layer, AttentionLayerBase)
+            and isinstance(getattr(layer, "impl", None), MLACommonImpl)
         ]
 
         self._global_hyperparameters = infer_global_hyperparameters(
@@ -144,8 +152,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         if has_context:
             chunked_context = prefill_metadata.chunked_context
             assert chunked_context is not None
-            num_chunks = chunked_context.cu_seq_lens.shape[0]
-            self._ensure_chunks(num_chunks, self._workspace_buffer)
+            self._ensure_chunks(len(chunked_context.chunks), self._workspace_buffer)
 
         num_qo_heads = self.num_heads
         num_kv_heads = num_qo_heads
@@ -155,41 +162,47 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         kv_indptr = qo_indptr.clone()
 
         assert self._prefill_main is not None
-        self._prefill_main.plan(
-            qo_indptr=qo_indptr,
-            kv_indptr=kv_indptr,
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim_qk=head_dim_qk,
-            head_dim_vo=head_dim_vo,
-            causal=True,
-            sm_scale=global_hyperparameters.sm_scale,
-            window_left=global_hyperparameters.window_left,
-            logits_soft_cap=global_hyperparameters.logits_soft_cap,
-            q_data_type=prefill_metadata.q_data_type,
-            o_data_type=prefill_metadata.output_dtype,
-        )
+        # FlashInfer's plan() currently copies GPU indptrs to the CPU.
+        # This will be fixed by https://github.com/vllm-project/vllm/pull/52657.
+        with gpu_sync_allowed():
+            self._prefill_main.plan(
+                qo_indptr=qo_indptr,
+                kv_indptr=kv_indptr,
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim_qk=head_dim_qk,
+                head_dim_vo=head_dim_vo,
+                causal=True,
+                sm_scale=global_hyperparameters.sm_scale,
+                window_left=global_hyperparameters.window_left,
+                logits_soft_cap=global_hyperparameters.logits_soft_cap,
+                q_data_type=prefill_metadata.q_data_type,
+                o_data_type=prefill_metadata.output_dtype,
+            )
 
         if has_context:
             chunked_context = prefill_metadata.chunked_context
             assert chunked_context is not None
-            for i in range(num_chunks):
-                kv_indptr_chunk = chunked_context.cu_seq_lens[i]
+            for chunk in chunked_context.chunks:
+                with gpu_sync_allowed():
+                    self._prefill_chunks[chunk.index].plan(
+                        qo_indptr=chunk.query_start_loc,
+                        kv_indptr=chunk.cu_seq_lens,
+                        num_qo_heads=num_qo_heads,
+                        num_kv_heads=num_kv_heads,
+                        head_dim_qk=head_dim_qk,
+                        head_dim_vo=head_dim_vo,
+                        causal=False,
+                        sm_scale=global_hyperparameters.sm_scale,
+                        window_left=global_hyperparameters.window_left,
+                        logits_soft_cap=global_hyperparameters.logits_soft_cap,
+                        q_data_type=prefill_metadata.q_data_type,
+                        o_data_type=prefill_metadata.output_dtype,
+                    )
 
-                self._prefill_chunks[i].plan(
-                    qo_indptr=qo_indptr,
-                    kv_indptr=kv_indptr_chunk,
-                    num_qo_heads=num_qo_heads,
-                    num_kv_heads=num_kv_heads,
-                    head_dim_qk=head_dim_qk,
-                    head_dim_vo=head_dim_vo,
-                    causal=False,
-                    sm_scale=global_hyperparameters.sm_scale,
-                    window_left=global_hyperparameters.window_left,
-                    logits_soft_cap=global_hyperparameters.logits_soft_cap,
-                    q_data_type=prefill_metadata.q_data_type,
-                    o_data_type=prefill_metadata.output_dtype,
-                )
+    def supports_out(self) -> bool:
+        # Planned with head_dim_vo == v_head_dim, so the output is unpadded.
+        return True
 
     def run_prefill_new_tokens(
         self,
@@ -206,27 +219,30 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             q=q,
             k=k,
             v=v,
+            out=out,
             return_lse=return_softmax_lse,
         )
 
         if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
-            return ret[0], ret[1].transpose(0, 1).contiguous()
+            return ret[0], log2_lse_to_ln(ret[1].transpose(0, 1))
         return ret
 
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        attn_out, lse = self._prefill_chunks[chunk_idx].run(
+        attn_out, lse = self._prefill_chunks[chunk.index].run(
             q=q,
             k=k,
             v=v,
+            out=out,
             return_lse=True,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
-        return attn_out, lse.transpose(0, 1).contiguous()
+        return attn_out, log2_lse_to_ln(lse.transpose(0, 1))
