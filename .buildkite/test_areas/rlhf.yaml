@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 35GB) RLHF Entrypoints"
   device: h200_35gb
-  key: entrypoints-unit-tests
+  key: rlhf-entrypoints-tests
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
