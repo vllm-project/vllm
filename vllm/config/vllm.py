@@ -49,7 +49,12 @@ from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
-from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
+from .speculative import (
+    EagleModelTypes,
+    NgramGPUTypes,
+    SpeculativeConfig,
+    SuffixGPUTypes,
+)
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
 from .watermarking import WatermarkConfig
@@ -1455,13 +1460,14 @@ class VllmConfig:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
+                    and self.speculative_config.method not in get_args(SuffixGPUTypes)
                     and self.speculative_config.method != "draft_model"
                     and self.speculative_config.method != "dspark"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark kind of "
-                        "speculative decoding"
+                        "with EAGLE/MTP/Draft Model/NGram GPU/Suffix GPU/DSpark "
+                        "kind of speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -1488,6 +1494,7 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
+                and self.speculative_config.method not in get_args(SuffixGPUTypes)
                 and self.speculative_config.method != "draft_model"
                 and self.speculative_config.method != "dspark"
             ):
@@ -2924,6 +2931,7 @@ class VllmConfig:
                 # https://github.com/vllm-project/vllm/pull/40704
                 "ngram",
                 "ngram_gpu",
+                "suffix_gpu",
                 # https://github.com/vllm-project/vllm/pull/43091
                 "draft_model",
                 "suffix",

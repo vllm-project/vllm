@@ -293,6 +293,12 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 
+    # req_id -> scheduled spec slots that held no real draft token.
+    # GPU-state drafters (ngram_gpu/suffix_gpu) schedule padded-k
+    # placeholders; the worker trims them at _update_states and reports
+    # the trim here so draft metrics count only real draft tokens.
+    num_invalid_spec_tokens: dict[str, int] | None = None
+
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
