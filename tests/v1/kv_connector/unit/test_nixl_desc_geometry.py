@@ -830,7 +830,9 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
         worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
 
 
-def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
+def _make_csa_linear_ple_worker(
+    scratch_aliases: str = "compressed", kv_buffer_device: str = "cuda"
+):
     """``scratch_aliases`` selects which pages the compressor ring overlays."""
     from unittest.mock import MagicMock
 
@@ -948,8 +950,10 @@ def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
     )
 
     vllm_config = create_vllm_config(block_size=4)
+    # The config is created for the host before the fake CUDA platform is active.
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     vllm_config.cache_config.enable_prefix_caching = False
-    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [4]
     fake_backend.get_name.return_value = "TEST_ATTN"
@@ -991,6 +995,12 @@ def test_csa_linear_registration_discovers_shared_regions():
     assert worker._ple_region_index == 0
     assert worker._region_is_mla == [False, False, True, True]
     assert worker._scratch_region_indices == [2, 3]
+
+
+@pytest.mark.cpu_test
+def test_csa_linear_mamba_rejects_host_staging():
+    with pytest.raises(NotImplementedError, match="shared tensors"):
+        _make_csa_linear_ple_worker(kv_buffer_device="cpu")
 
 
 @pytest.mark.cpu_test
@@ -1129,7 +1139,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
         )
 
 
-def _make_ring_worker():
+def _make_ring_worker(kv_buffer_device: str = "cuda"):
     """Paged MLA group plus a per-layer ring group, no Mamba: the shape of a
     model whose sliding-window KV lives in per-request rings."""
     from unittest.mock import MagicMock
@@ -1173,7 +1183,10 @@ def _make_ring_worker():
     # Both rings overlay the second paged region, so the scratch group must
     # address only that region while the paged group spans both.
     tensor_regions = (("paged.0",), ("paged.1", "ring.0", "ring.1"))
-    region_size, page_size = 512, 256
+    page_size = max(
+        spec.page_size_bytes for spec in (*paged_specs.values(), *ring_specs.values())
+    )
+    region_size = 2 * page_size
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
@@ -1192,7 +1205,7 @@ def _make_ring_worker():
 
     vllm_config = create_vllm_config(block_size=4)
     vllm_config.cache_config.enable_prefix_caching = False
-    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [4]
     fake_backend.get_name.return_value = "TEST_ATTN"
@@ -1210,7 +1223,9 @@ def _make_ring_worker():
         set_current_vllm_config(vllm_config),
     ):
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
-        tensors = [torch.zeros((2, 256), dtype=torch.uint8) for _ in range(2)]
+        if kv_buffer_device == "cpu":
+            worker.use_mla = True
+        tensors = [torch.zeros((2, page_size), dtype=torch.uint8) for _ in range(2)]
         worker.register_kv_caches(
             {
                 layer_name: tensors[region_index]
@@ -1236,3 +1251,60 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
     )
     # Paged block 1 in both regions; ring block 0 only in its scratch region.
     assert sorted(desc_ids.tolist()) == sorted([0 * 2 + 1, 1 * 2 + 1, 1 * 2 + 0])
+
+
+@pytest.mark.cpu_test
+def test_ring_scratch_without_mamba_supports_host_staging():
+    from types import SimpleNamespace
+
+    worker = _make_ring_worker(kv_buffer_device="cpu")
+
+    assert worker.use_host_buffer
+    assert len(worker.host_xfer_buffers) == 4
+    assert len({tensor.data_ptr() for tensor in worker.host_xfer_buffers.values()}) == 4
+    assert worker.region_group_ids == [0, 0, 1, 1]
+    assert worker.region_mem_types == ["DRAM"] * 4
+    assert worker._scratch_region_indices == [2, 3]
+    assert [region[0] for region in worker.nixl_wrapper.registered[0][0]] == [
+        worker.host_xfer_buffers[name].data_ptr() for name in worker.region_names
+    ]
+    for address, length, _ in worker.src_blocks_data:
+        assert any(
+            start <= address and address + length <= start + size
+            for start, size, _, _ in worker.nixl_wrapper.registered[0][0]
+        )
+
+    desc_ids = worker._compute_desc_ids(
+        block_ids=([1], [0]),
+        dst_num_blocks=2,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
+    assert desc_ids.tolist() == [1, 3, 4, 6]
+
+    for buffer in worker.host_xfer_buffers.values():
+        buffer.fill_(0xEE)
+    worker.host_xfer_buffers["paged.0"][1].fill_(0x11)
+    worker.host_xfer_buffers["paged.1"][1].fill_(0x11)
+    worker.host_xfer_buffers["ring.0"][0].fill_(0x22)
+    worker.host_xfer_buffers["ring.1"][0].fill_(0x22)
+
+    paged_0 = worker.device_kv_caches["paged.0"]
+    shared = worker.device_kv_caches["paged.1"]
+    paged_0[0].fill_(0xA0)
+    paged_0[1].fill_(0xA1)
+    shared[0].fill_(0xB0)
+    shared[1].fill_(0xB1)
+
+    def copy_blocks(src, dst, src_ids, dst_ids, direction):
+        for name in src:
+            dst[name][dst_ids] = src[name][src_ids]
+
+    worker.copy_blocks = copy_blocks
+    worker.sync_recved_kv_to_device(
+        "request", SimpleNamespace(local_physical_block_ids=([1], [0]))
+    )
+    assert torch.all(paged_0[0] == 0xA0)
+    assert torch.all(paged_0[1] == 0x11)
+    assert torch.all(shared[0] == 0x22)
+    assert torch.all(shared[1] == 0x11)

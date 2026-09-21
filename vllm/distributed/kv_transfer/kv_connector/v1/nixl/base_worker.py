@@ -1373,7 +1373,7 @@ class NixlBaseConnectorWorker:
             transfer_mode=self._TRANSFER_MODE,
         )
 
-        if self._is_csa_linear and self.use_host_buffer:
+        if self._has_mamba and self._is_csa_linear and self.use_host_buffer:
             raise NotImplementedError(
                 "NIXL host staging does not preserve CSA-linear shared tensors."
             )
@@ -2616,10 +2616,15 @@ class NixlBaseConnectorWorker:
         # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
         # The h2d block copies below are intentionally synchronous.
         with gpu_sync_allowed():
-            for group_block_ids in local_block_ids:
+            for group, group_block_ids in zip(
+                self.kv_cache_config.transfer_groups,
+                local_block_ids,
+                strict=True,
+            ):
+                layer_names = group.layer_names
                 self.copy_blocks(
-                    self.host_xfer_buffers,
-                    self.device_kv_caches,
+                    {name: self.host_xfer_buffers[name] for name in layer_names},
+                    {name: self.device_kv_caches[name] for name in layer_names},
                     group_block_ids,
                     group_block_ids,
                     "h2d",
