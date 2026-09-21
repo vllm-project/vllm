@@ -57,61 +57,6 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
 
 
-def _iter_checksum_targets(model: nn.Module):
-    """Yield (name, tensor) for persistent weights: all parameters plus
-    persistent buffers (quantizers/adapters sometimes store weights there)."""
-    non_persistent_buffer_patterns = (
-        "cos_cached",
-        "sin_cached",
-        "cos_sin_cache",
-        "inv_freq",
-        "freqs_cis",
-    )
-    supported_dtypes = {
-        torch.bool,
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-    }
-
-    for name, tensor in model.named_parameters():
-        if not tensor.is_floating_point() and tensor.dtype not in supported_dtypes:
-            continue
-        yield name, tensor
-
-    seen_buffers: set[int] = set()
-    for module_name, module in model.named_modules():
-        for buffer_name, tensor in module.named_buffers(recurse=False):
-            if id(tensor) in seen_buffers:
-                continue
-            seen_buffers.add(id(tensor))
-            if buffer_name in module._non_persistent_buffers_set:
-                continue
-            name = f"{module_name}.{buffer_name}" if module_name else buffer_name
-            if any(pattern in name for pattern in non_persistent_buffer_patterns):
-                continue
-            if not tensor.is_floating_point() and tensor.dtype not in supported_dtypes:
-                continue
-            yield name, tensor
-
-
-def _randomize_tensor_inplace(tensor: torch.Tensor) -> None:
-    """Fill ``tensor`` with random values without a same-sized temporary."""
-    if tensor.is_floating_point():
-        values = torch.rand_like(tensor, dtype=torch.float32).to(tensor.dtype)
-    else:
-        values = torch.randint(
-            0,
-            2,
-            tensor.shape,
-            device=tensor.device,
-            dtype=tensor.dtype,
-        )
-    tensor.copy_(values)
-
-
 @triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
