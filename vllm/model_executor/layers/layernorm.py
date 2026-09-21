@@ -331,6 +331,29 @@ class RMSNormGated(CustomOp):
     def forward_xpu(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if (
+            not torch.compiler.is_compiling()
+            and not torch.is_grad_enabled()
+            and x.shape in ((16, 128), (24, 128))
+            and x.dtype == torch.float16
+            and x.is_contiguous()
+            and z is not None
+            and z.shape == x.shape
+            and z.dtype == x.dtype
+            and z.device == x.device
+            and z.is_contiguous()
+            and self.weight.shape == (128,)
+            and self.weight.dtype == x.dtype
+            and self.weight.device == x.device
+            and self.weight.is_contiguous()
+            and self.bias is None
+            and self.group_size is None
+            and self.norm_before_gate
+            and self.activation in ("silu", "swish")
+        ):
+            out = torch.empty_like(x)
+            torch.ops._C.rms_norm_gated_decode(out, x, z, self.weight, self.eps)
+            return out
         return self.forward_cuda(x, z)
 
 
