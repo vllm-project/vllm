@@ -39,8 +39,11 @@ from .ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
+    hc_down_silu,
     hc_gate_mix,
     hc_silu,
+    hc_up_gate_mix,
+    supports_fused_low_rank_mix,
 )
 
 
@@ -124,15 +127,35 @@ class GatedResidual(nn.Module):
             return_bias=False,
         )
 
-    def mix(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        xn = grouped_gemma_rmsnorm(
-            hidden_states,
-            self.hc_norm.weight,
-            self.config.rms_norm_eps,
-            self.hc_count,
+    def _low_rank_mix(
+        self, xn: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run the low-rank mix: down -> SiLU -> up -> sigmoid gate mix.
+
+        Two paths produce the same result. The unfused one keeps the
+        projections as vLLM Linear modules with the pointwise work in its own
+        kernels; the fused one folds each pointwise step into the projection
+        beside it, halving the launches at decode widths. They cannot be
+        collapsed further: the up projection needs the complete ``lora``
+        vector, so a single kernel would need a grid-wide barrier.
+        """
+        down_weight = (
+            self.input_mix_weight_down_block_inject.weight
+            if self.use_combine
+            else self.input_mix_weight_down.weight
         )
+        up_weight = self.input_mix_weight_up.weight
+
+        if supports_fused_low_rank_mix(xn, down_weight, up_weight):
+            down = hc_down_silu(xn, down_weight, self.lora_rank, self.hc_count)
+            lora = down[:, : self.lora_rank]
+            injection = (
+                down[:, self.lora_rank : self.lora_rank + self.hc_count]
+                if self.use_combine
+                else None
+            )
+            block_input = hc_up_gate_mix(lora, up_weight, xn, self.hc_count)
+            return block_input, injection
 
         if self.use_combine:
             # produce injection logits for combine
@@ -146,7 +169,18 @@ class GatedResidual(nn.Module):
         lora = hc_silu(lora, self.hc_count)
         gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
+        return block_input, injection
 
+    def mix(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        xn = grouped_gemma_rmsnorm(
+            hidden_states,
+            self.hc_norm.weight,
+            self.config.rms_norm_eps,
+            self.hc_count,
+        )
+        block_input, injection = self._low_rank_mix(xn)
         return hidden_states, block_input, injection
 
     def combine_and_mix(
@@ -169,20 +203,7 @@ class GatedResidual(nn.Module):
             self.config.rms_norm_eps,
             self.hc_count,
         )
-
-        if self.use_combine:
-            # produce injection logits for combine
-            split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
-            down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        else:
-            lora = self.input_mix_weight_down(xn)
-            injection = None
-
-        lora = hc_silu(lora, self.hc_count)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
-        block_input = hc_gate_mix(xn, gate, self.hc_count)
-
+        block_input, injection = self._low_rank_mix(xn)
         return hidden_states, block_input, injection
 
     def combine(
