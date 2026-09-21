@@ -863,8 +863,6 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
-            # Set once a request holding no KV blocks is passed over.
-            blockless_ahead = False
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
@@ -892,7 +890,6 @@ class Scheduler(SchedulerInterface):
                         )
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
-                    blockless_ahead |= not self._holds_kv_blocks(request)
                     continue
 
                 if (
@@ -904,7 +901,6 @@ class Scheduler(SchedulerInterface):
                     # It drains within the pipeline depth.
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
-                    blockless_ahead |= not self._holds_kv_blocks(request)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -920,7 +916,6 @@ class Scheduler(SchedulerInterface):
                     # Scheduling would exceed max_loras, skip.
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
-                    blockless_ahead |= not self._holds_kv_blocks(request)
                     continue
 
                 num_external_computed_tokens = 0
@@ -961,7 +956,6 @@ class Scheduler(SchedulerInterface):
                             # the number of matched tokens.
                             request_queue.pop_request()
                             step_skipped_waiting.prepend_request(request)
-                            blockless_ahead |= not self._holds_kv_blocks(request)
                             continue
 
                         if self.prefix_replay_tokens:
@@ -1033,7 +1027,6 @@ class Scheduler(SchedulerInterface):
                     if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
-                        blockless_ahead |= not self._holds_kv_blocks(request)
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
@@ -1056,7 +1049,6 @@ class Scheduler(SchedulerInterface):
                     if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
-                        blockless_ahead |= not self._holds_kv_blocks(request)
                         continue
 
                 encoder_inputs_to_schedule = None
@@ -1069,7 +1061,9 @@ class Scheduler(SchedulerInterface):
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
 
-                if load_kv_async and blockless_ahead:
+                if load_kv_async and not all(
+                    self._holds_kv_blocks(req) for req in step_skipped_waiting
+                ):
                     # An async load is not preemptible and only runs once the
                     # scan reaches it. Never let it take blocks while a request
                     # ahead of it holds none: that request may then not fit, the
