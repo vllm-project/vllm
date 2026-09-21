@@ -685,6 +685,13 @@ def test_engram_dp_shared_memory_runtime_requirements(
         )
 
 
+def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch):
+    """A /dev/shm smaller than the tables must fall back instead of failing startup."""
+    monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: 2)
+    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM)
+    assert not engram_ops.can_share_engram_tables(layout)
+
+
 @pytest.mark.parametrize(
     "node_ids,dp_size,replica_size,expected",
     [
