@@ -143,7 +143,7 @@ class InternVisionPatchModel(nn.Module):
 
 
 class InternParallelAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
