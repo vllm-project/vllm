@@ -119,6 +119,17 @@ steps:
   - tests/models/glm5next/
   commands:
     - pytest -v -s models/glm5next
+  mirror:
+    amd:
+      label: ":amd: (MI355) GLM5Next"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 35
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200) Qwen4 Exp"
   key: qwen4-exp-unit-tests

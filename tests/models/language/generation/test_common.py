@@ -158,7 +158,9 @@ def test_models(
                 hf_model.model.device
             )
             if prompt_embeds is not None:
-                embed = hf_model.model.get_input_embeddings()(token_ids)
+                # Retained prompt values must not keep reference weights alive.
+                with torch.no_grad():
+                    embed = hf_model.model.get_input_embeddings()(token_ids)
 
                 # MiniCPM models apply scale_emb to embeddings internally.
                 # vLLM expects pre-scaled embeddings when using inputs_embeds.
