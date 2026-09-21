@@ -584,7 +584,11 @@ def dequantize_and_gather_k_cache_triton(
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
     if k_cache.shape[-1] == V41_NVFP4_BYTES_PER_TOKEN:
-        _dequantize_and_gather_k_nvfp4_kernel[(num_reqs, NUM_WORKERS)](
+        # Keep short gathers unchanged; cap total workers for multi-request chunks.
+        num_workers = min(
+            max(128, 2048 // max(1, num_reqs)), max(128, out.shape[1] - offset)
+        )
+        _dequantize_and_gather_k_nvfp4_kernel[(num_reqs, num_workers)](
             out,
             out.stride(0),
             out.stride(1),
@@ -978,6 +982,10 @@ class CombineTopkSwaIndicesKernel(
                 # turns the store index below negative).
                 topk_len = 0
             swa_start = tl.maximum(pos - (WINDOW_SIZE - 1), 0)
+            # gather_len already excludes context below the request's replay
+            # start (SWA bounded replay), so the window cannot start before
+            # the gathered buffer does.
+            swa_start = tl.maximum(swa_start, gather_start)
             swa_len = pos - swa_start + 1
 
             offset = tl.arange(0, PADDED_TOP_K)
@@ -1124,6 +1132,8 @@ def build_flashinfer_mixed_sparse_indices(
     decode_is_valid_token: torch.Tensor | None = None,
     swa_block_span: int | None = None,
     compressed_block_span: int | None = None,
+    *,
+    replay_start: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
@@ -1133,6 +1143,9 @@ def build_flashinfer_mixed_sparse_indices(
     per token). Decode tokens read precomputed SWA/compressed indices; prefill
     tokens derive their SWA window from the position and translate local
     compressed indices to global slots via the block tables.
+
+    ``replay_start`` ([num_reqs], SWA bounded replay) lower-bounds every
+    prefill token's window: positions below it hold no window KV.
     """
     assert decode_swa_indices.dtype == torch.int32
     assert decode_swa_indices.dim() == 2
@@ -1223,6 +1236,7 @@ def build_flashinfer_mixed_sparse_indices(
         query_start_loc,
         seq_lens,
         token_to_req_indices,
+        replay_start,
         swa_block_table,
         swa_block_table.stride(0),
         swa_block_size,
@@ -1291,6 +1305,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     token_to_req_indices_ptr,
+    replay_start_ptr,
     swa_block_table_ptr,
     swa_block_table_stride,
     swa_block_size,
@@ -1390,6 +1405,8 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     token_idx_in_query = token_idx - query_start
     pos = start_pos + token_idx_in_query
     swa_start_pos = tl.maximum(pos - (WINDOW_SIZE - 1), 0)
+    # SWA bounded replay: no window KV exists below the request's replay start.
+    swa_start_pos = tl.maximum(swa_start_pos, tl.load(replay_start_ptr + req_idx))
     swa_len = pos - swa_start_pos + 1
     if COMPRESS_RATIO > 0:
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)

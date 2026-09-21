@@ -145,6 +145,21 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
             },
             "guidance",
         ),
+        (
+            {
+                "type": "object",
+                "properties": {"n": {"type": ["number", "null"], "multipleOf": 3}},
+            },
+            "guidance",
+        ),
+        (
+            {
+                "type": ["string", "null"],
+                "pattern": "^a+$",
+                "maxLength": 2,
+            },
+            "guidance",
+        ),
         # patternProperties + properties is also unsupported by guidance.
         (
             {

@@ -27,6 +27,8 @@ from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 W8A8 GEMM via FlashInfer CUTLASS (SM100+)."""
 
+    supports_pre_processed_weights = True
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -116,6 +118,8 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
 class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 W8A8 GEMM via FlashInfer CuTe-DSL (SM100/SM103)."""
+
+    supports_pre_processed_weights = True
 
     @classmethod
     def is_supported(

@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from collections import defaultdict
-from collections.abc import Mapping
 from dataclasses import dataclass
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
-from vllm.inputs import MultiModalInput
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
@@ -29,12 +27,7 @@ from .processing import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import (
-        ModelConfig,
-        ObservabilityConfig,
-        SchedulerConfig,
-        VllmConfig,
-    )
+    from vllm.config import ModelConfig, ObservabilityConfig, VllmConfig
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
@@ -75,8 +68,6 @@ class MultiModalProcessorFactory(Protocol[_I]):  # type: ignore[misc]
         self,
         info: _I,
         dummy_inputs: BaseDummyInputsBuilder[_I],
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
     ) -> BaseMultiModalProcessor[_I]: ...
 
 
@@ -89,12 +80,10 @@ class _ProcessorFactories(Generic[_I]):
     def build_processor(
         self,
         ctx: InputProcessingContext,
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
     ):
         info = self.info(ctx)
         dummy_inputs_builder = self.dummy_inputs(info)
-        return self.processor(info, dummy_inputs_builder, cache=cache)
+        return self.processor(info, dummy_inputs_builder)
 
 
 class MultiModalRegistry:
@@ -218,7 +207,6 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         *,
         tokenizer: TokenizerLike | None = None,
-        cache: BaseMultiModalProcessorCache | None = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """Create a multi-modal processor for a specific model and tokenizer."""
         if not model_config.is_multimodal_model:
@@ -230,45 +218,7 @@ class MultiModalRegistry:
 
         ctx = self._create_processing_ctx(model_config, tokenizer)
 
-        return factories.build_processor(ctx, cache=cache)
-
-    def get_dummy_mm_inputs(
-        self,
-        model_config: "ModelConfig",
-        mm_counts: Mapping[str, int],
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
-        processor: BaseMultiModalProcessor | None = None,
-        scheduler_config: "SchedulerConfig | None" = None,
-    ) -> MultiModalInput:
-        """Create dummy data for profiling the memory usage of a model.
-
-        The model is identified by `model_config`.
-        """
-        seq_len = model_config.max_model_len
-        if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
-            seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
-
-        if processor is None:
-            processor = self.create_processor(model_config, cache=cache)
-
-        mm_config = model_config.get_multimodal_config()
-        processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-            seq_len=seq_len,
-            mm_counts=mm_counts,
-            mm_options=mm_config.limit_per_prompt,
-        )
-        mm_inputs = processor.apply(
-            processor_inputs,
-            timing_ctx=TimingContext(enabled=False),
-        )
-
-        prompt_token_ids = mm_inputs["prompt_token_ids"]
-        total_len = len(prompt_token_ids)
-        if total_len < seq_len:
-            prompt_token_ids.extend([0] * (seq_len - total_len))
-
-        return mm_inputs
+        return factories.build_processor(ctx)
 
     def _get_cache_type(
         self,

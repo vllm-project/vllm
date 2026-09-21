@@ -473,15 +473,18 @@ _E2M1_MAGNITUDES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 
 
 def _decode_nvfp4_row(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    """Unpack one 256-byte e2m1 row and apply its 32 e4m3 tile scales."""
+    """Unpack e2m1 rows and apply their e4m3 tile scales."""
     mags = torch.tensor(_E2M1_MAGNITUDES, device=packed.device)
-    codes = torch.empty(512, dtype=torch.uint8, device=packed.device)
-    codes[0::2] = packed & 0xF  # even element in the low nibble
-    codes[1::2] = packed >> 4
+    codes = torch.empty(
+        (*packed.shape[:-1], 512), dtype=torch.uint8, device=packed.device
+    )
+    codes[..., 0::2] = packed & 0xF  # even element in the low nibble
+    codes[..., 1::2] = packed >> 4
     vals = mags[(codes & 7).long()] * torch.where(codes >= 8, -1.0, 1.0)
     return (
-        vals.view(32, 16) * scales.view(torch.float8_e4m3fn).float().view(32, 1)
-    ).flatten()
+        vals.reshape(*packed.shape[:-1], 32, 16)
+        * scales.view(torch.float8_e4m3fn).float().reshape(*packed.shape[:-1], 32, 1)
+    ).flatten(-2)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
@@ -543,7 +546,10 @@ def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
-def test_v41_nvfp4_gather_matches_insert():
+@pytest.mark.parametrize("num_reqs", [1, 8, 32])
+@pytest.mark.parametrize("num_tokens", [70, 128, 129, 2051])
+@pytest.mark.parametrize("partial", [False, True])
+def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
     """The NVFP4 gather dequantizes exactly what the insert kernel wrote."""
     from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
@@ -553,38 +559,73 @@ def test_v41_nvfp4_gather_matches_insert():
     torch.manual_seed(17)
     device = "cuda"
     block_size = 64
-    num_tokens = 70
-    num_blocks = 4
+    num_blocks = math.ceil(num_tokens / block_size)
     page_bytes = math.ceil(block_size * 288 / 512) * 512
 
     positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
     latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
-    angles = torch.randn(128, 32, device=device)
+    angles = torch.randn(num_tokens, 32, device=device)
     cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
     backing = torch.zeros(num_blocks, page_bytes, dtype=torch.uint8, device=device)
     cache = backing.as_strided((num_blocks, block_size, 288), (page_bytes, 288, 1))
     slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
     rope_quant_insert(latent, positions, cos_sin, cache, slots, 1)
 
-    out = torch.zeros(1, num_tokens, 512, dtype=torch.bfloat16, device=device)
-    dequantize_and_gather_k_cache(
-        out,
-        cache,
-        seq_lens=torch.tensor([num_tokens], dtype=torch.int32, device=device),
-        gather_lens=None,
-        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device).view(
-            1, -1
-        ),
-        block_size=block_size,
-        offset=0,
+    offset = 7 if partial else 0
+    seq_lens = num_tokens - torch.arange(num_reqs, dtype=torch.int32, device=device)
+    gather_lens = seq_lens - 3 if partial else None
+    storage = torch.full(
+        (num_reqs, num_tokens + offset + 16, 512),
+        -123.0,
+        dtype=torch.bfloat16,
+        device=device,
     )
-    for t in (0, 1, block_size, num_tokens - 1):
-        page, row = divmod(t, block_size)
-        expected = _decode_nvfp4_row(
-            backing[page, row * 256 : (row + 1) * 256],
-            backing[page, block_size * 256 + row * 32 :][:32],
+    out = storage[:, : num_tokens + offset]
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).repeat(
+        num_reqs, 1
+    )
+
+    def gather():
+        dequantize_and_gather_k_cache(
+            out,
+            cache,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            block_table=block_table,
+            block_size=block_size,
+            offset=offset,
         )
-        torch.testing.assert_close(out[0, t].float(), expected, rtol=0, atol=0)
+
+    expected = _decode_nvfp4_row(
+        backing[:, : block_size * 256].reshape(-1, 256),
+        backing[:, block_size * 256 : block_size * 288].reshape(-1, 32),
+    )
+
+    def check(shorter_by):
+        assert (storage[:, num_tokens + offset :] == -123).all()
+        for req in range(num_reqs):
+            start = 3 if partial else 0
+            length = num_tokens - req - start - shorter_by
+            assert (out[req, :offset] == -123).all()
+            assert (out[req, offset + length :] == -123).all()
+            torch.testing.assert_close(
+                out[req, offset : offset + length].float(),
+                expected[start : start + length],
+                rtol=0,
+                atol=0,
+            )
+
+    gather()
+    check(0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        gather()
+    storage.fill_(-123)
+    seq_lens.sub_(1)
+    if gather_lens is not None:
+        gather_lens.sub_(1)
+    graph.replay()
+    check(1)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")

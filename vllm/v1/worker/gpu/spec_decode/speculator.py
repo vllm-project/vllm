@@ -481,6 +481,7 @@ class DraftModelSpeculator(BaseSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        dummy_run: bool = False,
     ) -> None:
         # Copy temperature, seeds, and idx mapping to the pre-allocated buffers.
         # NOTE(woosuk): For draft sampling, we only consider the temperature
@@ -490,10 +491,15 @@ class DraftModelSpeculator(BaseSpeculator):
         # affect the output distribution after rejection sampling.
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
-        self.idx_mapping[:num_reqs].copy_(idx_mapping)
-        # idx_mapping for CG padded requests points to -1, which is ignored
-        # during sampling to prevent writing stale values to draft logits.
-        self.idx_mapping[num_reqs:].fill_(-1)
+        # idx_mapping == -1 marks a row the drafter must not act on: sampling
+        # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows
+        # always get it; a dummy batch gets it for every row, since its arange
+        # idx_mapping names request-state slots with stale block tables.
+        if dummy_run:
+            self.idx_mapping.fill_(-1)
+        else:
+            self.idx_mapping[:num_reqs].copy_(idx_mapping)
+            self.idx_mapping[num_reqs:].fill_(-1)
 
     def _build_uniform_batch_dp_sync(
         self,

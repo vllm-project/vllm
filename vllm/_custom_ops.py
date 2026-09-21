@@ -2272,7 +2272,21 @@ def moe_align_block_size(
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
     expert_map: torch.Tensor | None = None,
+    scatter_idx: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        if scatter_idx is not None:
+            raise NotImplementedError("scatter_idx is not supported on XPU")
+        torch.ops._moe_C.moe_align_block_size(
+            topk_ids,
+            num_experts,
+            block_size,
+            sorted_token_ids,
+            experts_ids,
+            num_tokens_post_pad,
+            expert_map,
+        )
+        return
     torch.ops._moe_C.moe_align_block_size(
         topk_ids,
         num_experts,
@@ -2281,6 +2295,7 @@ def moe_align_block_size(
         experts_ids,
         num_tokens_post_pad,
         expert_map,
+        scatter_idx,
     )
 
 

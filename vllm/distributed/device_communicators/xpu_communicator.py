@@ -99,12 +99,24 @@ class XpuCommunicator(DeviceCommunicatorBase):
         output = torch.empty(
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
-        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
-            # if inputs shape in different ranks is not the same using reduce_scatter
+        if sizes is None or sizes.count(sizes[0]) == len(sizes):
+            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
+        elif torch.xpu.device_count() < self.world_size:
+            # uneven reduce_scatter is not supported when the
+            # process cannot see every device in the group (
+            # e.g. external-LBDP).
+            max_size = max(sizes)
+            padded = input_tensor.new_zeros(
+                (world_size * max_size,) + input_tensor.shape[1:]
+            )
+            for rank, split in enumerate(input_tensor.split(sizes, dim=0)):
+                padded[rank * max_size : rank * max_size + sizes[rank]] = split
+            padded_output = input_tensor.new_empty((max_size,) + input_tensor.shape[1:])
+            dist.reduce_scatter_tensor(padded_output, padded, group=self.device_group)
+            output = padded_output[:chunk_size]
+        else:
             input_splits = list(input_tensor.split(sizes, dim=0))
             dist.reduce_scatter(output, input_splits, group=self.device_group)
-        else:
-            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 

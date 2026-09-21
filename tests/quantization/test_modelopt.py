@@ -144,6 +144,36 @@ def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypat
     assert torch.equal(linear.weight_scale, scales)
 
 
+def test_modelopt_mxfp8_pre_processed_weights_follow_kernel(monkeypatch):
+    """The weight cache daemon can only serve MXFP8 layers whose kernel needs
+    no post-load state beyond the parameters it exports."""
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearKernel
+
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.spec = QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
+    method.kernel = None
+    assert not method.supports_pre_processed_weights
+
+    method.kernel = Mock(spec=Mxfp8LinearKernel)
+    method.kernel.supports_pre_processed_weights = False
+    assert not method.supports_pre_processed_weights
+    method.kernel.supports_pre_processed_weights = True
+    assert method.supports_pre_processed_weights
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.is_weights_pre_processed",
+        lambda: True,
+    )
+    layer = torch.nn.Module()
+    method.process_weights_after_loading(layer)
+    method.kernel.process_weights_after_loading.assert_not_called()
+
+    method.kernel.supports_pre_processed_weights = False
+    with pytest.raises(RuntimeError, match="pre-processed"):
+        method.process_weights_after_loading(layer)
+
+
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
     """Humming reads weight.input_dim/output_dim. Swapping the
     ModelWeightParameter for a plain Parameter drops them, so the per-tensor
@@ -341,7 +371,7 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
-            "model.language_model.layers.1.moe.experts.gate_up_proj": {
+            "model.language_model.layers.1.experts.gate_up_proj": {
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
@@ -353,10 +383,10 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     )
     config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_rename_mapper())
 
-    expected_prefix = "language_model.model.layers.0.moe.experts"
+    expected_prefix = "language_model.model.layers.0.experts"
     assert set(config.quantized_layers) == {
         expected_prefix,
-        "language_model.model.layers.1.moe.gate_up_proj",
+        "language_model.model.layers.1.experts.gate_up_proj",
     }
     assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
 

@@ -114,7 +114,7 @@ def test_engram_config_cli(options):
     "options,provided,dp_shared_memory",
     [
         ([], False, False),
-        (["--engram-config", "{}"], True, False),
+        (["--engram-config", "{}"], True, None),
         (
             ["--engram-config", '{"dp_shared_memory": true}'],
             True,

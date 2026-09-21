@@ -254,6 +254,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
 
         # Get the input ids and last token indices for the speculator.

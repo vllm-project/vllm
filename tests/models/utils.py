@@ -396,6 +396,8 @@ class ModelInfo:
 @dataclass
 class EmbedModelInfo(ModelInfo):
     mteb_score: float | None = None
+    # Per-model MTEB score tolerance; falls back to MTEB_EMBED_TOL.
+    mteb_tol: float | None = None
     is_matryoshka: bool = False
     matryoshka_dimensions: list[int] | None = None
 
@@ -403,6 +405,8 @@ class EmbedModelInfo(ModelInfo):
 @dataclass
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
+    # Per-model MTEB score tolerance; falls back to MTEB_RERANK_TOL.
+    mteb_tol: float | None = None
     chat_template_name: str | None = None
 
 

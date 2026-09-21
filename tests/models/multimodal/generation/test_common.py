@@ -317,8 +317,6 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "",
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
-        # FIXME: https://github.com/huggingface/transformers/pull/38510
-        marks=[pytest.mark.skip("Model is broken")],
     ),
     "cosmos3": VLMTestInfo(
         models=["nvidia/Cosmos3-Nano"],
@@ -819,10 +817,6 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
         marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
-                reason="This model is broken in Transformers v4.57.3",
-            ),
             pytest.mark.skipif(
                 Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
                 reason="Model's custom code uses ROPE_INIT_FUNCTIONS"

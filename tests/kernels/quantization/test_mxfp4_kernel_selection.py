@@ -14,7 +14,6 @@ from vllm.model_executor.kernels.linear import (
     AiterMxfp4LinearKernel,
     EmulationMxfp4LinearKernel,
     FlashInferMxFp4LinearKernel,
-    HummingMxFp4LinearKernel,
     MarlinMxFp4LinearKernel,
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
@@ -44,7 +43,7 @@ _TRUE_W4A4_KERNELS = [
 
 # Weight-only (A16) kernels: they never quantize activations. They still accept
 # MXFP4 activation keys as an intentional compatibility fallback.
-_WEIGHT_ONLY_KERNELS = [MarlinMxFp4LinearKernel, HummingMxFp4LinearKernel]
+_WEIGHT_ONLY_KERNELS = [MarlinMxFp4LinearKernel]
 
 
 def test_can_implement_is_abstract():

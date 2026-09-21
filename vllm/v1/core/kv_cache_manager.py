@@ -145,7 +145,7 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
-        enable_mamba_fine_grained_prefix_cache: bool = False,
+        enable_mamba_shared_prefix_checkpoint: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -183,16 +183,16 @@ class KVCacheManager:
         # junction costs a forward pass and displaces the block-boundary stop.
         # Multi-module MTP is excluded because ``cache_blocks`` then hands the
         # manager ``num_computed - num_reprefillable`` rather than the chunk end.
-        self.mamba_fine_grained_prefix_cache = (
-            enable_mamba_fine_grained_prefix_cache
+        self.mamba_shared_prefix_checkpoint = (
+            enable_mamba_shared_prefix_checkpoint
             and bool(self.coordinator.eagle_group_ids)
             and self.coordinator.enable_partial_hash_hits
             and self.coordinator.num_reprefillable_tokens == 0
         )
-        if self.mamba_fine_grained_prefix_cache:
+        if self.mamba_shared_prefix_checkpoint:
             for manager in self.coordinator.single_type_managers:
                 if isinstance(manager, MambaManager):
-                    manager.fine_grained_prefix_cache = True
+                    manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.retained_hit_group_ids = tuple(
@@ -465,12 +465,17 @@ class KVCacheManager:
             A list of new allocated blocks.
 
         """
-        # When loading KV data asynchronously, we may have zero new tokens to
-        # compute while still allocating slots for externally computed tokens.
-        if num_new_tokens == 0 and num_external_computed_tokens == 0:
+        # A step may need no slots of its own while still adopting computed
+        # tokens: an async KV load, or a chunk that ends inside the replayed
+        # range of a hit (SWA bounded replay).
+        if (
+            num_new_tokens == 0
+            and num_external_computed_tokens == 0
+            and num_new_computed_tokens == 0
+        ):
             raise ValueError(
                 "num_new_tokens must be greater than 0 when there are no "
-                "external computed tokens"
+                "computed tokens to adopt"
             )
 
         if new_computed_blocks is not None:

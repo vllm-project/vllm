@@ -87,6 +87,20 @@ steps:
     - tests/compile/h100/
   commands:
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  mirror:
+    amd:
+      label: ":amd: (MI355) PyTorch Compilation H100 Cases"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/utils.py
+      - csrc/
+      commands:
+      - pytest -v -s compile/h100/test_startup.py
 
 - label: ":nvidia: (L4) PyTorch Compilation Passes"
   key: pytorch-compilation-passes-unit-tests

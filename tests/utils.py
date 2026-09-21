@@ -87,25 +87,7 @@ def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
             )
 
 
-if current_platform.is_rocm():
-    from amdsmi import (
-        amdsmi_get_gpu_vram_usage,
-        amdsmi_get_processor_handles,
-        amdsmi_init,
-        amdsmi_shut_down,
-    )
-
-    _amdsmi_lock = threading.Lock()
-
-    @contextmanager
-    def _nvml():
-        with _amdsmi_lock:
-            try:
-                amdsmi_init()
-                yield
-            finally:
-                amdsmi_shut_down()
-elif current_platform.is_cuda():
+if current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
         nvmlDeviceGetHandleByUUID,
@@ -595,27 +577,20 @@ class RemoteVLLMServer:
         return members
 
     def _get_gpu_memory_used(self) -> float | None:
-        """Get total GPU memory used across all visible devices in bytes."""
+        """Get device-wide usage across visible devices in bytes.
+
+        On ROCm this initializes HIP in the caller; subsequent multiprocessing
+        GPU workers must use spawn, as the ROCm server helpers already do.
+        """
         try:
             if current_platform.is_rocm():
-                with _nvml():
-                    handles = amdsmi_get_processor_handles()
-                    devices = get_physical_device_indices(
-                        list(range(current_platform.device_count()))
-                    )
-                    total_used_mib = 0
-                    for device in devices:
-                        handle = handles[device]
-                        vram_info = amdsmi_get_gpu_vram_usage(handle)
-                        total_used_mib += vram_info["vram_used"]
-                    # amdsmi reports VRAM in MiB; convert to bytes so this
-                    # matches the CUDA/nvml branch (already bytes) and the
-                    # byte-based target in _wait_for_gpu_memory_release. Without
-                    # this, that wait compares MiB against a ~2e9-byte target,
-                    # is always satisfied instantly, and returns "released to
-                    # 0.00 GB" while the previous server's VRAM is still
-                    # resident -- OOMing the next server's startup on ROCm.
-                    return total_used_mib * 1024 * 1024
+                # Use HIP logical devices. On MI355 DPX/NPS2, the primary
+                # AMD SMI device can expose whole-card memory counters.
+                total_used = 0
+                for i in range(current_platform.device_count()):
+                    free, total = torch.accelerator.get_memory_info(i)
+                    total_used += total - free
+                return float(total_used)
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
@@ -653,9 +628,12 @@ class RemoteVLLMServer:
             # Can't query GPU memory - nothing to do
             return
 
-        # Allow up to 2 GiB overhead above baseline for driver/context state
-        # that may persist between server instances.
-        headroom_bytes = 2 * 1024 * 1024 * 1024
+        # Allow aggregate driver/context growth above the baseline.
+        headroom_bytes = (
+            4 * 1024 * 1024 * 1024
+            if current_platform.is_rocm()
+            else 2 * 1024 * 1024 * 1024
+        )
         target = baseline + headroom_bytes
 
         start = time.time()
@@ -1427,8 +1405,10 @@ def init_test_distributed_environment(
         get_current_vllm_config_or_none,
         set_current_vllm_config,
     )
+    from vllm.platforms import current_platform
 
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    backend = current_platform.dist_backend
 
     if data_parallel_size > 1:
         # For DP we need to set a common DP master port
@@ -1449,6 +1429,7 @@ def init_test_distributed_environment(
                 rank=rank % tp_pp_world,
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank if local_rank >= 0 else rank,
+                backend=backend,
             )
             ensure_model_parallel_initialized(tp_size, pp_size)
         return
@@ -1460,6 +1441,7 @@ def init_test_distributed_environment(
             rank=rank,
             distributed_init_method=distributed_init_method,
             local_rank=local_rank,
+            backend=backend,
         )
         ensure_model_parallel_initialized(tp_size, pp_size)
     else:
@@ -1470,6 +1452,7 @@ def init_test_distributed_environment(
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
+                backend=backend,
             )
             ensure_model_parallel_initialized(tp_size, pp_size)
 
@@ -1611,13 +1594,17 @@ def record_gpu_memory_usage_stats(
     *,
     devices: list[int],
 ) -> dict[int, tuple[float, float]]:
+    """Return device-wide used/total GiB; ROCm IDs are HIP logical devices.
+
+    ROCm queries initialize HIP in the caller and include other processes'
+    allocations on the same memory partition.
+    """
     output: dict[int, tuple[float, float]] = {}
     for device in devices:
         if current_platform.is_rocm():
-            dev_handle = amdsmi_get_processor_handles()[device]
-            mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
-            gb_used = mem_info["vram_used"] / 2**10
-            gb_total = mem_info["vram_total"] / 2**10
+            free, total = torch.accelerator.get_memory_info(device)
+            gb_used = (total - free) / 2**30
+            gb_total = total / 2**30
         elif current_platform.is_xpu():
             # nvml/amdsmi are unavailable on XPU. Query device memory through
             # torch.accelerator.get_memory_info, which the XPU platform patches
@@ -1645,7 +1632,9 @@ def wait_for_gpu_memory_to_clear(
     poll_interval_s: float = 5,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
-    devices = get_physical_device_indices(devices)
+    # HIP already applies device visibility; keep logical IDs and threshold keys.
+    if not current_platform.is_rocm():
+        devices = get_physical_device_indices(devices)
     if isinstance(threshold_bytes, int):
         threshold_bytes = {device: threshold_bytes for device in devices}
     elif isinstance(threshold_bytes, dict):
@@ -1667,8 +1656,6 @@ def wait_for_gpu_memory_to_clear(
                 threshold_bytes.get(device, 0), min_threshold_b if ratio < 0.05 else 0
             )
 
-    # Use nvml instead of pytorch to reduce measurement error from torch cuda
-    # context.
     start_time = time.time()
     stable_since: float | None = None
     stable_used_bytes: dict[int, int] | None = None

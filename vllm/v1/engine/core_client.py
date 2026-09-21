@@ -23,6 +23,7 @@ import zmq.asyncio
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -85,6 +86,10 @@ class EngineCoreClient(ABC):
     * SyncMPClient: ZMQ + background proc EngineCore (for LLM)
     * AsyncMPClient: ZMQ + background proc EngineCore w/ asyncio (for AsyncLLM)
     """
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        """KV-event publisher config of each ready engine, keyed by DP rank."""
+        return {}
 
     @staticmethod
     def make_client(
@@ -572,6 +577,7 @@ class MPClient(EngineCoreClient):
         self.vllm_config = vllm_config
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
+        self._kv_event_sources: dict[int, KVEventsConfig] = {}
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -859,6 +865,14 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = response.dp_stats_address
             else:
                 assert response.dp_stats_address == self.stats_update_address
+
+        if response.kv_events_config is not None:
+            self._kv_event_sources[response.data_parallel_rank] = (
+                response.kv_events_config
+            )
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        return dict(self._kv_event_sources)
 
 
 def _process_utility_output(
@@ -1944,6 +1958,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.lb_engines = self.lb_engines[:new_data_parallel_size]
         # Pending coordinator snapshots must use the surviving ranks too.
         self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
+        for rank in range(new_data_parallel_size, cur_data_parallel_size):
+            self._kv_event_sources.pop(rank, None)
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         pause_modes = ["keep"] * new_data_parallel_size + ["abort"] * removed_dp_size
         pause_futures = [
