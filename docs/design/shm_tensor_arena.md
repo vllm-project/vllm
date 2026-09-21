@@ -134,16 +134,12 @@ class _ArenaPickler(pickle.Pickler):
         return NotImplemented   # fall through to dispatch_table → _reduce_tensor
 ```
 
-Note the exact-type dict lookup (not `isinstance`): the `dispatch_table` this
-falls through to is itself keyed by exact type, so an *unrecognized*
-`Tensor` subclass must decline here too, or it would be diverted into the
-arena and rebuilt as a plain `Tensor`, silently losing its subclass
-identity — a divergence from the no-arena behavior that an `isinstance`
-check would have introduced. `torch.nn.Parameter` is the one subclass this
-*does* know how to divert safely, via its own rebuild function — see §2.3
-for why a naive "divert its `.data` and let `Parameter.__reduce_ex__`
-handle the wrapping" approach is a correctness trap, not just a
-type-identity one.
+Note the exact-type dict lookup (not `isinstance`), matching how
+`dispatch_table` itself dispatches: an unrecognized `Tensor` subclass must
+decline here too, or it would come back as a plain `Tensor`, silently
+losing its subclass identity. `torch.nn.Parameter` is the one subclass this
+*does* divert safely, via its own rebuild function — see §2.3 for why that
+needs more than just handling the type-identity case.
 
 `reducer_override` is consulted before an object's normal reduction, and
 returning `NotImplemented` falls through to the `dispatch_table` — so a diverted
@@ -173,25 +169,21 @@ def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
 ```
 
 **The `torch.nn.Parameter` trap.** `get_tensor` and release scheduling are
-two separate calls, not one, because they must not always be scheduled on
-the *same* object. For a plain tensor, `t` — the value `_rebuild_arena_
-tensor` returns — is exactly what the caller ends up holding, so scheduling
-release on `t` is correct. But `torch.nn.Parameter` doesn't get diverted by
-falling through to `_rebuild_arena_tensor` at all: `Parameter.__reduce_ex__`
-returns `(_rebuild_parameter, (data_tensor, requires_grad, state))`, and
-`_rebuild_parameter` builds `torch.nn.Parameter(data_tensor, requires_grad)`
-**without keeping a Python reference to `data_tensor` itself** — sharing its
-storage at the C++ level is enough for PyTorch, but not enough for a
-`weakref.finalize`-based scheme that only knows how to watch one specific
-Python object. Scheduling release on `data_tensor` there would queue the
-slot the instant `_rebuild_parameter` returns (nothing references
-`data_tensor` anymore) — while the just-constructed `Parameter`, still a
-live zero-copy view into that same slot, is what the caller actually gets
-back. The writer could then overwrite the slot underneath it with no error
-raised anywhere.
+separate calls because they aren't always scheduled on the same object. For
+a plain tensor, `t` is exactly what the caller ends up holding. But
+`torch.nn.Parameter(data_tensor, requires_grad)` shares `data_tensor`'s
+storage at the C++ level **without keeping a Python reference to
+`data_tensor` itself** — enough for PyTorch, not enough for a
+`weakref.finalize` scheme that watches one specific Python object.
+Scheduling release on `data_tensor` would queue the slot the instant it's
+constructed (nothing references `data_tensor` anymore), while the
+`Parameter` — still a live zero-copy view into that slot — is what the
+caller actually holds; the writer could then overwrite the slot underneath
+it with no error raised anywhere.
 
-The arena closes this by giving `torch.nn.Parameter` its own rebuild
-function instead of letting it fall through:
+The arena closes this with a dedicated rebuild function for
+`torch.nn.Parameter` that schedules release on the constructed `Parameter`
+instead:
 
 ```python
 def _rebuild_arena_parameter(arena_name, slot_idx, nbytes, dtype_str, shape):
@@ -212,41 +204,32 @@ wrapper object around its payload.
 The registry is keyed by arena shm name (`_TENSOR_ARENAS:
 weakref.WeakValueDictionary[str, ShmTensorArena]`) rather than a single
 per-process slot, since nothing guarantees a process only ever attaches to
-one arena-bearing queue — only that this happens to be true today. It holds
-only a *weak* reference: the registry must not be the thing keeping an
-arena alive, or it holds the arena (and its pinned mapping) for the life of
-the process even after the owning `MessageQueue` is gone. That also means
-nothing needs to (or safely can) proactively remove an entry —
-`MessageQueue.shutdown()` does not touch the registry, since it can run on
-a different thread than an in-flight `dequeue()` still reconstructing a
-tensor from that same arena (e.g. the multiproc executor's death-pipe
-monitor thread). An entry simply disappears once nothing else references
-that arena anymore.
+one arena-bearing queue. It holds only a *weak* reference — a strong one
+would keep the arena (and its pinned mapping) alive for the process
+lifetime — and needs no explicit removal on `MessageQueue.shutdown()`
+(unsafe anyway, since shutdown can run on a different thread than an
+in-flight `dequeue()`); an entry just disappears once nothing else
+references that arena.
 
 The rebuilt tensor *is* the shared memory — no transport copy and no deserialize
 on any rank.
 
-**Slot lifecycle.** The rebuilt tensor is the *source* of an async H2D
-(`x.to(device, non_blocking=True)`) while the worker executes that step, so the
-reader must not release the slot at unpickle time. Release is tied to the
-**garbage collection of the caller-retained object** (`weakref.finalize` in
-`schedule_release`), not to a fixed "next dequeue" schedule — this matters for
-callers that retain the tensor across many `dequeue` calls (e.g.
-`prompt_embeds`, which the worker re-slices on the CPU every step of a
-chunked prefill: a fixed next-dequeue release would let the writer reclaim
-the slot, and silently corrupt the tensor, while the worker is still reading
-it several steps later). Once queued for release, the pinned fast path
-(§2.4) adds a second gate: the H2D is a true async DMA that can outlive
-`execute_model` — under `--async-scheduling` no device sync covers it — so
-"the tensor was collected" alone is not sufficient. At `flush_releases` the
-reader records a CUDA event on the compute stream (ordered after the
-previous step's H2D) and only sets its done flag for a slot once that event
-has completed (non-blocking `event.query()`; a slot not yet done simply
-waits one more dequeue). When the mapping is *not* pinned, `cudaMemcpyAsync`
-from pageable host memory stages the copy synchronously before returning, so
-the slot is released as soon as it's queued. The writer requires all
-readers' done flags before reusing a slot, so a slot is never overwritten
-while any reader's DMA is in flight.
+**Slot lifecycle.** The rebuilt tensor is the *source* of an async H2D while
+the worker executes that step, so the reader must not release the slot at
+unpickle time. Release is tied to **garbage collection of the
+caller-retained object** (`weakref.finalize` in `schedule_release`), not a
+fixed "next dequeue" schedule — needed for callers like `prompt_embeds` that
+retain the tensor across many `dequeue` calls during chunked prefill, where
+a fixed schedule would let the writer reclaim (and corrupt) the slot while
+the worker was still reading it. Once queued, the pinned fast path (§2.4)
+adds a second gate: the H2D is a true async DMA that can outlive
+`execute_model`, so "the tensor was collected" alone isn't sufficient.
+`flush_releases` records a CUDA event on the compute stream after each
+step's H2D and only marks a slot done once that event completes
+(non-blocking `event.query()`; not-yet-done just waits one more dequeue).
+Unpinned, `cudaMemcpyAsync` from pageable memory already stages
+synchronously, so the slot releases immediately. Either way, the writer
+requires every reader's done flag before reusing a slot.
 
 > **Known residual limitation.** `weakref.finalize` tracks the garbage
 > collection of the *specific* object each rebuild function passes to

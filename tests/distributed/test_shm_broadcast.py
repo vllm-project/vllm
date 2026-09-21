@@ -925,13 +925,9 @@ def test_arena_slot_lifecycle():
 
 
 def test_arena_slot_not_released_while_tensor_retained_across_multiple_flushes():
-    """Regression test: a caller that retains the tensor `get_tensor` returned
-    across multiple `flush_releases()` calls (e.g. `dequeue`) — such as
-    `prompt_embeds` re-sliced on the CPU every step of a chunked prefill —
-    must keep its slot reserved for as long as it holds that reference, not
-    just until the reader's next flush. Before this was fixed, the fixed
-    "release at next dequeue" schedule would let the writer reclaim (and a
-    later write silently mutate) a slot the caller was still reading."""
+    """A caller retaining the tensor across many `flush_releases()` calls
+    (e.g. `prompt_embeds` across chunked-prefill steps) must keep its slot
+    reserved the whole time, not just until the reader's next flush."""
     writer, (reader,) = _make_arena(n_reader=1, n_slots=2)
     t = torch.ones(1000)
     idx = writer.write_tensor(t)
@@ -952,17 +948,11 @@ def test_arena_slot_not_released_while_tensor_retained_across_multiple_flushes()
 
 
 def test_arena_release_survives_intervening_flush_from_another_tensor():
-    """Regression test: `flush_releases()` must clear `_pending_release` IN
-    PLACE (`.clear()`), never rebind it to a new list object. `get_tensor`'s
-    `weakref.finalize` captures a bound `self._pending_release.append`
-    method tied to whatever list OBJECT is current at registration time --
-    if `flush_releases` ever did `self._pending_release = []` instead, a
-    tensor whose finalizer was registered before that reassignment but
-    collected after it would have its release silently appended into the
-    now-orphaned old list and never observed again, permanently leaking its
-    slot. This is exactly the interleaving a long-lived `prompt_embeds`
-    tensor sees in practice once any other (short-lived) tensor also flows
-    through the same reader/arena and triggers an intervening flush."""
+    """`flush_releases()` must clear `_pending_release` in place, never
+    rebind it: a finalizer registered before a rebind would append into the
+    now-orphaned old list and permanently leak its slot. Exercises the
+    interleaving a long-lived `prompt_embeds` tensor sees once a
+    shorter-lived tensor through the same reader triggers a flush first."""
     writer, (reader,) = _make_arena(n_reader=1, n_slots=2)
     t = torch.ones(1000)
     # `a` is long-lived: its finalizer is registered first, while
@@ -1075,13 +1065,9 @@ def test_arena_pickler_noncontig_falls_through(monkeypatch):
 
 @pytest.mark.parametrize("case", ["requires_grad", "conj"])
 def test_arena_pickler_excludes_requires_grad_and_conj(monkeypatch, case: str):
-    """Tensors `_reduce_tensor` excludes (requires_grad, or exotic tensors
-    like a conjugate-bit view that can't be aliased as uint8) must fall
-    through the arena the same way, even when they qualify on every other
-    criterion (CPU, contiguous, above the divert threshold). Regression
-    test: the arena's reducer_override used to divert these unconditionally
-    -- silently dropping requires_grad on the receiving side, or crashing
-    enqueue() with an uncaught RuntimeError from write_tensor's uint8 view."""
+    """Tensors `_reduce_tensor` excludes (requires_grad, or an exotic
+    conjugate-bit view that can't alias as uint8) must fall through the
+    arena the same way, even when every other criterion qualifies."""
     writer, (reader,) = _make_arena(n_reader=1)
     monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
     monkeypatch.setitem(
@@ -1104,30 +1090,14 @@ def test_arena_pickler_excludes_requires_grad_and_conj(monkeypatch, case: str):
 
 
 def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
-    """`reducer_override` declines a bare `isinstance`/`type` match for
-    `torch.Tensor` subclasses in general -- but `torch.nn.Parameter`
-    specifically IS diverted, via its own dedicated `_rebuild_arena_
-    parameter` rebuild hook (`_ARENA_REBUILD_FNS`), because a naive
-    "decline and let it fall through" approach has a subtler failure mode
-    than losing type identity: `Parameter.__reduce_ex__` returns
-    `(_rebuild_parameter, (plain_data_tensor, requires_grad, state_dict))`,
-    and `plain_data_tensor` (an exact-type `torch.Tensor`) is what the
-    arena would divert if `reducer_override` merely declined the outer
-    `Parameter` and let it recurse naturally. `_rebuild_parameter` builds
-    `torch.nn.Parameter(plain_data_tensor, requires_grad)` and returns
-    it -- WITHOUT keeping a Python reference to `plain_data_tensor` itself.
-    Regression test: `ShmTensorArena.get_tensor`'s caller used to schedule
-    release via `weakref.finalize` on that exact intermediate tensor
-    object, which would then be immediately garbage-collected (nothing
-    references it once `_rebuild_parameter` returns), queuing the slot for
-    release WHILE the constructed Parameter was still a live, in-use view
-    into it -- silent corruption the instant the writer reused the slot,
-    with no exception anywhere. `_rebuild_arena_parameter` fixes this by
-    scheduling release on the constructed `Parameter` instead (the object
-    the caller actually retains); this test would fail on the
-    `_pending_release` assertion below against the pre-fix code, even
-    though it already asserted (and passed) `type(out) is torch.nn.
-    Parameter`."""
+    """`torch.nn.Parameter` is diverted via its own `_rebuild_arena_parameter`
+    hook rather than falling through to `Parameter.__reduce_ex__`, which
+    would rebuild it from an intermediate tensor it keeps no Python
+    reference to. Regression test: scheduling release on that intermediate
+    tensor (instead of the constructed `Parameter`) would queue the slot the
+    instant it's collected, silently corrupting the still-live Parameter on
+    the next writer reuse -- the `_pending_release` assertions below catch
+    that even though `type(out) is torch.nn.Parameter` alone would not."""
     writer, (reader,) = _make_arena(n_reader=1)
     monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
     monkeypatch.setitem(
@@ -1217,16 +1187,12 @@ def test_arena_event_gated_release():
 
 
 def test_tensor_arena_registry_is_weak_and_survives_shutdown():
-    """`_TENSOR_ARENAS` must not be the thing keeping an arena alive -- or it
-    holds the arena (and its pinned mapping) for the life of the process
-    even after the owning MessageQueue is gone -- but it also must not be
-    forcibly cleared by `shutdown()`, since `shutdown()` can run on a
-    different thread than an in-flight `dequeue()` still reconstructing a
-    tensor from that same arena (e.g. multiproc_executor's death-pipe
-    monitor calling `mq.shutdown()` while the worker's main thread is mid
-    `pickle.loads`). A weak-value registry gets both right: the entry
-    survives `shutdown()` untouched, and only disappears once the arena is
-    genuinely unreferenced -- no explicit cleanup call needed or safe."""
+    """`_TENSOR_ARENAS` must not keep an arena alive past its owning
+    MessageQueue, but also must not be cleared by `shutdown()` -- which can
+    run on a different thread than an in-flight `dequeue()` still
+    reconstructing a tensor from that arena. A weak-value registry gets
+    both: the entry survives `shutdown()` and vanishes only once
+    unreferenced."""
     writer_mq = MessageQueue(n_reader=1, n_local_reader=1, enable_shm_tensor_arena=True)
     handle = writer_mq.export_handle()
     reader_mq = MessageQueue.create_from_handle(handle, rank=0)
@@ -1249,12 +1215,9 @@ def test_tensor_arena_registry_is_weak_and_survives_shutdown():
 
 def test_create_from_handle_tolerates_arena_attach_failure():
     """If a reader's `ShmTensorArena.__init__` can't attach to the writer's
-    shared-memory segment (`FileNotFoundError` -- e.g. "deserialized on a
-    different node"), `create_from_handle` must not crash: this is an
-    anticipated, deferred-failure state (`ShmTensorArena.__del__` already
-    guards for it with `hasattr(self, "shared_memory")`), matching how the
-    sibling `ShmRingBuffer` path handles the identical `FileNotFoundError`
-    without ever dereferencing `.shared_memory` up front."""
+    segment (`FileNotFoundError`, e.g. deserialized on a different node),
+    `create_from_handle` must not crash -- same deferred-failure convention
+    as the sibling `ShmRingBuffer` path."""
     writer_mq = MessageQueue(n_reader=1, n_local_reader=1, enable_shm_tensor_arena=True)
     handle = writer_mq.export_handle()
     n_reader, slot_bytes, n_slots, _real_name = handle.tensor_arena_handle

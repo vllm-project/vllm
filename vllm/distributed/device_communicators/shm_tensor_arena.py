@@ -3,51 +3,35 @@
 """Zero-copy shared-memory arena for large CPU tensors (multimodal fast path).
 
 Problem: `MessageQueue.enqueue` (see `shm_broadcast.py`) pickles the whole
-payload. For multimodal models the payload contains raw `pixel_values`
-tensors (up to hundreds of MB), and torch's storage pickling copies every
-byte into the pickle stream on the writer (THPStorage_writeFileRaw) and back
-out on EVERY local reader (THPStorage_readFileRaw). On a TP=4 engine this
-serialize/deserialize chain blocks the EngineCore step loop for ~1s per large
-image with all GPUs idle.
+payload, and torch's default tensor pickling copies bytes into the pickle
+stream on the writer and back out on every local reader. For a large
+`pixel_values` tensor (up to hundreds of MB) this blocks the EngineCore step
+loop for ~1s with all GPUs idle.
 
-Fast path: intercept large contiguous CPU tensors during pickling
-(`_ArenaPickler.reducer_override`), memcpy them ONCE into a free slot of a
-shared-memory arena, and pickle only a tiny (arena_name, slot, nbytes, dtype,
-shape) stub. Readers rebuild the tensor as a zero-copy view of the mapped
-slot (`torch.frombuffer`) — no byte-copy on either side.
+Fast path: `_ArenaPickler.reducer_override` intercepts qualifying CPU
+tensors during pickling, memcpys them ONCE into a free arena slot, and
+pickles a tiny `(arena_name, slot, nbytes, dtype, shape)` stub. Readers
+rebuild a zero-copy view of the mapped slot (`torch.frombuffer`).
 
 Slot lifecycle: single writer, n_reader readers, per-slot metadata
 [written_flag, reader0_done, ..., readerN_done] (same protocol as
-ShmRingBuffer). A reader does NOT release the slot when the tensor is
-rebuilt — the rebuilt view IS the zero-copy view, and stays the SOURCE of an
-async H2D copy while the worker executes that step (and, for callers like
-chunked-prefill `prompt_embeds` that retain the tensor across many steps, for
-as long as that reference is held). Release is therefore tied via
-`weakref.finalize` to the *caller-retained* object's own lifetime, not to a
-fixed "next dequeue" schedule: a slot is only queued for release once the
-last reference to that object is garbage-collected (`ShmTensorArena.
-schedule_release`). For a plain tensor that object IS `get_tensor`'s result;
-for a type like `torch.nn.Parameter`, whose own rebuild wraps `get_tensor`'s
-result without keeping a Python reference to it, the arena's dedicated
-rebuild hook schedules release on the constructed Parameter instead — see
-`schedule_release`'s docstring for why this distinction matters and
-`_ArenaPickler.reducer_override` for the fixed set of types this is known
-to be safe for. Once queued, release on the pinned fast path is further
-gated on a CUDA event recorded after the H2D: because the source is
-cudaHostRegister-pinned the H2D is a true async DMA that can outlive
-execute_model (async scheduling issues no covering device sync), so "the
-object was collected" alone is not sufficient to know the writer may reuse
-the slot. See `flush_releases`.
+ShmRingBuffer). A slot is not released when rebuilt: the rebuilt tensor is
+the SOURCE of an async H2D copy, and callers like chunked-prefill
+`prompt_embeds` retain it across many steps. Release is tied via
+`weakref.finalize` to the caller-retained object's GC, not a fixed
+"next dequeue" schedule — see `ShmTensorArena.schedule_release` for the
+mechanism (and its sharp edge: the tracked object must be exactly what the
+caller ends up holding). Once queued, release is further gated on a CUDA
+event on the pinned fast path, since the H2D can outlive the step that
+issued it — see `flush_releases`.
 
-The writer NEVER blocks on the arena: if no slot is free (or the tensor is
-larger than a slot), it falls back to the default pickle path for that
-tensor. Worst case is the status-quo behavior, and deadlock is impossible.
+The writer NEVER blocks: no free slot (or an oversized tensor) falls back to
+the default pickle path, so worst case matches today's behavior.
 
-Physical memory: slots are allocated lazily by the kernel (pages are backed
-on first write), so arenas on queues that never carry big tensors cost ~0.
-Creation is guarded by `check_shm_free_space` (same as `ShmRingBuffer`), so
-an undersized `/dev/shm` fails fast with a clear error instead of `SIGBUS`
-the first time a tensor is copied into pages beyond tmpfs capacity.
+Physical memory: slots are paged in lazily, so an arena on a queue that
+never carries big tensors costs ~0. Creation is guarded by
+`check_shm_free_space` (like `ShmRingBuffer`) so an undersized `/dev/shm`
+fails fast instead of a `SIGBUS` mid-copy.
 """
 
 import pickle
@@ -70,20 +54,15 @@ _ARENA_SLOT_BYTES = 256 * 1024 * 1024
 # take the out-of-band pickle-buffer path.
 _ARENA_MIN_BYTES = 8 * 1024 * 1024
 
-# Reader-side registry: arena shm name -> attached ShmTensorArena. A process
-# is not guaranteed to attach to only one arena (that only happens to be true
-# today, since only the engine->worker broadcast queue enables the arena), so
-# this is a name-keyed registry rather than a single slot. Populated by
-# `MessageQueue.create_from_handle`; consumed by the `_rebuild_arena_*`
-# functions when unpickling a tensor stub. A WEAK-value mapping: the registry
-# must not be the thing keeping an arena alive, or it holds the arena (and
-# its pinned mapping) for the life of the process even after the owning
-# MessageQueue is gone. Since the map holds no strong reference, there is
-# also nothing for `MessageQueue.shutdown` to proactively (and unsafely --
-# shutdown() can run on a different thread than an in-flight `dequeue`, e.g.
-# multiproc_executor's death-pipe monitor) remove: an entry simply
-# disappears once nothing else (chiefly `MessageQueue.tensor_arena`)
-# references that arena anymore.
+# Reader-side registry: arena shm name -> attached ShmTensorArena, keyed by
+# name rather than a single slot since a process isn't guaranteed to attach
+# to only one. Populated by `MessageQueue.create_from_handle`; consumed by
+# the `_rebuild_arena_*` unpickle hooks. WEAK-value: a strong reference here
+# would keep the arena (and its pinned mapping) alive for the process
+# lifetime, and would need `MessageQueue.shutdown` to remove it explicitly --
+# unsafe since shutdown() can run on a different thread than an in-flight
+# `dequeue`. Instead an entry just disappears once nothing else references
+# that arena.
 _TENSOR_ARENAS: weakref.WeakValueDictionary[str, "ShmTensorArena"] = (
     weakref.WeakValueDictionary()
 )
@@ -130,11 +109,9 @@ class ShmTensorArena:
 
         if name is None:
             self.is_creator = True
-            # Guard against an undersized /dev/shm the same way ShmRingBuffer
-            # does: without this, SharedMemory/ftruncate can succeed even
-            # though the tmpfs can't actually back every page, and the first
-            # symptom is a SIGBUS when a tensor is copied into pages beyond
-            # its real capacity instead of a clear error at creation time.
+            # Same guard as ShmRingBuffer: SharedMemory/ftruncate can succeed
+            # on an undersized /dev/shm, so check up front instead of SIGBUS
+            # on first write past tmpfs capacity.
             from vllm.distributed.device_communicators.shm_broadcast import (
                 check_shm_free_space,
             )
@@ -184,13 +161,9 @@ class ShmTensorArena:
         if nbytes > self.slot_bytes:
             return None
         try:
-            # The uint8 view exposes the raw bytes via the buffer protocol.
-            # Computed BEFORE claiming any slot, and with the same
-            # try/except as `_reduce_tensor`'s identical view: exotic
-            # tensors (e.g. with the conjugate bit set) don't support
-            # aliasing views and raise RuntimeError here. Falling back
-            # cleanly before claiming a slot avoids leaving one claimed
-            # with nothing ever written into it.
+            # Computed before claiming a slot: exotic tensors (e.g. conjugate
+            # bit set) raise RuntimeError here, same as `_reduce_tensor`'s
+            # identical view -- fail before claiming, not after.
             src = t.detach().reshape(-1).view(torch.uint8)
         except RuntimeError:
             return None
@@ -285,49 +258,28 @@ class ShmTensorArena:
     def schedule_release(self, obj, idx: int) -> None:
         """Queue slot `idx` for release once `obj` is garbage-collected.
 
-        Unlike a fixed "release at next dequeue" schedule, the slot is
-        queued for release only once `obj` is garbage-collected
-        (`weakref.finalize`), not merely on the reader's next `dequeue`
-        call. This matters for callers that retain `obj` across many
-        `dequeue` calls — e.g. `prompt_embeds`, which the worker re-slices
-        on the CPU every step of a chunked prefill. With a fixed
-        next-dequeue release, the slot would become eligible for writer
-        reuse — and be silently mutated underneath the still-live tensor —
-        long before the caller was actually done with it.
+        Tied to GC (`weakref.finalize`) rather than the reader's next
+        `dequeue`, since callers like chunked-prefill `prompt_embeds` retain
+        the tensor across many steps -- a fixed next-dequeue release would
+        let the writer reuse (and mutate) the slot out from under them. The
+        CUDA-event gate in `flush_releases` still applies once queued.
 
-        Once queued, the release still goes through the same CUDA-event
-        gate as before (see `flush_releases`), so the async-H2D in-flight
-        window is unaffected by this mechanism.
+        `obj` MUST be the *exact* object the caller ends up holding, not an
+        intermediate value another type's rebuild wraps without keeping a
+        Python reference to. E.g. `torch.nn.Parameter(t, requires_grad=False)`
+        shares `t`'s storage at the C++ level but keeps no Python reference
+        to `t`, so `_rebuild_arena_parameter` schedules release on the
+        constructed `Parameter`, not on `t`. See `_ArenaPickler.
+        reducer_override` for the fixed set of types this is known safe for.
 
-        `obj` MUST be the *exact* object the unpickling caller ends up
-        holding a reference to — not an intermediate value some other
-        object's rebuild function wraps without retaining a Python
-        reference to it. E.g. `torch.nn.Parameter(t, requires_grad=False)`
-        shares `t`'s storage at the C++ level but keeps no Python
-        reference to `t` itself, so scheduling release on `t` would let
-        the slot be reused — silently corrupting the still-live Parameter
-        — before the caller ever sees it. This is why `_rebuild_arena_
-        parameter` calls this on the constructed `Parameter`, not on the
-        `get_tensor()` result it wraps. See that function and
-        `_ArenaPickler.reducer_override` for the full set of types this
-        arena knows how to schedule release for correctly; anything else
-        must fall back to the out-of-band pickle path instead of calling
-        this method on a value it doesn't control the wrapping of.
-
-        Known residual limitation: this ties release to the garbage
-        collection of the *specific* object passed here. A caller that
-        takes a view/slice of `obj` and drops `obj` itself — instead of
-        keeping it alive, as vLLM's current callers do — would not delay
-        the release: PyTorch views keep the underlying storage alive via
-        the C++ refcount, independent of this (Python-object-level)
-        finalizer.
+        Residual limitation: a caller that drops `obj` itself but keeps a
+        view/slice of it would not delay release -- torch views keep the
+        underlying storage alive at the C++ level, independent of this
+        Python-object-level finalizer.
         """
-        # `self._pending_release.append` binds to the CURRENT list OBJECT,
-        # not to a live lookup of the `_pending_release` attribute -- so
-        # `flush_releases` must only ever mutate that same list in place
-        # (`.clear()`), never rebind `self._pending_release` to a new list,
-        # or a finalizer registered here before such a rebind would append
-        # into an orphaned list that nothing reads again (permanent leak).
+        # Binds to the current list OBJECT. `flush_releases` must mutate it
+        # in place (`.clear()`), never rebind `self._pending_release` --
+        # doing so would orphan any finalizer already registered here.
         weakref.finalize(obj, self._pending_release.append, idx)
 
     def _mark_released(self, idxs: list[int]):
@@ -355,29 +307,19 @@ class ShmTensorArena:
     def flush_releases(self):
         """Retire this reader's arena slots that are ready for writer reuse.
 
-        Called on every `MessageQueue.dequeue`. Two kinds of pending work:
+        Called on every `MessageQueue.dequeue`. `_pending_release` holds
+        slots whose tensor was just garbage-collected (see `get_tensor`). On
+        the pinned fast path that tensor was the source of an async
+        `non_blocking=True` H2D that can outlive the collection, so instead
+        of marking released immediately we record a CUDA event (ordered
+        after that H2D on the same stream) and move the slot to
+        `_deferred_releases` until `event.query()` says it's done -- a
+        not-yet-complete slot just waits one more `dequeue`. Unpinned (or no
+        CUDA context), the H2D already staged synchronously, so the slot is
+        safe to release right away.
 
-        - `_pending_release`: slots whose tensor was garbage-collected (see
-          `get_tensor`) since the last flush. On the pinned fast path the
-          tensor was the SOURCE of a `non_blocking=True` H2D — a true async
-          DMA that can still be in flight when the tensor itself is
-          collected — so these are not marked released immediately.
-          Instead a CUDA event is recorded here, ordered after that H2D on
-          the same (compute) stream, and the slot moves to
-          `_deferred_releases` until the event fires. When the mapping is
-          NOT pinned (or this process has no CUDA context), `cudaMemcpyAsync`
-          from pageable host memory stages the copy synchronously before
-          returning, so the slot is already safe to release.
-        - `_deferred_releases`: slots already queued behind an event from a
-          previous flush. `event.query()` is non-blocking — by the time we
-          are back here the event is virtually always already done, so this
-          keeps the reader off the critical path; a not-yet-complete slot
-          simply waits one more `dequeue`.
-
-        Only once every reader has marked a slot released (`_mark_released`)
-        does the writer consider it free for reuse (`write_tensor`), so a
-        slot is never overwritten while any reader's DMA may still be
-        reading it.
+        A slot only becomes free for the writer (`write_tensor`) once every
+        reader has marked it released (`_mark_released`).
         """
         if self._deferred_releases:
             still_pending = []
@@ -390,14 +332,7 @@ class ShmTensorArena:
 
         if not self._pending_release:
             return
-        # Snapshot-and-clear IN PLACE (never rebind `self._pending_release`
-        # to a new list object): `get_tensor`'s `weakref.finalize` captured
-        # a bound `self._pending_release.append` method tied to THIS list
-        # object. Reassigning the attribute (`self._pending_release = []`)
-        # would silently orphan that bound method for any tensor still
-        # alive at this point -- its eventual release would be appended to
-        # the now-abandoned old list and never observed again, permanently
-        # leaking that slot.
+        # Snapshot-and-clear in place, never rebind (see schedule_release).
         idxs = list(self._pending_release)
         self._pending_release.clear()
 
@@ -429,14 +364,9 @@ def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
 
 
 def _rebuild_arena_parameter(arena_name, slot_idx, nbytes, dtype_str, shape):
-    """Unpickle hook for `torch.nn.Parameter`: like `_rebuild_arena_tensor`,
-    but schedules release on the constructed `Parameter` -- not the
-    intermediate zero-copy tensor it wraps -- since `torch.nn.Parameter`
-    keeps no Python reference to the tensor it's built from (see
-    `ShmTensorArena.schedule_release`). Diverting a `Parameter` always
-    implies `requires_grad=False`: `_ArenaPickler.reducer_override` already
-    requires this, matching `_reduce_tensor`'s own exclusion.
-    """
+    """Unpickle hook for `torch.nn.Parameter`: schedules release on the
+    constructed `Parameter`, not the intermediate tensor it wraps (see
+    `ShmTensorArena.schedule_release`)."""
     arena = _TENSOR_ARENAS[arena_name]
     t = arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
     param = torch.nn.Parameter(t, requires_grad=False)
@@ -444,13 +374,12 @@ def _rebuild_arena_parameter(arena_name, slot_idx, nbytes, dtype_str, shape):
     return param
 
 
-# Tensor types `_ArenaPickler.reducer_override` knows how to divert safely,
-# each mapped to the rebuild hook that correctly schedules release on the
-# object the caller actually ends up holding (see
-# `ShmTensorArena.schedule_release`). Any OTHER type -- including any other
-# `torch.Tensor` subclass -- declines and falls through to the out-of-band
-# pickle path: we can't assume in general that an unknown type's own
-# `__reduce_ex__` retains a Python reference to the tensor it's built from.
+# Types `_ArenaPickler.reducer_override` knows how to divert safely, mapped
+# to the rebuild hook that schedules release on the right object (see
+# `ShmTensorArena.schedule_release`). Any other type -- including
+# `torch.Tensor` subclasses -- falls through to the normal pickle path,
+# since we can't assume its `__reduce_ex__` keeps a Python reference to the
+# tensor it's built from.
 _ARENA_REBUILD_FNS = {
     torch.Tensor: _rebuild_arena_tensor,
     torch.nn.Parameter: _rebuild_arena_parameter,
@@ -460,20 +389,13 @@ _ARENA_REBUILD_FNS = {
 class _ArenaPickler(pickle.Pickler):
     """Pickler that diverts large contiguous CPU tensors into the arena.
 
-    `reducer_override` is consulted before an object's normal reduction.
-    For a tensor whose exact type is one `_ARENA_REBUILD_FNS` knows how to
-    safely rebuild (currently `torch.Tensor` and `torch.nn.Parameter` --
-    NOT arbitrary subclasses; see `ShmTensorArena.schedule_release`), and
-    that also qualifies (CPU, strided, contiguous, not `requires_grad`: the
-    same criteria as `_reduce_tensor`, plus the divert-size threshold), it
-    does ONE memcpy into a free arena slot and returns a tiny
-    `(arena_name, slot, nbytes, dtype, shape)` rebuild stub. Everything it
-    declines — an unrecognized type, too small, non-contiguous,
-    `requires_grad`, exotic (e.g. conjugate-bit) tensors `write_tensor`
-    can't alias, or the arena is full — returns `NotImplemented`, which
-    falls through to the pickler's `dispatch_table` (i.e. `_reduce_tensor`'s
-    out-of-band `PickleBuffer` path, which applies the identical
-    exclusions), exactly as if no arena were attached.
+    `reducer_override` is consulted before an object's normal reduction. For
+    a qualifying tensor (exact type in `_ARENA_REBUILD_FNS`, CPU, strided,
+    contiguous, not `requires_grad`, above the divert-size threshold -- the
+    same criteria `_reduce_tensor` uses, plus size) it does one memcpy into a
+    free slot and returns a tiny rebuild stub. Anything that doesn't qualify,
+    or finds the arena full, returns `NotImplemented` and falls through to
+    the normal out-of-band pickle path, exactly as if no arena were attached.
     """
 
     def __init__(self, file, arena: ShmTensorArena, buffer_callback=None):
