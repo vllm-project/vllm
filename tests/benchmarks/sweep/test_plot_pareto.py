@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pandas as pd
 
 from vllm.benchmarks.sweep.plot_pareto import _pareto_frontier
