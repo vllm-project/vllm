@@ -9,7 +9,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any

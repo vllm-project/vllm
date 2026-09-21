@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
