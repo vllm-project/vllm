@@ -1369,10 +1369,11 @@ class SpeculativeConfig:
                         f"Unsupported speculative method: '{self.method}'"
                     )
 
-                if self.method in ("eagle", "eagle3"):
-                    # EAGLE drafts share the target's positional space; a
-                    # draft checkpoint with a smaller max_position_embeddings
-                    # than the target under-sizes its rotary cache (#48894).
+                if self.method in ("eagle", "eagle3", "dflash"):
+                    # EAGLE and DFlash drafts share the target's positional
+                    # space; a draft checkpoint with a smaller
+                    # max_position_embeddings than the target under-sizes its
+                    # rotary cache (#48894, #57941).
                     SpeculativeConfig._maybe_override_draft_max_position_embeddings(
                         self.draft_model_config.hf_config,
                         self.target_model_config.max_model_len,
@@ -1662,13 +1663,15 @@ class SpeculativeConfig:
         draft_hf_config: PretrainedConfig,
         target_max_model_len: int,
     ) -> None:
-        """Raise an EAGLE draft's max_position_embeddings up to the target's.
+        """Raise an EAGLE or DFlash draft's max_position_embeddings up to the
+        target's.
 
         The proposer feeds the draft positions up to the target's
         max_model_len, while max_position_embeddings sizes the draft's
         rotary cos_sin_cache. A smaller checkpoint value (e.g. 2048 for
-        yuhuili/EAGLE3-LLaMA3.1-Instruct-8B) makes that cache gather go
-        out of bounds (#48894).
+        yuhuili/EAGLE3-LLaMA3.1-Instruct-8B, or a DFlash draft published
+        against a shorter context than the target is served with) makes
+        that cache gather go out of bounds (#48894, #57941).
 
         Args:
             draft_hf_config: The draft model's HF config, mutated in place.
@@ -1685,8 +1688,8 @@ class SpeculativeConfig:
             return
         logger.info(
             "Overriding draft model max_position_embeddings from %d to the "
-            "target model's max_model_len (%d); EAGLE drafts share the "
-            "target's positional space.",
+            "target model's max_model_len (%d); EAGLE and DFlash drafts share "
+            "the target's positional space.",
             draft_max_position_embeddings,
             target_max_model_len,
         )
