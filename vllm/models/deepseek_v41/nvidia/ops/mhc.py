@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 from .mega_mhc import (
-    is_mega_mhc_supported,
+    can_use_mega_mhc,
     mhc_shifted_post_pre_deep_gemm,
     warmup_mega_mhc,
 )
@@ -178,13 +178,7 @@ def mhc_shifted_post_pre(
 
     When stream is supplied, join it before consuming the returned coefficients.
     """
-    use_mega_mhc = (
-        pre_mix is not None
-        and norm_weight is not None
-        and not capture_aux
-        and x.shape[0] <= 1 << 20
-        and is_mega_mhc_supported(x.shape[1], residual.shape[1])
-    )
+    use_mega_mhc = can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux)
     layer_input = None
     if reduce_results:
         tp = get_tp_group()

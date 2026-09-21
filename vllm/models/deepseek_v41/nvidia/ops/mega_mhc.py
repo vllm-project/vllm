@@ -28,6 +28,22 @@ def is_mega_mhc_supported(hidden_size: int, hc_mult: int) -> bool:
     return deep_gemm is not None and callable(getattr(deep_gemm, "mega_mhc", None))
 
 
+def can_use_mega_mhc(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    pre_mix: torch.Tensor | None,
+    norm_weight: torch.Tensor | None,
+    capture_aux: bool,
+) -> bool:
+    return (
+        pre_mix is not None
+        and norm_weight is not None
+        and not capture_aux
+        and x.shape[0] <= 1 << 20
+        and is_mega_mhc_supported(x.shape[1], residual.shape[1])
+    )
+
+
 @functools.cache
 def warmup_mega_mhc(
     stream: torch.cuda.Stream, num_tokens: int, hidden_size: int, hc_mult: int
