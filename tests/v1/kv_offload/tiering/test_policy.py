@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Unit tests for vllm.v1.kv_offload.tiering.fs.policy.
+Unit tests for vllm.v1.kv_offload.tiering.fs.dispatch.
 
-Covers FCFSQueue, SJFBucketQueue, LoadQueue, and Scheduler.
+Covers FCFSQueue, SJFBucketQueue, LoadQueue, and WorkDispatcher.
 """
 
 import math
@@ -13,13 +13,13 @@ from typing import Any
 import pytest
 
 from vllm.v1.kv_offload.base import Locality
-from vllm.v1.kv_offload.tiering.fs.policy import (
+from vllm.v1.kv_offload.tiering.fs.dispatch import (
     FCFSQueue,
     LoadQueue,
-    Scheduler,
     SJFBucketQueue,
     StoreQueue,
     ThreadMode,
+    WorkDispatcher,
 )
 
 # ---------------------------------------------------------------------------
@@ -34,8 +34,8 @@ def _make_scheduler(
     locality: Locality = Locality.LOCAL,
     n_read: int = 4,
     n_write: int = 2,
-) -> Scheduler:
-    return Scheduler(
+) -> WorkDispatcher:
+    return WorkDispatcher(
         locality=locality,
         load_job_q=LoadQueue(_BS),
         store_job_q=StoreQueue(_BS),
@@ -57,7 +57,7 @@ def _identity_batch(tasks: list[Any]) -> Callable[[], None]:
 
 
 def _submit_load(
-    scheduler: Scheduler,
+    scheduler: WorkDispatcher,
     job_id: int,
     tasks: list[Any],
 ) -> int:
@@ -69,7 +69,7 @@ def _submit_load(
 
 
 def _submit_store(
-    scheduler: Scheduler,
+    scheduler: WorkDispatcher,
     job_id: int,
     tasks: list[Any],
 ) -> int:
@@ -80,7 +80,7 @@ def _submit_store(
     )
 
 
-def _drain_load(scheduler: Scheduler) -> list[tuple[Any, int, Any]]:
+def _drain_load(scheduler: WorkDispatcher) -> list[tuple[Any, int, Any]]:
     """Fetch all available work for a READ thread."""
     results = []
     while True:
@@ -91,7 +91,7 @@ def _drain_load(scheduler: Scheduler) -> list[tuple[Any, int, Any]]:
     return results
 
 
-def _drain_store(scheduler: Scheduler) -> list[tuple[Any, int, Any]]:
+def _drain_store(scheduler: WorkDispatcher) -> list[tuple[Any, int, Any]]:
     """Fetch all available work for a WRITE thread."""
     results = []
     while True:
@@ -337,7 +337,7 @@ class TestLoadQueue:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — construction
+# WorkDispatcher — construction
 # ---------------------------------------------------------------------------
 
 
@@ -383,7 +383,7 @@ class TestSchedulerConstruction:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — submit
+# WorkDispatcher — submit
 # ---------------------------------------------------------------------------
 
 
@@ -423,7 +423,7 @@ class TestSchedulerSubmit:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — fetch_work / batching
+# WorkDispatcher — fetch_work / batching
 # ---------------------------------------------------------------------------
 
 
@@ -544,7 +544,7 @@ class TestSchedulerFetchWork:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — clear
+# WorkDispatcher — clear
 # ---------------------------------------------------------------------------
 
 
@@ -580,7 +580,7 @@ class TestSchedulerClear:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — write-thread-can-read edge case
+# WorkDispatcher — write-thread-can-read edge case
 # ---------------------------------------------------------------------------
 
 
@@ -604,7 +604,7 @@ class TestSchedulerNoReadThreads:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — WRITE_EXCL thread behaviour
+# WorkDispatcher — WRITE_EXCL thread behaviour
 # ---------------------------------------------------------------------------
 
 

@@ -17,11 +17,11 @@ from dataclasses import dataclass
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import Locality, OffloadKey
 from vllm.v1.kv_offload.tiering.base import JobId
-from vllm.v1.kv_offload.tiering.fs.policy import (
+from vllm.v1.kv_offload.tiering.fs.dispatch import (
     LoadQueue,
-    Scheduler,
     StoreQueue,
     ThreadMode,
+    WorkDispatcher,
     make_batches,
 )
 
@@ -94,9 +94,9 @@ class DualQueueThreadPool:
         self,
         n_read_threads: int,
         n_write_threads: int,
-        n_write_excl_threads: int = 0,
-        block_size: int = 0,
-        locality: Locality = Locality.REMOTE,
+        n_write_excl_threads: int,
+        block_size: int,
+        locality: Locality,
         thread_name_prefix: str = "fs_secondary_tier",
     ) -> None:
         self._n_read_threads = n_read_threads
@@ -109,10 +109,10 @@ class DualQueueThreadPool:
         self._inflight_jobs = 0  # guarded by _condition
 
         assert n_read_threads + n_write_threads > 0, (
-            "Threadpool needs atleast on 1 read eligible thread"
+            "Threadpool needs atleast on 1 rw thread"
         )
 
-        self._scheduler = Scheduler(
+        self._dispatcher = WorkDispatcher(
             locality=locality,
             load_job_q=LoadQueue(block_size),
             store_job_q=StoreQueue(block_size),
@@ -166,14 +166,12 @@ class DualQueueThreadPool:
         state = JobState(job_id, n_tasks)
         task_lst = list(tasks)
         assert len(task_lst) == n_tasks, "Unaccounted tasks"
-        # Build batches before acquiring the lock: list-slicing and
-        # make_batch_fn closures are O(n_tasks) and must not hold up
-        # other threads waiting on the condition variable.
-        n_threads = self._scheduler.n_batch_threads(is_load)
+        # Build batches before acquiring the lock; it is O(n_tasks)
+        n_threads = self._dispatcher.n_batch_threads(is_load)
         work_items = make_batches(state, task_lst, make_batch_fn, n_threads)
         with self._condition:
             self._inflight_jobs += 1
-            n_wake = self._scheduler.submit(job_id, work_items, n_tasks, is_load)
+            n_wake = self._dispatcher.submit(job_id, work_items, n_tasks, is_load)
             self._condition.notify(n_wake)
 
     def enqueue_load(
@@ -226,7 +224,7 @@ class DualQueueThreadPool:
     def shutdown(self, wait: bool = True) -> None:
         with self._condition:
             self._stop = True
-            self._scheduler.clear()
+            self._dispatcher.clear()
             # Cancelled tasks will not decrement _inflight_jobs; reset it so a
             # subsequent wait_idle() returns instead of hanging.
             self._inflight_jobs = 0
@@ -240,11 +238,11 @@ class DualQueueThreadPool:
         while True:
             with self._condition:
                 self._condition.wait_for(
-                    lambda: self._stop or self._scheduler.has_work(mode)
+                    lambda: self._stop or self._dispatcher.has_work(mode)
                 )
                 if self._stop:
                     return
-                work = self._scheduler.fetch_work(mode)
+                work = self._dispatcher.fetch_work(mode)
                 if work is None:
                     continue
                 fn, batch_size, state = work

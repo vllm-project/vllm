@@ -260,7 +260,7 @@ def make_batches(
     ]
 
 
-class Scheduler:
+class WorkDispatcher:
     def __init__(
         self,
         locality: Locality,
