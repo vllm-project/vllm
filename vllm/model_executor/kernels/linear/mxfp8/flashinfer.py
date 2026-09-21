@@ -43,6 +43,25 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+        N, K = c.weight_shape
+        if K < 128:
+            return (
+                False,
+                f"mm_mxfp8 requires K >= 128, got K={K}. "
+                f"in_features is too small for mm_mxfp8.",
+            )
+        if K % MXFP8_BLOCK_SIZE != 0:
+            return (
+                False,
+                f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, "
+                f"got K={K}.",
+            )
+        if N < 128:
+            return (
+                False,
+                f"mm_mxfp8 requires N >= 128, got N={N}. "
+                f"out_features is too small for mm_mxfp8.",
+            )
         return True, None
 
     def input_quant_key(self) -> QuantKey:
@@ -71,20 +90,6 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         weight = layer.weight
         weight_scale = layer.weight_scale
         N, K = weight.shape
-
-        min_dim = 128
-
-        assert min_dim <= K, (
-            f"mm_mxfp8 requires K >= {min_dim}, got K={K}. "
-            f"in_features is too small for mm_mxfp8."
-        )
-        assert K % MXFP8_BLOCK_SIZE == 0, (
-            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}."
-        )
-        assert min_dim <= N, (
-            f"mm_mxfp8 requires N >= {min_dim}, got N={N}. "
-            f"out_features is too small for mm_mxfp8."
-        )
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -136,6 +141,25 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+        N, K = c.weight_shape
+        if K < 128:
+            return (
+                False,
+                f"mm_mxfp8 requires K >= 128, got K={K}. "
+                f"in_features is too small for mm_mxfp8.",
+            )
+        if K % MXFP8_BLOCK_SIZE != 0:
+            return (
+                False,
+                f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, "
+                f"got K={K}.",
+            )
+        if N < 128:
+            return (
+                False,
+                f"mm_mxfp8 requires N >= 128, got N={N}. "
+                f"out_features is too small for mm_mxfp8.",
+            )
         return True, None
 
     def input_quant_key(self) -> QuantKey:
@@ -165,20 +189,6 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         weight = layer.weight  # [K, N], column-major
         weight_scale = layer.weight_scale
         K, N = weight.shape
-
-        min_dim = 128
-
-        assert min_dim <= K, (
-            f"mm_mxfp8 requires K >= {min_dim}, got K={K}. "
-            f"in_features is too small for mm_mxfp8."
-        )
-        assert K % MXFP8_BLOCK_SIZE == 0, (
-            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}."
-        )
-        assert min_dim <= N, (
-            f"mm_mxfp8 requires N >= {min_dim}, got N={N}. "
-            f"out_features is too small for mm_mxfp8."
-        )
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
