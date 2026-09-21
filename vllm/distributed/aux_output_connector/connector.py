@@ -41,13 +41,13 @@ class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
     block_keys: list[str] | None = None
-    block_size: int = 0
 
 
 class AuxOutputSchedulerConnector:
     """Build worker metadata and finalize backend-specific request outputs."""
 
-    def __init__(self) -> None:
+    def __init__(self, hash_block_size: int) -> None:
+        self._hash_block_size = hash_block_size
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
@@ -120,7 +120,9 @@ class AuxOutputSchedulerConnector:
             )
 
             if self._mooncake_output is None:
-                self._mooncake_output = MooncakeOutputPublisher(request_output)
+                self._mooncake_output = MooncakeOutputPublisher(
+                    request_output, self._hash_block_size
+                )
             return self._mooncake_output.take_output(request, request_output)
         local_end = token_end - request_output.token_start
         if local_end < 0:

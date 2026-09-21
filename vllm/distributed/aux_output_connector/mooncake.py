@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import groupby
+from math import prod
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -69,12 +70,12 @@ class MooncakeBlockObjectStore:
 class MooncakeOutputPublisher:
     """Finalize accepted boundary bytes without reading complete output blocks."""
 
-    def __init__(self, output: "AuxRequestOutput") -> None:
-        self._row_nbytes = output.rows.dtype.itemsize
-        for size in output.rows.shape[1:]:
-            self._row_nbytes *= size
-        self._object_nbytes = output.block_size * self._row_nbytes
-        self._store = create_mooncake_block_store(object_nbytes=self._object_nbytes)
+    def __init__(self, output: "AuxRequestOutput", block_size: int) -> None:
+        self._block_size = block_size
+        self._row_nbytes = prod(output.rows.shape[1:]) * output.rows.dtype.itemsize
+        self._store = create_mooncake_block_store(
+            object_nbytes=block_size * self._row_nbytes
+        )
         self._chunks: dict[str, list[str | bytes]] = {}
 
     def take_output(
@@ -86,7 +87,7 @@ class MooncakeOutputPublisher:
             return None
         keys = output.block_keys
         assert keys is not None
-        block_size = output.block_size
+        block_size = self._block_size
         stored_start = start // block_size * block_size
         stored_end = stored_start + len(keys) * block_size if keys else start
         assert end <= stored_end + len(output.rows)
@@ -110,7 +111,7 @@ class MooncakeOutputPublisher:
             chunks.append(output.rows[: end - stored_end].tobytes())
         if not request.is_finished():
             return None
-        chunks = self._chunks.pop(request.request_id)
+        del self._chunks[request.request_id]
         result: list[str] = []
         objects = []
         for is_key, group in groupby(chunks, lambda chunk: isinstance(chunk, str)):
@@ -118,11 +119,12 @@ class MooncakeOutputPublisher:
                 result.extend(cast(Iterable[str], group))
             else:
                 payload = b"".join(cast(Iterable[bytes], group))
-                for offset in range(0, len(payload), self._object_nbytes):
+                object_nbytes = self._store.object_nbytes
+                for offset in range(0, len(payload), object_nbytes):
                     key = f"r3-tail:{uuid4().hex}"
                     result.append(key)
                     objects.append(
-                        BlockObject(key, payload[offset : offset + self._object_nbytes])
+                        BlockObject(key, payload[offset : offset + object_nbytes])
                     )
         self._store.put(objects)
         return result

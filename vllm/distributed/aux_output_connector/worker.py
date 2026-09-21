@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from math import prod
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
@@ -124,7 +125,7 @@ class AuxOutputWorkerConnector:
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
+        block_nbytes = hash_block_size * prod(shape_per_token) * dtype.itemsize
         store: BlockObjectStore | MooncakeBlockObjectStore
         if self._return_keys:
             from vllm.distributed.aux_output_connector.mooncake import (
@@ -285,13 +286,13 @@ class AuxOutputWorkerConnector:
             stored_end = (
                 min(token_end // block_size, len(state.aux_output_keys)) * block_size
             )
+            keys = None
             if self._return_keys:
                 keys = state.aux_output_keys[
                     emit_start // block_size : stored_end // block_size
                 ]
-                tail_start = max(emit_start, stored_end)
                 chunks = []
-                cursor = tail_start
+                cursor = max(emit_start, stored_end)
                 for block_start, block in state.pending_blocks:
                     if block_start <= cursor < block_start + block_size:
                         chunk = block[
@@ -303,31 +304,23 @@ class AuxOutputWorkerConnector:
                         cursor += len(chunk)
                 if cursor < token_end:
                     chunks.append(buffer.read(request_id, cursor, token_end))
-                outputs[request_id] = AuxRequestOutput(
-                    emit_start,
-                    np.concatenate(chunks) if chunks else routed_experts[:0],
-                    keys,
-                    block_size,
-                )
-                state.emit_cursor = token_end
-                continue
-            if emit_start < stored_end:
-                first_block = emit_start // block_size
-                stored = materialize_routed_experts(
+                rows = np.concatenate(chunks) if chunks else routed_experts[:0]
+            elif emit_start < stored_end:
+                rows = materialize_routed_experts(
                     store,
-                    state.aux_output_keys[first_block : stored_end // block_size],
+                    state.aux_output_keys[
+                        emit_start // block_size : stored_end // block_size
+                    ],
                     shape_per_token=buffer.shape_per_token,
                     dtype=buffer.dtype,
-                )
-                local_start = emit_start % block_size
-                rows = stored[local_start : local_start + stored_end - emit_start]
+                )[emit_start % block_size :]
                 if stored_end < token_end:
                     rows = np.concatenate(
                         (rows, buffer.read(request_id, stored_end, token_end))
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            outputs[request_id] = AuxRequestOutput(emit_start, rows)
+            outputs[request_id] = AuxRequestOutput(emit_start, rows, keys)
             state.emit_cursor = token_end
         if self._return_keys and outputs:
             store.flush()

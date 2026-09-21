@@ -189,8 +189,6 @@ class BlockObjectStore:
             raise
         for object_id, obj in unique.items():
             slot = self._lru.get(object_id)
-            if slot is None:
-                continue
             if slot != self._UNALLOCATED_SLOT:
                 continue
             slot = self._allocate_slot()

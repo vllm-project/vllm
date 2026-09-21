@@ -145,7 +145,9 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     scheduler = create_scheduler()
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector()
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.hash_block_size
+    )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     assert scheduler_output.aux_output_connector_metadata.requests == {

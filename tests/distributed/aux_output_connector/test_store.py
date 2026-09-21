@@ -49,7 +49,7 @@ _BLOCK_SIZE = 4
 
 
 @pytest.fixture
-def remote_store(monkeypatch):
+def remote_store(monkeypatch, request):
     remote: dict[str, bytes] = {}
     native = Mock()
 
@@ -60,7 +60,9 @@ def remote_store(monkeypatch):
     native.put_batch.side_effect = put
     native.batch_get_buffer.side_effect = lambda keys: [remote.get(k) for k in keys]
     store = MooncakeBlockObjectStore(
-        native, object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)), max_batch_bytes=1024
+        native,
+        object_nbytes=getattr(request, "param", _BLOCK_SIZE) * int(np.prod(_SHAPE)),
+        max_batch_bytes=1024,
     )
     monkeypatch.setattr(
         "vllm.distributed.aux_output_connector.mooncake.create_mooncake_block_store",
@@ -69,24 +71,29 @@ def remote_store(monkeypatch):
     return store
 
 
-@pytest.mark.parametrize("start,end", [(0, 10), (1, 7), (4, 8), (8, 9), (10, 10)])
+@pytest.mark.parametrize("remote_store", [2, 4, 8], indirect=True)
+@pytest.mark.parametrize("start,end", [(0, 18), (1, 7), (4, 8), (16, 17), (18, 18)])
 def test_mooncake_output_keys_contain_exact_accepted_rows(remote_store, start, end):
-    rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
-    keys = ["block-0", "block-1"]
+    """Configured hash granularity determines key ranges, not output metadata."""
+    block_size = remote_store.object_nbytes // int(np.prod(_SHAPE))
+    rows = np.arange(108, dtype=np.uint8).reshape(18, *_SHAPE)
+    keys = [f"block-{i}" for i in range(16 // block_size)]
     remote_store.put(
         [
-            BlockObject(key, rows[i * 4 : i * 4 + 4].tobytes())
+            BlockObject(key, rows[i * block_size : (i + 1) * block_size].tobytes())
             for i, key in enumerate(keys)
         ]
     )
-    output = AuxRequestOutput(start, rows[max(start, 8) :], keys[start // 4 :], 4)
-    publisher = MooncakeOutputPublisher(output)
+    output = AuxRequestOutput(
+        start, rows[max(start, 16) :], keys[start // block_size :]
+    )
+    publisher = MooncakeOutputPublisher(output, block_size)
     request = _SchedulerRequest("request", [], num_tokens=end + 1, finished=True)
     result = publisher.take_output(request, output)
     assert result is not None
     assert remote_store.get_concatenated(result) == rows[start:end].tobytes()
-    if start == 0 and end == 10:
-        assert result[:2] == keys
+    if start == 0 and end == 18:
+        assert result[: len(keys)] == keys
     publisher.close()
 
 
@@ -103,7 +110,7 @@ def test_mooncake_worker_and_publisher_reuse_prefix_and_finalize_tail(remote_sto
     assert len(output["first"].block_keys) == 2
     second = _metadata(0, [_request_metadata("second", 8, 2, 0, hashes)], {"first": []})
     output = _process_output(worker, second, rows[8:], ["second"], np.array([0]))
-    publisher = MooncakeOutputPublisher(output["second"])
+    publisher = MooncakeOutputPublisher(output["second"], _BLOCK_SIZE)
     keys = publisher.take_output(
         _SchedulerRequest("second", [], num_tokens=11, finished=True), output["second"]
     )
@@ -114,19 +121,17 @@ def test_mooncake_worker_and_publisher_reuse_prefix_and_finalize_tail(remote_sto
 def test_mooncake_decode_crosses_blocks_and_clips_terminal_output(remote_store):
     """Late full-block keys must not duplicate bytes accepted in earlier steps."""
     rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
-    connector = AuxOutputSchedulerConnector()
+    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE)
     request = _SchedulerRequest("request", [], num_tokens=4)
     assert (
-        connector.take_output(
-            request, {"request": AuxRequestOutput(0, rows[:3], [], 4)}
-        )
+        connector.take_output(request, {"request": AuxRequestOutput(0, rows[:3], [])})
         is None
     )
     remote_store.put([BlockObject("block-0", rows[:4].tobytes())])
     request.num_tokens = 6
     assert (
         connector.take_output(
-            request, {"request": AuxRequestOutput(3, rows[4:5], ["block-0"], 4)}
+            request, {"request": AuxRequestOutput(3, rows[4:5], ["block-0"])}
         )
         is None
     )
@@ -134,7 +139,7 @@ def test_mooncake_decode_crosses_blocks_and_clips_terminal_output(remote_store):
     request.num_tokens = 10
     request.finished = True
     keys = connector.take_output(
-        request, {"request": AuxRequestOutput(5, rows[8:], ["block-1"], 4)}
+        request, {"request": AuxRequestOutput(5, rows[8:], ["block-1"])}
     )
     assert remote_store.get_concatenated(keys) == rows[:9].tobytes()
     connector.close()
@@ -150,12 +155,10 @@ def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
             for i, key in enumerate(keys)
         ]
     )
-    connector = AuxOutputSchedulerConnector()
+    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE)
     request = _SchedulerRequest("request", [], num_tokens=9)
     assert (
-        connector.take_output(
-            request, {"request": AuxRequestOutput(0, rows[:0], keys, 4)}
-        )
+        connector.take_output(request, {"request": AuxRequestOutput(0, rows[:0], keys)})
         is None
     )
     # Preemption terminates the Worker state, not the user request/output.
@@ -163,7 +166,7 @@ def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
     request.num_tokens = 11
     request.finished = True
     result = connector.take_output(
-        request, {"request": AuxRequestOutput(8, rows[8:], [], 4)}
+        request, {"request": AuxRequestOutput(8, rows[8:], [])}
     )
     assert remote_store.get_concatenated(result) == rows.tobytes()
     connector.request_finished(request)
@@ -248,7 +251,7 @@ def test_background_store_publishes_without_blocking_caller():
 
 
 def _make_connector():
-    return AuxOutputSchedulerConnector()
+    return AuxOutputSchedulerConnector(_BLOCK_SIZE)
 
 
 @dataclass
