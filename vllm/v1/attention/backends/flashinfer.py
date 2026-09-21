@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
@@ -680,6 +682,64 @@ class FlashInferMetadata:
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
 
 
+class _PinnedPlanWorkspaces:
+    """Per-wrapper rings of pinned host buffers for plan() to stage through.
+
+    plan() copies its pinned buffer to the GPU asynchronously. When build()
+    does not wait for the GPU, the next plan() could overwrite that buffer
+    before the copy has run, so a new zeroed buffer is used instead of
+    waiting. Buffers are never shared between wrappers: under CUDA graphs the
+    kernels read entries past the planned batch, which must be zeros or left
+    over from plans of the same shape. At most MAX_EXTRA_BUFFERS buffers are
+    added over all rings; after that a ring waits for its oldest copy.
+    """
+
+    MAX_EXTRA_BUFFERS = 8
+
+    def __init__(self):
+        self._rings: weakref.WeakKeyDictionary[
+            object, list[tuple[torch.Tensor, torch.cuda.Event]]
+        ] = weakref.WeakKeyDictionary()
+        self._next: weakref.WeakKeyDictionary[object, int] = weakref.WeakKeyDictionary()
+        self._num_extra = 0
+
+    def acquire(
+        self, wrapper, pinned: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Event]:
+        ring = self._rings.get(wrapper)
+        if ring is None:
+            ring = [(pinned, torch.cuda.Event())]
+            self._rings[wrapper] = ring
+        i = self._next.get(wrapper, 0)
+        if ring[i][1].query():
+            pass
+        elif self._num_extra >= self.MAX_EXTRA_BUFFERS:
+            with gpu_sync_allowed():
+                ring[i][1].synchronize()
+        else:
+            ring.insert(
+                i,
+                (
+                    torch.zeros(
+                        pinned.shape, dtype=pinned.dtype, device="cpu", pin_memory=True
+                    ),
+                    torch.cuda.Event(),
+                ),
+            )
+            self._num_extra += 1
+        self._next[wrapper] = (i + 1) % len(ring)
+        return ring[i]
+
+
+def _reads_kv_lens_from_device(wrapper) -> bool:
+    """Whether wrapper runs FlashInfer's fa2 kernels, which take each request's
+    KV length from its last-page length on the device. A wrapper created with
+    backend="auto" picks its kernels on its first plan() and keeps them."""
+    return getattr(wrapper, "_backend", None) == "fa2" and hasattr(
+        wrapper, "_paged_kv_last_page_len_buf"
+    )
+
+
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     kv_cache_spec: AttentionSpec
     reorder_batch_threshold: int = 1
@@ -925,6 +985,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_last_page_len = CpuGpuBuffer(
             max_num_reqs, dtype=torch.int32, device=self.device, pin_memory=False
         )
+        # Exact last-page lengths, computed on the device when planning from the
+        # CPU upper bound on seq_lens.
+        self.paged_kv_last_page_len_exact = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        self._plan_workspaces = _PinnedPlanWorkspaces()
 
     @property
     def kv_cache_layout(self) -> KVCacheLayout:
@@ -1252,11 +1318,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         block_table_tensor: torch.Tensor,
         num_reqs: int,
         page_size: int,
+        device_seq_lens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute paged_kv_indptr, paged_kv_indices and paged_kv_last_page_len.
 
         Results are stored in self.paged_kv_indptr,
         self.paged_kv_indices, self.paged_kv_last_page_len buffers.
+
+        With ``device_seq_lens``, ``seq_lens_np`` is the CPU upper bound and
+        the exact last-page lengths for this page table are written to
+        self.paged_kv_last_page_len_exact.
 
         Returns paged_kv_indices, a GPU tensor with shape [num_actual_pages].
         """
@@ -1269,11 +1340,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # write self.paged_kv_indices inplace
         num_actual_pages = self.paged_kv_indptr.np[num_reqs]
         paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
+        write_exact_last_page_len = device_seq_lens is not None
         _copy_page_indices_kernel[(num_reqs,)](
             paged_kv_indices,
             block_table_tensor,
             block_table_tensor.stride(0),
             paged_kv_indptr,
+            device_seq_lens if write_exact_last_page_len else paged_kv_indptr,
+            self.paged_kv_last_page_len_exact,
+            page_size,
+            WRITE_LAST_PAGE_LEN=write_exact_last_page_len,
             BLOCK_SIZE=1024,
         )
 
@@ -1286,6 +1362,78 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.paged_kv_last_page_len.copy_to_gpu(num_reqs)
         return paged_kv_indices
+
+    def _seq_lens_cpu_from_bounds(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_decodes: int,
+        decode_uses_trtllm: bool,
+        prefill_uses_trtllm: bool,
+        decode_wrapper,
+        prefill_wrapper,
+    ) -> tuple[torch.Tensor, bool] | None:
+        """CPU seq_lens to plan from without reading them back from the device,
+        and whether they are exact. None if the CPU bounds do not allow it.
+
+        decode_wrapper and prefill_wrapper are the wrappers this build plans, or
+        None if they do not exist yet. The plan uses the upper bound. fa2
+        wrappers get the exact lengths on the device after plan(), so their
+        rows may count a page too many, except rows with several query tokens:
+        fa2 lays out split-KV from the planned lengths. Other FlashInfer kernels
+        need exact bounds. TRTLLM reads the lengths from the device.
+        """
+        upper = common_attn_metadata.seq_lens_cpu_upper_bound
+        lower = common_attn_metadata.seq_lens_cpu_lower_bound
+        if upper is None or lower is None:
+            return None
+        num_reqs = common_attn_metadata.num_reqs
+        upper_np, lower_np = upper.numpy()[:num_reqs], lower.numpy()[:num_reqs]
+        if min(len(upper_np), len(lower_np)) < num_reqs or (lower_np > upper_np).any():
+            return None
+        exact = upper_np == lower_np
+        page_size = self.page_size
+        same_page = (lower_np + page_size - 1) // page_size == (
+            upper_np + page_size - 1
+        ) // page_size
+        query_start_loc = common_attn_metadata.query_start_loc_cpu.numpy()
+        single_query = np.diff(query_start_loc[: num_reqs + 1]) == 1
+        fa2_ok = same_page | single_query
+        all_exact = True
+        for start, stop, uses_trtllm, wrapper in (
+            (0, num_decodes, decode_uses_trtllm, decode_wrapper),
+            (num_decodes, num_reqs, prefill_uses_trtllm, prefill_wrapper),
+        ):
+            if uses_trtllm or start == stop:
+                continue
+            # Without the wait for the GPU, plan() must stage through the ring.
+            if not hasattr(wrapper, "_pin_memory_int_workspace_buffer"):
+                return None
+            if exact[start:stop].all():
+                continue
+            if not (_reads_kv_lens_from_device(wrapper) and fa2_ok[start:stop].all()):
+                return None
+            all_exact = False
+        return upper, all_exact
+
+    def _plan(self, wrapper, plan: Callable[..., None], **kwargs) -> None:
+        """Run ``plan(**kwargs)`` for ``wrapper`` with a pinned buffer from its
+        ring (see _PinnedPlanWorkspaces)."""
+        pinned = getattr(wrapper, "_pin_memory_int_workspace_buffer", None)
+        if pinned is None:
+            plan(**kwargs)
+            return
+        buf, event = self._plan_workspaces.acquire(wrapper, pinned)
+        wrapper._pin_memory_int_workspace_buffer = buf
+        plan(**kwargs)
+        event.record()
+
+    def _write_exact_last_page_len(self, wrapper, start: int, num: int) -> None:
+        """Hand a wrapper planned from the CPU upper bound the exact lengths:
+        fa2 derives each request's KV length from its last-page length. It
+        does not read the KV lengths plan() uploads; only trtllm-gen does."""
+        wrapper._paged_kv_last_page_len_buf[:num].copy_(
+            self.paged_kv_last_page_len_exact[start : start + num]
+        )
 
     def build(
         self,
@@ -1406,9 +1554,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
+        decode_uses_cudagraph = (
+            self.enable_cuda_graph
+            and num_prefills == 0
+            and num_decode_tokens <= self._decode_cudagraph_max_bs
+        )
+        seq_lens_exact = True
         if needs_seq_lens_cpu:
-            with gpu_sync_allowed():
-                seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            from_bounds = None
+            if not (self.use_dcp or use_cascade or self.has_sinks):
+                from_bounds = self._seq_lens_cpu_from_bounds(
+                    common_attn_metadata,
+                    num_decodes,
+                    decode_with_flashinfer_trtllm_api,
+                    prefill_use_trtllm,
+                    decode_wrapper=(
+                        self._decode_wrappers_cudagraph.get(num_decode_tokens)
+                        if decode_uses_cudagraph
+                        else self._decode_wrapper
+                    ),
+                    prefill_wrapper=(
+                        self._prefill_wrapper
+                        if causal
+                        else self._noncausal_prefill_wrapper
+                    ),
+                )
+            if from_bounds is not None:
+                seq_lens_cpu, seq_lens_exact = from_bounds
+            else:
+                with gpu_sync_allowed():
+                    seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
         else:
             seq_lens_cpu = None
 
@@ -1470,6 +1645,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 block_table_tensor,
                 num_reqs,
                 page_size,
+                device_seq_lens=None if seq_lens_exact else seq_lens,
             )
         else:
             paged_kv_indices = None
@@ -1658,7 +1834,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     o_dtype = (
                         FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
                     )
-                    prefill_wrapper.plan(
+                    self._plan(
+                        prefill_wrapper,
+                        prefill_wrapper.plan,
                         qo_indptr=qo_indptr_prefill_cpu,
                         paged_kv_indptr=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
@@ -1677,6 +1855,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         o_data_type=o_dtype,
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
+                    )
+                if not seq_lens_exact:
+                    self._write_exact_last_page_len(
+                        prefill_wrapper, prefill_start, num_prefills
                     )
                 attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
 
@@ -1727,16 +1909,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
             else:
                 assert seq_lens_cpu is not None
-                pure_decode = num_prefills == 0
-                use_cudagraph = (
-                    self.enable_cuda_graph
-                    and pure_decode
-                    and num_decode_tokens <= self._decode_cudagraph_max_bs
-                )
                 num_input_tokens = num_decode_tokens
 
                 decode_wrapper = self._get_decode_wrapper(
-                    num_input_tokens, use_cudagraph
+                    num_input_tokens, decode_uses_cudagraph
                 )
                 # Use the persistent buffer with padding length,
                 # instead of the same address but chunked version
@@ -1767,8 +1943,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 if PIN_MEMORY:
                     kv_lens_decode_cpu = kv_lens_decode_cpu.pin_memory()
-                fast_plan_decode(
+                self._plan(
                     decode_wrapper,
+                    partial(fast_plan_decode, decode_wrapper),
                     indptr_cpu=paged_kv_indptr_cpu,
                     indices=paged_kv_indices,
                     last_page_len_cpu=paged_kv_last_page_len_cpu,
@@ -1788,6 +1965,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     fixed_split_size=self.decode_fixed_split_size,
                     disable_split_kv=self.disable_split_kv,
                 )
+                if not seq_lens_exact:
+                    self._write_exact_last_page_len(decode_wrapper, 0, num_decodes)
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
 
@@ -2745,6 +2924,10 @@ def _copy_page_indices_kernel(
     block_table,
     block_table_stride,
     cu_num_blocks,
+    seq_lens,
+    last_page_len,
+    page_size,
+    WRITE_LAST_PAGE_LEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -2761,3 +2944,8 @@ def _copy_page_indices_kernel(
             block_ids,
             mask=i + offset < num_blocks,
         )
+
+    if WRITE_LAST_PAGE_LEN:
+        # Zero or negative when num_blocks counts a page past the exact length.
+        seq_len = tl.load(seq_lens + req_idx)
+        tl.store(last_page_len + req_idx, seq_len - (num_blocks - 1) * page_size)

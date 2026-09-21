@@ -636,6 +636,7 @@ class PCPManager:
             query_start_loc_np=local_query_start_loc_np[: num_reqs_after_padding + 1],
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
+            seq_lens_cpu_lower_bound=None,
             dcp_local_seq_lens=None,
             dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             num_computed_tokens_np=local_start_pos_np,

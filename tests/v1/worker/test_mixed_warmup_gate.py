@@ -39,11 +39,13 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     runner = SimpleNamespace(
         adaptive_verification=manager,
         rejection_sampler=rejection_sampler,
+        emit_seq_lens_cpu_lower_bound=True,
     )
 
     def run_steps(model_runner, execute, sample):
         assert model_runner.adaptive_verification is None
         assert not model_runner.rejection_sampler.enable_adaptive_verification
+        assert not model_runner.emit_seq_lens_cpu_lower_bound
         if fail_warmup:
             raise RuntimeError("warmup failed")
 
@@ -56,3 +58,4 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
     assert rejection_sampler.enable_adaptive_verification
+    assert runner.emit_seq_lens_cpu_lower_bound

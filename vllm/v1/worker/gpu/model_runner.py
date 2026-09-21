@@ -268,6 +268,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
         self.num_speculative_steps = vllm_config.num_speculative_tokens
+        # Off during kernel warm-up, whose steps never subtract rejected drafts.
+        self.emit_seq_lens_cpu_lower_bound = True
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -1420,6 +1422,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
 
+        # CPU lower bound on seq_lens. The upper bound counts the drafts of the
+        # step in flight as accepted; up to num_speculative_steps of them may be
+        # rejected, none on rows still prefilling. There is no such bound with
+        # adaptive verification, with more steps in flight or with pipeline
+        # parallelism.
+        seq_lens_cpu_lower_bound = None
+        if (
+            self.emit_seq_lens_cpu_lower_bound
+            and adaptive_verification is None
+            and self.vllm_config.max_concurrent_batches <= 2
+            and not self.use_pp
+        ):
+            seq_lens_cpu_lower_bound_np = seq_lens_cpu_upper_bound_np.copy()
+            if self.num_speculative_steps > 0:
+                lower = seq_lens_cpu_lower_bound_np[:num_reqs]
+                np.subtract(
+                    lower,
+                    self.num_speculative_steps,
+                    out=lower,
+                    where=~batch_req_state.is_prefilling_np,
+                )
+                np.maximum(lower, 0, out=lower)
+            seq_lens_cpu_lower_bound = torch.from_numpy(seq_lens_cpu_lower_bound_np)
+
         prompt_lens = None
         if self.model_config.rswa_window is not None:
             # prompt_lens is only used in R-SWA case.
@@ -1442,6 +1468,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            seq_lens_cpu_lower_bound=seq_lens_cpu_lower_bound,
             dcp_local_seq_lens=None,
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=batch_req_state.prefill_len_np,
