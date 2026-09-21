@@ -44,9 +44,9 @@ steps:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
-      label: ":amd: (MI300) PyTorch Compilation"
+      label: ":amd: (MI355 DPX) PyTorch Compilation"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd

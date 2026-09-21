@@ -21,7 +21,6 @@ import torch
 
 from tests.kernels.utils import _assert_accurate, _assert_deterministic
 from tests.quantization.reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
-from tests.utils import is_dpx
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 
@@ -603,9 +602,6 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
     atol = GEMM_ATOL
     rtol = GEMM_RTOL
     pass_rate = SKINNY_GEMM_PASS_RATES[(N, K)]
-    # gfx950 DPX shows ~0.9973 pass rate on large skinny GEMMs (build 62/63).
-    if is_dpx() and (N, K) == (8192, 8192):
-        pass_rate = 0.9973
     _assert_aiter_supported()
     from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
     from aiter.ops.triton.quant import dynamic_mxfp4_quant

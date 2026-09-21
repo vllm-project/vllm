@@ -9,7 +9,6 @@ from tests.kernels.quant_utils import (
     native_per_token_group_quant_int8,
     native_w8a8_block_matmul,
 )
-from tests.utils import is_dpx
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
@@ -131,6 +130,5 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
             block_size,
         )
 
-    # gfx950 DPX can miss by one element at 0.067 vs 0.065 (build 62/63).
-    tol = 0.07 if is_dpx() else 0.065
-    torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
+    # Check results
+    torch.testing.assert_close(out, ref_out, atol=0.065, rtol=0.065)

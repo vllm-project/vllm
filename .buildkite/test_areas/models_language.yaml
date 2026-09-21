@@ -16,9 +16,9 @@ steps:
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Standard)"
+      label: ":amd: (MI355 DPX) Language Models (Standard)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -40,9 +40,9 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Extra Standard) Shard %N"
+      label: ":amd: (MI355 DPX) Language Models (Extra Standard) Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -82,9 +82,9 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      label: ":amd: (MI355) Language Models (Hybrid) Shard %N"
+      label: ":amd: (MI355 DPX) Language Models (Hybrid) Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -155,6 +155,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Language Models (PPL)"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 65
       depends_on:
@@ -214,6 +215,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Language Models (MTEB)"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 60
       depends_on:

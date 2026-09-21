@@ -136,14 +136,6 @@ def test_lm_eval_correctness_param(config_filename, tp_size):
 
     _check_rocm_gpu_arch_requirement(eval_config)
 
-    if current_platform.is_rocm():
-        from tests.utils import is_dpx
-
-        if is_dpx() and "asym" in config_filename.name:
-            pytest.skip(
-                "INT8 compressed-tensors asym LM eval not validated on gfx950 DPX"
-            )
-
     results = launch_lm_eval(eval_config, tp_size)
 
     rtol = eval_config.get("rtol", DEFAULT_RTOL)

@@ -87,24 +87,6 @@ export PYTHONFAULTHANDLER
 # depend on their current working directory.
 export PYTHONPATH="${PYTHONPATH:-..}"
 
-# Any Buildkite queue whose name contains "dpx" (dpx, amd_mi355_dpx, …).
-# Export so pytest skipif() sees it before CUDA init. Explicit VLLM_DPX_CI=0/1
-# still wins.
-if [[ -z "${VLLM_DPX_CI:-}" ]]; then
-  dpx_queue="$(
-    printf '%s\n%s\n%s' \
-      "${BUILDKITE_AGENT_META_DATA_QUEUE:-}" \
-      "${BUILDKITE_AGENT_META_DATA_queue:-}" \
-      "${BUILDKITE_QUEUE:-}" \
-      | tr '[:upper:]' '[:lower:]'
-  )"
-  if [[ "${dpx_queue}" == *dpx* ]]; then
-    export VLLM_DPX_CI=1
-    echo "VLLM_DPX_CI=1 (Buildkite queue contains dpx: ${dpx_queue//$'\n'/ })"
-  fi
-  unset -v dpx_queue
-fi
-
 ci_started_at=$SECONDS
 
 ###############################################################################
@@ -1630,6 +1612,13 @@ fi
 
 echo "Final commands: $commands"
 
+# Match native CPU jobs even when the container can see AMD devices.
+cpu_platform_env=()
+if [[ "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" == "0" \
+  && "$commands" != *python_only_compile.sh* ]]; then
+  cpu_platform_env=(-e "VLLM_TARGET_DEVICE=cpu")
+fi
+
 standalone_merge_base_env=()
 if [[ "$commands" == *python_only_compile.sh* ]]; then
   # The ROCm test image often ships /vllm-workspace without .git. Resolve the
@@ -1777,7 +1766,6 @@ else
     -e PYTHONFAULTHANDLER \
     -e PYTEST_ADDOPTS \
     -e PYTEST_TIMEOUT \
-    -e VLLM_DPX_CI \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
@@ -1788,6 +1776,7 @@ else
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
+    "${cpu_platform_env[@]}" \
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \

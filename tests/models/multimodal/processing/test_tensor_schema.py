@@ -12,13 +12,13 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from tests.utils import is_dpx
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     ImageDummyOptions,
+    MultiModalDummyOptions,
     VideoDummyOptions,
 )
 from vllm.distributed import (
@@ -99,7 +99,7 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
-        mm_options={},
+        mm_options=MultiModalDummyOptions(),
     )
     mm_items = processor_inputs.mm_data_items
     resized_mm_data = {
@@ -174,9 +174,6 @@ def test_model_tensor_schema(model_id: str):
     if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
         pytest.skip("GLM-5.3-Flash is not supported on XPU")
 
-    if model_id == "CohereLabs/North-Micro-Vision-Instruct" and is_dpx():
-        pytest.skip("North-Micro processor fails on gfx950 DPX with NoneType iteration")
-
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
@@ -221,8 +218,14 @@ def test_model_tensor_schema(model_id: str):
 
     factories = model_cls._processor_factory
 
+    # Capture helpers return capture-buffer containers (e.g.
+    # EncoderCudaGraphCaptureInputs), not TensorSchema mm inputs.
+    capture_helpers = {"prepare_encoder_cudagraph_capture_inputs"}
+
     inputs_parse_methods = []
     for attr_name in dir(model_cls):
+        if attr_name in capture_helpers:
+            continue
         attr = getattr(model_cls, attr_name)
         if hasattr(attr, "__annotations__"):
             return_type = attr.__annotations__.get("return", None)
@@ -252,11 +255,13 @@ def test_model_tensor_schema(model_id: str):
             return AudioDummyOptions(count=count)
         return BaseDummyOptions(count=count)
 
-    model_config.get_multimodal_config().limit_per_prompt = {
-        modality: _to_dummy_options(modality, count)
-        for modality, count in limit_mm_per_prompt.items()
-    }
-    processor = factories.build_processor(ctx, cache=None)
+    model_config.get_multimodal_config().limit_per_prompt = MultiModalDummyOptions(
+        {
+            modality: _to_dummy_options(modality, count)
+            for modality, count in limit_mm_per_prompt.items()
+        }
+    )
+    processor = factories.build_processor(ctx)
 
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(model_config, processor):
