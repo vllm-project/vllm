@@ -139,3 +139,26 @@ class AiterCustomAllreduce:
     @property
     def supports_per_group_quant(self) -> bool:
         return self.build_supports_per_group_quant()
+
+    @staticmethod
+    def build_defers_capture_registration() -> bool:
+        """True if the running AITER re-takes its ``expandable_segments``
+        decision when CUDA graph capture is entered.
+
+        AITER refuses to register its buffers for IPC while expandable
+        segments are on, because VMM-backed pointers cannot be exported with
+        ``hipIpcGetMemHandle``; it then stages every all-reduce input through
+        a device-to-device copy. Older builds make that decision once in
+        ``__init__``, so turning expandable segments off for the duration of
+        capture comes too late to help and
+        ``VLLM_ROCM_NON_EXPANDABLE_CUDAGRAPH_POOL`` cannot pay off. The
+        capture-time decision is ROCm/aiter#5799.
+        """
+        try:
+            from aiter.dist.device_communicators.custom_all_reduce import (
+                CustomAllreduce as _AiterCustomAllreduce,
+            )
+        except ImportError:
+            return False
+
+        return hasattr(_AiterCustomAllreduce, "defers_capture_registration")

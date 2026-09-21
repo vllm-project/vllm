@@ -1631,6 +1631,46 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+def _use_non_expandable_graph_pool() -> bool:
+    """Whether to turn expandable segments off for the duration of capture.
+
+    Under ``expandable_segments:True`` the caching allocator hands out
+    VMM-backed pointers, which cannot be exported with
+    ``hipIpcGetMemHandle``. AITER's custom all-reduce therefore declines to
+    register its buffers and stages every input through a device-to-device
+    copy instead. Allocating the graph pool with expandable segments off makes
+    those activations exportable, so the registered (copy-free) path is
+    available; weights, KV cache and eager allocations are unaffected.
+    """
+    if not envs.VLLM_ROCM_NON_EXPANDABLE_CUDAGRAPH_POOL:
+        return False
+
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        logger.warning_once(
+            "VLLM_ROCM_NON_EXPANDABLE_CUDAGRAPH_POOL is set but this is not a "
+            "ROCm platform; ignoring it."
+        )
+        return False
+
+    from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+        AiterCustomAllreduce,
+    )
+
+    if not AiterCustomAllreduce.build_defers_capture_registration():
+        logger.warning_once(
+            "VLLM_ROCM_NON_EXPANDABLE_CUDAGRAPH_POOL is set, but the installed "
+            "AITER decides whether to register its all-reduce buffers once at "
+            "startup rather than when graph capture begins, so disabling "
+            "expandable segments for capture cannot remove the staging copy. "
+            "Ignoring it; this needs ROCm/aiter#5799."
+        )
+        return False
+
+    return True
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """`graph_capture` is a context manager which should surround the code that
@@ -1646,7 +1686,10 @@ def graph_capture(device: torch.device):
     from other kernels possibly launched on background in the default stream.
     """
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    from vllm.device_allocator.alloc_conf import non_expandable_allocations
+
     with (
+        non_expandable_allocations(_use_non_expandable_graph_pool()),
         get_tp_group().graph_capture(context),
         get_pp_group().graph_capture(context),
         get_dp_group().graph_capture(context),
