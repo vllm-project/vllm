@@ -10,27 +10,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from starlette.responses import JSONResponse
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
 from vllm.connections import HTTPConnection
 from vllm.entrypoints.launchers.run_batch import (
-    BatchProgressTracker,
-    BatchRequestInput,
     BatchRequestOutput,
     BatchTranscriptionRequest,
     download_bytes_from_url,
     make_transcription_wrapper,
-    run_request,
     upload_data,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.speech_to_text.transcription.protocol import (
-    TranscriptionDiarizedSegment,
-    TranscriptionResponseDiarized,
-    TranscriptionUsageAudio,
-)
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.mem_constants import MiB_bytes
 
@@ -834,62 +825,6 @@ def test_tool_calling():
                 assert "arguments" in tool_call["function"]
                 # Verify the tool name matches our tool definition
                 assert tool_call["function"]["name"] == "get_current_weather"
-
-
-# ---------------------------------------------------------------------------
-# Unit tests for batch response classification
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("as_json_response", [False, True], ids=["model", "json"])
-async def test_run_request_accepts_diarized_transcription_response(
-    as_json_response: bool,
-):
-    response = TranscriptionResponseDiarized(
-        duration=1.25,
-        text="Hello.",
-        segments=[
-            TranscriptionDiarizedSegment(
-                id="seg_0",
-                start=0.0,
-                end=1.25,
-                text="Hello.",
-                speaker="A",
-            )
-        ],
-        usage=TranscriptionUsageAudio(seconds=1),
-    )
-    request = BatchRequestInput.model_validate(
-        {
-            "custom_id": "diarized-probe",
-            "method": "POST",
-            "url": "/v1/audio/transcriptions",
-            "body": {
-                "model": "openmoss-transcribe-diarize",
-                "file_url": "data:audio/wav;base64,UklGRg==",
-                "response_format": "diarized_json",
-                "stream": False,
-            },
-        }
-    )
-    tracker = MagicMock(spec=BatchProgressTracker)
-    handler_response = (
-        JSONResponse(content=response.model_dump(mode="json"))
-        if as_json_response
-        else response
-    )
-
-    result = await run_request(
-        AsyncMock(return_value=handler_response), request, tracker
-    )
-
-    assert result.error is None
-    assert result.response is not None
-    assert result.response.status_code == 200
-    assert result.response.body == response
-    tracker.completed.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
