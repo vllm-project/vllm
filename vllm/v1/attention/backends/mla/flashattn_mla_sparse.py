@@ -287,7 +287,7 @@ class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
             return reason
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
-            # No engine context, so only the static gates above can be applied.
+            # No engine context: only the static gates above apply.
             return None
         if vllm_config.model_config is not None:
             hf_config = vllm_config.model_config.hf_text_config
@@ -316,8 +316,7 @@ class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
                     f"FA4 sparse MLA requires {head_counts} gathered query heads, "
                     f"got num_heads={num_heads} * dcp_size={dcp_size}"
                 )
-        # The prefill lane's own gates: PCP+DCP, qk_nope_head_dim, index_topk.
-        # Those reasons name ``cls``, so they name this backend. Pinned by test.
+        # super()'s remaining gates; their reasons name ``cls``, hence this backend.
         return super().supports_combination(*args, **kwargs)
 
 
