@@ -6,7 +6,7 @@ ARG TORCHAUDIO_VERSION=2.11.0+rocm10.0.0
 ARG TRITON_VERSION=3.8.0+git4cff872c.rocm10.0.0
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.21.post1"
+ARG AITER_BRANCH="v0.1.22.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -144,6 +144,15 @@ RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
         if [ -f "${ROCM_PATH}/lib/${bn}" ] && [ -f "$f" ] && [ ! -L "$f" ]; then \
             rm -f "$f"; \
             ln -sfn "${ROCM_PATH}/lib/${bn}" "$f"; \
+        fi; \
+    done \
+    && for f in librocprofiler-sdk.so.1 librocprofiler-register.so.0 \
+              librocprofiler-sdk-roctx.so.1; do \
+        if [ -e "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}" ] \
+           && [ -e "${SITE_PACKAGES}/_rocm_sdk_devel/lib/${f}" ]; then \
+            rm -f "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}"; \
+            ln -sfn "${SITE_PACKAGES}/_rocm_sdk_devel/lib/${f}" \
+                "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}"; \
         fi; \
     done \
     && ldconfig

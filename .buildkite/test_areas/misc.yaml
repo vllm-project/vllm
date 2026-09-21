@@ -99,12 +99,12 @@ steps:
       label: ":amd: (MI300) V1 Core"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) V1 Executor + Worker"
-  device: h200_35gb
+- label: ":nvidia: (H200 MIG 18GB) V1 Executor + Worker"
+  device: h200_18gb
   key: v1-executor-worker
   timeout_in_minutes: 45
   source_file_dependencies: *v1-core-kv-metrics-deps
@@ -119,7 +119,7 @@ steps:
       label: ":amd: (MI300) V1 Executor + Worker"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
@@ -130,6 +130,7 @@ steps:
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-offload.sh
     - pytest -v -s v1/kv_offload
     - pytest -v -s v1/simple_kv_offload
   mirror:
@@ -137,26 +138,27 @@ steps:
       label: ":amd: (MI300) V1 KV Offload"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
+- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors Shard %N"
   device: h200_35gb
   key: v1-kv-connectors
   timeout_in_minutes: 45
+  parallelism: 4
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
-    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) V1 KV Connectors"
+      label: ":amd: (MI300) V1 KV Connectors Shard %N"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
@@ -251,6 +253,35 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'distributed' tests/v1/kv_connector/extract_hidden_states_integration
+  mirror:
+    amd:
+      label: ":amd: (MI355) Extract Hidden States Integration"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/config/speculative.py
+      - vllm/distributed/kv_transfer/kv_connector/
+      - vllm/model_executor/layers/attention/
+      - vllm/model_executor/layers/mamba/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/models/extract_hidden_states.py
+      - vllm/model_executor/models/llama.py
+      - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_next.py
+      - vllm/model_executor/models/registry.py
+      - vllm/transformers_utils/configs/extract_hidden_states.py
+      - vllm/transformers_utils/configs/qwen3_5.py
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/v1/kv_cache_interface.py
+      - vllm/v1/spec_decode/extract_hidden_states.py
+      - vllm/v1/worker/gpu_model_runner.py
+      - vllm/_aiter_ops.py
+      - tests/v1/kv_connector/extract_hidden_states_integration/
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Regression"
   key: regression
@@ -274,6 +305,15 @@ steps:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
+  mirror:
+    amd:
+      label: ":amd: (MI355) Regression"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
 
 - label: ":nvidia: (H200 MIG 35GB) Examples"
   device: h200_35gb
@@ -376,7 +416,6 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
-      soft_fail: true
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -415,9 +454,15 @@ steps:
       label: ":amd: (MI355) Async Engine, Inputs, Utils, Worker"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 40
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s detokenizer
+      - pytest -v -s -m 'not cpu_test' multimodal
+      # test_cache.py marks every test cpu_test, including this GPU regression.
+      - pytest -v -s multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency
+      - pytest -v -s utils_
 
 - label: ":computer: (CPU) Params, Env, Tokenizers, Parser"
   key: cpu-params-env-tokenizers-parser
@@ -537,6 +582,25 @@ steps:
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
+  mirror:
+    amd:
+      label: ":amd: (MI250) Batch Invariance"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 35
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention
+      - vllm/model_executor/layers
+      - tests/v1/determinism/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pip install pytest-timeout pytest-forked
+      - pytest -v -s v1/determinism/test_batch_invariance.py
+      - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
 - label: ":nvidia: (B200) Batch Invariance"
   key: batch-invariance-b200
@@ -574,3 +638,17 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+  mirror:
+    amd:
+      label: ":amd: (MI355) Acceptance Length (Large Models)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/model_executor/models/mlp_speculator.py
+      - tests/v1/spec_decode/test_acceptance_length.py
+      - vllm/platforms/rocm.py
