@@ -229,6 +229,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         num_logical_experts: int | None = None,
     ):
         super().__init__()
+        self.input_prequantized = False
         self.prefix = prefix
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.num_experts = num_experts
@@ -606,7 +607,10 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         kernel: Mega mHC's FP8 MoE output requires both the routed and the
         shared-expert scale layouts.
         """
-        if not self.has_fused_shared_experts:
+        if (
+            type(self) is not DeepseekV4MegaMoEExperts
+            or not self.has_fused_shared_experts
+        ):
             return None
         from vllm.utils.deep_gemm import _import_deep_gemm
 
@@ -718,14 +722,12 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         *,
         activation_clamp: float | None,
         fast_math: bool = True,
-        prequantized: bool = False,
     ) -> torch.Tensor:
-        """Run the routed (and fused shared) experts.
-
-        ``prequantized``: the producer already wrote this batch's FP8 tokens and
-        both scale layouts into the symmetric buffer (Mega mHC FP8 output), so
-        input staging only repacks the routing tensors.
-        """
+        # Set by DeepseekV4MoE.forward for this call when the producer already
+        # wrote the batch's FP8 tokens and both scale layouts into the symmetric
+        # buffer (Mega mHC FP8 output); staging then only repacks the routing.
+        prequantized = self.input_prequantized
+        self.input_prequantized = False
         if hidden_states.shape[0] > self.max_num_tokens:
             raise ValueError(
                 f"DeepSeek V4 MegaMoE got {hidden_states.shape[0]} tokens, "
@@ -1150,12 +1152,14 @@ class DeepseekV4MoE(nn.Module):
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )
+        if prequantized:
+            assert isinstance(self.experts, DeepseekV4MegaMoEExperts)
+            self.experts.input_prequantized = True
         final_hidden_states = self.experts(
             hidden_states,
             topk_weights,
             topk_ids,
             activation_clamp=activation_clamp,
-            prequantized=prequantized,
         )
 
         if (

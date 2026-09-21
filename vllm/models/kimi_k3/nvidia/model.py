@@ -471,12 +471,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         *,
         activation_clamp: float | None,
         fast_math: bool = True,
-        prequantized: bool = False,
     ) -> torch.Tensor:
-        if prequantized:
-            raise NotImplementedError(
-                "Kimi K3 MegaMoE does not accept a pre-quantized input."
-            )
         self.synchronize_first_launch()
         if hidden_states.shape[0] > self.max_num_tokens:
             raise ValueError(
