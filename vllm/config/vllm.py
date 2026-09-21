@@ -1260,7 +1260,7 @@ class VllmConfig:
                 "Disable --enable-dbo and set --ubatch-size to 0."
             )
         if self.engram_config is None:
-            if not current_platform.is_cuda() or not model_has_engram_layers(
+            if not current_platform.is_cuda_alike() or not model_has_engram_layers(
                 model_config
             ):
                 return
