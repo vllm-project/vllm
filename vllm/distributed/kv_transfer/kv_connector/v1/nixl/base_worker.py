@@ -1154,6 +1154,30 @@ class NixlBaseConnectorWorker:
         """
         xfer_buffers: dict[str, torch.Tensor] = {}
         try:
+            if self._has_mamba and self._is_csa_linear:
+                # Mamba and ring views overlay attention pages in one HMA
+                # allocation; preserve those aliases in the staging mirror.
+                host_storages: dict[int, torch.Tensor] = {}
+                for layer_name, kv_cache in kv_caches.items():
+                    storage = kv_cache.untyped_storage()
+                    storage_key = storage.data_ptr()
+                    host_storage = host_storages.get(storage_key)
+                    if host_storage is None:
+                        host_storage = torch.empty(
+                            storage.nbytes(), dtype=torch.uint8, device="cpu"
+                        )
+                        host_storages[storage_key] = host_storage
+                    xfer_buffers[layer_name] = torch.empty(
+                        0, dtype=kv_cache.dtype, device="cpu"
+                    ).set_(
+                        host_storage.untyped_storage(),
+                        kv_cache.storage_offset(),
+                        kv_cache.shape,
+                        kv_cache.stride(),
+                    )
+                self.host_xfer_buffers = xfer_buffers
+                return
+
             for layer_name, kv_cache in kv_caches.items():
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
@@ -1372,11 +1396,6 @@ class NixlBaseConnectorWorker:
             self.backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
-
-        if self._has_mamba and self._is_csa_linear and self.use_host_buffer:
-            raise NotImplementedError(
-                "NIXL host staging does not preserve CSA-linear shared tensors."
-            )
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -2656,10 +2675,15 @@ class NixlBaseConnectorWorker:
                         ",".join(map(str, meta.local_physical_block_ids)),
                     )
                 # blocking
-                for group_block_ids in meta.local_physical_block_ids:
+                for group, group_block_ids in zip(
+                    self.kv_cache_config.transfer_groups,
+                    meta.local_physical_block_ids,
+                    strict=True,
+                ):
+                    layer_names = group.layer_names
                     self.copy_blocks(
-                        self.device_kv_caches,
-                        self.host_xfer_buffers,
+                        {name: self.device_kv_caches[name] for name in layer_names},
+                        {name: self.host_xfer_buffers[name] for name in layer_names},
                         group_block_ids,
                         group_block_ids,
                         "d2h",
