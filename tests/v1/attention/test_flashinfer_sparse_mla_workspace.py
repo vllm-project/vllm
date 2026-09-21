@@ -3,7 +3,7 @@
 """CPU-only tests for FlashInfer sparse MLA backend constraints."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -112,39 +112,6 @@ def test_single_context_parallel_mode_allows_flashinfer_sparse(
         )
 
     assert reason is None
-
-
-@pytest.mark.parametrize("dcp", [1, 2])
-def test_trtllm_builder_presizes_workspace_only_under_dcp(monkeypatch, dcp):
-    """Only DCP pre-sizes the workspace, and before the first graph capture."""
-    from vllm.model_executor.layers.attention.sparse_mla_attention import (
-        SparseMLACommonMetadataBuilder,
-    )
-    from vllm.v1.attention.backends.mla import flashinfer_mla_sparse as fi_sparse
-
-    def stub_base_init(self, kv_cache_spec, layer_names, vllm_config, device):
-        # Only the reorder-threshold and workspace inputs matter here.
-        self.vllm_config = vllm_config
-        self.dcp_world_size = dcp
-
-    monkeypatch.setattr(SparseMLACommonMetadataBuilder, "__init__", stub_base_init)
-    workspace = MagicMock()
-    monkeypatch.setattr(fi_sparse, "_get_workspace_buffer", workspace)
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(get_num_attention_heads=lambda _: 16),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192),
-        speculative_config=None,
-        attention_config=SimpleNamespace(hisparse_config=None),
-    )
-
-    fi_sparse.FlashInferMLASparseTRTLLMMetadataBuilder(
-        None, ["layer"], vllm_config, torch.device("cpu")
-    )
-
-    assert [call.args[1] for call in workspace.call_args_list] == (
-        [] if dcp == 1 else [_required_workspace_bytes(dcp, 16, 8192)]
-    )
 
 
 def test_default_constant_matches_envs_default(monkeypatch):

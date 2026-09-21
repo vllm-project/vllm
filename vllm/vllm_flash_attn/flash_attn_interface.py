@@ -295,10 +295,9 @@ def flash_attn_varlen_func(
         gather_kv_indices: (total_q, gather_kv_length) int32, one KV row list per query
             token, with `-1` as the "no token" sentinel. Requires q_v, excludes
             block_table, and gather_kv_length must be a multiple of 128. FA4 only.
-        gather_kv_valid_length: (total_q,) int32, per query token, how many leading
-            entries of its gather_kv_indices row are real. The kernel attends
-            `round_up(length, 128)` entries, so everything from `length` on must
-            still be a sentinel. FA4 only, requires gather_kv_indices.
+        gather_kv_valid_length: (total_q,) int32, leading real entries per
+            gather_kv_indices row. The kernel attends `round_up(length, 128)`
+            entries, so the rest must be `-1`. Needs gather_kv_indices. FA4 only.
 
     Return:
         out: (total, nheads, headdim).

@@ -797,8 +797,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         hot_cache = index_group.physical_kv_cache(layer_index).view(
             kv_c_and_k_pe_cache.dtype
         )
-        # HiSparse bakes the hot buffer's block stride into the indices it
-        # produces, which is only correct while that buffer is densely packed.
         assert hot_cache.is_contiguous(), (
             "HiSparse hot buffer must be contiguous; a strided buffer would "
             "misaddress the flat rows the top-k indices point at"

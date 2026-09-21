@@ -278,7 +278,7 @@ class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
             return reason
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
-            # No engine context, so only the static gates above can be applied.
+            # No engine context: only the static gates above apply.
             return None
         if vllm_config.model_config is not None:
             hf_config = vllm_config.model_config.hf_text_config
@@ -307,8 +307,7 @@ class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
                     f"FA4 sparse MLA requires {head_counts} gathered query heads, "
                     f"got num_heads={num_heads} * dcp_size={dcp_size}"
                 )
-        # The prefill lane's own gates: PCP+DCP, qk_nope_head_dim, index_topk.
-        # Those reasons name ``cls``, so they name this backend. Pinned by test.
+        # super()'s remaining gates; their reasons name ``cls``, hence this backend.
         return super().supports_combination(*args, **kwargs)
 
 
@@ -452,16 +451,14 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[SparseMLACommonMetadata]):
             return kernel_out.view(-1, kernel_out.shape[-2], self.kv_lora_rank), None
         assert isinstance(kernel_out, tuple)
         out = kernel_out[0].view(-1, kernel_out[0].shape[-2], self.kv_lora_rank)
-        # trtllm-gen returns a base-2 LSE; this impl declares base e.
         lse = FlashInferMLASparseImpl._normalize_lse(kernel_out[1], *out.shape[:2])
-        lse = lse * math.log(2.0)
+        lse = lse * math.log(2.0)  # trtllm-gen log2 -> ln
         # Rows this rank owns no slot for: the DCP merge identity.
         empty_rows = valid_counts == 0
         out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
         lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         return out, lse
 
-    # The largest legal HiSparse decode batch, run through this impl's own hook:
-    # it compiles the FA4 decode kernel before graph capture. The fused BF16
-    # query that body builds is the one the hook's width assert accepts.
+    # Compiles the FA4 decode kernel through this impl's hook before graph capture.
+    # FlashInfer's body builds the fused BF16 query FA4's hook width-asserts on.
     autotune_hisparse_decode = FlashInferMLASparseImpl.autotune_hisparse_decode
