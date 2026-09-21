@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
+import dataclasses
 import enum
 import heapq
 import math
@@ -12,6 +13,39 @@ from typing import Any
 
 from vllm.v1.kv_offload.base import Locality
 from vllm.v1.kv_offload.tiering.base import JobId
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkItem:
+    """A pre-batched unit of work sitting in a thread-pool work queue."""
+
+    make_batch_fn: Callable  # factory; needed to re-slice tasks during stealing
+    fn: Callable[[], None]  # prebuilt callable for this specific batch
+    tasks: list  # raw tasks (needed for steal splitting)
+    state: Any  # opaque per-job state
+
+    def unpack(self) -> tuple[Callable[[], None], int, Any]:
+        return self.fn, len(self.tasks), self.state
+
+    def split(self, quanta: int | None) -> tuple["WorkItem", "WorkItem" | None]:
+        """Split into (stolen, remainder).
+
+        Returns (self, None) when quanta is None or covers all tasks.
+        Otherwise returns a quanta-sized WorkItem and the remainder.
+        """
+        if quanta is None or quanta >= len(self.tasks):
+            return self, None
+        stolen = dataclasses.replace(
+            self,
+            fn=self.make_batch_fn(self.tasks[:quanta]),
+            tasks=self.tasks[:quanta],
+        )
+        remainder = dataclasses.replace(
+            self,
+            fn=self.make_batch_fn(self.tasks[quanta:]),
+            tasks=self.tasks[quanta:],
+        )
+        return stolen, remainder
 
 
 class ThreadMode(enum.Enum):
@@ -228,16 +262,19 @@ class Scheduler:
         store_job_q: JobQueue,
         n_read_threads: int,
         n_write_threads: int,
+        n_write_excl_threads: int,
     ):
         self._locality = locality
         self._load_job_q = load_job_q
         self._store_job_q = store_job_q
         self._n_read_threads = n_read_threads
         self._n_write_threads = n_write_threads
+        self._n_write_excl_threads = n_write_excl_threads
 
+        _rw_threads = self._n_read_threads + self._n_write_threads
         if self._locality == Locality.LOCAL:
             # Assume SSD
-            self._n_read_batch_threads = n_read_threads or self.total_threads
+            self._n_read_batch_threads = n_read_threads or _rw_threads
             # Limit concurrent SSD writes to 1 thread. When a NAND die is
             # busy with a write, any read to that die stalls until the write
             # completes. More write threads means more dies occupied at once,
@@ -245,50 +282,36 @@ class Scheduler:
             # NOTE: We can make this configurable in the future if needed.
             self._n_write_batch_threads = 1
         else:
-            # Assume NFS
-            self._n_read_batch_threads = n_read_threads or self.total_threads
-            self._n_write_batch_threads = n_write_threads or self.total_threads
-
-        # Read threads may always steal store jobs — stores are short and
-        # bounded by the engine forward pass.
-        self._read_threads_can_write = True
-
-        # Store threads steal from the load queue in small quanta so they
-        # can check back frequently for new store work.  The quanta is the
-        # running-mean store job size, updated on every store submission.
-        # When no read threads exist, write threads handle full load batches
-        # (no quanta restriction).  Stealing is gated on _avg_store_tasks > 0:
-        # until the first store job lands there is no calibrated quanta.
-        self._write_threads_can_read = True
+            # Assume remote disk(s)
+            self._n_read_batch_threads = n_read_threads or _rw_threads
+            self._n_write_batch_threads = n_write_threads or _rw_threads
 
         # Running mean of store job sizes — used as the steal quanta.
         self._avg_store_tasks: float = 0.0
         self._n_store_jobs: int = 0
 
         # Work queues that the threads draw work from
-        self._load_q: deque = deque()
-        self._store_q: deque = deque()
-        self._jobs: dict[JobId, Any] = {}
-
-    @property
-    def total_threads(self):
-        return self._n_read_threads + self._n_write_threads
+        self._load_q: deque[WorkItem] = deque()
+        self._store_q: deque[WorkItem] = deque()
+        self._jobs: dict[JobId, list[WorkItem]] = {}
 
     def submit(
         self,
         job_id: JobId,
-        pre_batched: list[tuple],
+        work_items: list[WorkItem],
         n_tasks: int,
         is_load: bool,
     ) -> int:
         """Register a pre-batched job and return the number of threads to wake.
 
-        pre_batched must be built by make_batches() outside the lock before
+        work_items must be built by make_batches() outside the lock before
         calling submit() under the lock.
         """
-        self._jobs[job_id] = pre_batched
+        self._jobs[job_id] = work_items
+        n_wake_threads = 0
         if is_load:
             self._load_job_q.put(job_id, n_tasks)
+            n_wake_threads = self._n_read_threads + self._n_write_threads
         else:
             self._store_job_q.put(job_id, n_tasks)
             # Update running mean — used as the steal quanta for write threads.
@@ -296,9 +319,10 @@ class Scheduler:
             self._avg_store_tasks += (
                 n_tasks - self._avg_store_tasks
             ) / self._n_store_jobs
+            # Any awoken thread can do this store
+            n_wake_threads = self._n_write_batch_threads + self._n_write_excl_threads
 
-        # TODO(varun): unfortunate! - wake selectively
-        return self._n_read_threads + self._n_write_threads
+        return n_wake_threads
 
     def has_work(self, mode: ThreadMode) -> bool:
         has_load_work = bool(self._load_q or self._load_job_q.maybe_has_work())
@@ -333,7 +357,7 @@ class Scheduler:
         tasks: list[Any],
         make_batch_fn: Callable,
         is_load: bool,
-    ) -> list[tuple]:
+    ) -> list[WorkItem]:
         """Build work-queue-ready items from raw tasks.
 
         Must be called outside the condition lock — list-slicing and
@@ -344,7 +368,9 @@ class Scheduler:
             self._n_read_batch_threads if is_load else self._n_write_batch_threads
         )
         return [
-            (make_batch_fn, make_batch_fn(b), b, state)
+            WorkItem(
+                make_batch_fn=make_batch_fn, fn=make_batch_fn(b), tasks=b, state=state
+            )
             for b in self._batch_tasks(tasks, n_threads)
         ]
 
@@ -361,13 +387,6 @@ class Scheduler:
             return
         work_q.extend(self._jobs.pop(job_id))
 
-    @staticmethod
-    def _unpack(item: tuple) -> tuple:
-        """Unpack a work-queue item into the (fn, batch_size, state) the
-        worker expects."""
-        _, fn, tasks, state = item
-        return fn, len(tasks), state
-
     def _steal_from_load_q(self) -> tuple:
         """Pop the head of _load_q and return a quanta-sized work item.
 
@@ -376,31 +395,26 @@ class Scheduler:
         batch is larger than the quanta, the remainder is pushed back to the
         front of _load_q for read threads (or future steal calls) to pick up.
         """
-        make_batch_fn, fn, tasks, state = self._load_q.popleft()
-        quanta = int(self._avg_store_tasks) if self._avg_store_tasks > 0 else len(tasks)
-        if len(tasks) <= quanta:
-            return fn, len(tasks), state
-        # Split: steal the first `quanta` tasks, push remainder back to front.
-        steal_fn = make_batch_fn(tasks[:quanta])
-        remainder = tasks[quanta:]
-        self._load_q.appendleft(
-            (make_batch_fn, make_batch_fn(remainder), remainder, state)
-        )
-        return steal_fn, quanta, state
+        item = self._load_q.popleft()
+        quanta = int(self._avg_store_tasks) if self._avg_store_tasks > 0 else None
+        stolen, remainder = item.split(quanta)
+        if remainder is not None:
+            self._load_q.appendleft(remainder)
+        return stolen.unpack()
 
     def fetch_work(self, mode: ThreadMode):
         if mode is ThreadMode.READ:
             self._maybe_populate_work_q(self._load_q, self._load_job_q)
             if self._load_q:
-                return self._unpack(self._load_q.popleft())
+                return self._load_q.popleft().unpack()
             self._maybe_populate_work_q(self._store_q, self._store_job_q)
             if self._store_q:
-                return self._unpack(self._store_q.popleft())
+                return self._store_q.popleft().unpack()
             return None
         elif mode is ThreadMode.WRITE:
             self._maybe_populate_work_q(self._store_q, self._store_job_q)
             if self._store_q:
-                return self._unpack(self._store_q.popleft())
+                return self._store_q.popleft().unpack()
             self._maybe_populate_work_q(self._load_q, self._load_job_q)
             if self._load_q:
                 return self._steal_from_load_q()
@@ -408,7 +422,7 @@ class Scheduler:
         else:  # WRITE_EXCL
             self._maybe_populate_work_q(self._store_q, self._store_job_q)
             if self._store_q:
-                return self._unpack(self._store_q.popleft())
+                return self._store_q.popleft().unpack()
             return None
 
     def clear(

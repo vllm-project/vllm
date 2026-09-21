@@ -107,7 +107,9 @@ class DualQueueThreadPool:
         self._finished_q: deque[tuple[JobId, bool, float]] = deque()
         self._inflight_jobs = 0  # guarded by _condition
 
-        assert self.total_threads > 0, "ThreadPool needs at least one thread"
+        assert n_read_threads + n_write_threads > 0, (
+            "Threadpool needs atleast on 1 read eligible thread"
+        )
 
         self._scheduler = Scheduler(
             locality=locality,
@@ -115,6 +117,7 @@ class DualQueueThreadPool:
             store_job_q=StoreQueue(block_size),
             n_read_threads=n_read_threads,
             n_write_threads=n_write_threads,
+            n_write_excl_threads=n_write_excl_threads,
         )
 
         for i in range(self._n_read_threads):
@@ -147,10 +150,6 @@ class DualQueueThreadPool:
             t.start()
             self._threads.append(t)
 
-    @property
-    def total_threads(self) -> int:
-        return self._n_read_threads + self._n_write_threads + self._n_write_excl_threads
-
     def _enqueue(
         self,
         make_batch_fn: Callable[[list[Task]], Callable[[], None]],
@@ -169,12 +168,12 @@ class DualQueueThreadPool:
         # Build batches before acquiring the lock: list-slicing and
         # make_batch_fn closures are O(n_tasks) and must not hold up
         # other threads waiting on the condition variable.
-        pre_batched = self._scheduler.make_batches(
+        work_items = self._scheduler.make_batches(
             state, task_lst, make_batch_fn, is_load
         )
         with self._condition:
             self._inflight_jobs += 1
-            n_wake = self._scheduler.submit(job_id, pre_batched, n_tasks, is_load)
+            n_wake = self._scheduler.submit(job_id, work_items, n_tasks, is_load)
             self._condition.notify(n_wake)
 
     def enqueue_load(
