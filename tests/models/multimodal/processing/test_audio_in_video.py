@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import MultiModalProcessorSenderCache
+from vllm.multimodal.cache import LruKeyReplicatedSenderCache
 
 from ....multimodal.utils import random_audio, random_video
 from ...utils import build_model_context
@@ -68,7 +68,7 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
     # Sender cache: on a cache hit returns (None, prompt_updates) for each
     # item, setting mm_kwargs["video"] = [None] – the exact condition that
     # triggered the original bug.
-    sender_cache = MultiModalProcessorSenderCache(ctx.model_config)
+    sender_cache = LruKeyReplicatedSenderCache(ctx.model_config)
 
     video_token_id = processor.info.get_hf_config().video_token_id
 

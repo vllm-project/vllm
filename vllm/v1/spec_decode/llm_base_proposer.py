@@ -35,7 +35,6 @@ from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -165,10 +164,7 @@ class SpecDecodeBaseProposer:
         self.max_positions = self.max_num_tokens
 
         # Multi-modal data support
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            vllm_config.model_config
-        )
+        self.supports_mm_inputs = vllm_config.model_config.supports_multimodal_inputs
 
         self.draft_attn_groups: list[AttentionGroup] = []
         self.kv_cache_gid: int = -1
