@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""AITER fused all-reduce + RMSNorm for the Kimi-K3 AMD latent-MoE tail."""
+"""AITER fused all-reduce + RMSNorm (no residual)."""
 
 import torch
 

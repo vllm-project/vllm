@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The K3 AMD latent tail must equal RMSNorm(all_reduce(partial)).
+"""AITER fused AR+RMSNorm must equal RMSNorm(all_reduce(partial)).
 
 One TP2 spawn covers the fused kernel (4 tokens) and the unfused fallback
-(256 tokens).
+(256 tokens). Hidden dim 3584 is outside AITER's old static-template set.
 """
 
 import pytest
@@ -14,7 +14,7 @@ from tests.utils import ensure_current_vllm_config, init_test_distributed_enviro
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.models.kimi_k3.amd.ops.fused_ar_rms import (
+from vllm.models.common.amd.ops.fused_allreduce_rms_norm import (
     can_fuse_allreduce_rms_norm,
     fused_allreduce_rms_norm_out,
 )
@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(
     reason="AITER fused AR+RMSNorm is only wired up on ROCm",
 )
 
-LATENT_SIZE = 3584
+HIDDEN_SIZE = 3584
 EPS = 1e-5
 DTYPE = torch.bfloat16
 WORLD_SIZE = 2
@@ -49,13 +49,13 @@ def _worker_fused_ar_rms(local_rank, world_size, port, seed):
     )
 
     set_random_seed(seed)
-    norm = RMSNorm(LATENT_SIZE, eps=EPS).to(device=device, dtype=DTYPE)
+    norm = RMSNorm(HIDDEN_SIZE, eps=EPS).to(device=device, dtype=DTYPE)
     with torch.no_grad():
         norm.weight.normal_(mean=1.0, std=0.1)
 
     torch.manual_seed(seed + local_rank)
-    fused = torch.randn(4, LATENT_SIZE, dtype=DTYPE, device=device)
-    fallback = torch.randn(256, LATENT_SIZE, dtype=DTYPE, device=device)
+    fused = torch.randn(4, HIDDEN_SIZE, dtype=DTYPE, device=device)
+    fallback = torch.randn(256, HIDDEN_SIZE, dtype=DTYPE, device=device)
 
     _check_matches_unfused(norm, fused)
     assert not can_fuse_allreduce_rms_norm(fallback)
@@ -81,5 +81,5 @@ def test_gate_is_closed_without_aiter_custom_ar(monkeypatch):
     monkeypatch.setattr(
         _aiter_ops.rocm_aiter_ops, "is_custom_all_reduce_enabled", lambda: False
     )
-    hidden = torch.empty(4, LATENT_SIZE, dtype=DTYPE)
+    hidden = torch.empty(4, HIDDEN_SIZE, dtype=DTYPE)
     assert not can_fuse_allreduce_rms_norm(hidden)

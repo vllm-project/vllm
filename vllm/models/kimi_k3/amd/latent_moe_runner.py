@@ -10,7 +10,9 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
-from vllm.models.kimi_k3.amd.ops.fused_ar_rms import fused_allreduce_rms_norm_out
+from vllm.models.common.amd.ops.fused_allreduce_rms_norm import (
+    fused_allreduce_rms_norm_out,
+)
 
 logger = init_logger(__name__)
 
@@ -26,7 +28,8 @@ class ROCmLatentMoERunner(MoERunner):
 
     The latent all-reduce is fused with the following RMSNorm via AITER's
     one-stage custom AR when that kernel's gate admits the tensor; see
-    ``ops/fused_ar_rms.py``. Everything else keeps the unfused all-reduce.
+    ``vllm.models.common.amd.ops.fused_allreduce_rms_norm``. Everything
+    else keeps the unfused all-reduce.
     """
 
     def __init__(
