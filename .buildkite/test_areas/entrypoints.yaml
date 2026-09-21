@@ -53,18 +53,55 @@ steps:
   key: entrypoints-integration-llm
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
+  source_file_dependencies: &entrypoints-llm-deps
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/llm
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
+  - pytest -v -s entrypoints/llm/core
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
       label: ":amd: (MI300) Entrypoints Integration (LLM)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM Accuracy)"
+  device: h200_35gb
+  key: entrypoints-integration-llm-accuracy
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies: *entrypoints-llm-deps
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/llm/accuracy
+  mirror:
+    amd:
+      label: ":amd: (MI300) Entrypoints Integration (LLM Accuracy)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM Structured Output) %N"
+  device: h200_35gb
+  key: entrypoints-integration-llm-structured-output
+  timeout_in_minutes: 60
+  parallelism: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies: *entrypoints-llm-deps
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/llm/structured_output --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  mirror:
+    amd:
+      label: ":amd: (MI300) Entrypoints Integration (LLM Structured Output) %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
