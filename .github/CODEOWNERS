@@ -219,7 +219,7 @@ mkdocs.yaml @hmellor
 
 # Reinforcement learning
 /vllm/distributed/weight_transfer @aoshen02
-/vllm/entrypoints/serve/dev/rlhf @njhill @aoshen02
+/vllm/entrypoints/serve/dev/rlhf @aoshen02
 /tests/distributed/test_weight_transfer.py @aoshen02
 /tests/entrypoints/weight_transfer @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
 /tests/entrypoints/serve/dev/rlhf @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
