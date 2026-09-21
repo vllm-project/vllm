@@ -207,6 +207,42 @@ def test_chunk_metadata_keeps_its_two_tensor_contract():
     assert base.return_annotation == override.return_annotation
 
 
+def test_kda_style_model_cannot_select_flydsl():
+    """Kimi K3 KDA reports head dims through linear_attn_config, not these.
+
+    Its builder overrides _build_chunk_metadata, which the AITER path skips,
+    so this pins the reason the two never meet: the resolver turns the model
+    down before the builder is ever constructed.
+    """
+    config = _make_config(head_k_dim=None, head_v_dim=None)
+    with (
+        patch.object(
+            qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=True
+        ),
+        patch.object(
+            qwen_gdn_linear_attn.rocm_aiter_ops,
+            "is_gdn_flydsl_prefill_available",
+            return_value=True,
+        ),
+    ):
+        requested, active = _resolve_gdn_prefill_backend(config)
+
+    assert (requested, active) == ("aiter_flydsl", "triton")
+
+
+def test_builder_with_custom_chunk_metadata_is_rejected_for_flydsl():
+    """And if some future builder could select it, say so at startup."""
+    check = GDNAttentionMetadataBuilder._check_chunk_metadata_override
+
+    # The KDA builder is the in-tree example of an override.
+    with pytest.raises(RuntimeError, match="KimiK3ROCmKDAMetadataBuilder"):
+        check(KimiK3ROCmKDAMetadataBuilder, "aiter_flydsl")
+
+    # It is only the AITER path that skips the override.
+    check(KimiK3ROCmKDAMetadataBuilder, "triton")
+    check(GDNAttentionMetadataBuilder, "aiter_flydsl")
+
+
 def test_flydsl_availability_respects_the_aiter_switch(monkeypatch):
     """VLLM_ROCM_USE_AITER stays the one switch that turns AITER kernels off.
 
