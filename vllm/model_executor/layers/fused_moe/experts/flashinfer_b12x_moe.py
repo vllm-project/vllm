@@ -293,10 +293,8 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # cudagraph-capturable.
         topk_ids = topk_ids.to(torch.int32)
         is_padding = topk_ids < 0
-        topk_ids = torch.where(is_padding, torch.zeros_like(topk_ids), topk_ids)
-        topk_weights = torch.where(
-            is_padding, torch.zeros_like(topk_weights), topk_weights
-        )
+        topk_ids = torch.where(is_padding, 0, topk_ids)
+        topk_weights = torch.where(is_padding, 0.0, topk_weights)
 
         wrapper_output = wrapper.run(
             x=hidden_states,

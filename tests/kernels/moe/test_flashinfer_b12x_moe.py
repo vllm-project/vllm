@@ -222,8 +222,21 @@ def test_flashinfer_b12x_moe(
         torch.testing.assert_close(sm12x_output, torch_output, atol=2e-1, rtol=2e-1)
 
 
+@pytest.mark.parametrize(
+    "m,topk,pad_mode",
+    [
+        # half padded, 64 routed rows -> static b12x path
+        (32, 2, "half"),
+        # ALL rows padded, 768 routed rows -> crosses the 640-row static/dynamic cutover.
+        # This is the shape that faulted in production.
+        (384, 2, "all"),
+        # vLLM documents that cudagraph padding rows may carry NaN/Inf activations; a zero
+        # route weight must still yield exactly zero, not 0 * NaN.
+        (32, 2, "nan"),
+    ],
+)
 @torch.inference_mode()
-def test_flashinfer_b12x_moe_tolerates_padding_sentinel(workspace_init):
+def test_flashinfer_b12x_moe_tolerates_padding_sentinel(m, topk, pad_mode, workspace_init):
     """Padding rows carrying the -1 sentinel must not reach the b12x kernels.
 
     ``VLLM_MOE_SKIP_PADDING`` makes the topk kernels write -1 into ``topk_ids``
@@ -231,7 +244,7 @@ def test_flashinfer_b12x_moe_tolerates_padding_sentinel(workspace_init):
     those ids directly, so an unhandled -1 writes out of bounds and trips an
     MMU fault (Xid 31 on SM12x). Padding rows must contribute nothing.
     """
-    m, n, k, e, topk = 32, 128, 256, 8, 2
+    n, k, e = 128, 256, 8
     dtype = torch.bfloat16
     set_random_seed(7)
     with set_current_vllm_config(
@@ -301,9 +314,12 @@ def test_flashinfer_b12x_moe_tolerates_padding_sentinel(workspace_init):
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
 
-        num_real = m // 2
+        num_real = 0 if pad_mode == "all" else m // 2
         padded_ids = topk_ids.clone()
         padded_ids[num_real:] = -1
+        if pad_mode == "nan":
+            # Poison the padded rows' activations.
+            a[num_real:] = float("nan")
 
         def _run(ids):
             return kernel.apply(
@@ -319,12 +335,15 @@ def test_flashinfer_b12x_moe_tolerates_padding_sentinel(workspace_init):
             )
 
         out = _run(padded_ids)
-        assert torch.isfinite(out).all()
-        # Padding rows contribute nothing.
+        # Padding rows contribute nothing -- exactly zero, and finite even when the padded
+        # activations were NaN.
         assert torch.equal(out[num_real:], torch.zeros_like(out[num_real:]))
-        # Real rows are unaffected by the presence of padding rows.
-        ref_out = _run(topk_ids)
-        torch.testing.assert_close(out[:num_real], ref_out[:num_real])
+        assert torch.isfinite(out[num_real:]).all()
+        if num_real:
+            # Real rows are unaffected by the presence of padding rows.
+            assert torch.isfinite(out[:num_real]).all()
+            ref_out = _run(topk_ids)
+            torch.testing.assert_close(out[:num_real], ref_out[:num_real])
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
