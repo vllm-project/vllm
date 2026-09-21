@@ -16,6 +16,8 @@ from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
     """Software emulation fallback for MXFP8 (dequant to BF16)."""
 
+    supports_pre_processed_weights = True
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
