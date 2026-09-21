@@ -940,7 +940,6 @@ def test_parse_chat_messages_audio_embeds_with_string(
     audio_embeds_model_config,
 ):
     """Test audio_embeds with base64 string embedding data."""
-
     import torch
 
     # Create a sample audio embedding tensor
@@ -983,7 +982,6 @@ async def test_parse_chat_messages_audio_embeds_async(
     audio_embeds_model_config,
 ):
     """Test audio_embeds with async futures."""
-
     import torch
 
     # Create a sample audio embedding tensor
@@ -2384,8 +2382,10 @@ def test_parse_chat_messages_include_thinking_chunk(mistral_model_config):
     assert conversation_with_thinking == expected_conversation
 
 
+@pytest.mark.parametrize("input_audio", [None, {}, {"data": "", "format": "wav"}])
 def test_parse_chat_messages_single_empty_audio_with_uuid(
     qwen2_audio_model_config,
+    input_audio,
 ):
     audio_uuid = "abcd"
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -2395,7 +2395,7 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
                 "content": [
                     {
                         "type": "input_audio",
-                        "input_audio": {},
+                        "input_audio": input_audio,
                         "uuid": audio_uuid,
                     },
                     {"type": "text", "text": "What does the audio say?"},
@@ -2418,8 +2418,10 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("input_audio", [None, {}, {"data": "", "format": "wav"}])
 async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     qwen2_audio_model_config,
+    input_audio,
 ):
     audio_uuid = "abcd"
     conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -2429,7 +2431,7 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
                 "content": [
                     {
                         "type": "input_audio",
-                        "input_audio": {},
+                        "input_audio": input_audio,
                         "uuid": audio_uuid,
                     },
                     {"type": "text", "text": "What does the audio say?"},
@@ -2982,7 +2984,6 @@ def test_postprocess_messages_null_arguments_string():
 @pytest.mark.asyncio
 async def test_resolve_items_runs_modalities_concurrently_and_preserves_order():
     """Media fetches overlap while modality and item order are preserved."""
-
     active_fetches = 0
     max_active_fetches = 0
 
