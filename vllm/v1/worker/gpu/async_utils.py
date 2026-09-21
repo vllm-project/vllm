@@ -120,8 +120,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        check_ep_fault: bool = False,
-        routed_experts: RoutedExpertsTensors | None = None,
+        check_ep_fault: bool,
+        routed_experts: RoutedExpertsTensors | None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than

@@ -328,4 +328,5 @@ class RejectionSampler:
             num_nans=num_nans,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
+            sampling_mask_tensors=None,
         )

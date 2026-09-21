@@ -412,6 +412,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
                 num_nans=None,
                 num_sampled=num_sampled.to(device),
                 num_rejected=num_rejected.to(device),
+                sampling_mask_tensors=None,
             )
         )
         copy_width = min(src_width, width)
@@ -537,6 +538,7 @@ def test_gather_sampler_output_logprobs_and_nans():
                 num_rejected=torch.zeros(
                     metadata.num_local_reqs, dtype=torch.int32, device=device
                 ),
+                sampling_mask_tensors=None,
             )
         )
         copy_cols = min(local_cols, num_cols)

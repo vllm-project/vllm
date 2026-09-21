@@ -394,6 +394,7 @@ def test_mrv2_async_output_returns_existing_routed_experts_field():
         num_nans=None,
         num_sampled=num_sampled,
         num_rejected=torch.tensor([0], dtype=torch.int32, device="cuda"),
+        sampling_mask_tensors=None,
     )
     output = AsyncOutput(
         model_runner_output=ModelRunnerOutput(req_ids=["req"], req_id_to_index={}),
@@ -401,6 +402,7 @@ def test_mrv2_async_output_returns_existing_routed_experts_field():
         num_sampled_tokens=num_sampled,
         main_stream=torch.cuda.current_stream(),
         copy_stream=torch.cuda.Stream(),
+        check_ep_fault=False,
         routed_experts=routed_experts,
     ).get_output()
 

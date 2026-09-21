@@ -1122,6 +1122,8 @@ def _run_mamba_prefix_cache_mrv2(
             logprobs_tensors=None,
             num_nans=None,
             num_sampled=num_sampled,
+            num_rejected=num_rejected,
+            sampling_mask_tensors=None,
         )
         return sampler_output, num_sampled, num_rejected
 
