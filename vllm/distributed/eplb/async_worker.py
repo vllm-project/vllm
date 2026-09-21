@@ -77,7 +77,9 @@ def transfer_run_periodically(
     is_profile: bool = False,
 ) -> None:
     while True:
-        state.rearrange_event.wait(stream=stream)
+        # Wait until a full layer of rearranged weights is available in the expert
+        # buffer.  rearrange_event is recorded by the main thread.
+        state.rearrange_event.wait(stream=stream, timeout=60.0)
 
         eplb_group = get_eplb_group().device_group
         eplb_cpu_group = get_eplb_group().cpu_group
@@ -155,6 +157,6 @@ def transfer_run_periodically(
                 # Block this thread until the main thread and main stream
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
-                consumed_event.wait(stream=stream)
+                consumed_event.wait(stream=stream, timeout=60.0)
                 assert model_state.pending_result is None
                 layer_idx += 1
