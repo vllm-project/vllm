@@ -3,7 +3,7 @@
 """Fused ``attn_out * sigmoid(gate)`` + per-token FP8 for Kimi-K3 MLA ``o_proj``.
 
 One Triton kernel writes the PTPC pair ``y [T, K] fp8``, ``scale [T, 1] float32``.
-Fusion is a no-op unless ``o_proj.input_quant_key`` is ``kFp8DynamicTokenSym``.
+Fusion is a no-op unless ``get_input_quant_key(o_proj)`` is ``kFp8DynamicTokenSym``.
 Do not use this for group-128 or MXFP4; those GEMMs need a different scale layout.
 ``g_proj`` is not fused: it produces the gate, not the tensor ``o_proj`` quantizes.
 """
@@ -23,7 +23,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
-# Triton BLOCK is next_power_of_2(K); above this, fall back to the torch path.
+# Triton BLOCK is next_power_of_2(K). Above this, maybe_fused declines and the
+# caller keeps sequential sigmoid-mul + PTPC in-kernel quant. Kimi-K3 MLA
+# o_proj K is (96/TP)*128, so k > 8192 only at TP1.
 _MAX_K = 8192
 
 _sigmoid_mul_fp8_per_token_kernel = None
@@ -63,25 +65,6 @@ if HAS_TRITON:
     _sigmoid_mul_fp8_per_token_kernel = _kernel
 
 
-def _sigmoid_mul_fp8_torch(
-    x: torch.Tensor,
-    gate: torch.Tensor,
-    quant_dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reference: fp32 sigmoid-mul, then per-token amax FP8.
-
-    Matches the Triton kernel: scale is ``amax / fp8_max``, and a zero amax
-    writes a zero scale with a zero quantized row (no 1e-12 floor).
-    """
-    fp8_min, fp8_max = get_fp8_min_max()
-    gated = x.float() * torch.sigmoid(gate.float())
-    amax = gated.abs().amax(dim=-1, keepdim=True)
-    scale = amax / float(fp8_max)
-    inv = torch.where(scale > 0, 1.0 / scale, torch.zeros_like(scale))
-    q = (gated * inv).clamp(fp8_min, fp8_max).to(quant_dtype)
-    return q, scale
-
-
 def sigmoid_mul_fp8_per_token(
     x: torch.Tensor,
     gate: torch.Tensor,
@@ -99,13 +82,12 @@ def sigmoid_mul_fp8_per_token(
         )
     t, k = x.shape
     _, fp8_max = get_fp8_min_max()
-    if not HAS_TRITON or t == 0 or k > _MAX_K:
-        if t == 0:
-            return (
-                torch.empty((0, k), dtype=quant_dtype, device=x.device),
-                torch.empty((0, 1), dtype=torch.float32, device=x.device),
-            )
-        return _sigmoid_mul_fp8_torch(x, gate, quant_dtype)
+    if t == 0:
+        return (
+            torch.empty((0, k), dtype=quant_dtype, device=x.device),
+            torch.empty((0, 1), dtype=torch.float32, device=x.device),
+        )
+    assert k <= _MAX_K, f"K={k} exceeds Triton BLOCK cap {_MAX_K}"
 
     x = x.contiguous()
     gate = gate.contiguous()
@@ -160,6 +142,8 @@ def maybe_fused_mla_oproj_ptpc(
     if not HAS_TRITON:
         return None
     if attn_out.ndim != 2 or gate.shape != attn_out.shape:
+        return None
+    if attn_out.shape[1] > _MAX_K:
         return None
 
     data, scale = sigmoid_mul_fp8_per_token(

@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
 from vllm.models.kimi_k3.amd.ops.sigmoid_mul_fp8_per_token import (
-    _sigmoid_mul_fp8_torch,
+    _MAX_K,
     maybe_fused_mla_oproj_ptpc,
     o_proj_is_ptpc_fp8,
     sigmoid_mul_fp8_per_token,
@@ -34,6 +34,25 @@ DTYPE = torch.bfloat16
 
 def _cuda_available() -> bool:
     return torch.cuda.is_available()
+
+
+def _sigmoid_mul_fp8_torch(
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference: fp32 sigmoid-mul, then per-token amax FP8.
+
+    Matches the Triton kernel: scale is ``amax / fp8_max``, and a zero amax
+    writes a zero scale with a zero quantized row (no 1e-12 floor).
+    """
+    fp8_min, fp8_max = get_fp8_min_max()
+    gated = x.float() * torch.sigmoid(gate.float())
+    amax = gated.abs().amax(dim=-1, keepdim=True)
+    scale = amax / float(fp8_max)
+    inv = torch.where(scale > 0, 1.0 / scale, torch.zeros_like(scale))
+    q = (gated * inv).clamp(fp8_min, fp8_max).to(quant_dtype)
+    return q, scale
 
 
 pytestmark = pytest.mark.skipif(
@@ -53,7 +72,7 @@ class _GProj:
 class _OProj:
     def __init__(self, *, ptpc: bool = False) -> None:
         if ptpc:
-            self.input_quant_key = kFp8DynamicTokenSym
+            self._input_quant_key = kFp8DynamicTokenSym
         self.seen: object | None = None
 
     def __call__(self, x: object) -> tuple[torch.Tensor]:
@@ -67,9 +86,9 @@ class _OProj:
 def test_o_proj_is_ptpc_fp8_reads_input_quant_key():
     layer = SimpleNamespace()
     assert o_proj_is_ptpc_fp8(layer) is False
-    layer.input_quant_key = kFp8DynamicTokenSym
+    layer._input_quant_key = kFp8DynamicTokenSym
     assert o_proj_is_ptpc_fp8(layer) is True
-    layer.input_quant_key = object()
+    layer._input_quant_key = object()
     assert o_proj_is_ptpc_fp8(layer) is False
 
 
@@ -80,11 +99,19 @@ def test_maybe_fused_declines_without_ptpc_key():
 
 
 def test_maybe_fused_declines_mismatched_shapes():
-    o_proj = SimpleNamespace(input_quant_key=kFp8DynamicTokenSym)
+    o_proj = SimpleNamespace(_input_quant_key=kFp8DynamicTokenSym)
     x = torch.zeros(2, 4)
     gate = torch.zeros(2, 8)
     assert maybe_fused_mla_oproj_ptpc(x, gate, o_proj) is None
     assert maybe_fused_mla_oproj_ptpc(torch.zeros(2, 4, 4), x, o_proj) is None
+
+
+def test_maybe_fused_declines_when_k_gt_max():
+    o_proj = SimpleNamespace(_input_quant_key=kFp8DynamicTokenSym)
+    k = _MAX_K + 128
+    x = torch.zeros(1, k)
+    gate = torch.zeros(1, k)
+    assert maybe_fused_mla_oproj_ptpc(x, gate, o_proj) is None
 
 
 def test_wrap_ptpc_activation_uses_token_sym_key():
@@ -131,7 +158,9 @@ def test_gated_o_proj_ptpc_passes_quantized_activation(monkeypatch: pytest.Monke
     assert wrapper.o_proj.seen is qa
 
 
-@pytest.mark.skipif(not _cuda_available(), reason="CUDA/HIP required")
+@pytest.mark.skipif(
+    not _cuda_available() or not HAS_TRITON, reason="Triton GPU required"
+)
 @pytest.mark.parametrize("num_tokens", [0, 1, 4, 14])
 @pytest.mark.parametrize("k", [128, K_TP8])
 def test_sigmoid_mul_fp8_matches_torch_reference(num_tokens: int, k: int) -> None:
@@ -164,7 +193,7 @@ def test_maybe_fused_wraps_ptpc_activation() -> None:
     torch.manual_seed(1)
     x = torch.randn(3, K_TP8, device="cuda", dtype=DTYPE)
     gate = torch.randn(3, K_TP8, device="cuda", dtype=DTYPE)
-    o_proj = SimpleNamespace(input_quant_key=kFp8DynamicTokenSym)
+    o_proj = SimpleNamespace(_input_quant_key=kFp8DynamicTokenSym)
     qa = maybe_fused_mla_oproj_ptpc(x, gate, o_proj)
     assert qa is not None
     assert qa.quant_key == kFp8DynamicTokenSym
