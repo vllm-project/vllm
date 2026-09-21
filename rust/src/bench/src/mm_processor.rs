@@ -4,7 +4,7 @@
 //! Multimodal preprocessing benchmark (`vllm-bench mm-processor`), mirroring
 //! `vllm bench mm-processor`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -291,7 +291,7 @@ async fn run_mm_processor_with_engine(
     print_e2el_summary(completed, failed, total_time, &e2el_times, &percentiles);
 
     if let Some(path) = &args.output_json {
-        write_result_json(path, completed, failed, &e2el_times, &percentiles, &stats)?;
+        write_result_json(path, completed, failed, &e2el_times, &percentiles, stats)?;
         eprintln!("Wrote stats JSON to {path}");
     }
 
@@ -399,109 +399,99 @@ fn parse_percentiles(raw: &str) -> Result<Vec<f64>> {
     Ok(values)
 }
 
-/// Aggregate per-request stage timings into `{statistic: {stage_ms: ms}}`.
+/// Aggregate per-request stage timings into `{stage_ms: {statistic: ms}}`,
+/// matching the Python `mm_processor_stats` schema orientation.
 fn aggregate_stats(
     per_request: HashMap<String, HashMap<String, f64>>,
     percentiles: &[f64],
 ) -> BTreeMap<String, BTreeMap<String, f64>> {
     let mut stage_values: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-    for (_request_id, stage_map) in per_request {
+    for stage_map in per_request.into_values() {
         for (stage, seconds) in stage_map {
             stage_values.entry(stage).or_default().push(seconds);
         }
     }
 
-    let mut stats: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
-    let mut mean_map = BTreeMap::new();
-    let mut median_map = BTreeMap::new();
-    let mut std_map = BTreeMap::new();
-    let mut percentile_maps: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
-
-    for (stage, values) in &stage_values {
-        let sorted = sort_clone(values);
-        let stage_ms = stage.replace("_secs", "_ms");
-        mean_map.insert(stage_ms.clone(), mean(values) * SEC_TO_MS);
-        median_map.insert(stage_ms.clone(), median_sorted(&sorted) * SEC_TO_MS);
-        std_map.insert(stage_ms.clone(), std_dev(values) * SEC_TO_MS);
-        for p in percentiles {
-            percentile_maps
-                .entry(format!("p{p}"))
-                .or_default()
-                .insert(stage_ms.clone(), percentile_sorted(&sorted, *p) * SEC_TO_MS);
-        }
-    }
-
-    stats.insert("mean".to_string(), mean_map);
-    stats.insert("median".to_string(), median_map);
-    stats.insert("std".to_string(), std_map);
-    stats.extend(percentile_maps);
-    stats
+    stage_values
+        .iter()
+        .map(|(stage, values)| {
+            let sorted = sort_clone(values);
+            let mut stat_map = BTreeMap::new();
+            stat_map.insert("mean".to_string(), mean(values) * SEC_TO_MS);
+            stat_map.insert("median".to_string(), median_sorted(&sorted) * SEC_TO_MS);
+            stat_map.insert("std".to_string(), std_dev(values) * SEC_TO_MS);
+            for p in percentiles {
+                stat_map.insert(format!("p{p}"), percentile_sorted(&sorted, *p) * SEC_TO_MS);
+            }
+            (stage.replace("_secs", "_ms"), stat_map)
+        })
+        .collect()
 }
 
-/// Print a plain-text table with one row per statistic and one column per stage.
-fn print_report(stats: &BTreeMap<String, BTreeMap<String, f64>>, percentiles: &[f64]) {
-    let mut stat_order: Vec<String> = vec!["mean".into(), "median".into(), "std".into()];
-    let mut pkeys: Vec<String> = percentiles.iter().map(|p| format!("p{p}")).collect();
-    pkeys.sort_by(|a, b| {
-        let av: f64 = a[1..].parse().unwrap_or(0.0);
-        let bv: f64 = b[1..].parse().unwrap_or(0.0);
-        av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    stat_order.extend(pkeys);
-    for key in stats.keys() {
-        if !stat_order.contains(key) {
-            stat_order.push(key.clone());
-        }
-    }
-
-    let mut stages: Vec<String> = {
-        let mut set = BTreeSet::new();
-        for map in stats.values() {
-            set.extend(map.keys().cloned());
-        }
-        set.into_iter().collect()
-    };
-    stages.sort_by_key(|stage| {
-        STAGE_ORDER
-            .iter()
-            .position(|s| *s == stage.as_str())
-            .map(|i| (i as isize, stage.clone()))
-            .unwrap_or((isize::MAX, stage.clone()))
-    });
-
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    let mut header = vec!["Statistic".to_string()];
-    header.extend(stages.iter().cloned());
-    rows.push(header);
-    for stat in &stat_order {
-        if let Some(map) = stats.get(stat) {
-            let mut row = vec![stat.clone()];
-            for stage in &stages {
-                row.push(
-                    map.get(stage).map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".to_string()),
-                );
-            }
-            rows.push(row);
-        }
-    }
-
-    let ncols = stages.len() + 1;
+/// Print a right-aligned plain-text table (pandas `to_string(index=False)` style).
+fn print_table(rows: &[Vec<String>]) {
+    let ncols = rows.first().map_or(0, Vec::len);
     let mut widths = vec![0usize; ncols];
-    for row in &rows {
+    for row in rows {
         for (i, cell) in row.iter().enumerate() {
             widths[i] = widths[i].max(cell.len());
         }
     }
-
-    for row in &rows {
+    for row in rows {
         let line = row
             .iter()
             .enumerate()
-            .map(|(i, cell)| format!("{cell:<width$}", width = widths[i]))
+            .map(|(i, cell)| format!("{cell:>width$}", width = widths[i]))
             .collect::<Vec<_>>()
-            .join("  ");
+            .join(" ");
         println!("{line}");
     }
+}
+
+/// Print a plain-text table with one row per stage and one column per
+/// statistic (mirrors the Python pandas report layout).
+fn print_report(stats: &BTreeMap<String, BTreeMap<String, f64>>, percentiles: &[f64]) {
+    // Column order: mean/median/std then the requested percentiles, like Python.
+    let mut columns: Vec<(String, String)> =
+        [("mean", "Mean"), ("median", "Median"), ("std", "Std")]
+            .into_iter()
+            .map(|(key, label)| (key.to_string(), label.to_string()))
+            .collect();
+    columns.extend(percentiles.iter().map(|p| (format!("p{p}"), format!("P{p:?}"))));
+    for key in stats.values().flat_map(|map| map.keys()) {
+        if !columns.iter().any(|(k, _)| k == key) {
+            columns.push((key.clone(), key.clone()));
+        }
+    }
+
+    let mut stages: Vec<&String> = stats.keys().collect();
+    stages.sort_by_key(|stage| {
+        STAGE_ORDER
+            .iter()
+            .position(|s| s == stage)
+            .map(|i| (i as isize, (*stage).clone()))
+            .unwrap_or((isize::MAX, (*stage).clone()))
+    });
+
+    let mut rows: Vec<Vec<String>> = vec![
+        std::iter::once("Stage".to_string())
+            .chain(columns.iter().map(|(_, label)| label.clone()))
+            .collect(),
+    ];
+    for stage in &stages {
+        let mut row = vec![(*stage).clone()];
+        for (key, _) in &columns {
+            row.push(
+                stats[*stage]
+                    .get(key)
+                    .map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+        }
+        rows.push(row);
+    }
+    println!("MM Processor Metrics:");
+    print_table(&rows);
 }
 
 /// Print the end-to-end latency summary (mirrors the Python report layout).
@@ -520,13 +510,23 @@ fn print_e2el_summary(
 
     let e2el_ms: Vec<f64> = e2el_times_secs.iter().map(|secs| secs * SEC_TO_MS).collect();
     let sorted = sort_clone(&e2el_ms);
-    println!("End-to-End Latency (ms):");
-    println!("  Mean:   {:.3}", mean(&e2el_ms));
-    println!("  Median: {:.3}", median_sorted(&sorted));
-    println!("  Std:    {:.3}", std_dev(&e2el_ms));
+    let mut rows = vec![
+        vec!["Metric".to_string(), "Value (ms)".to_string()],
+        vec!["Mean".to_string(), format!("{:.2}", mean(&e2el_ms))],
+        vec![
+            "Median".to_string(),
+            format!("{:.2}", median_sorted(&sorted)),
+        ],
+        vec!["Std".to_string(), format!("{:.2}", std_dev(&e2el_ms))],
+    ];
     for p in percentiles {
-        println!("  P{p}:    {:.3}", percentile_sorted(&sorted, *p));
+        rows.push(vec![
+            format!("P{p:?}"),
+            format!("{:.2}", percentile_sorted(&sorted, *p)),
+        ]);
     }
+    println!("End-to-End Latency (ms):");
+    print_table(&rows);
     let throughput = completed as f64 / total_time.as_secs_f64();
     println!("Request throughput: {throughput:.3} req/s");
 }
@@ -550,21 +550,10 @@ fn write_result_json(
     failed: usize,
     e2el_times_secs: &[f64],
     percentiles: &[f64],
-    stats: &BTreeMap<String, BTreeMap<String, f64>>,
+    mm_processor_stats: BTreeMap<String, BTreeMap<String, f64>>,
 ) -> Result<()> {
     let e2el_ms: Vec<f64> = e2el_times_secs.iter().map(|secs| secs * SEC_TO_MS).collect();
     let sorted = sort_clone(&e2el_ms);
-    // Transpose the internal `{statistic: {stage: ms}}` aggregation into the
-    // Python schema's `{stage: {statistic: ms}}` orientation.
-    let mut mm_processor_stats: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
-    for (statistic, stage_map) in stats {
-        for (stage, value) in stage_map {
-            mm_processor_stats
-                .entry(stage.clone())
-                .or_default()
-                .insert(statistic.clone(), *value);
-        }
-    }
     let result = BenchmarkResultJson {
         completed,
         failed,
