@@ -15,12 +15,11 @@ from vllm.model_executor.models.transformers.fusers.base import (
     fused_head_size,
 )
 from vllm.model_executor.models.transformers.fx_utils import (
+    block_chain,
     compile_forward,
-    innermost_block,
     is_linear,
     recover_forward,
     returned_linear,
-    single_self_call,
 )
 from vllm.model_executor.models.transformers.utils import (
     log_replacement,
@@ -99,12 +98,18 @@ class QKVFuser(StackedFuser):
         return cls(source_cls=type(module).__name__, **names)
 
     def update_forward(self, module: nn.Module) -> None:
-        """Replace `q(x), k(x), v(x)` with `qkv(x).split(sizes, -1)` in source."""
+        """Replace `q(x), k(x), v(x)` with `qkv(x).split(sizes, -1)` in source.
+
+        A projection may be guarded by an existence check -- a
+        `self.<proj> is (not) None` comparison (e.g. Gemma 4's `v_proj`) or a bare
+        truthiness test -- which is folded to its constant value (see
+        `bypass_existence_guard`). The calls may sit in different branches, so the
+        fused GEMM is inserted before the earliest of them, in the innermost block
+        that dominates all three.
+        """
         funcdef, fn = recover_forward(type(module))
-        calls = [
-            single_self_call(funcdef, name)
-            for name in (self.q_name, self.k_name, self.v_name)
-        ]
+        proj_names = (self.q_name, self.k_name, self.v_name)
+        calls = self._unguarded_calls(funcdef, proj_names)
         arg_dumps = {ast.dump(call.args[0]) for call in calls}
         if len(arg_dumps) != 1:
             raise ValueError("projection inputs are written differently")
@@ -115,7 +120,7 @@ class QKVFuser(StackedFuser):
             name
             for name, child in module.named_children()
             if isinstance(child, nn.Linear)
-        } - {self.q_name, self.k_name, self.v_name}
+        } - set(proj_names)
         for node in ast.walk(funcdef):
             if (
                 isinstance(node, ast.Call)
@@ -124,16 +129,24 @@ class QKVFuser(StackedFuser):
                 and any(ast.dump(arg) in arg_dumps for arg in node.args)
             ):
                 raise ValueError("another linear consumes the same input")
-        blocks = [innermost_block(funcdef.body, call) for call in calls]
-        if any(found is None for found in blocks):
+
+        # Insert the fused GEMM before the earliest call, in the innermost block
+        # common to all three (the calls may be split across branches).
+        chains = [block_chain(funcdef.body, call) for call in calls]
+        if any(not chain for chain in chains):
             raise ValueError("projection calls not found in the function body")
-        if len({id(block) for block, _ in blocks}) != 1:
-            raise ValueError("projection calls are in different blocks")
+        depth = 0
+        for level in zip(*chains):
+            if len({id(block) for block, _ in level}) != 1:
+                break
+            depth += 1
+        block = chains[0][depth - 1][0]
+        indices = [chain[depth - 1][1] for chain in chains]
+        insert_index = min(indices)
+        self._check_input_stable(funcdef, module, calls, block, indices)
 
         # q(x), k(x), v(x) -> q, k, v = qkv(x).split(qkv.output_sizes / qkv.tp_size, -1)
-        block = blocks[0][0]
-        index = min(index for _, index in blocks)
-        self._splice_merged_split(funcdef, calls, block, index)
+        self._splice_merged_split(funcdef, calls, block, insert_index)
         self.fused_forward = compile_forward(funcdef, fn)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
