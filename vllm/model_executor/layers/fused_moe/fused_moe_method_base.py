@@ -39,6 +39,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return self.moe_kernel is not None
 
     @property
+    def shared_expert_online_loader(self):
+        """Loader for online-quantized shared-expert weights."""
+        from vllm.model_executor.layers.quantization.online.moe_shared_expert import (
+            UnimplementedOnlineSharedExpertLoader,
+        )
+
+        return UnimplementedOnlineSharedExpertLoader(self.method_name)
+
+    @property
     def mk_can_overlap_shared_experts(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
