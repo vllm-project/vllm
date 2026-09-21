@@ -863,6 +863,8 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
+            # Set once a request fails to get KV blocks in this step.
+            kv_blocked = False
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
@@ -875,9 +877,24 @@ class Scheduler(SchedulerInterface):
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
+                if kv_blocked:
+                    # Admit nothing new past a request that could not get
+                    # blocks, but keep visiting skipped requests that already
+                    # hold blocks: they are not preemptible, so scheduling
+                    # them is the only way those blocks are ever freed.
+                    if not self.skipped_waiting:
+                        break
+                    request_queue = self.skipped_waiting
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if kv_blocked and not any(
+                    self.kv_cache_manager.get_block_ids(request_id)
+                ):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -1228,7 +1245,11 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    if request_queue is self.skipped_waiting:
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                    kv_blocked = True
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
