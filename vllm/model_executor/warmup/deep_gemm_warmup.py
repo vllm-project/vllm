@@ -25,6 +25,7 @@ from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
+    get_tma_aligned_size,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
 )
@@ -328,6 +329,56 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         )
 
 
+def _deepgemm_mxfp8_linear_modules(
+    model: torch.nn.Module,
+) -> list[tuple[torch.Size, torch.nn.Module]]:
+    """Linear layers routed to ``DeepGemmMxfp8LinearKernel`` (one per weight shape)."""
+    from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+        DeepGemmMxfp8LinearKernel,
+    )
+
+    seen: dict[torch.Size, torch.nn.Module] = {}
+    for module in model.modules():
+        kernel = getattr(getattr(module, "quant_method", None), "kernel", None)
+        if not isinstance(kernel, DeepGemmMxfp8LinearKernel):
+            continue
+        weight = getattr(module, "weight", None)
+        if weight is None or weight.dtype != torch.float8_e4m3fn or weight.ndim != 2:
+            continue
+        seen.setdefault(weight.size(), module)
+    return list(seen.items())
+
+
+def _deepgemm_mxfp8_gemm_m_values(w: torch.Tensor, max_tokens: int) -> list[int]:
+    n = w.shape[0]
+    return _generate_optimal_warmup_m_values(max_tokens, n, w.device)
+
+
+def deepgemm_mxfp8_gemm_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None
+) -> None:
+    """Pre-compile ``fp8_gemm_nt`` with recipe (1, 1, 32) and packed UE8M0
+    scales for every M bucket a DeepGEMM MXFP8 linear may see, so the DeepSeek
+    V4.1 FP8 chain does not JIT during serving."""
+    for size, module in _deepgemm_mxfp8_linear_modules(model):
+        w, ws = module.weight, module.weight_scale
+        n, k = w.shape
+        device = w.device
+        a = torch.empty((max_tokens, k), device=device, dtype=torch.float8_e4m3fn)
+        for m in _deepgemm_mxfp8_gemm_m_values(w, max_tokens):
+            # DeepGEMM requires the packed scale's column stride to be the
+            # TMA-aligned size of this M, so the scale is allocated per bucket.
+            sf = torch.empty_strided(
+                (m, cdiv(k // 32, 4)),
+                (1, get_tma_aligned_size(m, torch.int32.itemsize)),
+                device=device,
+                dtype=torch.int32,
+            )
+            torch.ops.vllm.deepgemm_mxfp8_gemm(a[:m], sf, w, ws, [1, 1, 32])
+            if pbar is not None:
+                pbar.update(1)
+
+
 def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     seen_fp8_sizes: set[torch.Size] = set(FP8_GEMM_NT_WARMUP_CACHE)
     seen_grouped_sizes: set[torch.Size] = set(
@@ -353,6 +404,8 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
             if w2.size() not in seen_grouped_sizes:
                 total += n_values
                 seen_grouped_sizes.add(w2.size())
+    for _, module in _deepgemm_mxfp8_linear_modules(model):
+        total += len(_deepgemm_mxfp8_gemm_m_values(module.weight, max_tokens))
     return total
 
 
@@ -367,6 +420,8 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
         with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
+            deepgemm_mxfp8_gemm_warmup(model, max_tokens, pbar)
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
+        deepgemm_mxfp8_gemm_warmup(model, max_tokens, None)
