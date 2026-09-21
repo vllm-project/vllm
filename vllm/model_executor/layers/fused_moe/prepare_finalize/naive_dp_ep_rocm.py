@@ -32,8 +32,10 @@ def _comm_overlap_active() -> bool:
     return dbo_enabled() and not torch.cuda.is_current_stream_capturing()
 
 
-class _DBOCommRegionMixin:
-    """Runs the dispatch/combine collective on the DBO comm stream."""
+class MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO(
+    MoEPrepareAndFinalizeNaiveDPEPModular
+):
+    """Modular naive DP/EP prepare/finalize with ROCm DBO comm overlap."""
 
     @contextmanager
     def _comm_region(self) -> Iterator[None]:
@@ -47,12 +49,6 @@ class _DBOCommRegionMixin:
             yield
         finally:
             dbo_switch_to_compute_sync()
-
-
-class MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO(
-    _DBOCommRegionMixin, MoEPrepareAndFinalizeNaiveDPEPModular
-):
-    """Modular naive DP/EP prepare/finalize with ROCm DBO comm overlap."""
 
     def supports_async(self) -> bool:
         # The modular kernel treats "not async" as "no DBO" and asserts out of
