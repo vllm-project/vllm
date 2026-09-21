@@ -1,16 +1,14 @@
 # Qwen3.5-4B: vLLM / SGLang, DFlash on / off
 
-This branch adds a portable reproduction to vLLM commit `b6e7c1f1f0430b5d4784aea391c42067581b7f76`; there are no engine changes.
+This benchmark compares Qwen3.5-4B throughput, streamed-chunk latency, and acceptance length across vLLM and SGLang, with DFlash enabled and disabled.
 The original measurements used one NVIDIA H100 80 GB per run, TP=1, FP8 target weights, BF16 compute, context length 32768, concurrency 1, 20 warmups followed by 200 measured requests, and 256 requested output tokens.
 No profiler is enabled.
 
 ## Setup
 
 Use a Linux NVIDIA GPU machine with a CUDA 13 compatible driver, `uv`, and `canhazgpu` installed and configured for GPU reservations.
-The original environment used Python 3.12, vLLM at the commit above with PyTorch 2.13.0+cu130, SGLang 0.5.17 with PyTorch 2.11.0+cu130 and sglang-kernel 0.4.5, FlashInfer 0.6.18.post1, and AIPerf 0.12.0.
 The setup script creates separate engine environments because their PyTorch requirements differ.
-SGLang overrides its older FlashInfer and CUTLASS dependency pins with FlashInfer 0.6.18.post1 and CUTLASS DSL 4.7.1, matching the measured environment; it also pins FlashAttention 4.0.0b19.
-Consequently, plain `uv pip check` in the SGLang environment reports the two intentional metadata mismatches.
+Exact versions and the reasons for pinning them are recorded in the appendix.
 Model downloads require internet access and enough disk space for both checkpoints and environments.
 
 ```bash
@@ -19,8 +17,6 @@ cd vllm
 bash benchmarks/dflash_4b/setup.sh
 ```
 
-Setup pins the main packages and the precompiled vLLM wheel commit; it is not a full transitive dependency lock.
-The pinned nightly wheel must still be available from the vLLM wheel service.
 If using existing environments, set `ENGINE_PYTHON` to the appropriate environment's Python when invoking `run.sh`.
 
 ## Run all four configurations
@@ -48,13 +44,6 @@ Requests set `max_completion_tokens=256` and do not set `ignore_eos=true` in eit
 Therefore, 256 is a maximum, not a guaranteed output length: generation can stop earlier on an EOS (end-of-sequence) token.
 Setting `ignore_eos=true` in both engines would enforce generation up to the token limit, but would change the workload from the original comparison.
 Sampling parameters are omitted, matching the original requests; the engines use their model defaults, so this is not a deterministic generation or accuracy test.
-
-Both checkpoints are pinned:
-
-| Checkpoint | Revision |
-| --- | --- |
-| `Qwen/Qwen3.5-4B` | `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` |
-| `z-lab/Qwen3.5-4B-DFlash` | `9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf` |
 
 vLLM explicitly uses MRV2, max-num-seqs 128, prefix caching, the qwen3 reasoning parser, qwen3_coder tool parser, and graph capture sizes 1, 2, 4, 8, 16, 32, 64, 128.
 SGLang retains its original server defaults for graph sizes and maximum running requests, with memory fraction 0.8 and metrics enabled.
@@ -87,3 +76,39 @@ Original H100 reference measurements (not guaranteed on a different machine):
 Only benchmark code, instructions, and verified public GSM8K prompts are included.
 Environments, original logs, profiles, archives, and generated results are ignored.
 New runtime logs can contain local paths, host details, and model output; review them separately before sharing.
+
+## Appendix: environment recorded for the original runs
+
+The versions below record the environment used on September 18, 2026.
+They are pinned so another machine can reproduce that comparison without silently picking up later engine, dependency, or model changes.
+The exact version numbers and model revision hashes are provenance, not parameters selected through performance tuning or evidence that these are the only supported versions.
+These were the available versions and checkpoint snapshots used during the investigation; we did not establish that every component was the latest published version.
+In particular, the engines required different PyTorch versions, and SGLang used dependency overrides to match the measured environment.
+
+### Engine and dependency versions
+
+| Component | Recorded version | Context |
+| --- | --- | --- |
+| vLLM | `b6e7c1f1f0430b5d4784aea391c42067581b7f76` | Main-branch snapshot used for the measurements; this reproduction adds no engine changes. |
+| SGLang | `0.5.17` | Installed release used for the comparison. |
+| Python | `3.12` | Interpreter used by both environments. |
+| PyTorch, vLLM | `2.13.0+cu130` | vLLM environment's PyTorch version. |
+| PyTorch, SGLang | `2.11.0+cu130` | Separate environment for SGLang compatibility. |
+| sglang-kernel | `0.4.5` | SGLang kernel package used in the runs. |
+| FlashInfer | `0.6.18.post1` | Shared measured version; overrides SGLang's older dependency pin. |
+| CUTLASS DSL | `4.7.1` | Measured version paired with FlashInfer; overrides SGLang's older dependency pin. |
+| FlashAttention | `4.0.0b19` | Installed prerelease pinned in the SGLang setup recipe. |
+| AIPerf | `0.12.0` | Benchmark client used for all four configurations. |
+
+Setup pins the main packages and the precompiled vLLM wheel commit; it is not a full transitive dependency lock.
+The pinned nightly wheel must still be available from the vLLM wheel service.
+Plain `uv pip check` in the SGLang environment reports the two intentional FlashInfer and CUTLASS metadata mismatches.
+
+### Model revisions
+
+These are the checkpoint snapshots used by the original runs:
+
+| Checkpoint | Revision |
+| --- | --- |
+| `Qwen/Qwen3.5-4B` | `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` |
+| `z-lab/Qwen3.5-4B-DFlash` | `9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf` |
