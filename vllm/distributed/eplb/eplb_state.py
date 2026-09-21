@@ -220,6 +220,13 @@ class EplbModelState:
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
     """
+    cycle_in_flight: bool = False
+    """
+    Indicates whether an async EPLB rearrangement cycle is actively in flight.
+    Main-thread only; set synchronously on all ranks in rearrange() and cleared
+    when the final layer result is consumed or aborted. Prevents collective
+    communication calls during normal idle steps.
+    """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
     Per-ubatch scalar int32 tensors holding the number of real (non-padding)
@@ -654,19 +661,20 @@ class EplbState:
             # Run _move_to_workspace if all ranks have finished transferring the
             # new weights to the intermediate buffer
             for eplb_model_state in self.model_states.values():
-                # rebalanced must remain consistent amongst all ranks otherwise the
-                # all_reduce in _all_ranks_result_ready will hang
-                if eplb_model_state.rebalanced and self._all_ranks_result_ready(
+                if eplb_model_state.cycle_in_flight and self._all_ranks_result_ready(
                     eplb_model_state
                 ):
-                    _move_to_workspace(
-                        model_state=eplb_model_state,
-                        ep_rank=ep_group.rank(),
-                    )
+                    if eplb_model_state.rebalanced:
+                        _move_to_workspace(
+                            model_state=eplb_model_state,
+                            ep_rank=ep_group.rank(),
+                        )
+                    else:
+                        eplb_model_state.cycle_in_flight = False
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if self.is_async and any(
-                eplb_model_state.rebalanced
+                eplb_model_state.cycle_in_flight
                 for eplb_model_state in self.model_states.values()
             ):
                 # Still performing asynchronous rearrangement; update
@@ -946,6 +954,7 @@ class EplbState:
                     num_gpus=num_gpus,
                 )
                 eplb_model_state.rebalanced = True
+                eplb_model_state.cycle_in_flight = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
             self.rearrange_event.record()
@@ -981,20 +990,24 @@ class EplbState:
         if not self.is_async:
             return
         for model_key, ms in self.model_states.items():
-            needs_drain = ms.rebalanced
+            needs_drain = ms.cycle_in_flight
             if needs_drain:
                 logger.info(
                     "Draining async EPLB worker for model %s",
                     model_key,
                 )
-            while ms.rebalanced:
+            while ms.cycle_in_flight:
                 if self._all_ranks_result_ready(ms):
-                    result = ms.pending_result
-                    assert result is not None
-                    if result.layer_idx == ms.model.num_moe_layers - 1:
-                        ms.rebalanced = False
-                    ms.pending_result = None
-                    result.consumed_event.record()
+                    if ms.rebalanced:
+                        result = ms.pending_result
+                        assert result is not None
+                        if result.layer_idx == ms.model.num_moe_layers - 1:
+                            ms.rebalanced = False
+                            ms.cycle_in_flight = False
+                        ms.pending_result = None
+                        result.consumed_event.record()
+                    else:
+                        ms.cycle_in_flight = False
                 else:
                     time.sleep(0.001)
             if needs_drain:
@@ -1005,22 +1018,24 @@ class EplbState:
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
-        has_result = int(model_state.pending_result is not None)
+        is_ready = int(
+            model_state.pending_result is not None or not model_state.rebalanced
+        )
 
         cpu_group = getattr(parallel_state, "cpu_group", None)
         if cpu_group is not None and cpu_group.size() > 1:
-            flag = torch.tensor((has_result,), dtype=torch.int32, device="cpu")
+            flag = torch.tensor((is_ready,), dtype=torch.int32, device="cpu")
             all_reduce(flag, group=cpu_group)
             return int(flag.item()) == cpu_group.size()
 
         device_group = parallel_state.device_group
         if device_group.size() <= 1:
-            return bool(has_result)
+            return bool(is_ready)
 
         device = getattr(
             parallel_state, "device", model_state.physical_to_logical_map.device
         )
-        flag = torch.tensor((has_result,), dtype=torch.int32, device=device)
+        flag = torch.tensor((is_ready,), dtype=torch.int32, device=device)
         all_reduce(flag, group=device_group)
         return int(flag.item()) == device_group.size()
 
@@ -1419,6 +1434,7 @@ def _move_to_workspace(
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False
+        model_state.cycle_in_flight = False
 
     # Reset pending_result before unblocking the async worker
     model_state.pending_result = None
