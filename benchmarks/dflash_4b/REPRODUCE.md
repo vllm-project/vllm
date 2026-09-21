@@ -86,6 +86,11 @@ Setup pins the main packages and the precompiled vLLM wheel commit; it is not a 
 
 ### Model revisions
 
+These hashes identify the checkpoints downloaded for the original runs; they were not chosen for a particular fix or performance property.
+The pins preserve the same weights and model configuration across reruns.
+You can omit `--revision` in `download_model()` to use each repository’s current default revision, but later checkpoint changes may affect results.
+The hashes are only useful when reproducing or comparing against the original measurements.
+
 | Checkpoint | Revision |
 | --- | --- |
 | `Qwen/Qwen3.5-4B` | `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` |
