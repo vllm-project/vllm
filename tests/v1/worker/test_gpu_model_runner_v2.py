@@ -3,7 +3,7 @@
 
 import contextlib
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.async_utils import AsyncCacheOnlyOutput
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 
@@ -56,6 +57,45 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
         global_batch.idx_mapping, 0
     )
     runner.pcp_manager.restore_for_sampling.assert_not_called()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_cache_only_runner_waits_for_kv_writes_before_output(monkeypatch):
+    event = MagicMock()
+    main_stream = object()
+    monkeypatch.setattr(torch, "Event", MagicMock(return_value=event))
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    input_batch = SimpleNamespace(
+        req_ids=["req"], idx_mapping=torch.tensor([0], dtype=torch.int32)
+    )
+    runner.execute_model_state = SimpleNamespace(
+        input_batch=input_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=torch.ones(1, 1),
+        aux_hidden_states=None,
+        dp_sync=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        routed_experts=None,
+        cudagraph_stats=None,
+    )
+    runner.is_last_pp_rank = True
+    runner.is_dsv41_encoder_only_prefill = True
+    runner.postprocess_num_computed_tokens = MagicMock()
+    runner.model_state = SimpleNamespace(postprocess_state=MagicMock())
+    runner.kv_connector = SimpleNamespace(post_forward=MagicMock(return_value=None))
+    runner.main_stream = main_stream
+    runner.eplb = SimpleNamespace(step=MagicMock())
+
+    output = runner.sample_tokens(None)
+
+    assert isinstance(output, AsyncCacheOnlyOutput)
+    event.record.assert_called_once_with(main_stream)
+    event.synchronize.assert_not_called()
+    assert output.get_output().sampled_token_ids == [[]]
+    event.synchronize.assert_called_once()
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
