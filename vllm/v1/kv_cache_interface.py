@@ -600,6 +600,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1
     model_version: str | None = None
+    # Marks draft groups that flatten a non-causal query block into decode rows.
+    non_causal_multi_token_decode: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
 
@@ -649,9 +651,13 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             indexes_kv_by_block_stride=block_stride_set.pop(),
             sliding_window=sliding_window_set.pop(),
             extra_retained_tokens=extra_retained_set.pop(),
+            kv_quant_mode=specs[0].kv_quant_mode,
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
 
     def is_uniform_with_collection(

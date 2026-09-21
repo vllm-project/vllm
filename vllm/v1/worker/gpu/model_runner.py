@@ -530,7 +530,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_blocks_per_group.append(max_num_blocks)
 
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
-            self.kv_cache_config, self.vllm_config, self.device
+            self.kv_cache_config,
+            self.vllm_config,
+            self.device,
+            cudagraph_excluded_layer_names=(
+                self.speculator.draft_attn_layer_names
+                if isinstance(self.speculator, DraftModelSpeculator)
+                else None
+            ),
         )
         attn_cg_support = attn_cg_support.narrow(
             *self.model_state.get_additional_cg_support()

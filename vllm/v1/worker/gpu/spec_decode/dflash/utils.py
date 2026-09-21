@@ -1,14 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from copy import copy
+
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import CacheConfig, VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
 )
+
+
+def _get_draft_cache_config(vllm_config: VllmConfig) -> CacheConfig:
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    cache_config = vllm_config.cache_config
+    if speculative_config.kv_cache_dtype is None:
+        return cache_config
+    # Reconstructing CacheConfig would mark the resolved default block size
+    # as user-specified, preventing the draft backend's automatic selection.
+    draft_cache_config = copy(cache_config)
+    draft_cache_config.cache_dtype = speculative_config.kv_cache_dtype
+    return draft_cache_config
 
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -35,14 +50,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
             backend=speculative_config.attention_backend,
         ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
-        ),
+        cache_config=_get_draft_cache_config(vllm_config),
     )
     with set_model_tag("dflash_head"):
         dflash_model = get_model(

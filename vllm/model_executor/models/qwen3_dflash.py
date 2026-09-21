@@ -704,7 +704,7 @@ class DFlashQwen3Model(nn.Module):
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
-    model_cls = DFlashQwen3Model
+    model_cls: type[nn.Module] = DFlashQwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)

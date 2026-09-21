@@ -94,6 +94,8 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
+    *,
+    cudagraph_excluded_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -166,7 +168,12 @@ def init_attn_backend(
             else:
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
-            # Check cudagraph support for the attention backend
+            # Draft metadata is also needed by the target's context pass, but
+            # only layers executed in this graph should constrain its support.
+            if cudagraph_excluded_layer_names is not None and all(
+                name in cudagraph_excluded_layer_names for name in group.layer_names
+            ):
+                continue
             cg_support = builder.get_cudagraph_support(
                 vllm_config,
                 group.kv_cache_spec,

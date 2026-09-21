@@ -1551,6 +1551,9 @@ def group_and_unify_kv_cache_specs(
     """
     if not any(
         isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()
+    ) or any(
+        not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+        for spec in kv_cache_spec.values()
     ):
         return None
 

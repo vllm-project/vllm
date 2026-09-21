@@ -1162,6 +1162,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return SlidingWindowMLASpec(
                 **common_kwargs,
                 sliding_window=self.sliding_window,
+                non_causal_multi_token_decode=self.non_causal_multi_token_decode,
             )
         return MLAAttentionSpec(
             **common_kwargs,
@@ -2349,7 +2350,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_actual_tokens=num_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
-            head_dim=self.model_config.get_head_size(),
+            head_dim=self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
             # MLACommonMetadata Chunk prefill specific
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
