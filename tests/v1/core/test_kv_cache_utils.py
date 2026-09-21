@@ -121,6 +121,11 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     group = KVCacheGroupSpec(list(specs), group_spec)
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1},
+        ),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(index_topk=128),
             max_model_len=gpu_block_size,
@@ -140,11 +145,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
-    indexer_spec = specs["model.layers.0.self_attn.indexer"]
-    assert get_hisparse_gpu_memory_usage(config, [group]) == (
-        indexer_spec.max_memory_usage_bytes(config)
-    )
-
     monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
     cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
         config, [group], available_memory=2**30
@@ -182,6 +182,20 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     assert indexer_group.kv_cache_spec.prefix_cacheable
     assert host_group.enable_kv_transfer
     auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
+    device_stride = next(
+        tensor.block_stride
+        for tensor in cache_config.kv_cache_tensors
+        if not tensor.host_resident
+    )
+    hot_blocks = sum(
+        spec.blocks_per_request
+        for spec in auxiliary_specs
+        if isinstance(spec, HiSparseHotSpec)
+    )
+    # One indexer and one resident block, plus the per-request hot pages.
+    assert get_hisparse_gpu_memory_usage(config, [group]) == (
+        (2 + hot_blocks) * device_stride
+    )
     assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)
     assert any(isinstance(spec, HiSparseHotSpec) for spec in auxiliary_specs)
     assert all(
@@ -202,6 +216,51 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         ),
     )
     assert scheduler_block_size == hash_block_size == gpu_block_size
+
+
+def test_hisparse_pp_capacity_uses_each_physical_pool(monkeypatch):
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=64))
+    config.model_config.hf_config.index_topk = 128
+    config.attention_config.hisparse_config = HiSparseConfig(device_buffer_size=256)
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="HiSparseConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"host_pool_gib": 0.01},
+    )
+    specs = {}
+    for i in range(3):
+        specs[f"mla.{i}"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            block_stride_alignment=1152,
+        )
+        specs[f"idx.{i}"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+    workers = [
+        {k: v for k, v in specs.items() if k.endswith(".0")},
+        {k: v for k, v in specs.items() if not k.endswith(".0")},
+    ]
+    configs = get_kv_cache_configs(config, workers, [2**20, 2**20])
+    assert configs[0].num_blocks == configs[1].num_blocks
+    assert configs[0].hisparse_host_num_blocks == configs[1].hisparse_host_num_blocks
+    for worker, cache in zip(workers, configs):
+        device = next(t for t in cache.kv_cache_tensors if not t.host_resident)
+        assert device.size == cache.num_blocks * device.block_stride
+        assert device.size <= 2**20
+        groups = get_kv_cache_groups(config, worker)
+        required = get_hisparse_gpu_memory_usage(config, groups)
+        assert required <= (cache.num_blocks - 1) * device.block_stride
 
 
 def test_hisparse_rejects_deepseek_v4():
@@ -4065,7 +4124,8 @@ def test_auto_fit_max_model_len_reserves_null_block():
     assert vllm_config.model_config.max_model_len == 63 * block_size
 
 
-def test_check_enough_kv_cache_memory_reserves_null_block():
+@pytest.mark.parametrize("layout,alignment", [(None, None), ("BLHNC", 1152)])
+def test_check_enough_kv_cache_memory_reserves_null_block(layout, alignment):
     """The public admission check must reject a KV cache sized to exactly the
     blocks a max_model_len request needs. BlockPool keeps one block as the
     null block, so only num_blocks - 1 are usable; accepting
@@ -4075,18 +4135,21 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     block_size = 16
     max_model_len = 512  # needs 512 / 16 = 32 blocks
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
-    spec = new_kv_cache_spec(block_size=block_size)
+    vllm_config.cache_config.kv_cache_layout = layout
+    spec = replace(
+        new_kv_cache_spec(block_size=block_size), block_stride_alignment=alignment
+    )
+    stride = kv_cache_utils._pool_bytes_per_block(
+        get_kv_cache_groups(vllm_config, {"layer1": spec}),
+        KVCacheLayout[layout] if layout else None,
+    )
 
     # 32 blocks -> only 31 usable after the null block: one short -> reject.
     with pytest.raises(ValueError, match="max seq len"):
-        check_enough_kv_cache_memory(
-            vllm_config, {"layer1": spec}, spec.page_size_bytes * 32
-        )
+        check_enough_kv_cache_memory(vllm_config, {"layer1": spec}, stride * 32)
 
     # 33 blocks -> 32 usable after the null block -> accept.
-    check_enough_kv_cache_memory(
-        vllm_config, {"layer1": spec}, spec.page_size_bytes * 33
-    )
+    check_enough_kv_cache_memory(vllm_config, {"layer1": spec}, stride * 33)
 
 
 def test_is_full_attention_spec_unwraps_uniform_type_specs():

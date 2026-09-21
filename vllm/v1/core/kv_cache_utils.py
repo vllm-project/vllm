@@ -20,6 +20,7 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.hisparse.layout import (
+    create_hisparse_layout,
     get_hisparse_gpu_memory_usage,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
@@ -1006,16 +1007,22 @@ def check_enough_kv_cache_memory(
         # plans against usable blocks, as in get_kv_cache_configs. Group a copy
         # of the specs since grouping may unify them in-place.
         groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
+        layout = (
+            vllm_config.cache_config.get_resolved_kv_cache_layout()
+            if vllm_config.cache_config.kv_cache_layout is not None
+            else None
+        )
+        device_groups = _device_kv_cache_groups(vllm_config, groups)
         check_memory = (
-            available_memory - _pool_bytes_per_block(groups)
+            available_memory - _pool_bytes_per_block(device_groups, layout)
             if groups
             else available_memory
         )
         _check_enough_kv_cache_memory(
             check_memory,
-            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
-            lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
 
 
@@ -1118,13 +1125,25 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
-def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _device_kv_cache_groups(
+    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
+) -> list[KVCacheGroupSpec]:
+    if groups and vllm_config.attention_config.hisparse_config is not None:
+        return create_hisparse_layout(
+            vllm_config, groups, get_hisparse_host_pool_bytes(vllm_config)
+        ).device_groups
+    return groups
+
+
+def _pool_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout | None = None
+) -> int:
     """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    return _get_kv_cache_bytes_per_block(kv_cache_groups)
+    return _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1590,6 +1609,7 @@ def _get_per_layer_spec(
 
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
+    layout: KVCacheLayout | None = None,
 ) -> int:
     """Return the largest cache group's bytes per block."""
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
@@ -1604,23 +1624,18 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
-    hot_page_sizes = [
+    alignments = [
         group.kv_cache_spec.page_size_bytes
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     ]
-    if hot_page_sizes:
-        bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
-    stride_alignments = [
-        spec.block_stride_alignment
-        for group in kv_cache_groups
-        for layer_name in group.layer_names
-        if isinstance(spec := _get_per_layer_spec(group, layer_name), MLAAttentionSpec)
-        and spec.block_stride_alignment
-    ]
-    if stride_alignments:
-        bytes_per_block = round_up(bytes_per_block, math.lcm(*stride_alignments))
-    return bytes_per_block
+    if layout is not None and layout.is_block_outermost:
+        alignments.extend(
+            _get_per_layer_spec(group, layer_name).block_stride_alignment or 1
+            for group in kv_cache_groups
+            for layer_name in group.layer_names
+        )
+    return round_up(bytes_per_block, math.lcm(*alignments))
 
 
 def validate_kv_cache_layout(
@@ -1756,7 +1771,7 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
+    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
@@ -2454,7 +2469,12 @@ def _max_memory_usage_bytes_from_groups(
             total_blocks += 1
         return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
 
-    bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
+    layout = (
+        vllm_config.cache_config.get_resolved_kv_cache_layout()
+        if vllm_config.cache_config.kv_cache_layout is not None
+        else None
+    )
+    bytes_per_block = _pool_bytes_per_block(kv_cache_groups, layout)
     total_blocks = 0
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
@@ -2487,12 +2507,12 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = model_len
         if hisparse_enabled:
             try:
-                config = get_kv_cache_config_from_groups(
-                    vllm_config, kv_cache_groups, available_memory
+                return (
+                    _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+                    <= available_memory
                 )
             except ValueError:
                 return False
-            return get_max_concurrency_for_kv_cache_config(vllm_config, config) >= 1
         return (
             _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
             <= available_memory
@@ -2695,6 +2715,18 @@ def get_kv_cache_configs(
         for worker_spec in kv_cache_specs
     ]
 
+    layout = (
+        vllm_config.cache_config.get_resolved_kv_cache_layout()
+        if vllm_config.cache_config.kv_cache_layout is not None
+        else None
+    )
+    pool_strides = [
+        _pool_bytes_per_block(_device_kv_cache_groups(vllm_config, groups), layout)
+        if groups
+        else 0
+        for groups in projected_groups_per_worker
+    ]
+
     # If `num_gpu_blocks_override` is set, the cache size that will actually
     # be allocated is decoupled from the profiled `available_memory`:
     # `may_override_num_blocks` in `get_kv_cache_config_from_groups` clamps
@@ -2704,11 +2736,12 @@ def get_kv_cache_configs(
     override = vllm_config.cache_config.num_gpu_blocks_override
     if override is not None:
         adjusted_memory: list[int] = []
-        for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+        for groups, avail_mem, bytes_per_block in zip(
+            projected_groups_per_worker, available_memory, pool_strides
+        ):
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2718,14 +2751,18 @@ def get_kv_cache_configs(
         available_memory = adjusted_memory
 
     if vllm_config.attention_config.hisparse_config is not None:
-        available_memory = [min(available_memory)] * len(available_memory)
+        shared_blocks = min(
+            memory // stride
+            for memory, stride in zip(available_memory, pool_strides)
+            if stride
+        )
+        available_memory = [shared_blocks * stride for stride in pool_strides]
 
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _pool_bytes_per_block(groups) if groups else avail_mem
-        for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
+        avail_mem - stride for avail_mem, stride in zip(available_memory, pool_strides)
     ]
 
     if vllm_config.model_config.original_max_model_len == -1:
@@ -2761,14 +2798,32 @@ def get_kv_cache_configs(
     min_num_blocks = min(
         kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
     )
+    host_counts = [
+        config.hisparse_host_num_blocks
+        for config in kv_cache_configs
+        if config.hisparse_host_num_blocks is not None
+    ]
+    min_host_blocks = min(host_counts) if host_counts else None
     for i, kv_cache_config in enumerate(kv_cache_configs):
-        if kv_cache_config.num_blocks == min_num_blocks:
+        if (
+            kv_cache_config.num_blocks == min_num_blocks
+            and kv_cache_config.hisparse_host_num_blocks == min_host_blocks
+        ):
             continue
         # Re-plan with exactly the memory the smallest rank can afford, so
         # strides and offsets stay consistent with the shrunken allocation.
-        groups = kv_cache_config.kv_cache_groups
+        groups = projected_groups_per_worker[i]
+        if min_host_blocks is not None:
+            assert kv_cache_config.hisparse_host_block_stride is not None
+            kv_cache_configs[i] = get_hisparse_kv_cache_config(
+                vllm_config,
+                groups,
+                min_num_blocks * pool_strides[i],
+                min_host_blocks * kv_cache_config.hisparse_host_block_stride,
+            )
+            continue
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
-            vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
+            vllm_config, groups, min_num_blocks * pool_strides[i]
         )
 
     return kv_cache_configs
