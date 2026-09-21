@@ -81,10 +81,11 @@ patterns for submodules whose parameters never change during training. These
 are vLLM module names, not checkpoint keys; do not infer them from
 `requires_grad=False`, which is also used for ordinary inference weights.
 
-With level 2 sleep, their GPU parameters are copied to pageable CPU memory once.
-`wake_up(tags=["weights"])` restores them in place and keeps the CPU copies for
-later cycles. Already CPU-resident parameters are reused without another copy.
-Budget host memory for these retained local shards alongside trainer offload.
+With level 2 sleep, their GPU parameters are copied to pageable CPU memory.
+`wake_up(tags=["weights"])` restores them in place and releases the CPU copies.
+Each sleep/wake cycle saves and restores the current values, just like buffers.
+Already CPU-resident parameters need no copy. Budget host memory for these
+backups alongside trainer offload.
 Level 1 retains its existing full-weight backup behavior.
 
 This option only controls sleep/wake; it does not modify weight loaders or

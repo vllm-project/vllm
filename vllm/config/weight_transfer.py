@@ -19,6 +19,6 @@ class WeightTransferConfig:
     frozen_weight_modules: list[str] = Field(default_factory=list)
     """Runtime module-name glob patterns retained across level-2 sleep. Their
     parameters must remain immutable and be omitted by the sender. This only
-    controls sleep/wake, not weight loading. GPU parameters keep a CPU backup;
-    CPU-resident parameters are reused.
+    controls sleep/wake, not weight loading. GPU parameters are backed up to CPU
+    at sleep and restored at wake; CPU-resident parameters need no copy.
     """
