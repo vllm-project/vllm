@@ -89,9 +89,9 @@ steps:
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
-      label: ":amd: (MI355) PyTorch Compilation H100 Cases"
+      label: ":amd: (MI355 DPX) PyTorch Compilation H100 Cases"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 45
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -192,9 +192,9 @@ steps:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
-      label: ":amd: (MI355) PyTorch Fullgraph"
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd

@@ -212,9 +212,9 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Models (Extended Generation 2) Shard %N"
+      label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 2) Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 100
       depends_on:
       - image-build-amd
@@ -231,9 +231,9 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Models (Extended Generation 3)"
+      label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 3)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd

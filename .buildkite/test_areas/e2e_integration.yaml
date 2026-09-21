@@ -53,9 +53,9 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
   mirror:
     amd:
-      label: ":amd: (MI355) DeepSeek V2-Lite Prefetch Offload Accuracy"
+      label: ":amd: (MI355 DPX) DeepSeek V2-Lite Prefetch Offload Accuracy"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       working_dir: "/vllm-workspace"
       timeout_in_minutes: 30
       depends_on:

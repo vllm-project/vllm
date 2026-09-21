@@ -374,9 +374,9 @@ steps:
     - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
   mirror:
     amd:
-      label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance Nightly"
+      label: ":amd: (MI355 DPX) Spec Decode AL MTP + Other Acceptance Nightly"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd

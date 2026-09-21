@@ -35,9 +35,9 @@ steps:
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
   mirror:
     amd:
-      label: ":amd: (MI355) Sharded RDT Weight Transfer"
+      label: ":amd: (MI355 DPX) Sharded RDT Weight Transfer"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 45
       working_dir: /vllm-workspace/tests

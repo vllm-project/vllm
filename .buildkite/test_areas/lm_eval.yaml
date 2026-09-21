@@ -68,9 +68,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
   mirror:
     amd:
-      label: ":amd: (MI355) LM Eval Watermarking"
+      label: ":amd: (MI355 DPX) LM Eval Watermarking"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 45
       working_dir: /vllm-workspace/tests
@@ -738,9 +738,9 @@ steps:
     - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
   mirror:
     amd:
-      label: ":amd: (MI355) MRCR Eval Small Models"
+      label: ":amd: (MI355 DPX) MRCR Eval Small Models"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd

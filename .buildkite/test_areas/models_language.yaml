@@ -113,9 +113,9 @@ steps:
     - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
   mirror:
     amd:
-      label: ":amd: (MI355) Granite Language Model Compatibility"
+      label: ":amd: (MI355 DPX) Granite Language Model Compatibility"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 80
       working_dir: /vllm-workspace/tests
@@ -151,9 +151,9 @@ steps:
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   mirror:
     amd:
-      label: ":amd: (MI355) Language Models (Extended Generation)"
+      label: ":amd: (MI355 DPX) Language Models (Extended Generation)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 95
       depends_on:
       - image-build-amd

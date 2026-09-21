@@ -88,9 +88,9 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek)"
   mirror:
     amd:
-      label: ":amd: (MI355) Fusion E2E Quick"
+      label: ":amd: (MI355 DPX) Fusion E2E Quick"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       working_dir: "/vllm-workspace/"
       timeout_in_minutes: 30
       depends_on:
@@ -129,9 +129,9 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
   mirror:
     amd:
-      label: ":amd: (MI355) Fusion E2E Config Sweep"
+      label: ":amd: (MI355 DPX) Fusion E2E Config Sweep"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       working_dir: "/vllm-workspace/"
       timeout_in_minutes: 40
       depends_on:

@@ -18,9 +18,9 @@ steps:
   - pytest -v -s entrypoints/launchers
   mirror:
     amd:
-      label: ":amd: (MI355) Entrypoints Unit"
+      label: ":amd: (MI355 DPX) Entrypoints Unit"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd

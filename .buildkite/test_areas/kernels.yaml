@@ -15,9 +15,9 @@ steps:
     - pytest -v -s tests/kernels/ir
   mirror:
     amd:
-      label: ":amd: (MI355) vLLM IR"
+      label: ":amd: (MI355 DPX) vLLM IR"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 50
       working_dir: "/vllm-workspace/"
       depends_on:
@@ -113,9 +113,9 @@ steps:
     - pytest -v -s kernels/test_top_k_per_row.py
   mirror:
     amd:
-      label: ":amd: (MI355) DeepSeek V4 Fused Kernels"
+      label: ":amd: (MI355 DPX) DeepSeek V4 Fused Kernels"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 60
       working_dir: /vllm-workspace/tests
@@ -230,9 +230,9 @@ steps:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
   mirror:
     amd:
-      label: ":amd: (MI355) Attention DiffKV Kernels"
+      label: ":amd: (MI355 DPX) Attention DiffKV Kernels"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
@@ -270,9 +270,9 @@ steps:
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
   mirror:
     amd:
-      label: ":amd: (MI355) MLA Kernels"
+      label: ":amd: (MI355 DPX) MLA Kernels"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 40
       working_dir: /vllm-workspace/
@@ -702,10 +702,10 @@ steps:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
 
-- label: ":amd: (MI355) FP8 MoE Kernels"
+- label: ":amd: (MI355 DPX) FP8 MoE Kernels"
   key: amd-fp8-moe-kernels-mi355
   dind: false
-  device: mi355_1
+  device: mi355_dpx
   num_devices: 1
   timeout_in_minutes: 40
   working_dir: /vllm-workspace/tests
@@ -732,10 +732,10 @@ steps:
   - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
   - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: ":amd: (MI355) Kernels"
+- label: ":amd: (MI355 DPX) Kernels"
   key: amd-kernels-mi355
   dind: false
-  device: mi355_1
+  device: mi355_dpx
   num_devices: 1
   timeout_in_minutes: 25
   working_dir: /vllm-workspace/

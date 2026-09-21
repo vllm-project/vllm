@@ -239,9 +239,9 @@ steps:
     - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
   mirror:
     amd:
-      label: ":amd: (MI355) Extract Hidden States Integration Single GPU"
+      label: ":amd: (MI355 DPX) Extract Hidden States Integration Single GPU"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 45
       working_dir: /vllm-workspace
@@ -472,9 +472,9 @@ steps:
   - pytest -v -s utils_
   mirror:
     amd:
-      label: ":amd: (MI355) Async Engine, Inputs, Utils, Worker"
+      label: ":amd: (MI355 DPX) Async Engine, Inputs, Utils, Worker"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -661,9 +661,9 @@ steps:
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
   mirror:
     amd:
-      label: ":amd: (MI355) Acceptance Length (Large Models)"
+      label: ":amd: (MI355 DPX) Acceptance Length (Large Models)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
