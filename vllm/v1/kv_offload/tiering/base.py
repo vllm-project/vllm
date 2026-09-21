@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from vllm.v1.cache_hit_source import CacheHitSource
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
