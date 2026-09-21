@@ -26,7 +26,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
-from vllm.v1.worker import extensible_kv_cache
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import (
     _reserved_block_count,
@@ -194,27 +193,32 @@ def test_mixed_warmup_reserves_lookahead_blocks():
 
 
 class _StubExtensibleCache:
-    def __init__(self, committable_blocks: int) -> None:
-        self.committable_blocks_value = committable_blocks
+    """Stands in for `ExtensibleKVCache`: the engine-agreed cap wins over
+    what this rank alone could commit."""
+
+    def __init__(self, local_committable_blocks: int, cap: int | None) -> None:
+        self.local_committable_blocks = local_committable_blocks
+        self.committable_blocks_cap = cap
         self.commits: list[int] = []
 
     def committable_blocks(self) -> int:
-        return self.committable_blocks_value
+        if self.committable_blocks_cap is not None:
+            return self.committable_blocks_cap
+        return self.local_committable_blocks
 
     def commit(self, num_blocks: int) -> None:
         self.commits.append(num_blocks)
 
 
-def test_warmup_sizes_batches_by_the_rank_agreed_committable_count(monkeypatch):
+def test_warmup_sizes_batches_by_the_rank_agreed_committable_count():
     """Each rank measures its own free memory; the warmup batch and what it
-    commits must follow the smallest count across ranks, or ranks run
-    different shapes and can skip steps the others wait on."""
-    # Locally 1024 blocks could be committed, another rank reports 3.
-    monkeypatch.setattr(extensible_kv_cache, "_min_across_ranks", lambda value: 3)
+    commits must follow the smallest count across ranks (the engine's cap), or
+    ranks run different shapes and can skip steps the others wait on."""
+    # Locally 1024 blocks could be committed, the engine agreed on 3.
     runner = _make_runner(
         [_attention_group()], num_lookahead_tokens=0, num_spec_steps=0
     )
-    cache = _StubExtensibleCache(1024)
+    cache = _StubExtensibleCache(1024, cap=3)
     runner.extensible_kv_cache = cache
     recorder = _StepRecorder()
 
@@ -226,10 +230,9 @@ def test_warmup_sizes_batches_by_the_rank_agreed_committable_count(monkeypatch):
     assert cache.commits[0] == 3
 
 
-def test_mixed_warmup_skips_when_ranks_agree_too_few_blocks(monkeypatch):
-    monkeypatch.setattr(extensible_kv_cache, "_min_across_ranks", lambda value: 9)
+def test_mixed_warmup_skips_when_ranks_agree_too_few_blocks():
     runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
-    cache = _StubExtensibleCache(1024)
+    cache = _StubExtensibleCache(1024, cap=9)
     runner.extensible_kv_cache = cache
     recorder = _StepRecorder()
 

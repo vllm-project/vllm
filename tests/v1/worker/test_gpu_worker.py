@@ -398,7 +398,9 @@ def test_extensible_init_settles_dcp_interleave_before_runner_reads_it():
     log: list[str] = []
     runner = SimpleNamespace(
         initialize_kv_cache=lambda *args, **kwargs: log.append("initialize_kv_cache"),
-        extensible_kv_cache=SimpleNamespace(reserved_headroom_bytes=0),
+        extensible_kv_cache=SimpleNamespace(
+            reserved_headroom_bytes=0, committable_blocks=lambda: 42
+        ),
     )
     kv_cache_config = SimpleNamespace(
         num_blocks=8, kv_cache_layout=None, needs_kv_cache_zeroing=False
@@ -415,6 +417,6 @@ def test_extensible_init_settles_dcp_interleave_before_runner_reads_it():
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
         _v2_model_runner=lambda: runner,
     )
-    Worker.initialize_from_config(worker, kv_cache_config)
+    assert Worker.initialize_from_config(worker, kv_cache_config) == 42
     assert log == ["adjust_dcp:8", "initialize_kv_cache"]
     assert worker._kv_cache_config is kv_cache_config
