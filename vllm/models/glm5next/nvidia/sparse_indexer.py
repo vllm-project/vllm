@@ -10,6 +10,7 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
     _build_decode_scatter_indices,
@@ -37,21 +38,6 @@ if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
-
-
-def _use_cooperative_topk(
-    logits: torch.Tensor,
-    select_k: int,
-    num_rows: int,
-) -> bool:
-    return (
-        current_platform.is_cuda()
-        and select_k in (512, 1024, 2048)
-        and num_rows <= 64
-        and logits.stride(0) % 4 == 0
-        and current_platform.has_device_capability(90)
-        and not current_platform.is_device_capability_family(120)
-    )
 
 
 # kpool write helper: form pools from the current token batch and compress them
@@ -117,7 +103,7 @@ def sparse_attn_indexer_kpool(
     scale_fmt: str | None,
     topk_tokens: int,
     head_dim: int,
-    max_model_len: int,
+    max_pool_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
@@ -134,6 +120,7 @@ def sparse_attn_indexer_kpool(
     # path and when the tail cache is disabled.
     tail_kv_cache: torch.Tensor | None = None,
     tail_prefix: str | None = None,
+    topk_backend: str = "auto",
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -153,7 +140,7 @@ def sparse_attn_indexer_kpool(
         )
 
         # Reserve profiler-visible memory for the worst-case decode logits,
-        # whose shape is [B * next_n, max_model_len]. This profiling branch
+        # whose shape is [B * next_n, max_pool_len]. This profiling branch
         # returns before invoking the logits kernel itself.
         cfg = get_current_vllm_config_or_none()
         worst_decode_tokens = 0
@@ -169,7 +156,7 @@ def sparse_attn_indexer_kpool(
                 sched.max_num_batched_tokens,
             )
         # float32 logits -> 4 bytes/element; uint8 sentinel so elems == bytes.
-        decode_logits_elems = worst_decode_tokens * max_model_len * 4
+        decode_logits_elems = worst_decode_tokens * max_pool_len * 4
         prefill_cap_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         max_logits_elems = max(decode_logits_elems, prefill_cap_elems)
         _ = torch.empty(
@@ -569,7 +556,7 @@ def sparse_attn_indexer_kpool(
             seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
+            max_model_len=max_pool_len,
             clean_logits=False,
         )
         num_rows = logits.shape[0]
@@ -584,35 +571,18 @@ def sparse_attn_indexer_kpool(
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if current_platform.is_cuda() and select_k in (512, 1024, 2048):
-            workspace_manager = current_workspace_manager()
-            (topk_workspace,) = workspace_manager.get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-            )
-            topk_op = (
-                torch.ops._C.cooperative_topk
-                if _use_cooperative_topk(logits, select_k, num_rows)
-                else torch.ops._C.persistent_topk
-            )
-            topk_op(
-                logits,
-                seq_lens,
-                topk_dst,
-                topk_workspace,
-                select_k,
-                attn_metadata_narrowed.max_seq_len,
-            )
-        else:
-            torch.ops._C.top_k_per_row_decode(
-                logits,
-                next_n,
-                seq_lens,
-                topk_dst,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                select_k,
-            )
+        # Shared dispatcher with the DSA sparse indexer, so the kpool select
+        # honors kernel_config.sparse_indexer_topk_backend and picks between
+        # cooperative/persistent by batch size instead of always taking the
+        # same kernel.
+        get_indexer_topk(topk_backend)(
+            logits,
+            seq_lens,
+            next_n,
+            topk_dst,
+            select_k,
+            attn_metadata_narrowed.max_seq_len,
+        )
 
         # Resolve to token-level indices in the output buffer.
         if index_kpool > 1:
@@ -668,7 +638,7 @@ class SparseAttnIndexerKpool(CustomOp):
         scale_fmt: str,
         topk_tokens: int,
         head_dim: int,
-        max_model_len: int,
+        max_pool_len: int,
         max_total_seq_len: int,
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
@@ -682,7 +652,7 @@ class SparseAttnIndexerKpool(CustomOp):
         self.scale_fmt = scale_fmt
         self.topk_tokens = topk_tokens
         self.head_dim = head_dim
-        self.max_model_len = max_model_len
+        self.max_pool_len = max_pool_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
@@ -692,6 +662,11 @@ class SparseAttnIndexerKpool(CustomOp):
                 "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
             )
         _cfg = get_current_vllm_config_or_none()
+        self.topk_backend = (
+            _cfg.kernel_config.sparse_indexer_topk_backend
+            if _cfg is not None
+            else "auto"
+        )
         _parallel = _cfg.parallel_config if _cfg is not None else None
         if (
             _parallel is not None
@@ -755,7 +730,7 @@ class SparseAttnIndexerKpool(CustomOp):
             self.scale_fmt,
             self.topk_tokens,
             self.head_dim,
-            self.max_model_len,
+            self.max_pool_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
@@ -766,4 +741,5 @@ class SparseAttnIndexerKpool(CustomOp):
             positions,
             self.tail_cache.kv_cache if self.tail_cache is not None else None,
             self.tail_cache.prefix if self.tail_cache is not None else None,
+            self.topk_backend,
         )
