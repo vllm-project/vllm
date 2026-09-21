@@ -42,13 +42,16 @@ class Glm47MoeModelToolParser(Glm47MoeParserToolAdapter):  # type: ignore[valid-
         from vllm.tool_parsers.structural_tag_registry import (
             get_model_structural_tag,
         )
+        from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
+        # FUNCTION lifts the auto/no-strict gate so envelope constraints still
+        # apply without pinning argument schemas (PARAMETER).
         structural_tag = get_model_structural_tag(
             model="glm_4_7_nonstrict",
             tools=request.tools,
             tool_choice=request.tool_choice,
             reasoning=False,
-            non_strict=True,
+            strict_level=ToolStrictLevel.FUNCTION,
         )
         if structural_tag is None:
             return super().adjust_request(request)

@@ -11,7 +11,6 @@ from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from openai.types.responses.tool_choice_function import ToolChoiceFunction
 from xgrammar import StructuralTag, normalize_tool_choice
-from xgrammar import builtin_structural_tag as xgrammar_builtin_structural_tag
 from xgrammar import get_model_structural_tag as get_xgrammar_model_structural_tag
 from xgrammar.openai_tool_call_schema import (
     BuiltinToolParam,
@@ -36,6 +35,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -52,7 +52,6 @@ StructuralTagBuilder: TypeAlias = Callable[
         SimplifiedToolChoice,
         bool,
         str,
-        bool,
     ],
     StructuralTag,
 ]
@@ -72,10 +71,11 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v3_2",
         "glm_4_7",
         "deepseek_v4",
+        "deepseek_v4_1",
     }
 )
 VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
-    {"deepseek_v41", "glm_4_7_nonstrict", "hermes", "hy_v4", "kimi_k3"}
+    {"glm_4_7_nonstrict", "hermes", "hy_v4", "kimi_k3"}
 )
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
@@ -96,15 +96,57 @@ def register_vllm_structural_tag(
     return decorator
 
 
+def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
+    if isinstance(tool, FunctionTool):
+        return tool.strict is True
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.function.strict is True
+    return False
+
+
 def _any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
-    for tool in tools:
-        if isinstance(tool, FunctionTool) and tool.strict is True:
-            return True
-        if isinstance(tool, ChatCompletionToolsParam) and tool.function.strict is True:
-            return True
-    return False
+    return any(_tool_is_strict(tool) for tool in tools)
+
+
+def _with_tool_strict(
+    tool: ChatCompletionToolsParam | ResponsesTool,
+    strict: bool,
+) -> ChatCompletionToolsParam | ResponsesTool:
+    """Return a copy of ``tool`` with ``strict`` set, leaving the request's alone."""
+    if isinstance(tool, FunctionTool):
+        return tool.model_copy(update={"strict": strict})
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.model_copy(
+            update={"function": tool.function.model_copy(update={"strict": strict})}
+        )
+    return tool
+
+
+def _resolve_tool_strictness(
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+    strict_level: ToolStrictLevel,
+) -> Sequence[ChatCompletionToolsParam | ResponsesTool] | None:
+    """Decide whether a structural tag applies and pin each tool's ``strict``.
+
+    A tool without an explicit ``strict`` is treated as non-strict: its call
+    envelope is still constrained, but its arguments stay free unless the
+    server level is PARAMETER. ``None`` means no structural tag.
+    """
+    if (
+        tool_choice == "auto"
+        and strict_level == ToolStrictLevel.AUTO
+        and not _any_tool_strict(tools)
+    ):
+        return None
+    return [
+        _with_tool_strict(
+            tool, strict_level >= ToolStrictLevel.PARAMETER or _tool_is_strict(tool)
+        )
+        for tool in tools
+    ]
 
 
 def get_model_structural_tag(
@@ -113,14 +155,14 @@ def get_model_structural_tag(
     tool_choice: ToolChoice,
     reasoning: bool,
     token_suffix: str = "",
-    non_strict: bool = False,
+    strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
-
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools) and not non_strict:
+    tools = _resolve_tool_strictness(tools, tool_choice, strict_level)
+    if tools is None:
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
@@ -137,13 +179,6 @@ def get_model_structural_tag(
             simplified_tool_choice,
             reasoning,
             token_suffix,
-            non_strict,
-        )
-
-    if non_strict:
-        raise ValueError(
-            f"Structural tag model {model!r} does not support non-strict "
-            "tool calling constraints"
         )
 
     if model not in XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS:
@@ -168,7 +203,6 @@ def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
 ) -> dict[str, Any]:
     """Convert tool objects to xgrammar's Chat Completions tool protocol."""
-
     if isinstance(tool, FunctionTool):
         function: dict[str, Any] = {"name": tool.name}
         if tool.description is not None:
@@ -188,7 +222,6 @@ def _dump_tool_choice_for_xgrammar(
     tool_choice: ToolChoice,
 ) -> dict[str, Any] | str | None:
     """Convert tool_choice objects to xgrammar's expected protocol."""
-
     if tool_choice is None:
         return None
 
@@ -238,111 +271,6 @@ def get_function_parameters(function) -> dict[str, Any] | bool:
     return function.parameters if function.parameters is not None else True
 
 
-_V41_CALLS_START = "<｜DSML｜ calls>"
-_V41_CALLS_END = "</｜DSML｜ calls>"
-_V41_INVOKE_END = "</｜DSML｜ invoke>"
-_V41_PARAMETER_END = "</｜DSML｜ parameter>"
-
-
-@register_vllm_structural_tag("deepseek_v41")
-def get_deepseek_v41_structural_tag(
-    tools: list[FunctionToolParam],
-    builtin_tools: list[BuiltinToolParam],
-    tool_choice: SimplifiedToolChoice,
-    reasoning: bool,
-    token_suffix: str = "",
-    non_strict: bool = False,
-) -> StructuralTag:
-    # Serving enables this visible-text grammar after the reasoning boundary.
-    builder = getattr(
-        xgrammar_builtin_structural_tag, "get_deepseek_v4_1_structural_tag", None
-    )
-    if builder is not None:
-        return builder(
-            tools=tools,
-            builtin_tools=builtin_tools,
-            tool_choice=tool_choice,
-            reasoning="disabled",
-        )
-
-    del builtin_tools, reasoning, token_suffix, non_strict
-
-    # Compatibility with xgrammar releases without the V4.1 builtin. This constrains
-    # tool names and DSML/value syntax only. Parameter names, presence, uniqueness
-    # and value schemas remain unconstrained, including for strict=true. The request
-    # layer still uses strict to decide whether auto tool choice activates a grammar.
-    parameter = TagFormat(
-        begin='<｜DSML｜ parameter name="',
-        content=SequenceFormat(
-            elements=[
-                RegexFormat(pattern=r'[^"]+'),
-                ConstStringFormat(value='" string="'),
-                OrFormat(
-                    elements=[
-                        SequenceFormat(
-                            elements=[
-                                ConstStringFormat(value='true">'),
-                                AnyTextFormat(
-                                    excludes=[
-                                        _V41_PARAMETER_END,
-                                        _V41_INVOKE_END,
-                                        _V41_CALLS_END,
-                                    ]
-                                ),
-                            ]
-                        ),
-                        SequenceFormat(
-                            elements=[
-                                ConstStringFormat(value='false">'),
-                                JSONSchemaFormat(json_schema=True),
-                            ]
-                        ),
-                    ]
-                ),
-            ]
-        ),
-        end=f"{_V41_PARAMETER_END}\n",
-    )
-    calls = TagsWithSeparatorFormat(
-        tags=[
-            TagFormat(
-                begin=f'<｜DSML｜ invoke name="{tool.function.name}">\n',
-                content=StarFormat(content=parameter),
-                end=f"{_V41_INVOKE_END}\n",
-            )
-            for tool in tools
-        ],
-        separator="",
-        at_least_one=True,
-        stop_after_first=tool_choice == "forced",
-    )
-    if tool_choice == "auto":
-        return StructuralTag(
-            format=TriggeredTagsFormat(
-                triggers=[_V41_CALLS_START],
-                tags=[
-                    TagFormat(
-                        begin=f"{_V41_CALLS_START}\n",
-                        content=calls,
-                        end=_V41_CALLS_END,
-                    )
-                ],
-                excludes=["<think>", "</think>"],
-            )
-            if tools
-            else AnyTextFormat(excludes=["<think>", "</think>"])
-        )
-    return StructuralTag(
-        format=SequenceFormat(
-            elements=[
-                ConstStringFormat(value=f"\n\n{_V41_CALLS_START}\n"),
-                calls,
-                ConstStringFormat(value=_V41_CALLS_END),
-            ]
-        )
-    )
-
-
 def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
     arguments_field_prefix = '", "arguments": '
     formats = [
@@ -374,9 +302,8 @@ def get_hermes_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
-    non_strict: bool = False,
 ) -> StructuralTag:
-    del builtin_tools, reasoning, token_suffix, non_strict
+    del builtin_tools, reasoning, token_suffix
 
     tool_call_trigger = "<tool_call>"
 
@@ -425,9 +352,8 @@ def get_minimax_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
-    non_strict: bool = False,
 ) -> StructuralTag:
-    del builtin_tools, reasoning, token_suffix, non_strict
+    del builtin_tools, reasoning, token_suffix
 
     tool_call_begin = "<minimax:tool_call>\n"
     tool_call_end = "</minimax:tool_call>"
@@ -723,9 +649,8 @@ def get_kimi_k3_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
-    non_strict: bool = False,
 ) -> StructuralTag:
-    del builtin_tools, reasoning, token_suffix, non_strict
+    del builtin_tools, reasoning, token_suffix
 
     trailer = OptionalFormat(content=ConstStringFormat(value=_K3_MESSAGE_CLOSE))
 
@@ -785,7 +710,6 @@ def get_hy_v4_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
-    non_strict: bool = False,
 ) -> StructuralTag:
     """Build HYV4 <tool_calls>/<tool_call>/<arg_key>/<arg_value> structural tags.
 
@@ -798,9 +722,9 @@ def get_hy_v4_structural_tag(
             leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
             uses unsuffixed tokens. The HYV4 tool parser reads it off the
             tokenizer vocab and passes it to ``get_model_structural_tag``.
-        non_strict: Unused; HYV4 always applies shallow constraints.
+
     """
-    del builtin_tools, non_strict
+    del builtin_tools
 
     think_end = f"</think{token_suffix}>"
     tool_calls_begin = f"<tool_calls{token_suffix}>"
@@ -961,7 +885,6 @@ def get_glm_4_7_non_strict_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
-    non_strict: bool = False,
 ) -> StructuralTag:
     """Build the non-strict GLM-4.7 structural tag.
 
@@ -976,9 +899,9 @@ def get_glm_4_7_non_strict_structural_tag(
         tool_choice: Simplified tool choice.
         reasoning: Whether the grammar also covers the reasoning phase.
         token_suffix: Unused; GLM-4.7 structural tokens are fixed.
-        non_strict: Unused; the registration key is non-strict only.
+
     """
-    del builtin_tools, token_suffix, non_strict
+    del builtin_tools, token_suffix
 
     tags = [_glm_4_7_tool_tag(tool) for tool in tools]
     if tool_choice == "auto":

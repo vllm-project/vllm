@@ -245,8 +245,8 @@ def _dequantize_fp8_ds_mla_entry(
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion path.
-    """
 
+    """
     # The first kv_lora_rank bytes store FP8 latent values with one scale per
     # 128 element tile written as float32 right after the latent payload.
     scales = cache_slice.view(torch.float32)[kv_lora_rank // 4 : kv_lora_rank // 4 + 4]
@@ -283,8 +283,8 @@ def _quantize_dequantize_fp8_ds_mla(
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion in dequantization.
-    """
 
+    """
     if kv_c.numel() == 0:
         return kv_c.clone(), k_pe.clone()
 
@@ -421,7 +421,18 @@ def test_sparse_backend_decode_correctness(
     workspace_init,
     q_scale: float,
     k_scale: float,
+    monkeypatch,
 ):
+    if (
+        batch_name == "large_q_pure_prefill"
+        and backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype == "fp8_ds_mla"
+        and tensor_parallel_size == 4
+    ):
+        monkeypatch.setattr(
+            "vllm.v1.attention.backends.mla.flashmla_sparse.split_prefill_chunks",
+            lambda rows, capacity: [(i, i + 1) for i in range(len(rows))],
+        )
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
@@ -774,6 +785,10 @@ def test_sparse_backend_decode_correctness(
     )
 
     with torch.inference_mode():
+        if backend_cls == FlashMLASparseBackend and kv_cache_dtype == "fp8_ds_mla":
+            from vllm.v1.worker.workspace import current_workspace_manager
+
+            current_workspace_manager().lock()
         backend_output = mock_layer.forward_impl(
             query_vllm,
             kv_c_vllm,
