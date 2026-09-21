@@ -6543,6 +6543,17 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
+        if current_platform.is_rocm() and self.parallel_config.use_ubatching:
+            # Size the shared (ubatch 0) workspace slot with a full-batch
+            # run; the ubatched profile run below sizes the per-ubatch
+            # slots. Either run alone leaves one slot undersized for its
+            # runtime path and trips the post-capture workspace lock.
+            self._dummy_run(
+                self.max_num_tokens,
+                is_profile=True,
+                allow_microbatching=False,
+            )
+
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
