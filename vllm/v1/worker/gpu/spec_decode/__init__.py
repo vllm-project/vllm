@@ -26,6 +26,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         )
 
         return DFlashSpeculator(vllm_config, device)
+    elif speculative_config.method == "xpress":
+        from vllm.v1.worker.gpu.spec_decode.xpress.speculator import (
+            XPressSpeculator,
+        )
+
+        return XPressSpeculator(vllm_config, device)
     elif speculative_config.method == "dspark":
         from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
             DSparkSpeculator,
