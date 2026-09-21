@@ -1653,7 +1653,7 @@ def test_two_groups_full_and_sliding_window(
         expected_loaded=((0, 0), (0, 1), (0, 2), (1, 1), (1, 2)),
     )
     assert prefill_stats is not None
-    assert prefill_stats.external_cached_token_sources == [
+    assert prefill_stats.external_cached_sources.segments == [
         ("host" if sparse_source == "host" else "external_unspecified", block_size * 3)
     ]
     assert prefill_stats.num_external_cached_tokens == block_size * 3
