@@ -20,11 +20,22 @@ from vllm.v1.worker.gpu_worker import Worker
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 
-    def __init__(self, raise_on_update: bool = False):
+    def __init__(
+        self,
+        raise_on_update: bool = False,
+        raise_on_start: bool = False,
+        raise_on_finish: bool = False,
+        raise_on_abort: bool = False,
+    ):
         self.raise_on_update = raise_on_update
+        self.raise_on_start = raise_on_start
+        self.raise_on_finish = raise_on_finish
+        self.raise_on_abort = raise_on_abort
         self.started = False
         self.finished = False
         self.reset_count = 0
+        self.abort_count = 0
+        self.calls: list[str] = []
         self.supports_draft_weight_update = False
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
@@ -34,19 +45,33 @@ class _RecordingEngine:
 
     def start_weight_update(self) -> None:
         self._record_config()
+        self.calls.append("start")
+        if self.raise_on_start:
+            raise ValueError("boom")
         self.started = True
 
     def update_weights(self, update_info: dict) -> None:
         self._record_config()
+        self.calls.append("update")
         self.update_calls.append(update_info)
         if self.raise_on_update:
             raise ValueError("boom")
 
     def finish_weight_update(self) -> None:
         self._record_config()
+        self.calls.append("finish")
+        if self.raise_on_finish:
+            raise ValueError("boom")
         self.finished = True
 
+    def abort_weight_update(self) -> None:
+        self.calls.append("abort")
+        self.abort_count += 1
+        if self.raise_on_abort:
+            raise RuntimeError("abort failed")
+
     def reset_weight_update_target(self) -> None:
+        self.calls.append("reset")
         self.reset_count += 1
 
 
@@ -211,6 +236,71 @@ def test_update_resets_active_on_error():
     # A failed update ends the session so the next start is clean.
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+
+
+def test_update_error_lets_engine_abort_before_target_reset():
+    engine = _RecordingEngine(raise_on_update=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.update_weights(worker, {"names": ["w"]})
+
+    # The engine restores the model while it still points at the session's
+    # target, then the target is reset and the session is gone.
+    assert engine.calls == ["start", "update", "abort", "reset"]
+    assert worker._weight_update_active is False
+    with pytest.raises(RuntimeError, match="without a matching"):
+        Worker.finish_weight_update(worker)
+
+
+def test_start_error_lets_engine_abort():
+    engine = _RecordingEngine(raise_on_start=True)
+    worker = _make_worker(engine)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.start_weight_update(worker)
+
+    assert engine.calls == ["start", "abort", "reset"]
+    assert worker._weight_update_active is False
+
+
+def test_finish_error_lets_engine_abort_and_drops_session():
+    engine = _RecordingEngine(raise_on_finish=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.finish_weight_update(worker)
+
+    assert engine.calls == ["start", "update", "finish", "abort", "reset"]
+    assert worker._weight_update_active is False
+    assert worker.model_runner.reset_lora_calls == 0
+
+
+def test_abort_error_does_not_hide_the_update_error():
+    engine = _RecordingEngine(raise_on_update=True, raise_on_abort=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.update_weights(worker, {"names": ["w"]})
+
+    # The target is still reset and the session still ends.
+    assert engine.calls == ["start", "update", "abort", "reset"]
+    assert worker._weight_update_active is False
+
+
+def test_successful_session_never_aborts():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+    Worker.finish_weight_update(worker)
+
+    assert engine.calls == ["start", "update", "finish", "reset"]
+    assert engine.abort_count == 0
 
 
 def test_missing_engine_raises():

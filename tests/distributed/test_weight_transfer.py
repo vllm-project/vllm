@@ -63,6 +63,8 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLWeightTransferUpdateInfo,
     SparseWeightPatch,
 )
+from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -1139,6 +1141,35 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     with pytest.raises(ValueError, match="IPC handle not found"):
         engine.receive_weights(update_info)
+
+
+def test_ipc_abort_weight_update_restores_model():
+    """An aborted update leaves the model with the weights it started from."""
+    layer = torch.nn.Linear(2, 2, bias=False)
+    layer.weight.weight_loader = default_weight_loader
+    model = torch.nn.Sequential(layer)
+    original = layer.weight.detach().clone()
+    record_metadata_for_reloading(model)
+    engine = IPCWeightTransferEngine(
+        WeightTransferConfig(backend="ipc"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+
+    engine.start_weight_update()
+    assert layer.weight.is_meta
+
+    engine.abort_weight_update()
+
+    assert not layer.weight.is_meta
+    assert torch.equal(layer.weight, original)
+
+    # A new session starts cleanly from the restored weights.
+    engine.start_weight_update()
+    assert layer.weight.is_meta
+    engine.abort_weight_update()
+    assert torch.equal(layer.weight, original)
 
 
 class RecordingClient:

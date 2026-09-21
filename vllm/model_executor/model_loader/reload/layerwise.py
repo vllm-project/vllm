@@ -37,6 +37,7 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "abort_layerwise_reload",
 ]
 
 
@@ -285,6 +286,50 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
 def finalize_layerwise_reload(*args, **kwargs):
     finalize_layerwise_processing(*args, **kwargs)
+
+
+def abort_layerwise_reload(model: torch.nn.Module):
+    """Undo an `initialize_layerwise_reload` that will not be finalized.
+
+    Every layer whose reload is still open gets its saved kernel tensors placed
+    back and its buffered partial weights dropped, so it serves the weights it
+    had before the reload started.
+
+    Note:
+        A layer whose weights all arrived before the failure was already
+        processed and copied back by `_layerwise_process`, so it keeps the new
+        weights; only layers still mid-reload revert. The model can therefore
+        hold a mix of the old and new versions until the update is resent. Safe
+        to call when no reload is in progress.
+
+    """
+    if hasattr(model, "_original_do_torchao_reload"):
+        model._do_torchao_reload = model._original_do_torchao_reload
+
+    restored = 0
+    for layer in model.modules():
+        # `.get`, not `get_layerwise_info`: aborting a model that never started
+        # a reload should touch nothing, not create empty info entries.
+        info = LAYERWISE_INFO.get(layer)
+        if info is None or not info.can_load():
+            continue
+
+        # The weight transfer engines always record kernel tensors before
+        # parking a layer, so this is set on their path; guard it for the
+        # online-quantization case, which arms a layer without them.
+        if info.kernel_tensors is not None:
+            _place_kernel_tensors(layer, info)
+        info.reset()
+        restored += 1
+
+    if restored:
+        logger.warning(
+            "Restored %d layer(s) to their pre-update weights after a failed "
+            "weight reload; any layer already applied keeps the new weights, so "
+            "resend the full update to bring the model back to one version.",
+            restored,
+        )
+    LOADING_LAYERS.clear()
 
 
 def _finalize_attention_layer(
