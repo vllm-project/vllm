@@ -197,6 +197,11 @@ class DiffusionGemmaForConditionalGeneration(
         text_config.attention_k_eq_v = True
 
         # ---- Vision tower ----
+        # Gemma4's image path, borrowed below, reads this flag.
+        lora_config = vllm_config.lora_config
+        self._enable_mm_lora = bool(
+            lora_config is not None and lora_config.enable_tower_connector_lora
+        )
         vision_config = getattr(config, "vision_config", None)
         self.embed_vision: Gemma4MultimodalEmbedder | None
         if vision_config is not None:
