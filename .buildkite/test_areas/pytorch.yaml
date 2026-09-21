@@ -239,7 +239,6 @@ steps:
       label: ":amd: (MI300) PyTorch Nightly Dependency Override Check"
       dind: false
       device: mi300_1
-      soft_fail: false
       timeout_in_minutes: 30
       depends_on:
       - image-build-amd
