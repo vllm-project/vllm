@@ -15,7 +15,6 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.spec_decode import (
@@ -226,9 +225,7 @@ class DraftModelSpeculator(BaseSpeculator):
         )
         self.draft_attn_layer_names = all_attn_layers - target_attn_layer_names
 
-        target_supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-            self.vllm_config.model_config
-        )
+        target_supports_mm = self.vllm_config.model_config.supports_multimodal_inputs
         draft_supports_mm = supports_multimodal_embeddings(self.model)
         self.supports_mm_inputs = target_supports_mm and draft_supports_mm
         if target_supports_mm and not draft_supports_mm:
@@ -481,6 +478,7 @@ class DraftModelSpeculator(BaseSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        dummy_run: bool = False,
     ) -> None:
         # Copy temperature, seeds, and idx mapping to the pre-allocated buffers.
         # NOTE(woosuk): For draft sampling, we only consider the temperature
@@ -490,10 +488,15 @@ class DraftModelSpeculator(BaseSpeculator):
         # affect the output distribution after rejection sampling.
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
-        self.idx_mapping[:num_reqs].copy_(idx_mapping)
-        # idx_mapping for CG padded requests points to -1, which is ignored
-        # during sampling to prevent writing stale values to draft logits.
-        self.idx_mapping[num_reqs:].fill_(-1)
+        # idx_mapping == -1 marks a row the drafter must not act on: sampling
+        # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows
+        # always get it; a dummy batch gets it for every row, since its arange
+        # idx_mapping names request-state slots with stale block tables.
+        if dummy_run:
+            self.idx_mapping.fill_(-1)
+        else:
+            self.idx_mapping[:num_reqs].copy_(idx_mapping)
+            self.idx_mapping[num_reqs:].fill_(-1)
 
     def _build_uniform_batch_dp_sync(
         self,

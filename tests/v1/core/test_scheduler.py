@@ -19,6 +19,10 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputSchedulerConnector,
+    AuxRequestOutput,
+)
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
@@ -36,10 +40,13 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
+from vllm.v1.engine.core import EngineCore
+from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -52,7 +59,6 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
-    RoutedExpertsLists,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
 )
@@ -133,21 +139,18 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
-def test_routed_experts_prompt_start_at_prompt_end():
+@pytest.mark.parametrize("max_tokens", [1, 2])
+def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     """A prompt-end offset should return empty routing data, not crash."""
     scheduler = create_scheduler()
-    (request,) = create_requests(num_requests=1)
+    (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector()
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
-    num_tokens = scheduler_output.num_scheduled_tokens[request.request_id]
-
-    manager = Mock()
-    manager.routed_experts_by_slot = np.empty((0, 1, 1), dtype=np.uint8)
-    manager.get.return_value = np.empty((0, 1, 1), dtype=np.uint8)
-    scheduler.enable_return_routed_experts = True
-    scheduler.routed_experts_mgr = manager
-    scheduler._re_block_ids = {request.request_id: []}
+    assert scheduler_output.aux_output_connector_metadata.requests == {
+        request.request_id: request.num_prompt_tokens
+    }
 
     outputs = scheduler.update_from_output(
         scheduler_output,
@@ -158,21 +161,23 @@ def test_routed_experts_prompt_start_at_prompt_end():
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
-            routed_experts=RoutedExpertsLists(
-                routing_data=np.zeros((num_tokens, 1, 1), dtype=np.uint8),
-                slot_mapping=np.arange(num_tokens),
-            ),
+            aux_output_connector_output={
+                request.request_id: AuxRequestOutput(
+                    request.num_prompt_tokens,
+                    np.empty((0, 1, 1), dtype=np.uint8),
+                )
+            },
         ),
     )
 
-    manager.get.assert_called_once_with(
-        [], request.num_prompt_tokens, token_start=request.num_prompt_tokens
-    )
-    assert outputs[request.client_index].outputs[0].routed_experts.shape == (0, 1, 1)
+    output = outputs[request.client_index].outputs[0]
+    assert output.new_token_ids == [0]
+    assert output.routed_experts.shape == (0, 1, 1)
 
 
 def test_finish_request():
     scheduler = create_scheduler()
+    scheduler.aux_output_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -181,6 +186,7 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+        scheduler.aux_output_connector.request_finished.assert_called_with(request)
 
 
 def test_get_num_unfinished_requests():
@@ -1370,6 +1376,31 @@ def test_preemption_re_records_prefix_cache_query():
     assert stats.preempted_requests == 1
 
 
+def test_preemption_processes_stale_aux_output():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.running.remove(request)
+    scheduler.aux_output_connector = Mock()
+    scheduler._preempt_request(request, 0.0)
+    scheduler.aux_output_connector.request_finished.assert_called_once_with(request)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.aux_output_connector.take_output.assert_called_once_with(request, None)
+
+
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():
     """With prefix caching off there is no local lookup, so admitting a request
     records no phantom miss."""
@@ -1458,6 +1489,7 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -1474,10 +1506,20 @@ def test_scheduler_reset_prefix_cache():
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
     assert not scheduler.reset_prefix_cache()
+    scheduler.aux_output_connector.reset.assert_not_called()
 
-    # Reset prefix cache with reset_running_requests=True. All running requests
-    # Should be pushed back to the waiting queue and kv cache should be freed
+    with pytest.raises(RuntimeError, match=r"pause\(mode='keep'\)"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    # pause(mode="keep") also waits for scheduled model outputs to drain.
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    with pytest.raises(RuntimeError, match="model output is in flight"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    for request in requests:
+        request.num_in_flight_tokens = 0
+
     assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.aux_output_connector.reset.assert_called_once_with()
 
     # Verify requests moved from running to waiting
     assert len(scheduler.waiting) == len(requests)
@@ -1485,6 +1527,89 @@ def test_scheduler_reset_prefix_cache():
 
     for i, request in enumerate(requests):
         assert scheduler.waiting[i] == request
+
+
+@pytest.mark.parametrize("reset_successful", [False, True])
+def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = Mock()
+    scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=reset_successful)
+
+    assert scheduler.reset_prefix_cache() is reset_successful
+    assert scheduler.aux_output_connector.reset.call_count == int(reset_successful)
+
+
+def test_kv_cache_release_after_keep_pause_preserves_requests():
+    """A completed keep pause permits release and recomputation of live requests."""
+    scheduler = create_scheduler(max_num_seqs=1, enable_prefix_caching=True)
+    running, waiting = create_requests(num_requests=2)
+    for request in (running, waiting):
+        scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[running.request_id],
+            req_id_to_index={running.request_id: 0},
+            sampled_token_ids=[[1]],
+        ),
+    )
+    assert scheduler.kv_cache_manager.get_block_ids(running.request_id)[0]
+
+    core = object.__new__(EngineCore)
+    core.scheduler = scheduler
+    core.model_executor = Mock(is_sleeping=False)
+    core.mm_receiver_cache = None
+    core.batch_queue = None
+
+    assert core.pause_scheduler(mode="keep", clear_cache=False) is None
+    assert scheduler.running == [running]
+    assert list(scheduler.waiting) == [waiting]
+    assert not scheduler.has_requests()
+
+    core.release_kv_cache_memory()
+
+    core.model_executor.discard.assert_called_once_with(("kv_cache",))
+    assert scheduler.requests == {
+        request.request_id: request for request in (running, waiting)
+    }
+    assert not scheduler.running
+    assert list(scheduler.waiting) == [running, waiting]
+    assert running.status == RequestStatus.PREEMPTED
+    assert running.num_computed_tokens == 0
+    assert list(running.output_token_ids) == [1]
+    assert not scheduler.kv_cache_manager.get_block_ids(running.request_id)[0]
+    assert scheduler.schedule().total_num_scheduled_tokens == 0
+
+    assert core.wake_up(tags=["kv_cache"])
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {running.request_id: running.num_tokens}
+
+
+@pytest.mark.parametrize(
+    "sleeping_tags",
+    [{"weights", "kv_cache"}, {"weights"}, {"kv_cache"}],
+    ids=["full-sleep", "weights-only", "kv-only-or-repeated-release"],
+)
+def test_kv_cache_release_rejects_nonresident_memory(sleeping_tags):
+    """Reject release without resetting caches or discarding more memory."""
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    core.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    core.batch_queue = None
+    core._reset_caches = Mock()
+    core.model_executor = object.__new__(UniProcExecutor)
+    core.model_executor.sleeping_tags = sleeping_tags.copy()
+    core.model_executor.collective_rpc = Mock()
+
+    with pytest.raises(
+        RuntimeError, match="requires all executor memory to be resident"
+    ):
+        core.release_kv_cache_memory()
+
+    core._reset_caches.assert_not_called()
+    core.model_executor.collective_rpc.assert_not_called()
+    assert core.model_executor.sleeping_tags == sleeping_tags
 
 
 def test_reset_connector_cache_no_connector_is_no_op_success():
@@ -2300,6 +2425,25 @@ def test_has_sync_kv_loads(
     output = scheduler.schedule()
 
     assert output.has_sync_kv_loads is expected_has_sync_loads
+
+
+def test_kv_connector_honors_skip_reading_prefix_cache():
+    """A request that must score every prompt row takes no external hit."""
+    BLOCK_SIZE = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=False),
+        block_size=BLOCK_SIZE,
+    )
+    plain, scoring = create_requests(num_requests=2, num_tokens=BLOCK_SIZE * 4)
+    scoring.sampling_params.prompt_logprobs = 1
+    scoring.skip_reading_prefix_cache = True
+    scheduler.add_request(plain)
+    scheduler.add_request(scoring)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
+    assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
 
 
 @pytest.mark.parametrize("is_async", [False, True])
@@ -3696,10 +3840,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
+    scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.vllm_config = Mock()
-    scheduler.vllm_config.model_config.enable_return_routed_experts = False
-    scheduler.enable_return_routed_experts = False
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False

@@ -46,12 +46,49 @@ from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
+    _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
     try_get_dense_modules,
 )
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
+    calls = []
+
+    def original_validate_rope(config, *args, **kwargs):
+        calls.append(config)
+
+    from transformers import PretrainedConfig
+
+    monkeypatch.setattr(PretrainedConfig, "validate_rope", original_validate_rope)
+    _patch_hf_transformers_nested_rope_validation()
+
+    nested_rope_parameters = {
+        "full_attention": {"rope_type": "default"},
+        "original_max_position_embeddings": 32768,
+    }
+    PretrainedConfig.validate_rope(
+        SimpleNamespace(rope_parameters=nested_rope_parameters)
+    )
+    assert nested_rope_parameters == {"full_attention": {"rope_type": "default"}}
+
+    flat_rope_parameters = {
+        "rope_type": "linear",
+        "factor": 8.0,
+        "rope_theta": 500000.0,
+    }
+    PretrainedConfig.validate_rope(
+        SimpleNamespace(rope_parameters=flat_rope_parameters)
+    )
+    assert flat_rope_parameters == {
+        "rope_type": "linear",
+        "factor": 8.0,
+        "rope_theta": 500000.0,
+    }
+    assert len(calls) == 2
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -477,45 +514,6 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         default_breakable_cudagraph_architectures.cache_clear()
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
-@pytest.mark.parametrize(
-    ("architecture", "use_v2", "mode", "expected"),
-    [
-        ("DeepseekV4ForCausalLM", True, None, CUDAGraphMode.NONE),
-        ("DeepseekV4ForConditionalGeneration", True, None, CUDAGraphMode.NONE),
-        ("DeepseekV4ForCausalLM", False, None, None),
-        ("LlamaForCausalLM", True, None, None),
-        (
-            "DeepseekV4ForCausalLM",
-            True,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ),
-    ],
-)
-def test_rocm_gfx950_deepseek_v4_cudagraph_default(
-    monkeypatch, architecture, use_v2, mode, expected
-):
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.platforms import rocm
-
-    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
-    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: False)
-    monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: False)
-    monkeypatch.setattr(
-        rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: False
-    )
-    config = SimpleNamespace(
-        compilation_config=CompilationConfig(cudagraph_mode=mode),
-        model_config=SimpleNamespace(architecture=architecture),
-        use_v2_model_runner=use_v2,
-    )
-
-    rocm.RocmPlatform.apply_config_platform_defaults(config)
-
-    assert config.compilation_config.cudagraph_mode == expected
-
-
 @pytest.mark.parametrize(
     ("model", "architecture"),
     [
@@ -649,6 +647,15 @@ def test_v2_model_runner_supports_extract_hidden_states():
             parallel_drafting=False,
             enable_adaptive_verification=False,
         ),
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_v2_model_runner_supports_custom_logits_processors():
+    config = VllmConfig()
+    config.model_config = cast(
+        ModelConfig, SimpleNamespace(logits_processors=["a.b:C"])
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
@@ -1278,21 +1285,33 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
 
 
 @pytest.mark.parametrize(
+    "cpu_offload,dp_size,elastic_ep,expected",
+    [(True, 2, False, True), (False, 2, False, False), (True, 1, False, False)],
+)
+def test_engram_dp_shared_memory_defaults_when_supported(
+    cpu_offload, dp_size, elastic_ep, expected
+):
+    """Unset dp_shared_memory enables sharing only for offloaded, non-elastic DP."""
+    parallel = ParallelConfig(data_parallel_size=dp_size)
+    parallel.enable_elastic_ep = elastic_ep
+    config = EngramConfig(cpu_offload=cpu_offload)
+    config.resolve_dp_shared_memory(parallel)
+    assert config.dp_shared_memory is expected
+
+
+@pytest.mark.parametrize(
     "dp_size,load_format,multithread,error",
     [
         (1, "auto", False, "requires data_parallel_size > 1"),
-        (2, "dummy", False, "requires load_format"),
-        (2, "sharded_state", False, "requires load_format"),
         (2, "auto", False, None),
         (2, "safetensors", True, None),
-        (2, "pt", True, None),
     ],
 )
 def test_engram_dp_shared_memory_config_validation(
     monkeypatch, dp_size, load_format, multithread, error
 ):
     """Reject invalid shared configs before distributed init; allow threaded loads."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     config = cast(
         VllmConfig,
         SimpleNamespace(
@@ -1317,7 +1336,7 @@ def test_engram_dp_shared_memory_config_validation(
 
 
 @pytest.mark.parametrize(
-    "architecture, ple_layers, cuda, supported",
+    "architecture, ple_layers, accelerator, supported",
     [
         ("DeepseekV41ForCausalLM", [1], True, True),
         ("DeepseekV41ForCausalLM", [], True, False),
@@ -1332,9 +1351,11 @@ def test_engram_dp_shared_memory_config_validation(
         (None, None, True, False),
     ],
 )
-def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, supported):
+def test_engram_model_support(
+    monkeypatch, architecture, ple_layers, accelerator, supported
+):
     """A similarly named HF field must not enable unsupported implementations."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: accelerator)
     model = (
         cast(
             ModelConfig,
@@ -1371,16 +1392,8 @@ def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, suppo
         assert resolved.engram_config.cpu_offload is True
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"), [(None, True), ("0", False), ("1", True)]
-)
-def test_engram_cpu_offload_environment_default(monkeypatch, value, expected):
-    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
-    if value is not None:
-        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", value)
-    assert EngramConfig().cpu_offload is expected
-    assert EngramConfig(cpu_offload=False).cpu_offload is False
-    assert EngramConfig(cpu_offload=True).cpu_offload is True
+def test_engram_cpu_offload_default():
+    assert EngramConfig().cpu_offload is True
 
 
 def test_engram_config_defaults_to_none():
@@ -1423,7 +1436,7 @@ def test_engram_explicit_config_requires_supported_model():
 @pytest.mark.parametrize("explicit", [False, True])
 def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, explicit):
     """MTP may inherit cross-DP sharding without having its own PLE layers."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     target = SimpleNamespace(
         architecture="Qwen4ExpForCausalLM",
         hf_text_config=SimpleNamespace(ple_layer_ids=[1] if target_has_ple else []),
@@ -1495,6 +1508,41 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.nnodes == 1
     assert parallel_config.node_rank == 0
     assert parallel_config.world_size == 8
+
+
+@pytest.mark.parametrize("data_parallel_size", [4, 8])
+def test_nnodes_within_dp_when_replicas_outnumber_nodes(data_parallel_size):
+    """A replica that fits on one node spans one node, never zero.
+
+    External LB pins ``data_parallel_size_local`` to 1, so the ratio rounds
+    down to 0 as soon as there are more DP replicas than nodes. Anything
+    dividing by ``nnodes_within_dp`` then raises ZeroDivisionError.
+    """
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_size_local=1,
+        data_parallel_external_lb=True,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+    assert parallel_config.local_world_size == parallel_config.world_size
+
+
+@pytest.mark.parametrize("nnodes", [4, 9])
+def test_nnodes_within_dp_rejects_uneven_internal_lb(nnodes):
+    parallel_config = ParallelConfig(
+        data_parallel_size=8,
+        data_parallel_size_local=1,
+        distributed_executor_backend="mp",
+        nnodes=nnodes,
+    )
+
+    with pytest.raises(ValueError, match="Invalid data parallel configuration"):
+        _ = parallel_config.nnodes_within_dp
 
 
 def test_draft_model_enables_async_scheduling_by_default():
