@@ -63,6 +63,7 @@ def _make_profiling_runner(
         needs_capture, num_full_descs, piecewise_only
     )
     runner.vllm_config = SimpleNamespace()
+    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
 
     events: list[str] = []
     runner.events = events
@@ -94,7 +95,7 @@ class _FakePlatform:
         return type(self)._global_graph_pool
 
 
-def _patch_module(monkeypatch) -> None:
+def _patch_module(monkeypatch, released_bytes: int = 0) -> None:
     @contextlib.contextmanager
     def _fake_set_current_vllm_config(_cfg):
         yield
@@ -108,11 +109,12 @@ def _patch_module(monkeypatch) -> None:
     monkeypatch.setattr(
         cgu, "_teardown_profiling_state", lambda r: r.events.append("teardown")
     )
-    # The profiler reads free GPU memory before/after to compute what it
-    # retained; default to a constant (nothing retained).
+    # The profiler measures memory released when graph owners are dropped.
+    free_memory = iter((0, released_bytes))
+    monkeypatch.setattr(cgu.torch.accelerator, "synchronize", lambda: None)
     monkeypatch.setattr(cgu.torch.accelerator, "empty_cache", lambda: None)
     monkeypatch.setattr(
-        cgu.torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+        cgu.torch.accelerator, "get_memory_info", lambda: (next(free_memory), 1 << 30)
     )
 
 
@@ -130,18 +132,20 @@ def test_profile_cudagraph_memory_disabled_returns_zero(monkeypatch):
 def test_profile_cudagraph_memory_no_graphs_tears_down(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.FULL, needs_capture=False)
+    manager = runner.cudagraph_manager
 
     result = cgu.profile_cudagraph_memory(runner)
 
     assert result == 0
     # Bootstrapped then cleaned up, without capturing or touching the pool.
     assert runner.events == ["init", "teardown"]
-    assert runner.cudagraph_manager.pool == GLOBAL_POOL
+    assert manager.pool == GLOBAL_POOL
+    assert runner.cudagraph_manager is None
 
 
 def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
-    _patch_module(monkeypatch)
     gib = 1 << 30
+    _patch_module(monkeypatch, released_bytes=1000 * gib)
     # Measured delta 1000 MiB includes the sampled FULL graphs (100 + 20 MiB).
     # Extrapolated FULL cost for 3 graphs: 100 + 2 * 20 = 140 MiB.
     runner = _make_profiling_runner(
@@ -150,6 +154,7 @@ def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
         captured_bytes=1000 * gib,
         mem_samples=[100 * gib, 20 * gib],
     )
+    manager = runner.cudagraph_manager
 
     result = cgu.profile_cudagraph_memory(runner)
 
@@ -157,17 +162,14 @@ def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
     # Bootstrap, capture, and teardown run in order.
     assert runner.events == ["init", "capture", "teardown"]
     # Capture must use a throwaway pool, not the persistent global pool.
-    assert runner.cudagraph_manager.pool == THROWAWAY_POOL
+    assert manager.pool == THROWAWAY_POOL
     # FULL capture must be limited to the largest few graphs.
-    assert (
-        runner.cudagraph_manager._max_full_descs_to_capture
-        == cgu._FULL_GRAPH_PROFILING_SAMPLES
-    )
+    assert manager._max_full_descs_to_capture == cgu._FULL_GRAPH_PROFILING_SAMPLES
 
 
 def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
-    _patch_module(monkeypatch)
     captured_bytes = 5 << 30
+    _patch_module(monkeypatch, released_bytes=captured_bytes)
     runner = _make_profiling_runner(
         CUDAGraphMode.FULL_AND_PIECEWISE,
         piecewise_only=True,
@@ -178,6 +180,34 @@ def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
 
     # No FULL graphs to sample or extrapolate: the measured delta is exact.
     assert result == captured_bytes
+
+
+@pytest.mark.parametrize("bootstrap_bytes", [0, 2 << 30])
+@pytest.mark.parametrize("capture_retained_bytes", [0, 2 << 30])
+def test_profile_excludes_persistent_workspaces_from_graph_estimate(
+    monkeypatch, bootstrap_bytes, capture_retained_bytes
+):
+    """Retained workspace belongs in the worker budget, regardless of its phase."""
+    graph_bytes = 1 << 30
+    _patch_module(monkeypatch)
+    runner = _make_profiling_runner(
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+        piecewise_only=True,
+        captured_bytes=graph_bytes + capture_retained_bytes,
+    )
+    runner.kv_caches = [object()]
+    free_after_capture = (16 << 30) - bootstrap_bytes - capture_retained_bytes
+    readings = iter((free_after_capture - graph_bytes, free_after_capture))
+
+    def memory_info():
+        # Releasing dummy KV before the second sample would overcount graphs.
+        assert runner.kv_caches
+        assert "teardown" not in runner.events
+        return next(readings), 16 << 30
+
+    monkeypatch.setattr(cgu.torch.accelerator, "get_memory_info", memory_info)
+
+    assert cgu.profile_cudagraph_memory(runner) == graph_bytes
 
 
 def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
@@ -344,9 +374,16 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
 
 
 @create_new_process_for_each_test("spawn")
-@pytest.mark.skipif(not cgu.current_platform.is_cuda(), reason="requires CUDA")
-def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
-    """Profiling graph memory must be freed before teardown completes."""
+@pytest.mark.skipif(
+    not cgu.current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
+@pytest.mark.parametrize("workspace_phase", [None, "bootstrap", "capture"])
+@pytest.mark.parametrize("use_fast_prefill", [False, True])
+def test_profile_cudagraph_memory_frees_throwaway_pool(
+    monkeypatch, workspace_phase, use_fast_prefill
+):
+    """Release graph pools and dummy KV, retaining only persistent workspaces."""
+    from vllm.v1.worker.gpu.attn_utils import FastPrefillHelper
 
     @contextlib.contextmanager
     def _fake_set_current_vllm_config(_cfg):
@@ -371,6 +408,12 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
 
     def _init(r):
         r.events.append("init")
+        if use_fast_prefill:
+            r.cudagraph_manager.device = torch.device("cuda")
+            # Keep the helper buffer distinguishable from allocator granularity.
+            r.fast_prefill = FastPrefillHelper(
+                r.cudagraph_manager, max_num_tokens=allocation_bytes // 4
+            )
         kv_cache = torch.empty(allocation_bytes, dtype=torch.uint8, device="cuda")
         r.kv_caches = [kv_cache]
         r.compilation_config.static_forward_context = {
@@ -379,8 +422,16 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
         manager = cgu.CudaGraphManager.__new__(cgu.CudaGraphManager)
         manager.pool = cgu.current_platform.get_global_graph_pool()
         r.speculator = SimpleNamespace(cudagraph_manager=manager)
+        if workspace_phase == "bootstrap":
+            r.workspace = torch.empty(
+                allocation_bytes, dtype=torch.uint8, device="cuda"
+            )
 
     def _capture_model(*, profile_only: bool = False) -> int:
+        if workspace_phase == "capture":
+            runner.workspace = torch.empty(
+                allocation_bytes, dtype=torch.uint8, device="cuda"
+            )
         for owner in (
             runner.cudagraph_manager,
             runner.speculator.cudagraph_manager,
@@ -398,11 +449,16 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
     monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", _init)
     runner.capture_model = _capture_model
 
-    cgu.profile_cudagraph_memory(runner)
+    graph_estimate = cgu.profile_cudagraph_memory(runner)
     memory["after"] = torch.accelerator.memory_reserved()
 
-    assert memory["captured"] - memory["before"] >= 3 * allocation_bytes
-    assert memory["after"] == memory["before"]
+    graph_bytes = (2 + use_fast_prefill) * allocation_bytes
+    assert memory["captured"] - memory["before"] >= graph_bytes + allocation_bytes
+    assert graph_bytes <= graph_estimate < graph_bytes + allocation_bytes, (
+        f"{graph_estimate=}, {graph_bytes=}"
+    )
+    retained_bytes = allocation_bytes if workspace_phase is not None else 0
+    assert memory["after"] - memory["before"] == retained_bytes
 
 
 def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):

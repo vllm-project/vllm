@@ -852,7 +852,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     Called during memory profiling, *before* the real KV cache is allocated,
     so that ``Worker.determine_available_memory`` can reserve headroom for
     graph capture. Bootstraps a minimal KV cache, runs ``capture_model()``
-    once, then releases everything so the real init/capture path starts clean.
+    once, then releases profiling graphs and KV state. Persistent allocations
+    remain and are accounted for by the worker's post-profiling snapshot.
 
     FULL graphs bake in KV cache pointers, so only the largest few are
     captured (into a throwaway pool) and their total cost is extrapolated.
@@ -896,6 +897,9 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         original_pools: dict[int, Any] = {}
         speculator = getattr(runner, "speculator", None)
         spec_manager_names: list[str] = []
+        free_with_graphs: int | None = None
+        uncaptured_graph_memory = 0
+        graph_memory = 0
         try:
             if not manager.needs_capture():
                 return 0
@@ -920,16 +924,15 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             mem_samples: list[int] = []
             manager._capture_mem_samples = mem_samples
 
-            measured = int(runner.capture_model(profile_only=True))
+            runner.capture_model(profile_only=True)
 
-            # The measured delta covers PIECEWISE, encoder and speculator graphs
-            # plus the sampled FULL graphs; swap the sampled FULL cost for the
-            # extrapolated total. FULL and PIECEWISE share one pool here just as
-            # they share the global pool at runtime, so the overlap is not
-            # double-counted.
             num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
             full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
-            return max(measured - sum(mem_samples) + full_estimate, 0)
+            uncaptured_graph_memory = max(full_estimate - sum(mem_samples), 0)
+            torch.accelerator.synchronize()
+            gc.collect()
+            torch.accelerator.empty_cache()
+            free_with_graphs = torch.accelerator.get_memory_info()[0]
         finally:
             compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
             compilation_counter.num_gpu_runner_capture_triggers = saved_capture_triggers
@@ -943,10 +946,24 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # release the throwaway pool here rather than after the real init.
             for name in spec_manager_names:
                 setattr(speculator, name, None)
-            # Drop local references before teardown detaches the runner's
-            # manager and flushes the allocator.
+            # Release graph owners while keeping the profiling KV cache alive.
             del manager
+            runner.cudagraph_manager = None
+            runner.fast_prefill = None
+            if runner.model_state.supports_mm_inputs:
+                runner.model_state.encoder_runner.clear()
+            if free_with_graphs is not None:
+                # Measure released graph pools before freeing the dummy KV
+                # cache. Persistent workspaces survive and are charged by the
+                # worker's post-profiling memory snapshot instead.
+                torch.accelerator.synchronize()
+                gc.collect()
+                torch.accelerator.empty_cache()
+                graph_memory = max(
+                    torch.accelerator.get_memory_info()[0] - free_with_graphs, 0
+                )
             _teardown_profiling_state(runner)
+        return graph_memory + uncaptured_graph_memory
     finally:
         platform_cls._global_graph_pool = saved_global_pool
 
@@ -990,7 +1007,7 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
 
 
 def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
-    """Release the profiling KV cache and captured graphs while keeping model
+    """Release the profiling KV cache and metadata while keeping model
     weights, so the real ``initialize_kv_cache`` starts from a clean slate."""
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
@@ -1009,12 +1026,6 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         runner.attn_groups.clear()
     if hasattr(runner, "kv_cache_config"):
         del runner.kv_cache_config
-    # Dropping the manager releases the profiling graphs and throwaway pool.
-    runner.cudagraph_manager = None
-    # Release encoder graphs captured during profiling; the real
-    # capture_model() re-captures them.
-    if runner.model_state.supports_mm_inputs:
-        runner.model_state.encoder_runner.clear()
     # Detach profiling KV tensors held by attention layers. The layers live
     # in the static forward context for compiled models.
     layers: Iterable[Any] = runner.compilation_config.static_forward_context.values()

@@ -20,6 +20,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.compilation import CUDAGraphMode
 from vllm.config.reasoning import ReasoningConfig
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
@@ -172,6 +173,85 @@ def test_freeze_gc_disables_and_restores_automatic_gc(
             gc.enable()
         else:
             gc.disable()
+
+
+@pytest.mark.parametrize("capture_encoder", [False, True])
+def test_graph_profile_excludes_retained_workspace_and_minimal_kv(
+    monkeypatch, capture_encoder
+):
+    """Budget released graph pools plus unsampled graphs, without workspace overlap."""
+    module = gpu_model_runner_module
+    mib = 1 << 20
+    memory = dict(free=20 * GiB_bytes, graphs=0)
+    descs = [SimpleNamespace(num_tokens=n) for n in (16, 8, 4)]
+
+    def allocate_graph(size):
+        memory["free"] -= size
+        memory["graphs"] += size
+
+    def init_cache():
+        memory["free"] -= 5 * GiB_bytes  # 2 GiB KV and 3 GiB workspace.
+
+    def capture(desc, **kwargs):
+        if desc.num_tokens == 16:
+            memory["free"] -= GiB_bytes  # Retained during each mode's warmup.
+            if memory["graphs"] == 0:
+                allocate_graph(4 * GiB_bytes)  # Shared FULL/PIECEWISE pool.
+        else:
+            allocate_graph(32 * mib)
+
+    def clear_graphs():
+        memory["free"] += memory["graphs"]
+        memory["graphs"] = 0
+
+    def cleanup_cache():
+        # Graph measurement must precede releasing this temporary KV cache.
+        assert memory["free"] == 13 * GiB_bytes
+        memory["free"] += 2 * GiB_bytes
+
+    encoder = SimpleNamespace(
+        get_num_graphs_to_capture=lambda: 1,
+        token_budgets=[16],
+        capture=lambda **kw: allocate_graph(GiB_bytes),
+        clear=lambda: None,
+    )
+    runner = SimpleNamespace(
+        vllm_config=None,
+        device="cuda:0",
+        max_model_len=128,
+        max_num_tokens=128,
+        lora_config=None,
+        _init_minimal_kv_cache_for_profiling=init_cache,
+        _cleanup_profiling_kv_cache=cleanup_cache,
+        _create_encoder_cudagraph_manager=lambda: encoder if capture_encoder else None,
+        _freeze_gc=nullcontext,
+        _warmup_and_capture=capture,
+        maybe_remove_all_loras=lambda _: None,
+        cudagraph_dispatcher=SimpleNamespace(
+            get_capture_descs=lambda: [
+                (CUDAGraphMode.FULL, descs),
+                (CUDAGraphMode.PIECEWISE, descs),
+            ],
+            cudagraph_keys={},
+        ),
+    )
+    monkeypatch.setattr(module, "set_current_vllm_config", lambda _: nullcontext())
+    monkeypatch.setattr(module, "graph_capture", lambda **kw: nullcontext())
+    monkeypatch.setattr(module, "set_cudagraph_capturing_enabled", lambda _: None)
+    monkeypatch.setattr(module.current_platform, "graph_pool_handle", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (memory["free"], 20 * GiB_bytes)
+    )
+    monkeypatch.setattr(module.CUDAGraphWrapper, "clear_all_graphs", clear_graphs)
+    monkeypatch.setattr(
+        module.BreakableCUDAGraphWrapper, "clear_all_graphs", lambda: None
+    )
+
+    estimate = GPUModelRunner.profile_cudagraph_memory(runner)
+
+    assert estimate == (4 + capture_encoder) * GiB_bytes + 128 * mib
 
 
 def test_prepare_padding_mask_marks_sequence_parallel_padding():
