@@ -11,4 +11,5 @@ class CacheHitSource(str, Enum):
     HOST = "host"
     DISK = "disk"
     P2P = "p2p"
-    EXTERNAL = "external"
+    # Fallback: uninstrumented connector, remote store, or a range mixing tiers.
+    EXTERNAL_UNSPECIFIED = "external_unspecified"

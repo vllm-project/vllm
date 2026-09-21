@@ -259,7 +259,7 @@ class OffloadingManager(ABC):
         promotion into a primary tier. The default keeps out-of-tree managers
         compatible while making unknown provenance explicit.
         """
-        return CacheHitSource.EXTERNAL
+        return CacheHitSource.EXTERNAL_UNSPECIFIED
 
     @abstractmethod
     def prepare_load(

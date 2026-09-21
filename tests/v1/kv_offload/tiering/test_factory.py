@@ -52,7 +52,7 @@ def test_pre_registered_tiers_can_be_imported():
         cls = SecondaryTierFactory._registry[tier_type]()
         assert issubclass(cls, SecondaryTierManager)
         assert cls.cache_hit_source == expected_sources.get(
-            tier_type, CacheHitSource.EXTERNAL
+            tier_type, CacheHitSource.EXTERNAL_UNSPECIFIED
         )
 
 
@@ -124,7 +124,7 @@ def test_register_new_tier_type(tier_type):
     assert tier.tier_type == tier_type
     assert isinstance(tier, ExampleSecondaryTierManager)
     # Registration names must not infer a physical source for custom tiers.
-    assert tier.cache_hit_source is CacheHitSource.EXTERNAL
+    assert tier.cache_hit_source is CacheHitSource.EXTERNAL_UNSPECIFIED
 
 
 # ---------------------------------------------------------------------------

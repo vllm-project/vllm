@@ -226,7 +226,7 @@ def test_scheduler_reports_mooncake_cache_source():
     # Mooncake Store is an external cache service. Its internal memory and
     # local-storage policy is intentionally hidden behind that stable label.
     assert connector.get_external_cache_hit_sources(None, 32) == [  # type: ignore[arg-type]
-        ("external", 32)
+        ("external_unspecified", 32)
     ]
     assert connector.get_external_cache_hit_sources(None, 0) == []  # type: ignore[arg-type]
 

@@ -583,8 +583,8 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
 @pytest.mark.parametrize(
     ("recurrent_source", "expected"),
     [
-        ("host", [("external", 16), ("host", 12)]),
-        ("p2p", [("p2p", 16), ("external", 12)]),
+        ("host", [("external_unspecified", 16), ("host", 12)]),
+        ("p2p", [("p2p", 16), ("external_unspecified", 12)]),
         (None, [("p2p", 16), ("host", 12)]),
     ],
 )
@@ -630,8 +630,8 @@ def test_external_cache_hit_sources_preserve_partial_tail_origin(
 @pytest.mark.parametrize(
     ("second_source", "expected"),
     [
-        ("host", [("host", 4), ("external", 4)]),
-        ("p2p", [("external", 8)]),
+        ("host", [("host", 4), ("external_unspecified", 4)]),
+        ("p2p", [("external_unspecified", 8)]),
     ],
 )
 def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
@@ -686,7 +686,7 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
     assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == expected
 
 
-@pytest.mark.parametrize("source", ["host", "disk", "p2p", "external"])
+@pytest.mark.parametrize("source", ["host", "disk", "p2p", "external_unspecified"])
 def test_external_cache_hit_sources_recurrent_only_state(source):
     scheduler = _make_partial_tail_scheduler(recurrent_only=True)
     request = _make_partial_tail_request(scheduler)
@@ -719,7 +719,9 @@ def test_external_cache_hit_sources_recurrent_only_state(source):
 @pytest.mark.parametrize("blocks_per_chunk", [1, 2])
 @pytest.mark.parametrize("local_tokens", [0, 4])
 @pytest.mark.parametrize("full_attention", [False, True])
-@pytest.mark.parametrize("sparse_source", ["host", "disk", "p2p", "external", "mixed"])
+@pytest.mark.parametrize(
+    "sparse_source", ["host", "disk", "p2p", "external_unspecified", "mixed"]
+)
 def test_external_cache_hit_sources_use_required_sparse_state(
     sparse_kind,
     blocks_per_chunk,
@@ -796,15 +798,23 @@ def test_external_cache_hit_sources_use_required_sparse_state(
     if full_attention:
         expected = [
             (
-                "host" if sparse_source == "host" else "external",
+                "host" if sparse_source == "host" else "external_unspecified",
                 2 * chunk_size - local_tokens,
             ),
-            ("disk" if sparse_source == "disk" else "external", 2 * chunk_size),
+            (
+                "disk" if sparse_source == "disk" else "external_unspecified",
+                2 * chunk_size,
+            ),
         ]
         if expected[0][0] == expected[1][0]:
-            expected = [("external", count)]
+            expected = [("external_unspecified", count)]
     else:
-        expected = [("external" if sparse_source == "mixed" else sparse_source, count)]
+        expected = [
+            (
+                "external_unspecified" if sparse_source == "mixed" else sparse_source,
+                count,
+            )
+        ]
     result = scheduler.get_external_cache_hit_sources(request, count)
     assert result == expected
     assert sum(tokens for _, tokens in result) == count
@@ -1644,7 +1654,7 @@ def test_two_groups_full_and_sliding_window(
     )
     assert prefill_stats is not None
     assert prefill_stats.external_cached_token_sources == [
-        ("host" if sparse_source == "host" else "external", block_size * 3)
+        ("host" if sparse_source == "host" else "external_unspecified", block_size * 3)
     ]
     assert prefill_stats.num_external_cached_tokens == block_size * 3
 

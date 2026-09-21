@@ -257,7 +257,9 @@ def test_prompt_token_stats_partial_external_transfer():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 500
     assert stats.cached_tokens == 500
-    assert stats.cached_tokens_by_source == CachedTokensBySource(external=500)
+    assert stats.cached_tokens_by_source == CachedTokensBySource(
+        external_unspecified=500
+    )
     assert stats.total == 1000
 
 
@@ -327,7 +329,9 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
-    assert stats.cached_tokens_by_source == CachedTokensBySource(external=999)
+    assert stats.cached_tokens_by_source == CachedTokensBySource(
+        external_unspecified=999
+    )
     assert stats.total == 1000
 
 
