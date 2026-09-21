@@ -10,6 +10,13 @@ from functools import cached_property
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
+from xgrammar.structural_tag import (
+    Format,
+    JSONSchemaFormat,
+    OrFormat,
+    TagFormat,
+    TriggeredTagsFormat,
+)
 
 from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
@@ -37,6 +44,7 @@ from vllm.tool_parsers.streaming import (
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
+from xgrammar import StructuralTag
 
 logger = init_logger(__name__)
 
@@ -398,6 +406,38 @@ class Parser:
         return 0
 
 
+def _response_format_to_structural_tag_format(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> Format | None:
+    """Convert response_format to structural_tag"""
+    response_format = (
+        request.text.format
+        if isinstance(request, ResponsesRequest) and request.text is not None
+        else getattr(request, "response_format", None)
+    )
+    if response_format is None:
+        return None
+    if response_format.type == "json_schema":
+        if response_format.json_schema is None:
+            return None
+        return JSONSchemaFormat(json_schema=response_format.json_schema.json_schema)
+    if response_format.type == "structural_tag":
+        if hasattr(response_format, "format"):
+            return response_format.format
+        return TriggeredTagsFormat(
+            triggers=response_format.triggers,
+            tags=[
+                TagFormat(
+                    begin=s.begin,
+                    content=JSONSchemaFormat(json_schema=s.structural_tag_schema),
+                    end=s.end,
+                )
+                for s in response_format.structures
+            ],
+        )
+    return None
+
+
 class DelegatingParser(Parser):
     """
     A Parser implementation that delegates to separate ReasoningParser and
@@ -560,11 +600,24 @@ class DelegatingParser(Parser):
     def _apply_structural_tag(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        if (
-            self._tool_parser is None
-            or self._tool_parser.structural_tag_model is None
-            or not request.tools
-        ):
+        if self._tool_parser is None or not request.tools:
+            return request
+
+        response_format_present = (
+            request.text is not None
+            if isinstance(request, ResponsesRequest)
+            else getattr(request, "response_format", None) is not None
+        )
+
+        if self._tool_parser.structural_tag_model is None:
+            if response_format_present and request.tool_choice in ("auto", None):
+                # if tool_choice is None => auto is used
+                logger.warning_once(
+                    "tool_choice=auto + response_format set, but "
+                    "model has no structural tag support => "
+                    "response_format wins and tool calling disabled.",
+                    scope="local",
+                )
             return request
 
         need_tool_calling = (
@@ -582,8 +635,30 @@ class DelegatingParser(Parser):
             request,
             reasoning=False,
         )
+
         if structure_tag is None:
+            if response_format_present and request.tool_choice in ("auto", None):
+                # if tool_choice is None => auto is used
+                logger.warning_once(
+                    "tool_choice=auto but no tool is strict => "
+                    "no constraint decoding enabled and response_format wins.",
+                    scope="local",
+                )
             return request
+
+        response_format_fmt = _response_format_to_structural_tag_format(request)
+        if response_format_fmt is not None:
+            structure_tag = StructuralTag(
+                type="structural_tag",
+                format=OrFormat(elements=[structure_tag.format, response_format_fmt]),
+            )
+        elif response_format_present:
+            logger.warning_once(
+                "tool_choice=%s with an unsupported response_format type "
+                "=> response_format is ignored, tool calling wins.",
+                request.tool_choice,
+                scope="local",
+            )
 
         structural_tag = json.dumps(structure_tag.model_dump())
         request.structured_outputs = StructuredOutputsParams(
