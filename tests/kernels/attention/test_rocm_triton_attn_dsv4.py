@@ -188,6 +188,7 @@ def _ref_sparse_decode_ragged(
     extra_rows: list[list[int]] | None = None,
     main_use_fnuz: bool = False,
     extra_use_fnuz: bool = False,
+    extra_block_size: int | None = None,
 ) -> torch.Tensor:
     q_f32 = q.float()
     out = torch.empty_like(q_f32)
@@ -209,7 +210,10 @@ def _ref_sparse_decode_ragged(
             )
             row_kv.append(
                 _read_fp8_ds_mla_cache_rows(
-                    extra_cache, extra_slots, block_size, extra_use_fnuz
+                    extra_cache,
+                    extra_slots,
+                    extra_block_size or block_size,
+                    extra_use_fnuz,
                 )
             )
 
@@ -242,6 +246,12 @@ def _ragged_from_rows(
         torch.tensor(flat, dtype=torch.int32, device=device),
         torch.tensor(indptr, dtype=torch.int32, device=device),
     )
+
+
+def _rows_from_ragged(indices: torch.Tensor, indptr: torch.Tensor) -> list[list[int]]:
+    ends = indptr.cpu().tolist()
+    values = indices[: ends[-1]].cpu().tolist()
+    return [values[start:end] for start, end in zip(ends, ends[1:])]
 
 
 def _launch_sparse_decode_reduce(
@@ -1192,6 +1202,254 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
     torch.testing.assert_close(out, expected_long, atol=2e-2, rtol=2e-2)
 
 
+@requires_gfx950
+@torch.inference_mode()
+def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
+    """Replay the production ROCm decode path after device-only reallocation."""
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.models.deepseek_v4.amd.rocm import (
+        DeepseekV4ROCMAiterMLASparseMetadataBuilder,
+        DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+    )
+    from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
+
+    device = torch.device("cuda")
+    num_reqs = 3
+    upper_query_len = 8
+    graph_tokens = num_reqs * upper_query_len
+    block_size = 256
+    compressed_block_size = block_size // 128
+    window_size = 32
+
+    vllm_config = create_vllm_config(
+        model_name="facebook/opt-125m",
+        max_model_len=1024,
+        block_size=block_size,
+        max_num_seqs=num_reqs,
+        max_num_batched_tokens=graph_tokens,
+        hf_config_override={
+            "compress_ratios": [128],
+            "index_topk": 2048,
+            "sliding_window": window_size,
+        },
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=upper_query_len - 1,
+        parallel_drafting=False,
+        enable_adaptive_verification=True,
+        use_dspark=lambda: True,
+    )
+    mla_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.bfloat16,
+        tokens_per_state=128,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.bfloat16,
+        sliding_window=window_size,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    mla_builder = DeepseekV4ROCMAiterMLASparseMetadataBuilder(
+        mla_spec, ["c128a"], vllm_config, device
+    )
+    swa_builder = DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
+        swa_spec, ["c128a"], vllm_config, device
+    )
+    assert (
+        mla_builder.get_cudagraph_support(vllm_config, mla_spec)
+        == AttentionCGSupport.ALWAYS
+    )
+    assert (
+        swa_builder.get_cudagraph_support(vllm_config, swa_spec)
+        == AttentionCGSupport.ALWAYS
+    )
+
+    seq_lens = torch.tensor([520, 528, 536], dtype=torch.int32, device=device)
+    seq_lens_cpu = seq_lens.cpu()
+    cpu_query_start_loc = torch.arange(
+        0,
+        graph_tokens + 1,
+        upper_query_len,
+        dtype=torch.int32,
+    )
+    max_blocks = (int(seq_lens_cpu.max()) + block_size - 1) // block_size
+    block_table = torch.arange(
+        num_reqs * max_blocks, dtype=torch.int32, device=device
+    ).view(num_reqs, max_blocks)
+
+    def build_metadata(query_lens: list[int]):
+        query_lens_tensor = torch.tensor(query_lens, dtype=torch.int32, device=device)
+        query_start_loc = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32, device=device),
+                query_lens_tensor.cumsum(0),
+            ]
+        )
+        active_tokens = sum(query_lens)
+        positions = torch.zeros(graph_tokens, dtype=torch.int64, device=device)
+        position_rows = [
+            torch.arange(
+                seq_len - query_len,
+                seq_len,
+                dtype=torch.int64,
+                device=device,
+            )
+            for seq_len, query_len in zip(seq_lens_cpu.tolist(), query_lens)
+        ]
+        positions[:active_tokens] = torch.cat(position_rows)
+        slot_mapping = torch.full((graph_tokens,), -1, dtype=torch.int64, device=device)
+        slot_mapping[:active_tokens] = torch.arange(
+            active_tokens, dtype=torch.int64, device=device
+        )
+        common = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=cpu_query_start_loc,
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
+            num_reqs=num_reqs,
+            num_actual_tokens=graph_tokens,
+            max_query_len=upper_query_len,
+            max_seq_len=int(seq_lens_cpu.max()),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            positions=positions,
+            causal=True,
+        )
+        return (
+            mla_builder.build_for_cudagraph_capture(common),
+            swa_builder.build_for_cudagraph_capture(common),
+        )
+
+    mla_metadata, swa_metadata = build_metadata([8, 8, 8])
+    assert mla_metadata.for_cudagraph_capture
+    metadata_ptrs = (
+        mla_metadata.c128a_decode_topk_ragged_indices.data_ptr(),
+        mla_metadata.c128a_decode_topk_ragged_indptr.data_ptr(),
+        swa_metadata.decode_swa_ragged_indices.data_ptr(),
+        swa_metadata.decode_swa_ragged_indptr.data_ptr(),
+    )
+
+    torch.manual_seed(19)
+    num_heads = 16
+    q = (
+        torch.randn(
+            graph_tokens,
+            num_heads,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    num_cache_blocks = num_reqs * max_blocks
+    swa_cache = _pack_fp8_ds_mla_cache(
+        torch.randn(
+            num_cache_blocks * block_size,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125,
+        block_size,
+        use_fnuz=False,
+    )
+    compressed_cache = _pack_fp8_ds_mla_cache(
+        torch.randn(
+            num_cache_blocks * compressed_block_size,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125,
+        compressed_block_size,
+        use_fnuz=False,
+    )
+    attn_sink = torch.linspace(-0.1, 0.1, num_heads, dtype=torch.float32, device=device)
+    out = torch.empty_like(q)
+    monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *args: 1)
+
+    def run_decode(mla_md, swa_md) -> None:
+        mod.rocm_sparse_attn_decode(
+            q=q,
+            kv_cache=compressed_cache,
+            swa_k_cache=swa_cache,
+            swa_only=False,
+            topk_indices=mla_md.c128a_global_decode_topk_indices,
+            topk_lens=mla_md.c128a_decode_topk_lens,
+            swa_indices=swa_md.decode_swa_indices,
+            swa_lens=swa_md.decode_swa_lens,
+            swa_ragged_indices=swa_md.decode_swa_ragged_indices,
+            swa_ragged_indptr=swa_md.decode_swa_ragged_indptr,
+            topk_ragged_indices=mla_md.c128a_decode_topk_ragged_indices,
+            topk_ragged_indptr=mla_md.c128a_decode_topk_ragged_indptr,
+            attn_sink=attn_sink,
+            scale=HEAD_DIM**-0.5,
+            head_dim=HEAD_DIM,
+            nope_head_dim=NOPE_HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            output=out,
+            extra_cache_nan_free=True,
+            adaptive_splits=True,
+        )
+
+    def reference(mla_md, swa_md) -> torch.Tensor:
+        return _ref_sparse_decode_ragged(
+            q=q,
+            main_cache=swa_cache,
+            main_rows=_rows_from_ragged(
+                swa_md.decode_swa_ragged_indices,
+                swa_md.decode_swa_ragged_indptr,
+            ),
+            scale=HEAD_DIM**-0.5,
+            attn_sink=attn_sink,
+            block_size=block_size,
+            extra_cache=compressed_cache,
+            extra_rows=_rows_from_ragged(
+                mla_md.c128a_decode_topk_ragged_indices,
+                mla_md.c128a_decode_topk_ragged_indptr,
+            ),
+            extra_block_size=compressed_block_size,
+        )
+
+    run_decode(mla_metadata, swa_metadata)
+    torch.accelerator.synchronize()
+    expected_full = reference(mla_metadata, swa_metadata)
+    torch.testing.assert_close(out, expected_full, atol=2e-2, rtol=2e-2)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run_decode(mla_metadata, swa_metadata)
+    torch.accelerator.synchronize()
+    captured_full = out.clone()
+
+    reallocated_mla, reallocated_swa = build_metadata([3, 8, 5])
+    assert metadata_ptrs == (
+        reallocated_mla.c128a_decode_topk_ragged_indices.data_ptr(),
+        reallocated_mla.c128a_decode_topk_ragged_indptr.data_ptr(),
+        reallocated_swa.decode_swa_ragged_indices.data_ptr(),
+        reallocated_swa.decode_swa_ragged_indptr.data_ptr(),
+    )
+    expected_reallocated = reference(reallocated_mla, reallocated_swa)
+    run_decode(reallocated_mla, reallocated_swa)
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(out, expected_reallocated, atol=2e-2, rtol=2e-2)
+    assert not torch.equal(captured_full, expected_reallocated)
+
+    graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(out, expected_reallocated, atol=2e-2, rtol=2e-2)
+
+
 # ---------------------------------------------------------------------------
 # o-projection: fused inverse-RoPE + cached bf16 wo_a (rocm_inv_rope_einsum)
 # ---------------------------------------------------------------------------
@@ -1430,3 +1688,189 @@ def test_get_cached_wo_a_bf16_fp8_blockscale_caches() -> None:
 
     # Second call returns the same cached object.
     assert _get_cached_wo_a_bf16(wo_a, n_local_groups, o_lora_rank, hidden_dim) is out
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_fp8_paged_mqa_logits_triton_matches_torch_ref() -> None:
+    """Block-flat Triton decode logits vs the eager torch reference.
+
+    Compare only valid key positions: the kernel skips the -inf pad that
+    the torch ref writes past seq_len.
+    """
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = torch.device("cuda")
+    init_workspace_manager(device)
+    torch.manual_seed(0)
+
+    fp8_dtype = current_platform.fp8_dtype()
+    batch_size = 2
+    next_n = 1
+    num_heads = 4
+    head_size = 128
+    block_size = 64
+    max_model_len = 256
+    seq_lens = [180, 64]
+    num_pages = [(seq_len + block_size - 1) // block_size for seq_len in seq_lens]
+    num_blocks = sum(num_pages)
+
+    q = torch.randn(
+        batch_size, next_n, num_heads, head_size, device=device, dtype=torch.bfloat16
+    ).to(fp8_dtype)
+    weights = torch.rand(
+        batch_size * next_n, num_heads, device=device, dtype=torch.float32
+    )
+    context_lens = torch.tensor(seq_lens, device=device, dtype=torch.int32)
+    block_tables = torch.full(
+        (batch_size, max(num_pages)), 0, device=device, dtype=torch.int32
+    )
+    page = 0
+    for i, n_pages in enumerate(num_pages):
+        block_tables[i, :n_pages] = torch.arange(
+            page, page + n_pages, device=device, dtype=torch.int32
+        )
+        page += n_pages
+
+    kv_cache = torch.empty(
+        num_blocks, block_size, 1, head_size + 4, device=device, dtype=torch.uint8
+    )
+    values = torch.randn(
+        num_blocks, block_size, head_size, device=device, dtype=torch.bfloat16
+    ).to(fp8_dtype)
+    scales = torch.rand(
+        num_blocks, block_size, device=device, dtype=torch.float32
+    ).clamp(min=1e-3)
+    kv_flat = kv_cache.view(num_blocks, -1)
+    scale_off = block_size * head_size
+    kv_flat[:, :scale_off] = values.reshape(num_blocks, -1).view(torch.uint8)
+    kv_flat[:, scale_off:] = scales.contiguous().view(torch.uint8).view(num_blocks, -1)
+
+    got = mod.rocm_fp8_paged_mqa_logits_triton(
+        q, kv_cache, weights, context_lens, block_tables, max_model_len
+    )
+    ref = mod.fp8_paged_mqa_logits_torch(
+        q, kv_cache, weights, context_lens, block_tables, max_model_len
+    )
+    for i, seq_len in enumerate(seq_lens):
+        torch.testing.assert_close(
+            got[i, :seq_len], ref[i, :seq_len], atol=2e-3, rtol=2e-3
+        )
+
+
+def test_indexer_k_is_c4a_block_flat_gate() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _indexer_k_is_c4a_block_flat,
+    )
+
+    assert not _indexer_k_is_c4a_block_flat(1)
+    assert not _indexer_k_is_c4a_block_flat(2)
+    assert _indexer_k_is_c4a_block_flat(4)
+    assert not _indexer_k_is_c4a_block_flat(128)
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_paged_mqa_logits_gate_v41_shuffle_vs_c4a_flat() -> None:
+    """Ratio 1/2 stay on AITER; ratio 4 takes Triton."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        fp8_paged_mqa_logits_torch,
+        indexer_k_quant_and_cache_triton,
+        rocm_fp8_paged_mqa_logits,
+        rocm_fp8_paged_mqa_logits_triton,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = torch.device("cuda")
+    init_workspace_manager(device)
+    torch.manual_seed(1)
+
+    fp8_dtype = current_platform.fp8_dtype()
+    batch_size = 1
+    next_n = 1
+    num_heads = 32
+    head_size = 128
+    block_size = 64
+    seq_len = 180
+    max_model_len = 256
+    num_pages = (seq_len + block_size - 1) // block_size
+    num_tokens = num_pages * block_size
+
+    q = torch.randn(
+        batch_size, next_n, num_heads, head_size, device=device, dtype=torch.bfloat16
+    ).to(fp8_dtype)
+    weights = torch.rand(
+        batch_size * next_n, num_heads, device=device, dtype=torch.float32
+    )
+    context_lens = torch.tensor([seq_len], device=device, dtype=torch.int32)
+    block_tables = torch.arange(num_pages, device=device, dtype=torch.int32).view(1, -1)
+    dummy_sched = torch.zeros(8, 2, device=device, dtype=torch.int32)
+
+    k_bf16 = torch.randn(num_tokens, head_size, device=device, dtype=torch.bfloat16)
+    slot = torch.arange(num_tokens, device=device, dtype=torch.int32)
+    cache_shuffle = torch.zeros(
+        num_pages, block_size, head_size + 4, device=device, dtype=torch.uint8
+    )
+    indexer_k_quant_and_cache_triton(k_bf16, cache_shuffle, slot, 128, "ue8m0")
+    cache_shuffle = cache_shuffle.unsqueeze(2)
+
+    aiter = rocm_fp8_paged_mqa_logits(
+        q,
+        cache_shuffle,
+        weights,
+        context_lens,
+        block_tables,
+        dummy_sched,
+        max_model_len,
+        compress_ratio=1,
+    )
+    for ratio in (1, 2):
+        got = rocm_fp8_paged_mqa_logits(
+            q,
+            cache_shuffle,
+            weights,
+            context_lens,
+            block_tables,
+            dummy_sched,
+            max_model_len,
+            compress_ratio=ratio,
+        )
+        torch.testing.assert_close(got[:, :seq_len], aiter[:, :seq_len], atol=0, rtol=0)
+
+    cache_flat = torch.empty(
+        num_pages, block_size, 1, head_size + 4, device=device, dtype=torch.uint8
+    )
+    values = torch.randn(
+        num_pages, block_size, head_size, device=device, dtype=torch.bfloat16
+    ).to(fp8_dtype)
+    scales = torch.rand(
+        num_pages, block_size, device=device, dtype=torch.float32
+    ).clamp(min=1e-3)
+    kv_flat = cache_flat.view(num_pages, -1)
+    scale_off = block_size * head_size
+    kv_flat[:, :scale_off] = values.reshape(num_pages, -1).view(torch.uint8)
+    kv_flat[:, scale_off:] = scales.contiguous().view(torch.uint8).view(num_pages, -1)
+
+    gated_c4a = rocm_fp8_paged_mqa_logits(
+        q,
+        cache_flat,
+        weights,
+        context_lens,
+        block_tables,
+        dummy_sched,
+        max_model_len,
+        compress_ratio=4,
+    )
+    triton = rocm_fp8_paged_mqa_logits_triton(
+        q, cache_flat, weights, context_lens, block_tables, max_model_len
+    )
+    ref = fp8_paged_mqa_logits_torch(
+        q, cache_flat, weights, context_lens, block_tables, max_model_len
+    )
+    torch.testing.assert_close(
+        gated_c4a[:, :seq_len], triton[:, :seq_len], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        gated_c4a[:, :seq_len], ref[:, :seq_len], atol=2e-3, rtol=2e-3
+    )
