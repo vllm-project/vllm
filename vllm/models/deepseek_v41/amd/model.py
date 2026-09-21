@@ -378,6 +378,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
+        if vllm_config.is_dsv41_encoder_only_prefill:
+            raise NotImplementedError(
+                "dsv41_encoder_only_prefill is currently implemented for NVIDIA "
+                "GPUs only."
+            )
+
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config

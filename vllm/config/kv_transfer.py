@@ -13,6 +13,27 @@ KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
 
 
+def dsv41_encoder_only_boundary_layer(hf_config: Any) -> int:
+    """Validate the supported V4.1 global-cache topology and return its cut."""
+    kv_sources = tuple(getattr(hf_config, "kv_source_layer_ids", ()) or ())
+    index_sources = tuple(getattr(hf_config, "index_source_layer_ids", ()) or ())
+    if (
+        getattr(hf_config, "num_hidden_layers", None) != 40
+        or not kv_sources
+        or max(kv_sources) != 20
+        or not set(kv_sources) <= set(index_sources)
+    ):
+        raise ValueError(
+            "dsv41_encoder_only_prefill requires the 40-layer V4.1-Flash "
+            "topology with complete Main-KV/Indexer-K sources through L20."
+        )
+    if 20 in (getattr(hf_config, "engram_layer_ids", ()) or ()):
+        raise ValueError(
+            "The dsv41_encoder_only_prefill boundary cannot be an Engram layer."
+        )
+    return 20
+
+
 def hisparse_host_pool_gib(
     kv_transfer_config: "KVTransferConfig | None",
 ) -> float | None:
@@ -105,6 +126,16 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
+    dsv41_encoder_only_prefill: bool = False
+    """DeepSeek-V4.1 encoder-only P/D handoff on MooncakeConnector.
+
+    Both MooncakeConnector roles must enable this option. The producer
+    stops after publishing the final global Main-KV/Indexer-K source and
+    completes cache-only requests without sampling. The consumer transfers
+    only the model's global Main-KV/Indexer-K state and reconstructs local
+    SWA/draft state.
+    """
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -116,9 +147,11 @@ class KVTransferConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
+        factors: list[Any] = (
+            [self.dsv41_encoder_only_prefill, self.kv_role]
+            if self.dsv41_encoder_only_prefill
+            else []
+        )
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
