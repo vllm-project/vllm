@@ -40,9 +40,9 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
-from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
+    DiffusionScheduler,
     diffusion_canvas_width,
 )
 from vllm.v1.core.sched.interface import PauseState
@@ -6878,18 +6878,14 @@ def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
     return scheduler
 
 
-def test_diffusion_scheduler_is_selected_with_async_scheduling():
-    def selected(**kwargs):
-        config = create_scheduler(**kwargs).vllm_config.scheduler_config
-        return config.get_scheduler_cls(), config.async_scheduling
-
-    # The platform has the last word on async scheduling (CPU turns it off).
-    cls, is_async = selected(async_scheduling=True, diffusion_canvas_length=8)
-    assert cls is (DiffusionAsyncScheduler if is_async else Scheduler)
-    cls, _ = selected(async_scheduling=False, diffusion_canvas_length=8)
-    assert cls is Scheduler
-    cls, is_async = selected(async_scheduling=True)
-    assert cls is (AsyncScheduler if is_async else Scheduler)
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
+    config = create_scheduler(
+        async_scheduling=async_scheduling, diffusion_canvas_length=8
+    ).vllm_config.scheduler_config
+    assert config.get_scheduler_cls() is (
+        DiffusionAsyncScheduler if config.async_scheduling else DiffusionScheduler
+    )
 
 
 def test_diffusion_scheduler_narrows_the_canvas_per_request():
@@ -6906,6 +6902,50 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
     assert output.scheduled_spec_decode_tokens["narrow"] == [-1] * 4
     assert output.num_scheduled_tokens["narrow"] == 4
     assert narrow.num_output_placeholders == 4
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("structured", [False, True])
+def test_diffusion_scheduler_trims_full_width_worker_drafts(
+    async_scheduling, structured
+):
+    """Padded worker drafts must be narrowed before scheduling or grammar validation."""
+    scheduler = create_scheduler(
+        async_scheduling=async_scheduling,
+        diffusion_canvas_length=8,
+        scheduler_cls=(
+            DiffusionAsyncScheduler if async_scheduling else DiffusionScheduler
+        ),
+    )
+    wide = _diffusion_request("wide", {})
+    narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
+    for request in (wide, narrow):
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    _model_output(scheduler, prefill, [[], []])
+
+    if structured:
+        for request in (wide, narrow):
+            request.structured_output_request = SimpleNamespace(
+                grammar=_RecordingGrammar(), reasoning_ended=True
+            )
+    tokens = list(range(8)) if structured else [-1] * 8
+    drafts = DraftTokenIds(["wide", "narrow"], [tokens.copy(), tokens.copy()])
+    if async_scheduling:
+        output = scheduler.schedule()
+        scheduler.update_draft_token_ids_in_output(drafts, output)
+    else:
+        scheduler.update_draft_token_ids(drafts)
+        output = scheduler.schedule()
+
+    assert output.scheduled_spec_decode_tokens == {
+        "wide": tokens,
+        "narrow": tokens[:4],
+    }
+    assert output.num_scheduled_tokens == {"wide": 8, "narrow": 4}
+    if structured:
+        assert wide.structured_output_request.grammar.seen == [tokens]
+        assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
 
 
 def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():

@@ -29,6 +29,10 @@ curl -s localhost:8011/v1/chat/completions -H 'content-type: application/json' -
   ]}'
 ```
 
+Diffusion models automatically select the diffusion scheduler for the active
+scheduling mode. Use `--no-async-scheduling` for synchronous execution;
+`--scheduler-cls` is only needed to override the default.
+
 Question types: `noul` (yes/no), `choice` with `options`, `score` with
 ordered `levels`. Each label must be a single token in the answer template,
 which the server checks with the tokenizer when a request uses the schema.

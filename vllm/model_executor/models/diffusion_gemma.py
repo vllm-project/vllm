@@ -875,10 +875,6 @@ class DiffusionGemmaModelState(ModelState):
         if idx is not None:
             self.diffusion_states.remove_request(idx)
 
-    def num_draft_tokens_per_req(self, input_batch: Any) -> np.ndarray:
-        slots = input_batch.idx_mapping_np[: input_batch.num_reqs]
-        return self.diffusion_states.canvas_width_np[slots]
-
     def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
