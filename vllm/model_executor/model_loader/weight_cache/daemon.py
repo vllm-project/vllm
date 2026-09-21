@@ -59,6 +59,7 @@ import signal
 import socket
 import sys
 from collections.abc import Callable
+from itertools import product
 
 import torch
 
@@ -468,9 +469,9 @@ def main() -> None:
     ]
     draft_vllm_config = get_draft_daemon_config(vllm_config)
     if draft_vllm_config is not None:
-        draft_master_port = args.weight_cache_draft_master_port
-        if draft_master_port is None:
-            draft_master_port = master_port + 1 if nnodes > 1 else get_open_port()
+        draft_master_port = args.weight_cache_draft_master_port or (
+            master_port + 1 if nnodes > 1 else get_open_port()
+        )
         if draft_master_port == master_port:
             raise ValueError(
                 "--weight-cache-draft-master-port must differ from "
@@ -491,27 +492,28 @@ def main() -> None:
         node_rank * local_world_size + local_rank
         for local_rank in range(local_world_size)
     ]
-    procs = []
-    expected_ready: set[tuple[str, int]] = set()
-    for is_draft, config, init_method in groups:
-        role = format_daemon_role(is_draft)
-        for local_rank, global_rank in enumerate(global_ranks):
-            expected_ready.add((role, global_rank))
-            procs.append(
-                ctx.Process(
-                    target=_run_daemon,
-                    args=(
-                        global_rank,
-                        local_rank,
-                        config,
-                        init_method,
-                        args.weight_cache_socket_dir,
-                        ready_queue,
-                        is_draft,
-                    ),
-                    name=f"vllm-weight-cache-{role}-{global_rank}",
-                )
-            )
+    expected_ready = {
+        (format_daemon_role(is_draft), global_rank)
+        for (is_draft, _, _), global_rank in product(groups, global_ranks)
+    }
+    procs = [
+        ctx.Process(
+            target=_run_daemon,
+            args=(
+                global_rank,
+                local_rank,
+                config,
+                init_method,
+                args.weight_cache_socket_dir,
+                ready_queue,
+                is_draft,
+            ),
+            name=f"vllm-weight-cache-{format_daemon_role(is_draft)}-{global_rank}",
+        )
+        for (is_draft, config, init_method), (local_rank, global_rank) in product(
+            groups, enumerate(global_ranks)
+        )
+    ]
     for proc in procs:
         proc.start()
 
