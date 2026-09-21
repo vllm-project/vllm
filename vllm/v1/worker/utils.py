@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
+from vllm.v1.conf_compute_utils import prep_stream_ctx
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -239,7 +240,15 @@ class KVBlockZeroer:
             n_segs,
         ) = self._meta
         n_blocks = len(block_ids)
-        idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
+        # Under Confidential Computing an H2D on the compute stream blocks the
+        # host on the in-flight forward (observed 35ms in prefill); see
+        # vllm.v1.conf_compute_utils.
+        with prep_stream_ctx(self.device):
+            idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
+        # idx was allocated on the prep stream but is consumed on the compute
+        # stream; keep the allocator from reusing it before the kernel runs.
+        if idx.is_cuda:
+            idx.record_stream(torch.cuda.current_stream(self.device))
         grid = (n_blocks, n_segs, max_chunks)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
