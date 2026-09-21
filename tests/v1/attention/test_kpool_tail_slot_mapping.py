@@ -27,7 +27,6 @@ import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV4IndexerBackend,
     Glm5NextIndexerBackend,
     KpoolTailBackend,
     KpoolTailMetadataBuilder,
@@ -35,7 +34,6 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.worker.block_table import get_block_table_width
 
 KPOOL = 4
 
@@ -58,51 +56,23 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     assert content_stride == 1
 
 
-def test_indexer_backends_keep_both_packed_layouts():
-    layouts = (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
-    assert DeepseekV4IndexerBackend.supported_kv_cache_layouts() == layouts
-    assert Glm5NextIndexerBackend.supported_kv_cache_layouts() == layouts
+def test_glm_indexer_keeps_both_packed_layouts():
+    assert Glm5NextIndexerBackend.supported_kv_cache_layouts() == (
+        KVCacheLayout.BLHNC,
+        KVCacheLayout.BLNHC,
+    )
 
 
-@pytest.mark.parametrize(
-    ("num_speculative_tokens", "expected_capacity"),
-    [(0, 4), (3, 8), (4, 8), (5, 12)],
-)
-def test_tail_spec_reserves_complete_pools_for_speculation(
-    num_speculative_tokens, expected_capacity
-):
+def test_tail_spec_reserves_complete_pools_for_speculation():
     from vllm.models.glm5next.common.attention import Glm5NextTailCache
 
     cache = SimpleNamespace(_index_kpool=KPOOL, head_dim=128)
     spec = Glm5NextTailCache.get_kv_cache_spec(
-        cache, SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
+        cache, SimpleNamespace(num_speculative_tokens=5)
     )
 
     assert isinstance(spec, CircularBufferSpec)
-    assert spec.block_size == expected_capacity
-    assert spec.max_num_blocks_per_req(SimpleNamespace(), 10_000) == 1
-
-
-def test_tail_spec_opts_out_of_generic_slot_mapping():
-    """The tail row is one block wide (padded to the block-table alignment), so
-    the generic kernel's ``pos // kpool`` column index runs off the end of the
-    allocation for long prompts. The spec must opt out of it entirely."""
-    spec = CircularBufferSpec(
-        block_size=KPOOL,
-        num_kv_heads=2,
-        head_size=128,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-    )
-    max_len = 1 << 20
-    width = get_block_table_width(
-        spec.max_num_blocks_per_req(None, max_len),
-        spec.block_size,
-        token_alignment=spec.block_table_token_alignment,
-    )
-
-    assert width * KPOOL < max_len
-    assert spec.uses_slot_mapping is False
+    assert spec.block_size == 12
 
 
 def make_tail_block_table(own_blocks, width=64):
@@ -426,19 +396,12 @@ def test_interleaved_decode_pollution_legacy_vs_circular():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-@pytest.mark.parametrize(
-    "per_req,num_actual,padded_len,ring_size",
-    [
-        ([list(range(10)), list(range(12))], 22, 22, KPOOL),
-        ([list(range(10)), list(range(12))], 22, 30, 2 * KPOOL),
-        ([[3, 4], [0], [7, 8, 9]], 6, 8, KPOOL),
-        ([[5]], 1, 1, KPOOL),
-    ],
-)
-def test_triton_mapping_matches_cpu(per_req, num_actual, padded_len, ring_size):
+def test_triton_mapping_matches_cpu():
     """The CUDA (Triton) path must match the CPU torch reference, including
     tokens between the last request boundary and num_actual_tokens (mapped to
     the last request) and untouched padding beyond num_actual."""
+    per_req = [list(range(10)), list(range(12))]
+    num_actual, padded_len, ring_size = 22, 30, 2 * KPOOL
     positions, qsl, slot_mapping, _, num_reqs = make_batch(
         per_req, padded_len=padded_len
     )

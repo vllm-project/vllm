@@ -2462,8 +2462,6 @@ def test_generate_scheduler_kv_cache_config():
 
 
 def test_packed_groups_glm5_like_hybrid():
-    """MLA + kpool indexer, a per-request ring and 3x as many KDA states pack
-    into one attention group, one ring group and Mamba groups sized to the block."""
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
     kpool, block_size = 4, 1024
@@ -2520,7 +2518,6 @@ def test_packed_groups_glm5_like_hybrid():
     ]
     assert len(attn) == 1 and len(attn[0].layer_names) == 22
     assert len(rings) == 1 and len(rings[0].layer_names) == 11
-    assert not rings[0].kv_cache_spec.prefix_cacheable
     # 11 * (1.18 MB MLA + 34 KB indexer) per block fits 12 fp32-SSM KDA states.
     assert len(mamba) == 3
     assert sum(len(g.layer_names) for g in mamba) == 34

@@ -860,7 +860,6 @@ def _run_sparse_backend_decode_correctness(
 
 
 def test_flashinfer_sparse_mla_packed_stride(
-    default_vllm_config,
     dist_init,
     workspace_init,
 ):

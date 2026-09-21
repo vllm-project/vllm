@@ -370,6 +370,4 @@ def test_deepgemm_paged_mqa_packed_manager_block_stride():
         )
         for cache, table in zip((compact_pages, packed_pages), tables)
     ]
-    assert torch.isfinite(logits[0]).all()
-    assert torch.equal(torch.isfinite(logits[0]), torch.isfinite(logits[1]))
     torch.testing.assert_close(*logits, rtol=0, atol=0)

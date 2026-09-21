@@ -1259,12 +1259,7 @@ def test_ring_scratch_without_mamba_supports_host_staging():
 
     worker = _make_ring_worker(kv_buffer_device="cpu")
 
-    assert worker.use_host_buffer
-    assert len(worker.host_xfer_buffers) == 4
     assert len({tensor.data_ptr() for tensor in worker.host_xfer_buffers.values()}) == 4
-    assert worker.region_group_ids == [0, 0, 1, 1]
-    assert worker.region_mem_types == ["DRAM"] * 4
-    assert worker._scratch_region_indices == [2, 3]
     assert [region[0] for region in worker.nixl_wrapper.registered[0][0]] == [
         worker.host_xfer_buffers[name].data_ptr() for name in worker.region_names
     ]

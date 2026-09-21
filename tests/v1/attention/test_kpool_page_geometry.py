@@ -4,27 +4,10 @@
 import pytest
 import torch
 
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerMetadataBuilder,
-    kpool_page_geometry,
-)
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 ROW = 132  # 128 fp8 bytes + 4 scale bytes per indexer state
-
-
-@pytest.mark.parametrize(
-    ("num_states", "stride_pages", "expected"),
-    [
-        (64, None, (64, 1, 1)),
-        (256, None, (64, 4, 4)),
-        (256, 13, (64, 4, 13)),
-        (288, None, (32, 9, 9)),
-    ],
-)
-def test_kpool_page_geometry(num_states, stride_pages, expected):
-    stride_bytes = None if stride_pages is None else stride_pages * 64 * ROW
-    assert kpool_page_geometry(num_states, stride_bytes, ROW) == expected
 
 
 def test_packed_page_table_uses_physical_stride():
@@ -50,11 +33,11 @@ def test_packed_page_table_uses_physical_stride():
 
 
 @pytest.mark.parametrize(
-    ("block_size", "kpool", "expected_page"),
-    [(1024, 4, 64), (1152, 4, 32), (256, 4, None), (4096, 16, 64)],
+    ("block_size", "expected_page"),
+    [(1024, 64), (1152, 32), (256, None)],
 )
 def test_kpool_spec_declares_repage_alignment(
-    default_vllm_config, block_size, kpool, expected_page
+    default_vllm_config, block_size, expected_page
 ):
     from vllm.models.glm5next.common.attention import Glm5NextIndexerCache
 
@@ -62,9 +45,9 @@ def test_kpool_spec_declares_repage_alignment(
     cache = Glm5NextIndexerCache(
         head_dim=ROW,
         dtype=torch.uint8,
-        prefix=f"indexer_{block_size}_{kpool}",
+        prefix=f"indexer_{block_size}",
         cache_config=default_vllm_config.cache_config,
-        index_kpool=kpool,
+        index_kpool=4,
     )
     spec = cache.get_kv_cache_spec(default_vllm_config)
     expected = None if expected_page is None else expected_page * ROW

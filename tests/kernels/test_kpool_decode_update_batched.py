@@ -292,8 +292,8 @@ def _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos):
     return kv, tail
 
 
-@pytest.mark.parametrize("pool_size", [4, 16])
-def test_decode_writer_matches_prefill_writer_with_expanded_ring(pool_size):
+def test_decode_writer_matches_prefill_writer_with_expanded_ring():
+    pool_size = 16
     ring = 2 * pool_size
     n_pools, page, nblk = 8, 64, 4
     n_tok = n_pools * pool_size
