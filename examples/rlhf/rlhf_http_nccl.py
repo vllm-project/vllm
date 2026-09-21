@@ -19,7 +19,7 @@ The script starts the server itself, then:
   3. Generate again → sensible output.
 
 Run:
-    $ python examples/rl/rlhf_http_nccl.py
+    $ python examples/rlhf/rlhf_http_nccl.py
 """
 
 import os

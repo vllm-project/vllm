@@ -30,7 +30,7 @@ rank 0 (the sender) ships the merged handles and drives the server.
 This example was run on 4xH100.
 
 Run:
-    $ python examples/rl/rlhf_ipc_fsdp_ep.py
+    $ python examples/rlhf/rlhf_ipc_fsdp_ep.py
 """
 
 from __future__ import annotations

@@ -22,7 +22,7 @@ steps:
 
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
   - tests/entrypoints/launchers/test_shutdown.py
-  - tests/entrypoints/openai/test_return_token_ids.py
+  - tests/entrypoints/rlhf/return_routed_experts/test_openai_api.py
   - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   commands:
@@ -38,7 +38,7 @@ steps:
   - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   # test_comparison streams differently: Rust emits a separate first (prompt_token_ids) chunk and
   # finish chunk without logprobs, while the test reads `logprobs.tokens` on every chunk.
-  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
+  - pytest -v -s entrypoints/rlhf/return_routed_experts/test_openai_api.py -k "not test_comparison"
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
   mirror:
@@ -62,7 +62,7 @@ steps:
       - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
       - tests/entrypoints/openai/chat_completion/test_serving_chat.py
       - tests/entrypoints/openai/completion/test_shutdown.py
-      - tests/entrypoints/openai/test_return_token_ids.py
+      - tests/entrypoints/rlhf/return_routed_experts/test_openai_api.py
       - tests/entrypoints/openai/test_uds.py
       - tests/v1/sample/test_logprobs_e2e.py
       - vllm/platforms/rocm.py

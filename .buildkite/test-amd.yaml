@@ -988,13 +988,13 @@ steps:
   - tests/distributed/test_quick_all_reduce.py
   - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - tests/utils.py
-  - examples/rl/rlhf_async_new_apis.py
+  - examples/rlhf/rlhf_async_new_apis.py
   - tests/distributed/test_weight_transfer.py
   - tests/distributed/test_packed_tensor.py
   optional: true
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rlhf/rlhf_async_new_apis.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
   - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -1034,7 +1034,7 @@ steps:
   - vllm/distributed/
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
-  - examples/rl/
+  - examples/rlhf/
   - examples/features/data_parallel/data_parallel_offline.py
   - vllm/platforms/rocm.py
   commands:
@@ -1046,8 +1046,8 @@ steps:
   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   - python3 ../examples/features/data_parallel/data_parallel_offline.py --enforce-eager
   # rlhf examples
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_http_nccl.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_http_ipc.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rlhf/rlhf_http_nccl.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rlhf/rlhf_http_ipc.py
 
 - label: ":amd: (MI300) Elastic EP Scaling" # TBD
   timeout_in_minutes: 50
@@ -2397,7 +2397,7 @@ steps:
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
   - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
   - tests/entrypoints/launchers/test_shutdown.py
-  - tests/entrypoints/openai/test_return_token_ids.py
+  - tests/entrypoints/rlhf/return_routed_experts/test_openai_api.py
   - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   - vllm/platforms/rocm.py
@@ -2414,7 +2414,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
   - pytest -v -s entrypoints/openai/chat_completion/test_serving_chat.py -k "test_chat_per_request_metrics_follow_server_flag or test_streaming_reasoning_usage_counts_across_deltas or test_completion_tokens_details"
   - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
-  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
+  - pytest -v -s entrypoints/rlhf/return_routed_experts/test_openai_api.py -k "not test_comparison"
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
@@ -3479,12 +3479,12 @@ steps:
   - tests/v1/distributed/test_dbo.py
   - tests/utils.py
   - examples/features/data_parallel/data_parallel_offline.py
-  - examples/rl/rlhf_async_new_apis.py
+  - examples/rlhf/rlhf_async_new_apis.py
   - tests/distributed/test_weight_transfer.py
   - tests/distributed/test_packed_tensor.py
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rlhf/rlhf_async_new_apis.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
   - pytest -v -s tests/v1/distributed/test_dbo.py

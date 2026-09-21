@@ -22,7 +22,7 @@ IPC handles are pickled for HTTP transport, so both sides need
 the server it spawns.
 
 Run:
-    $ python examples/rl/rlhf_http_ipc.py
+    $ python examples/rlhf/rlhf_http_ipc.py
 """
 
 import os
