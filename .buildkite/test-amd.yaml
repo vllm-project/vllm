@@ -2414,7 +2414,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
   - pytest -v -s entrypoints/openai/chat_completion/test_serving_chat.py -k "test_chat_per_request_metrics_follow_server_flag or test_streaming_reasoning_usage_counts_across_deltas or test_completion_tokens_details"
   - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
-  - pytest -v -s entrypoints/rlhf/return_routed_experts/test_openai_api.py -k "not test_comparison"
+  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
