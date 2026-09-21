@@ -315,8 +315,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert num_new_tokens == 2
 
     def test_streaming_e2e_lifecycle(self):
-        """
-        Comprehensive integration test covering complete streaming request lifecycle
+        """Comprehensive integration test covering complete streaming request lifecycle
         including scheduler state management and aliasing bug prevention.
 
         FULL LIFECYCLE:
