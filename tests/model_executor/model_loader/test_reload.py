@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import importlib.machinery
 import inspect
+import sys
+import types
+from types import SimpleNamespace
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
 
@@ -326,8 +330,8 @@ def _load_marlin_checkpoint_format_weights(layer):
     )
 
 
-def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_init):
-    """Marlin must reuse the workspace storage captured by CUDA graphs."""
+def test_marlin_post_load_does_not_own_workspace(monkeypatch, dist_init):
+    """Weight reload must not create layer-owned Marlin lock storage."""
     _stub_marlin_ops(monkeypatch)
     kernel = _make_marlin_kernel()
 
@@ -335,19 +339,17 @@ def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_i
     _load_marlin_checkpoint_format_weights(layer)
     kernel.process_weights_after_loading(layer)
 
-    workspace_ptr = kernel.workspace.data_ptr()
+    assert not hasattr(kernel, "workspace")
 
     _load_marlin_checkpoint_format_weights(layer)
     kernel.process_weights_after_loading(layer)
 
-    assert kernel.workspace.data_ptr() == workspace_ptr
-    assert torch.all(kernel.workspace == 0)
+    assert not hasattr(kernel, "workspace")
 
 
 @pytest.mark.parametrize("variant", ["fp8", "mxfp8", "nvfp4"])
-def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
-    """The Marlin fallback prepare_* functions rerun on weight reload and must
-    reuse the workspace storage whose address captured CUDA graphs hold."""
+def test_marlin_prepare_layer_does_not_own_workspace(monkeypatch, variant):
+    """Weight preparation must not attach runtime workspace to model layers."""
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.quantization.utils import (
         marlin_utils,
@@ -413,34 +415,57 @@ def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
 
     load_checkpoint_format_weights()
     prepare(layer)
-    workspace_ptr = layer.workspace.data_ptr()
+    assert not hasattr(layer, "workspace")
 
     # Reload: fresh checkpoint-format tensors, prepare runs again
     load_checkpoint_format_weights()
     prepare(layer)
 
-    assert layer.workspace.data_ptr() == workspace_ptr
-    assert torch.all(layer.workspace == 0)
+    assert not hasattr(layer, "workspace")
 
 
-def test_marlin_make_workspace_new_rejects_incompatible_existing(monkeypatch):
-    """An incompatible existing workspace means the address captured by CUDA
-    graphs is already unusable; allocating a replacement would hide that."""
+def test_marlin_workspace_uses_persistent_workspace_manager(monkeypatch):
+    """Calls reuse initialized locks; independent streams get separate storage."""
     from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.utils import torch_utils
+    from vllm.v1.worker import workspace as workspace_module
 
     monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
     device = torch.device("cpu")
+    manager = workspace_module.WorkspaceManager(device)
+    monkeypatch.setattr(workspace_module, "_manager", manager)
+    stream = "main"
+    monkeypatch.setattr(torch_utils, "current_stream", lambda: stream)
 
-    workspace = marlin_utils.marlin_make_workspace_new(device)
-    reused = marlin_utils.marlin_make_workspace_new(device, existing=workspace)
-    assert reused is workspace
+    workspace = marlin_utils.get_marlin_workspace(device)
+    assert workspace.shape == (4 * marlin_utils.MARLIN_MAX_BLOCKS_PER_SM,)
+    assert workspace.dtype == torch.int32
+    assert torch.count_nonzero(workspace) == 0
 
-    with pytest.raises(ValueError, match="incompatible"):
-        marlin_utils.marlin_make_workspace_new(device, 4, existing=workspace)
-    with pytest.raises(ValueError, match="incompatible"):
-        marlin_utils.marlin_make_workspace_new(
-            device, existing=workspace.to(torch.int64)
-        )
+    workspace.fill_(1)
+    assert marlin_utils.get_marlin_workspace(device) is workspace
+    assert torch.all(workspace == 1)
+
+    stream = "aux"
+    aux_workspace = marlin_utils.get_marlin_workspace(device)
+    assert aux_workspace.data_ptr() != workspace.data_ptr()
+    assert torch.count_nonzero(aux_workspace) == 0
+
+    manager.lock()
+    assert marlin_utils.get_marlin_workspace(device) is aux_workspace
+
+
+def test_marlin_workspace_without_manager(monkeypatch):
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.v1.worker import workspace as workspace_module
+
+    monkeypatch.setattr(workspace_module, "_manager", None)
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    first = marlin_utils.get_marlin_workspace(torch.device("cpu"))
+    second = marlin_utils.get_marlin_workspace(torch.device("cpu"))
+    assert first.data_ptr() != second.data_ptr()
+    assert first.shape == (4 * marlin_utils.MARLIN_MAX_BLOCKS_PER_SM,)
+    assert torch.count_nonzero(first) == 0
 
 
 def test_model_cleanup(dist_init, default_vllm_config):
@@ -462,6 +487,111 @@ def test_model_cleanup(dist_init, default_vllm_config):
 
     assert layer_ref() is None
     assert len(mock_info_dict) == 0
+
+
+@pytest.mark.parametrize("is_gated", [False, True])
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize("padded", [False, True])
+def test_padded_moe_reload_releases_each_layer(
+    monkeypatch, is_gated, has_bias, tp_rank, padded
+):
+    """Checkpoint-sized copies finish each layer without global finalization."""
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    hidden, intermediate, experts = 4, 3, 2
+    stored_hidden, stored_intermediate = (8, 8) if padded else (hidden, intermediate)
+    config = SimpleNamespace(
+        hidden_dim_unpadded=hidden,
+        intermediate_size_per_partition_unpadded=intermediate,
+        is_act_and_mul=is_gated,
+        has_bias=has_bias,
+        tp_rank=tp_rank,
+        tp_shard_with_padding=False,
+        moe_parallel_config=SimpleNamespace(tp_size=2),
+    )
+    model = torch.nn.ModuleList()
+    processed: list[torch.nn.Module] = []
+    for _ in range(2):
+        method = object.__new__(UnquantizedFusedMoEMethod)
+        torch.nn.Module.__init__(method)
+        method.moe = config
+        # The regression concerns streaming reload, not kernel conversion.
+        monkeypatch.setattr(method, "process_weights_after_loading", processed.append)
+        layer = object.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = config
+        layer.quant_config = None
+        layer.quant_method = method
+        layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
+        layer._loaded_expert_biases = set()
+        method.create_weights(
+            layer,
+            experts,
+            stored_hidden,
+            stored_intermediate,
+            torch.float32,
+            weight_loader=layer.weight_loader,
+        )
+        model.append(layer)
+
+    record_metadata_for_reloading(model)
+    original_params = [dict(layer.named_parameters()) for layer in model]
+    shards = ["w1", "w3", "w2"] if is_gated else ["w1", "w2"]
+    for cycle in range(2):
+        initialize_layerwise_reload(model)
+        for layer_index, layer in enumerate(model):
+            info = reload_layerwise.get_layerwise_info(layer)
+            inputs = []
+            expected = {
+                name: torch.full_like(p, float("nan"))
+                for name, p in original_params[layer_index].items()
+            }
+            params = dict(layer.named_parameters())
+            calls = [
+                (e, s, b)
+                for e in range(experts)
+                for s in shards
+                for b in ([False, True] if has_bias else [False])
+            ]
+            for call_index, (expert, shard, bias) in enumerate(calls):
+                name = ("w2" if shard == "w2" else "w13") + (
+                    "_bias" if bias else "_weight"
+                )
+                shape = (
+                    ((hidden,) if bias else (hidden, 2 * intermediate))
+                    if shard == "w2"
+                    else ((2 * intermediate,) if bias else (2 * intermediate, hidden))
+                )
+                weight = torch.arange(
+                    torch.Size(shape).numel(), dtype=torch.float32
+                ).reshape(shape)
+                weight = weight + 100 * (1 + call_index + cycle)
+                inputs.append(ref(weight))
+                # Direct checkpoint loading is the reference for deferred reload.
+                layer.weight_loader(expected[name], weight, name, shard, expert)
+                param = params[name]
+                param.weight_loader(param, weight, name, shard, expert)
+                del weight
+                if call_index != len(calls) - 1:
+                    assert info.can_load(), (
+                        "Layer processed before its final checkpoint shard"
+                    )
+
+            assert not info.can_load(), (
+                "Padding must not defer the layer until finalization"
+            )
+            assert not info.loaded_weights
+            assert len(processed) == cycle * len(model) + layer_index + 1
+            assert all(source() is None for source in inputs)
+            for name, original in original_params[layer_index].items():
+                assert getattr(layer, name) is original
+                # Kernel-specific tests cover padding, which is not checkpoint data.
+                mask = torch.isfinite(expected[name])
+                assert torch.equal(original[mask], expected[name][mask])
 
 
 def test_get_numel_loaded():
@@ -815,6 +945,110 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
     assert torch.equal(layer.scale, loaded_scale)
     assert "scale" in layer._non_persistent_buffers_set
     assert "0.scale" not in model.state_dict()
+
+
+@pytest.fixture
+def hpc_rope_norm(monkeypatch, default_vllm_config):
+    """Import HpcRopeNorm with the external ``hpc`` package stubbed out."""
+    if "hpc" not in sys.modules:
+        stub = types.ModuleType("hpc")
+        stub.__spec__ = importlib.machinery.ModuleSpec("hpc", loader=None)
+        stub.QuantType = types.SimpleNamespace(  # type: ignore[attr-defined]
+            QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR=types.SimpleNamespace(value=0)
+        )
+        monkeypatch.setitem(sys.modules, "hpc", stub)
+    from vllm.model_executor.layers.hpc import rope_norm
+
+    monkeypatch.setattr(rope_norm, "_hpc_rope_norm_instances", {})
+    return rope_norm
+
+
+def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm):
+    """The fused HPC kernel is handed the live QK-norm weights after a refit.
+
+    Drives the production ``_forward_impl`` with a recording ``hpc`` stub. The
+    Q/K norm weights it receives must be the model's own float32 parameters,
+    so a layerwise reload that rewrites them in place (same storage) is what
+    the kernel sees. Previously the kernel read separate mirrors that no
+    reload path refreshed.
+    """
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    head_dim, num_heads, num_kv_heads, block_size = 128, 8, 1, 4
+    layer = torch.nn.Module()
+    layer.q_norm = RMSNorm(head_dim, 1e-6, dtype=torch.float32)
+    layer.k_norm = RMSNorm(head_dim, 1e-6, dtype=torch.float32)
+    layer.hpc_rope_norm = hpc_rope_norm.HpcRopeNorm(
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        cos_sin_cache=torch.ones(16, head_dim),
+        use_qk_norm=True,
+        fallback_qnorm=layer.q_norm,
+        fallback_knorm=layer.k_norm,
+        kv_cache_dtype="auto",
+        layer_name="hpc_test_layer",
+    )
+    model = torch.nn.Sequential(layer)
+    rnorm = layer.hpc_rope_norm
+
+    calls: list[dict] = []
+
+    def record(*args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(sys.modules["hpc"], "rope_norm_store_kv", record, raising=False)
+
+    def kernel_norm_weights():
+        q_size, kv_size = num_heads * head_dim, num_kv_heads * head_dim
+        qkv = torch.zeros(1, q_size + 2 * kv_size, dtype=torch.bfloat16)
+        kv_cache = torch.zeros(
+            2, num_kv_heads, block_size, 2 * head_dim, dtype=torch.bfloat16
+        )
+        attn_layer = types.SimpleNamespace(
+            _k_scale=torch.ones(1), _v_scale=torch.ones(1)
+        )
+        attn_metadata = types.SimpleNamespace(
+            num_actual_tokens=1,
+            num_decodes=1,
+            num_decode_tokens=1,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            max_query_len=1,
+            decode_query_len=1,
+            qo_indptr=None,
+            qo_indptr_decode=None,
+            slot_mapping=torch.tensor([4]),
+            seq_lens=torch.tensor([1]),
+            block_table_tensor=torch.tensor([[1]]),
+            hpc_kv_written=False,
+        )
+        output = torch.zeros(1, q_size, dtype=torch.bfloat16)
+        rnorm._forward_impl(qkv, kv_cache, attn_metadata, attn_layer, output)
+        return calls[-1]["q_norm_weight"], calls[-1]["k_norm_weight"]
+
+    def loaded(value):
+        return torch.full((head_dim,), value, dtype=torch.bfloat16)
+
+    default_weight_loader(layer.q_norm.weight, loaded(0.5))
+    default_weight_loader(layer.k_norm.weight, loaded(0.25))
+    q, k = kernel_norm_weights()
+    assert torch.equal(q, loaded(0.5).float())
+    assert torch.equal(k, loaded(0.25).float())
+    q_ptr, k_ptr = q.data_ptr(), k.data_ptr()
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.q_norm.weight.weight_loader(layer.q_norm.weight, loaded(2.0))
+    layer.k_norm.weight.weight_loader(layer.k_norm.weight, loaded(3.0))
+    finalize_layerwise_reload(model, model_config=None)
+
+    q, k = kernel_norm_weights()
+    assert q.dtype == k.dtype == torch.float32
+    assert torch.equal(q, loaded(2.0).float())
+    assert torch.equal(k, loaded(3.0).float())
+    assert (q.data_ptr(), k.data_ptr()) == (q_ptr, k_ptr)
+    assert not hasattr(rnorm, "qnorm_weight")
 
 
 @pytest.mark.parametrize(
