@@ -110,8 +110,6 @@ python --version
 ########################################
 # install build tools (stable uv)
 ########################################
-
-pip install -U pip setuptools-rust
 pip install uv
 pip install "setuptools>=78.1.1" build wheel cmake auditwheel
 uv pip install "setuptools>=78.1.1" cython meson-python pybind11 "sympy>=1.13.3" --no-build-isolation
