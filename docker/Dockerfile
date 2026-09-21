@@ -1049,7 +1049,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 
 # Expose the Rust frontend bundled in the wheel on the container's PATH.
 RUN ln -s "$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/vllm/vllm-rs" /usr/local/bin/vllm-rs \
-    && vllm-rs --help
+    && vllm-rs --version
 
 RUN --mount=type=cache,target=/opt/uv/cache \
 . /etc/environment && \
