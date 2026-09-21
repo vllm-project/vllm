@@ -627,8 +627,9 @@ def nvfp4_sf_byte(s: torch.Tensor) -> torch.Tensor:
     not current_platform.is_device_capability(100),
     reason="nvfp4_ds_mla requires SM100 (Blackwell)",
 )
+@pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
-def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int):
+def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int, cfg: ModelConfig):
     """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 only).
 
     Per-token 352-byte entry: 256 B of 512 e2m1 NoPE packed 2/byte (low nibble
@@ -640,8 +641,8 @@ def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int):
     max_pos = 8192
     pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
 
-    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
-    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    q_c = torch.randn(num_tokens, cfg.q_lora, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, cfg.kv_lora, device=dev, dtype=torch.bfloat16)
     # Tile 0 is deliberately low-magnitude: amax/6 lands between two e4m3
     # subnormals (spaced a flat 2^-9 there), so round-to-nearest picks a scale
     # BELOW amax/6 and the tile's peak saturates at +-6. Asserted below, so a
@@ -651,10 +652,10 @@ def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int):
     kv_c[:, :16] = (
         7.5 * (2.0**-9) * torch.linspace(0.2, 1.0, 16, device=dev, dtype=torch.bfloat16)
     )
-    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
-    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
-    kvw = torch.ones(KV_LORA, device=dev, dtype=torch.bfloat16)
-    mla_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+    k_pe = torch.randn(num_tokens, cfg.rope_dim, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(cfg.q_lora, device=dev, dtype=torch.bfloat16)
+    kvw = torch.ones(cfg.kv_lora, device=dev, dtype=torch.bfloat16)
+    mla_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev)
 
     bs = max_pos
     mla_cache = torch.zeros(1, bs, 352, device=dev, dtype=torch.uint8)
@@ -704,19 +705,19 @@ def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int):
     )
 
     ref_codes = quantize_to_e2m1(tiles / ref_scale.float().unsqueeze(-1))
-    ref_codes = ref_codes.reshape(num_tokens, KV_LORA)
+    ref_codes = ref_codes.reshape(num_tokens, cfg.kv_lora)
 
     cache = mla_cache[0, :num_tokens]  # [N, 352] uint8
-    packed = cache[:, : KV_LORA // 2]
+    packed = cache[:, : cfg.kv_lora // 2]
     got_codes = torch.stack([packed & 0xF, packed >> 4], dim=-1)
-    got_codes = got_codes.reshape(num_tokens, KV_LORA)  # low nibble = even elem
+    got_codes = got_codes.reshape(num_tokens, cfg.kv_lora)  # low nibble = even elem
     torch.testing.assert_close(got_codes, ref_codes, rtol=0, atol=0)
 
-    got_rope = cache[:, KV_LORA // 2 : KV_LORA // 2 + ROPE_DIM].view(FP8)
+    got_rope = cache[:, cfg.kv_lora // 2 : cfg.kv_lora // 2 + cfg.rope_dim].view(FP8)
     assert_fp8(got_rope, kpe_ref.to(FP8), "nvfp4_ds_mla RoPE e4m3")
 
     perm = nvfp4_sf_byte(torch.arange(32, device=dev))
-    got_scale = cache[:, KV_LORA // 2 + ROPE_DIM :].view(FP8)[:, perm]
+    got_scale = cache[:, cfg.kv_lora // 2 + cfg.rope_dim :].view(FP8)[:, perm]
     torch.testing.assert_close(got_scale.float(), ref_scale.float(), rtol=0, atol=0)
 
     # No indexer on this call: top-k buffer must be untouched.
