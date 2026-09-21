@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_bac
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import worker_receiver_cache_from_config
+from vllm.plugins.model_metadata import prepare_model_metadata_consumer
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
@@ -274,6 +275,7 @@ class WorkerWrapperBase:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
+        prepare_model_metadata_consumer(vllm_config)
 
         # Let the platform replace core Triton kernels (e.g. CPU fallback
         # implementations) before any worker or model code can launch them.

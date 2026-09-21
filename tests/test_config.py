@@ -4,7 +4,8 @@
 import json
 import logging
 import os
-from dataclasses import MISSING, Field, asdict, dataclass, field
+import pickle
+from dataclasses import MISSING, Field, asdict, dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,7 @@ from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
+from vllm.plugins.model_metadata import MetadataSource
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -107,6 +109,60 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_model_metadata_source_pickle_and_hash(tmp_path: Path):
+    from transformers import LlamaConfig
+
+    hf_config = LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=128,
+        max_position_embeddings=64,
+        dtype="float32",
+    )
+    _write_json(tmp_path / "config.json", hf_config.to_dict())
+    source = MetadataSource(
+        model="org/model",
+        tokenizer=None,
+        revision="release",
+        tokenizer_revision=None,
+        code_revision="code-release",
+        cache_root=str(tmp_path / "cache"),
+        offline=True,
+        use_modelscope=False,
+    )
+    sources: list[MetadataSource | None] = [
+        None,
+        source,
+        replace(
+            source,
+            revision="other-release",
+            cache_root=str(tmp_path / "other-cache"),
+            offline=False,
+        ),
+    ]
+    configs = [
+        ModelConfig(
+            model=str(tmp_path),
+            dtype="float32",
+            skip_tokenizer_init=True,
+            metadata_source=metadata_source,
+        )
+        for metadata_source in sources
+    ]
+    assert len({config.compute_hash() for config in configs}) == 1
+    for config, metadata_source in zip(configs, sources):
+        assert config.metadata_source == metadata_source
+        restored = pickle.loads(pickle.dumps(config))
+        assert restored.metadata_source == metadata_source
+        assert restored.compute_hash() == config.compute_hash()
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")

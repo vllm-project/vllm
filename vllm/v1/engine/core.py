@@ -35,6 +35,7 @@ from vllm.multimodal.cache import (
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
 )
+from vllm.plugins.model_metadata import prepare_model_metadata_consumer
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -123,6 +124,7 @@ class EngineCore:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
+        prepare_model_metadata_consumer(vllm_config)
 
         self.vllm_config = vllm_config
         if not vllm_config.parallel_config.data_parallel_rank_local:
