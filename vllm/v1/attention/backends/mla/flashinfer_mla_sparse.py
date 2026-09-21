@@ -28,11 +28,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    flat_kv_row_view,
-    triton_convert_req_index_to_global_index,
-    triton_filter_and_convert_dcp_index,
-)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -119,14 +114,12 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
             and parallel_config.decode_context_parallel_size > 1
         ):
             return (
-                "FLASHINFER_MLA_SPARSE does not support combined PCP+DCP; "
+                f"{cls.get_name()} does not support combined PCP+DCP; "
                 "use FLASHMLA_SPARSE, which gathers each DCP KV shard before "
                 "running the rank-local PCP prefill queries"
             )
         if kv_cache_dtype == "fp8_ds_mla":
-            return (
-                "FLASHINFER_MLA_SPARSE SM10 does not support fp8_ds_mla kv-cache dtype"
-            )
+            return f"{cls.get_name()} SM10 does not support fp8_ds_mla kv-cache dtype"
 
         # FlashInfer MLA sparse SM10 kernel requires qk_nope_head_dim in [128, 192].
         if vllm_config.model_config is not None:
@@ -480,12 +473,16 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # for query and kv_cache (mixed bf16+fp8 is not supported).
         self.supports_quant_query_input = True
 
-    def forward_mqa(
+    def _forward_mqa_kernel(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: FlashInferMLASparseMetadata,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid_counts: torch.Tensor,
+        *,
         layer: AttentionLayer,
+        block_size: int,
+        is_decode: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if isinstance(q, tuple):
             ql_nope, q_pe = q
@@ -494,182 +491,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             else:
                 q = torch.cat(q, dim=-1)
 
-        num_actual_toks = q.shape[0]
-
-        assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
-
         self._prepare_mqa_kernel(layer, q.device)
-
-        index_group = self.index_group
-        if isinstance(index_group, HiSparseMLAIndexGroup):
-            num_decode_tokens = attn_metadata.num_decode_tokens
-            decode_out: torch.Tensor | None = None
-            decode_lse: torch.Tensor | None = None
-            if num_decode_tokens > 0:
-                physical_topk, valid_counts = (
-                    index_group.convert_decode_logical_to_physical_topk(
-                        self.index_group_index,
-                        topk_indices[:num_decode_tokens],
-                        attn_metadata,
-                        return_valid_counts=True,
-                    )
-                )
-                decode_out, decode_lse = self._run_mqa_kernel(
-                    q[:num_decode_tokens],
-                    index_group.physical_kv_cache(self.index_group_index).view(
-                        kv_c_and_k_pe_cache.dtype
-                    ),
-                    physical_topk,
-                    valid_counts,
-                )
-                if num_decode_tokens == num_actual_toks:
-                    return decode_out, decode_lse
-
-            cache = index_group.cache(self.index_group_index)
-            if num_decode_tokens == 0 and cache.all_context_pages_resident:
-                physical_topk, valid_counts = (
-                    index_group.convert_logical_to_physical_topk(
-                        self.index_group_index,
-                        topk_indices,
-                        attn_metadata,
-                        block_stride_rows=None,
-                        return_valid_counts=True,
-                    )
-                )
-                return self._run_mqa_kernel(
-                    q,
-                    index_group.physical_kv_cache(self.index_group_index).view(
-                        kv_c_and_k_pe_cache.dtype
-                    ),
-                    physical_topk,
-                    valid_counts,
-                )
-
-            prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
-                self.index_group_index, kv_c_and_k_pe_cache, attn_metadata
-            )
-            prefill_indices, prefill_lens = triton_convert_req_index_to_global_index(
-                req_ids,
-                block_table,
-                topk_indices[num_decode_tokens:],
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                return_valid_counts=True,
-            )
-            prefill_out, prefill_lse = self._run_mqa_kernel(
-                q[num_decode_tokens:],
-                prefill_cache,
-                prefill_indices,
-                prefill_lens,
-            )
-            if decode_out is None:
-                return prefill_out, prefill_lse
-            output = torch.cat((decode_out, prefill_out))
-            if decode_lse is None:
-                return output, None
-            assert prefill_lse is not None
-            return output, torch.cat((decode_lse, prefill_lse))
-
-        _, block_stride_rows = flat_kv_row_view(
-            kv_c_and_k_pe_cache, attn_metadata.block_size
-        )
-
-        if self.dcp_world_size > 1:
-            topk_indices_physical, seq_lens = triton_filter_and_convert_dcp_index(
-                attn_metadata.req_id_per_token[:num_actual_toks],
-                attn_metadata.block_table,
-                topk_indices,
-                dcp_size=self.dcp_world_size,
-                dcp_rank=self.dcp_rank,
-                cp_kv_cache_interleave_size=(attn_metadata.cp_kv_cache_interleave_size),
-                BLOCK_SIZE=attn_metadata.block_size,
-                BLOCK_STRIDE_ROWS=block_stride_rows,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                return_valid_counts=True,
-            )
-        else:
-            topk_indices_physical, seq_lens = self._convert_logical_to_physical_topk(
-                topk_indices,
-                attn_metadata,
-                block_stride_rows=block_stride_rows,
-                return_valid_counts=True,
-            )
-
-        return self._run_mqa_kernel(
-            q,
-            kv_c_and_k_pe_cache,
-            topk_indices_physical,
-            seq_lens,
-        )
-
-    def _prepare_mqa_kernel(
-        self,
-        layer: AttentionLayer,
-        device: torch.device,
-    ) -> None:
-        if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(device)
-
-        if self.bmm1_scale is None:
-            self.bmm1_scale = self.scale
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-        if self.bmm2_scale is None:
-            self.bmm2_scale = 1.0
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm2_scale *= layer._k_scale_float
-
-    def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
-        """Autotune the largest legal HiSparse decode batch."""
-        assert isinstance(self.index_group, HiSparseMLAIndexGroup)
-        cache = self.index_group.cache(self.index_group_index)
-        assert self.topk_indices_buffer is not None
-
-        runtime = cache.runtime
-        kv_cache = runtime.hot.attention_cache
-        num_tokens = runtime.max_num_reqs
-        topk_tokens = self.topk_indices_buffer.shape[1]
-        self._prepare_mqa_kernel(layer, kv_cache.device)
-
-        q_dtype = (
-            current_platform.fp8_dtype()
-            if is_quantized_kv_cache(self.kv_cache_dtype)
-            else kv_cache.dtype
-        )
-        q = torch.zeros(
-            (
-                num_tokens,
-                self.num_heads,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-            ),
-            dtype=q_dtype,
-            device=kv_cache.device,
-        )
-        topk_indices = (
-            torch.arange(
-                topk_tokens,
-                dtype=torch.int32,
-                device=kv_cache.device,
-            )
-            .expand(num_tokens, -1)
-            .contiguous()
-        )
-        seq_lens = torch.full(
-            (num_tokens,),
-            topk_tokens,
-            dtype=torch.int32,
-            device=kv_cache.device,
-        )
-        self._run_mqa_kernel(q, kv_cache, topk_indices, seq_lens)
-
-    def _run_mqa_kernel(
-        self,
-        q: torch.Tensor,
-        kv_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
-        seq_lens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self._workspace_buffer is not None
         assert self.bmm1_scale is not None
         assert self.bmm2_scale is not None
@@ -685,7 +507,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # deferred until MTP is validated end-to-end for this backend.
         query = q.unsqueeze(1)
         block_tables = topk_indices.unsqueeze(1)
-        seq_lens_arg = seq_lens
+        seq_lens_arg = valid_counts
 
         # page_table width = topk buffer width, which kpool widens past
         # index_topk (topk_tokens) and rounds up to a multiple of 128. The
@@ -706,9 +528,9 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             # the launch. ``triton_convert_req_index_to_global_index`` packs the
             # valid indices into a contiguous prefix, which is what the kernel
             # requires of the page table.
-            empty_rows = seq_lens == 0
+            empty_rows = valid_counts == 0
             topk_indices[:, 0] = topk_indices[:, 0].masked_fill(empty_rows, 0)
-            extra_kwargs["sparse_mla_top_k_lens"] = seq_lens.clamp(min=1)
+            extra_kwargs["sparse_mla_top_k_lens"] = valid_counts.clamp(min=1)
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
@@ -744,6 +566,73 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             if lse is not None:
                 lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         return out, lse
+
+    def _prepare_mqa_kernel(
+        self,
+        layer: AttentionLayer,
+        device: torch.device,
+    ) -> None:
+        if self._workspace_buffer is None:
+            self._workspace_buffer = _get_workspace_buffer(device)
+
+        if self.bmm1_scale is None:
+            self.bmm1_scale = self.scale
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+        if self.bmm2_scale is None:
+            self.bmm2_scale = 1.0
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm2_scale *= layer._k_scale_float
+
+    def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
+        """Autotune the largest legal HiSparse decode batch."""
+        assert isinstance(self.index_group, HiSparseMLAIndexGroup)
+        cache = self.index_group.cache(self.index_group_index)
+        assert self.topk_indices_buffer is not None
+
+        runtime = cache.runtime
+        kv_cache = runtime.hot.attention_cache
+        num_tokens = runtime.max_num_reqs
+        topk_tokens = self.topk_indices_buffer.shape[1]
+
+        q_dtype = (
+            current_platform.fp8_dtype()
+            if is_quantized_kv_cache(self.kv_cache_dtype)
+            else kv_cache.dtype
+        )
+        q = torch.zeros(
+            (
+                num_tokens,
+                self.num_heads,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+            ),
+            dtype=q_dtype,
+            device=kv_cache.device,
+        )
+        topk_indices = (
+            torch.arange(
+                topk_tokens,
+                dtype=torch.int32,
+                device=kv_cache.device,
+            )
+            .expand(num_tokens, -1)
+            .contiguous()
+        )
+        seq_lens = torch.full(
+            (num_tokens,),
+            topk_tokens,
+            dtype=torch.int32,
+            device=kv_cache.device,
+        )
+        self._forward_mqa_kernel(
+            q,
+            kv_cache,
+            topk_indices,
+            seq_lens,
+            layer=layer,
+            block_size=runtime.hot.block_size,
+            is_decode=True,
+        )
 
     @staticmethod
     def _normalize_lse(
