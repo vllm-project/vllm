@@ -261,4 +261,3 @@ csrc/cpu/cpu_attn_dispatch_generated.h
 /benchmarks/issue_49730_*.py
 /benchmarks/issue_49730_run.sh
 /benchmarks/dflash_4b/results/
-!/benchmarks/dflash_4b/inputs.json

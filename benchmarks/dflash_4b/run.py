@@ -3,7 +3,6 @@
 """Run the four single-GPU, concurrency-one Qwen3.5-4B comparisons."""
 
 import argparse
-import hashlib
 import importlib.metadata
 import json
 import os
@@ -47,7 +46,7 @@ def main():
         "engine": args.engine,
         "mode": args.mode,
         "models": {"target": TARGET, "draft": DRAFT},
-        "input_sha256": hashlib.sha256((HERE / "inputs.json").read_bytes()).hexdigest(),
+        "public_dataset": "spec_al_gsm8k",
         "versions": versions(args.engine),
         "server_command": command,
         "vllm_runner": "V2" if args.engine == "vllm" else None,
@@ -79,10 +78,10 @@ def main():
                 "200",
                 "--warmup-request-count",
                 "20",
-                "--input-file",
-                str(HERE / "inputs.json"),
-                "--custom-dataset-type",
-                "inputs-json",
+                "--public-dataset",
+                "spec_al_gsm8k",
+                "--extra-inputs",
+                "max_completion_tokens:256",
                 "--concurrency",
                 "1",
                 "--endpoint-type",

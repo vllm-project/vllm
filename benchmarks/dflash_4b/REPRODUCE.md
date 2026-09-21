@@ -9,7 +9,7 @@ No profiler is enabled.
 Use a Linux NVIDIA GPU machine with a CUDA 13 compatible driver, `uv`, and `canhazgpu` installed and configured for GPU reservations.
 The setup script creates separate engine environments because their PyTorch requirements differ.
 Exact versions and the reasons for pinning them are recorded in the appendix.
-Model downloads require internet access and enough disk space for both checkpoints and environments.
+Model and initial dataset downloads require internet access and enough disk space for both checkpoints and environments.
 
 ```bash
 git clone --branch repro/qwen35-4b-dflash https://github.com/tomasruizt/vllm.git
@@ -36,10 +36,12 @@ GPU memory, CPU speed, driver, and dependency differences can affect results.
 
 ## Workload and engine settings
 
-`inputs.json` contains all 1319 public GSM8K test questions, in their original order, formatted as `Question: {question}\nAnswer:`.
-The payloads are identical to those used in the original comparison; only random session UUIDs have been replaced by deterministic IDs.
-The dataset comes from OpenAI's `grade-school-math` repository; its MIT license is included in `GSM8K_LICENSE`.
-AIPerf selects the workload using the same inputs-json configuration for every run, with 20 warmups and 200 measured requests.
+AIPerf automatically downloads and caches GSM8K using `--public-dataset spec_al_gsm8k` (`openai/gsm8k`, `main` subset, `test` split, 1319 questions).
+No dataset file is bundled with this reproduction.
+All four configurations use this same loader, with 20 warmups and 200 measured requests.
+The loader sends each raw question as the user message; the engine applies its chat template.
+The original measurements used `Question: {question}\nAnswer:` instead, so the reference results below predate this formatting change.
+The output limit is passed through `--extra-inputs max_completion_tokens:256`.
 Requests set `max_completion_tokens=256` and do not set `ignore_eos=true` in either engine.
 Therefore, 256 is a maximum, not a guaranteed output length: generation can stop earlier on an EOS (end-of-sequence) token.
 Setting `ignore_eos=true` in both engines would enforce generation up to the token limit, but would change the workload from the original comparison.
@@ -73,7 +75,7 @@ Original H100 reference measurements (not guaranteed on a different machine):
 
 ## Publication scope
 
-Only benchmark code, instructions, and verified public GSM8K prompts are included.
+Only benchmark code and instructions are included; AIPerf loads the public dataset at runtime.
 Environments, original logs, profiles, archives, and generated results are ignored.
 New runtime logs can contain local paths, host details, and model output; review them separately before sharing.
 
