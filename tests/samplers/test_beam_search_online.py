@@ -46,13 +46,15 @@ class _VllmConfig:
     _check_supports_watermarking = VllmConfig._check_supports_watermarking
 
 
-class _EngineClient:
+class _InputProcessor:
     vllm_config = _VllmConfig()
 
     def resolve_watermarking(self, params):
-        # Mirrors InputProcessor.resolve_watermarking: a pure check that never
-        # writes back to the caller's params object.
         return self.vllm_config._check_supports_watermarking(params)
+
+
+class _EngineClient:
+    input_processor = _InputProcessor()
 
     async def generate(self, prompt, *args, **kwargs):
         assert args[0].watermarking is False
