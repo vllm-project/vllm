@@ -941,6 +941,21 @@ class ParallelConfig:
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
+        # Meta CI (VLLM_META_MODE): collapse the parallel sizes to one in-process
+        # worker (world_size==1 -> "uni" executor), remembering the requested TP
+        # so the worker can emulate TP/EP sharding in one process.
+        if envs.VLLM_META_MODE:
+            from vllm import meta_mode
+
+            meta_mode.set_logical_tp(self.tensor_parallel_size)
+            meta_mode.set_logical_dcp(self.decode_context_parallel_size)
+            self.tensor_parallel_size = 1
+            self.pipeline_parallel_size = 1
+            self.prefill_context_parallel_size = 1
+            self.data_parallel_size = 1
+            self.decode_context_parallel_size = 1
+            self.distributed_executor_backend = "uni"
+
         # Continue with the rest of the initialization
         self.world_size = (
             self.pipeline_parallel_size

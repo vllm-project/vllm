@@ -36,6 +36,8 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn.functional as F
+
+import vllm.envs as envs
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -636,6 +638,10 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         attn_out: torch.Tensor,
     ) -> None:
+        if envs.VLLM_META_MODE:
+            # Meta CI: the fused Gated-MLA prefill/decode kernels write into the
+            # pre-allocated `attn_out`; skip them (shape-correct meta tensor).
+            return
         forward_context = get_forward_context()
         attn_metadata_by_layer = forward_context.attn_metadata
         if attn_metadata_by_layer is None:

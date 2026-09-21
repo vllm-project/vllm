@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
@@ -77,6 +78,12 @@ def requantize_with_max_scale(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
+
+    if envs.VLLM_META_MODE:
+        # Meta CI: dummy weights make requantization meaningless, and the
+        # unfused-checkpoint detection below does a data-dependent bool()/.item()
+        # meta can't support. Return the shape-correct max scale + weight.
+        return max_w_scale, weight
 
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize

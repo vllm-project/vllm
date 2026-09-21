@@ -403,6 +403,13 @@ class ExpertMapManager:
 
         Returns string mapping local to global expert IDs.
         """
+        # Meta CI: the expert map is a meta tensor, so the .item()/nonzero()
+        # calls below are impossible; this debug-log helper has no effect.
+        import vllm.envs as envs
+
+        if envs.VLLM_META_MODE:
+            return "<meta:skipped>"
+
         if self._expert_map is None:
             return f"[0..{self.global_num_experts - 1}]"
 

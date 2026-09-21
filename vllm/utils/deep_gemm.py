@@ -143,6 +143,11 @@ def is_deep_gemm_e8m0_used() -> bool:
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable DeepGEMM backend."""
+    # Meta CI: no DeepGEMM/accelerator. These entry points write into caller
+    # pre-allocated output buffers (callers use those, not the return value), so
+    # a no-op leaves correct-shaped meta outputs instead of raising.
+    if envs.VLLM_META_MODE:
+        return None
     raise RuntimeError(
         "DeepGEMM backend is unavailable in the current vLLM environment, "
         "or the available DeepGEMM package does not provide the required APIs "

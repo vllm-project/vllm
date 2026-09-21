@@ -1017,6 +1017,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_input_scale.data.fill_(1.0)
             layer.w2_input_scale.data.fill_(1.0)
 
+        if envs.VLLM_META_MODE:
+            # Meta CI: the NVFP4 MoE weight conversion + kernel build are GPU-only
+            # + data-dependent; expert compute runs through the faked moe_forward
+            # op, so none of it is needed on meta.
+            return
+
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]

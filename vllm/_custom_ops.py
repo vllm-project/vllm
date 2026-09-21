@@ -367,6 +367,66 @@ def fused_qk_norm_rope(
     )
 
 
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fused_qk_norm_rope"):
+
+    @register_fake("_C::fused_qk_norm_rope")
+    def _fused_qk_norm_rope_fake(
+        qkv: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        num_heads_v: int,
+        head_dim: int,
+        eps: float,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        position_ids: torch.Tensor,
+        forced_token_heads_per_warp: int = -1,
+    ) -> None:
+        # Writes into `qkv` in place; nothing to return.
+        return None
+
+
+# FP8 quantization ops write into caller pre-allocated output tensors, so on meta
+# the fake is a no-op.
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "static_scaled_fp8_quant"):
+
+    @register_fake("_C::static_scaled_fp8_quant")
+    def _static_scaled_fp8_quant_fake(
+        result: torch.Tensor,
+        input: torch.Tensor,
+        scale: torch.Tensor,
+        group_shape: list[int] | None = None,
+    ) -> None:
+        return None
+
+
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "dynamic_scaled_fp8_quant"):
+
+    @register_fake("_C::dynamic_scaled_fp8_quant")
+    def _dynamic_scaled_fp8_quant_fake(
+        result: torch.Tensor,
+        input: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> None:
+        return None
+
+
+if hasattr(torch.ops, "_C") and hasattr(
+    torch.ops._C, "dynamic_per_token_scaled_fp8_quant"
+):
+
+    @register_fake("_C::dynamic_per_token_scaled_fp8_quant")
+    def _dynamic_per_token_scaled_fp8_quant_fake(
+        result: torch.Tensor,
+        input: torch.Tensor,
+        scale: torch.Tensor,
+        scale_ub: torch.Tensor | None = None,
+    ) -> None:
+        return None
+
+
 def apply_repetition_penalties_torch(
     logits: torch.Tensor,
     prompt_mask: torch.Tensor,

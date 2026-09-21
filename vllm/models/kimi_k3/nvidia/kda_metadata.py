@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -375,6 +376,22 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         if self.vllm_config.cache_config.mamba_cache_mode == "align":
             if self.mamba_aligned_state_indices is not None:
                 block_table_tensor = self.mamba_aligned_state_indices[: m.num_reqs]
+            elif envs.VLLM_META_MODE:
+                # Meta CI: the MRV2 precompute and MRV1 fallback are both
+                # triton/CUDA-bound (assert is_cuda + no-op kernel on meta), so
+                # compute the aligned state indices via the equivalent pure-torch
+                # gather (the "align" recipe above). Shapes only; values moot.
+                block_size = self.kv_cache_spec.block_size
+                num_state_slots = 1 + self.kv_cache_spec.num_speculative_blocks
+                start = ((m.seq_lens - 1) // block_size).clamp(min=0)
+                offsets = torch.arange(
+                    num_state_slots,
+                    dtype=torch.int64,
+                    device=m.block_table_tensor.device,
+                )
+                indices = (start[:, None] + offsets).to(torch.int64)
+                indices = indices.clamp(max=m.block_table_tensor.shape[1] - 1)
+                block_table_tensor = torch.gather(m.block_table_tensor, 1, indices)
             else:
                 assert not self.vllm_config.use_v2_model_runner, (
                     "Aligned Mamba state indices must be precomputed"

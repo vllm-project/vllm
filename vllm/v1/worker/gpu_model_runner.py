@@ -1139,6 +1139,10 @@ class GPUModelRunner(
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
+        # Meta CI: KV cache is meta (no data), so zeroing (a triton kernel) is a
+        # no-op.
+        if envs.VLLM_META_MODE:
+            return
         if hasattr(self, "_kv_block_zeroer"):
             self._kv_block_zeroer.zero_block_ids(block_ids)
 
@@ -3545,7 +3549,18 @@ class GPUModelRunner(
             # With spec decoding, this is done in propose_draft_token_ids().
             if self.input_batch.prev_sampled_token_ids is None:
                 assert sampled_token_ids.shape[-1] == 1
-                self.input_batch.prev_sampled_token_ids = sampled_token_ids
+                if envs.VLLM_META_MODE:
+                    # sampled_token_ids is meta; the next step copies
+                    # prev_sampled_token_ids into input_ids on-device, so feed
+                    # real host fake ids.
+                    self.input_batch.prev_sampled_token_ids = torch.full(
+                        (sampled_token_ids.shape[0], 1),
+                        100,
+                        dtype=self.input_ids.gpu.dtype,
+                        device=self.device,
+                    )
+                else:
+                    self.input_batch.prev_sampled_token_ids = sampled_token_ids
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
@@ -3971,6 +3986,10 @@ class GPUModelRunner(
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        # Meta CI: remember this step's token count so sample_tokens can charge
+        # a simulated per-token latency.
+        if envs.VLLM_META_MODE:
+            self._meta_num_tokens = num_scheduled_tokens
         with (
             record_function_or_nullcontext("gpu_model_runner: preprocess"),
             self.synchronize_input_prep(),
@@ -4531,7 +4550,31 @@ class GPUModelRunner(
             )
 
         if not self.use_async_scheduling:
+            # Meta CI: emulate GPU async output + a token-proportional latency.
+            if envs.VLLM_META_MODE:
+                from vllm import meta_mode
+
+                delay = getattr(self, "_meta_num_tokens", 0) * meta_mode.token_latency_s()
+                return meta_mode.MetaAsyncOutput(output, delay)
             return output
+
+        # Meta CI (async scheduling path): the sampled token ids are meta (no
+        # data) and AsyncGPUModelRunnerOutput does real CUDA D2H, so synthesize
+        # shape-correct fake ids into `output` and return the deferred
+        # MetaAsyncOutput (its get_output() realizes the latency on consumption,
+        # overlapping next-step scheduling).
+        if envs.VLLM_META_MODE:
+            from vllm import meta_mode
+
+            st = sampler_output.sampled_token_ids
+            n = st.shape[0]
+            k = st.shape[1] if st.ndim > 1 else 1
+            fake = [[100] * k for _ in range(n)]
+            for i in invalid_req_indices:
+                fake[i] = []
+            output.sampled_token_ids = fake
+            delay = getattr(self, "_meta_num_tokens", 0) * meta_mode.token_latency_s()
+            return meta_mode.MetaAsyncOutput(output, delay)
 
         with record_function_or_nullcontext(
             "gpu_model_runner: AsyncGPUModelRunnerOutput"
@@ -6997,9 +7040,15 @@ class GPUModelRunner(
         """
         allocation_context = kv_cache_allocation_context or nullcontext()
         with allocation_context:
+            # Meta CI: allocate the KV pool on meta (zero memory). IO buffers /
+            # slot mapping stay on self.device (real values drive scheduling);
+            # attention is faked so KV is never read.
+            kv_cache_device = (
+                torch.device("meta") if envs.VLLM_META_MODE else self.device
+            )
             kv_caches = allocate_kv_cache(
                 kv_cache_config,
-                self.device,
+                kv_cache_device,
                 self.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
             )
@@ -7181,6 +7230,12 @@ class GPUModelRunner(
         return kv_cache_spec
 
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+        # Meta CI: sampled ids are meta (no data), so synthesize shape-correct
+        # fake ids to let the generation loop proceed (values meaningless).
+        if envs.VLLM_META_MODE and sampled_token_ids.is_meta:
+            n = sampled_token_ids.shape[0]
+            k = sampled_token_ids.shape[1] if sampled_token_ids.ndim > 1 else 1
+            return [[100] * k for _ in range(n)]
         # This is a short term mitigation for issue mentioned in
         # https://github.com/vllm-project/vllm/issues/22754.
         # `tolist` would trigger a cuda wise stream sync, which

@@ -434,6 +434,38 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Init device")
     def init_device(self):
+        if envs.VLLM_META_MODE:
+            # Meta CI: run the v1 GPU model runner on CPU with a meta model + KV
+            # cache (zero memory), emulating the requested TP/EP in one process.
+            from vllm import meta_mode
+
+            self.device = torch.device("cpu")
+            init_worker_distributed_environment(
+                self.vllm_config,
+                self.rank,
+                self.distributed_init_method,
+                self.local_rank,
+                "gloo",
+            )
+            set_random_seed(self.model_config.seed)
+            # Fake the TP/EP group BEFORE building the runner + model so runner
+            # buffers and model shards agree on the (logical) TP size.
+            meta_mode.enable_fake_tp(meta_mode.get_logical_tp())
+            # Fake the DCP group too (BlockTable reads get_dcp_group().world_size).
+            meta_mode.enable_fake_dcp(meta_mode.get_logical_dcp())
+            # Raw @triton.jit kernels (not torch ops) can't get a meta kernel;
+            # skip their launch (outputs are host pre-allocated).
+            meta_mode.disable_triton_launch()
+            # Same for CuteDSL (cutlass.cute) kernels (DeepSeek-V4 / Kimi-K3).
+            meta_mode.disable_cutedsl_launch()
+            # Make torch.cuda.Event/Stream meta-safe (no-op event / None stream)
+            # so the custom models' unconditional overlap bookkeeping stays valid.
+            meta_mode.patch_cuda_primitives()
+            init_workspace_manager(self.device, 1)
+            from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
+            return
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
@@ -644,6 +676,16 @@ class Worker(WorkerBase):
             by adjusting the `gpu_memory_utilization` parameter.
 
         """
+        if envs.VLLM_META_MODE:
+            # Meta CI: skip GPU memory profiling. KV cache is on meta (zero
+            # memory), so derive a budget from the model's KV spec covering
+            # max_num_seqs sequences at max_model_len.
+            spec = self.model_runner.get_kv_cache_spec()
+            per_seq = sum(
+                s.max_memory_usage_bytes(self.vllm_config) for s in spec.values()
+            )
+            max_num_seqs = self.scheduler_config.max_num_seqs
+            return max(per_seq * max_num_seqs, 256 * 1024 * 1024)
         maybe_apply_startup_plan(self)
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
@@ -906,6 +948,10 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        if envs.VLLM_META_MODE:
+            # Meta CI: nothing to compile/warm up on meta/cpu (no triton JIT, no
+            # cudagraph capture); the forward path is exercised by generate().
+            return CompilationTimes(language_model=0.0, encoder=0.0)
         warmup_sizes: list[int] = []
 
         if (

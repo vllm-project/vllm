@@ -1413,6 +1413,24 @@ class VllmConfig:
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
+
+        # Meta CI (VLLM_META_MODE): force meta-friendly settings BEFORE the rest
+        # of __post_init__, so the derived compilation mode honors enforce_eager
+        # (-> mode=NONE + cudagraph_mode=NONE) and weights load on meta.
+        if envs.VLLM_META_MODE:
+            if self.model_config is not None:
+                self.model_config.enforce_eager = True
+            self.load_config.load_format = "dummy"
+            self.load_config.device = "meta"
+            # CustomOps (RMSNorm/RoPE/SiluAndMul/...) -> forward_native (pure
+            # torch, meta-friendly) instead of the _C kernels.
+            self.compilation_config.custom_ops = ["none"]
+            # Speculative decoding builds a draft head + acceptance-sampling loop
+            # with value-dependent (.item()) boundaries that don't lower onto
+            # meta; drop the speculator (meta CI validates the base model).
+            if self.speculative_config is not None:
+                self.speculative_config = None
+
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 

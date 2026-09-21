@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -93,6 +94,26 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             assert not hasattr(layer, "k_scale")
             assert not hasattr(layer, "v_scale")
             assert not hasattr(layer, "prob_scale")
+            return
+
+        if envs.VLLM_META_MODE:
+            # Meta CI: dummy weights => no real scales, and the scale processing
+            # below coerces meta tensors to Python floats (bool()/.item()), which
+            # meta can't do. Set neutral 1.0 scales and drop the raw params.
+            for buf_name in ("_q_scale", "_k_scale", "_v_scale", "_prob_scale"):
+                buf = getattr(layer, buf_name, None)
+                if buf is not None:
+                    buf.copy_(1.0)
+            for cpu_name in ("_k_scale_cpu", "_v_scale_cpu"):
+                cpu_buf = getattr(layer, cpu_name, None)
+                if cpu_buf is not None:
+                    cpu_buf.fill_(1.0)
+            layer._q_scale_float = 1.0
+            layer._k_scale_float = 1.0
+            layer._v_scale_float = 1.0
+            for param_name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
+                if hasattr(layer, param_name):
+                    delattr(layer, param_name)
             return
 
         # Per-token-head quantized KV cache: scales are computed dynamically

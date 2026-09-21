@@ -28,6 +28,69 @@ except ImportError as e:
     FA3_UNAVAILABLE_REASON = str(e)
     FA3_AVAILABLE = False
 
+# Meta CI (VLLM_META_MODE): the FA3 fwd C++ op has no meta kernel, so sparse-MLA
+# decode (DeepSeek Sparse Attention / GLM-5) can't run on meta. Register a fake
+# returning shape-correct outputs (out [num_tokens, num_heads, v_head_dim] +
+# softmax_lse + two unused tensors, matching `out, softmax_lse, _, _`).
+if FA3_AVAILABLE:
+    import vllm.envs as envs
+
+    if envs.VLLM_META_MODE:
+        from torch.library import register_fake as _register_fake
+
+        def _fa3_fwd_fake(
+            q,
+            k,
+            v,
+            k_new=None,
+            v_new=None,
+            q_v=None,
+            out=None,
+            cu_seqlens_q=None,
+            cu_seqlens_k=None,
+            cu_seqlens_k_new=None,
+            seqused_q=None,
+            seqused_k=None,
+            max_seqlen_q=None,
+            max_seqlen_k=None,
+            page_table=None,
+            kv_batch_idx=None,
+            leftpad_k=None,
+            rotary_cos=None,
+            rotary_sin=None,
+            seqlens_rotary=None,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            softmax_scale=0.0,
+            is_causal=False,
+            window_size_left=-1,
+            window_size_right=-1,
+            softcap=0.0,
+            is_rotary_interleaved=False,
+            scheduler_metadata=None,
+            num_splits=0,
+            pack_gqa=None,
+            sm_margin=0,
+            s_aux=None,
+            cp_world_size=1,
+            cp_rank=0,
+            cp_tot_seqused_k=None,
+        ):
+            # out: [num_tokens, num_heads, v_head_dim]; the value head dim comes
+            # from v's last dim (kv_lora_rank in the MLA case). Reuse the caller's
+            # pre-allocated `out` when provided.
+            if out is None:
+                out = q.new_empty((q.shape[0], q.shape[1], v.shape[-1]))
+            softmax_lse = q.new_empty((q.shape[1], q.shape[0]), dtype=torch.float32)
+            return [out, softmax_lse, q.new_empty(0), q.new_empty(0)]
+
+        try:
+            _register_fake("_vllm_fa3_C::fwd", _fa3_fwd_fake)
+        except (RuntimeError, AttributeError):
+            # Already registered (e.g. re-import) or op unavailable; ignore.
+            pass
+
 
 try:
     import os

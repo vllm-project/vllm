@@ -7,6 +7,7 @@ from typing import ClassVar, Self
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
@@ -114,6 +115,14 @@ class Fp8BlockScaledMMLinearKernel(
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
         output_shape = [*x.shape[:-1], weight.shape[0]]
+
+        if envs.VLLM_META_MODE:
+            # Meta CI: the block-scaled GEMM leaf is GPU/cuBLASLt-layout-specific
+            # and computes nothing on meta; return a shape-correct meta output
+            # (mirrors the per-tensor fp8 path).
+            return input_2d.new_empty(
+                output_shape, dtype=out_dtype if out_dtype is not None else x.dtype
+            )
 
         if self.apply_input_quant:
             q_input, input_scale = self.quant_fp8(
