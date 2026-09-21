@@ -4,11 +4,15 @@
 
 import glob
 import tempfile
+from types import SimpleNamespace
 
 import huggingface_hub.constants
 import pytest
 import torch
 
+from vllm.config.load import LoadConfig
+from vllm.model_executor.model_loader import weight_utils
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
     parse_expert_id,
@@ -374,3 +378,52 @@ class TestEpFilterOnSyntheticMoeWeights:
 
         for name, tensor in filtered.items():
             assert torch.equal(tensor, all_weights[name]), f"Tensor mismatch for {name}"
+
+    def test_model_skip_rule_drops_tensors_before_reading(
+        self, synthetic_moe_files, monkeypatch
+    ):
+        files, expected = synthetic_moe_files
+        read: list[str] = []
+        real_safe_open = weight_utils.safe_open
+
+        class RecordingSafeOpen:
+            def __init__(self, *args, **kwargs):
+                self._file = real_safe_open(*args, **kwargs)
+
+            def __enter__(self):
+                self._handle = self._file.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._file.__exit__(*exc)
+
+            def keys(self):
+                return self._handle.keys()
+
+            def get_tensor(self, name):
+                read.append(name)
+                return self._handle.get_tensor(name)
+
+        monkeypatch.setattr(weight_utils, "safe_open", RecordingSafeOpen)
+        dense = {name for name in expected if parse_expert_id(name) is None}
+
+        loaded = dict(
+            safetensors_weights_iterator(
+                files, False, skip_weight=lambda name: name not in dense
+            )
+        )
+
+        assert set(loaded) == dense
+        assert set(read) == dense
+
+    def test_loader_applies_the_model_skip_rule(self, synthetic_moe_files, tmp_path):
+        _, expected = synthetic_moe_files
+        dense = {name for name in expected if parse_expert_id(name) is None}
+        model = SimpleNamespace(skip_checkpoint_weight=lambda name: name not in dense)
+        model_config = SimpleNamespace(model=str(tmp_path), revision=None)
+
+        loaded = dict(
+            DefaultModelLoader(LoadConfig()).get_all_weights(model_config, model)
+        )
+
+        assert set(loaded) == dense

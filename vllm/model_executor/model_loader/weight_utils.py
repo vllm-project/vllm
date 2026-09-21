@@ -1031,12 +1031,24 @@ def _prefetch_all_checkpoints(
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
 
+def _keep_weight(
+    name: str,
+    local_expert_ids: set[int] | None,
+    skip_weight: Callable[[str], bool] | None,
+) -> bool:
+    """Decide from the name alone whether a tensor is read at all."""
+    if should_skip_weight(name, local_expert_ids):
+        return False
+    return skip_weight is None or not skip_weight(name)
+
+
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     safetensors_load_strategy: str | None = None,
     local_expert_ids: set[int] | None = None,
     *,
+    skip_weight: Callable[[str], bool] | None = None,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
@@ -1045,6 +1057,11 @@ def safetensors_weights_iterator(
     When *local_expert_ids* is provided, expert weights not belonging to
     this rank are skipped **before** reading from disk, which drastically
     reduces storage I/O for MoE models under EP.
+
+    When *skip_weight* is provided, every tensor whose name it accepts is
+    skipped the same way. It lets a model that loads only part of a shared
+    checkpoint (e.g. a drafter shipped inside its target's checkpoint) avoid
+    reading the rest.
     """
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
@@ -1127,7 +1144,7 @@ def safetensors_weights_iterator(
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
             for name, param in state_dict.items():
-                if not should_skip_weight(name, local_expert_ids):
+                if _keep_weight(name, local_expert_ids, skip_weight):
                     yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
@@ -1144,7 +1161,7 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if not _keep_weight(name, local_expert_ids, skip_weight):
                         continue
                     state_dict[name] = f.get_tensor(name)
 
@@ -1162,7 +1179,7 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if not _keep_weight(name, local_expert_ids, skip_weight):
                         continue
                     param = f.get_tensor(name)
                     yield name, param

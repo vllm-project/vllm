@@ -335,3 +335,17 @@ def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     assert torch.equal(calls[1][1], stacked_output.view(2, 3, 4)[:, 2] + 2)
     assert calls[0][3] is slot_mappings[0]
     assert calls[1][3] is slot_mappings[2]
+
+
+@pytest.mark.cpu_test
+def test_deepseek_v4_dspark_skips_every_checkpoint_weight_it_does_not_load():
+    drafter = dsv4_dspark.DSparkDeepseekV4ForCausalLM.__new__(
+        dsv4_dspark.DSparkDeepseekV4ForCausalLM
+    )
+    object.__setattr__(drafter, "model", SimpleNamespace(confidence_head=None))
+
+    assert drafter.skip_checkpoint_weight("layers.3.attn.wq_a.weight")
+    assert drafter.skip_checkpoint_weight("embed.weight")
+    assert drafter.skip_checkpoint_weight("mtp.2.confidence_head.proj.weight")
+    assert not drafter.skip_checkpoint_weight("mtp.0.main_proj.weight")
+    assert not drafter.skip_checkpoint_weight("mtp.1.attn.wkv.weight")
