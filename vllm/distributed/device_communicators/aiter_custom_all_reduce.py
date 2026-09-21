@@ -73,9 +73,9 @@ class AiterCustomAllreduce:
 
         Mirrors the launcher contract of aiter's ``fused_allreduce_rmsnorm``
         (csrc/include/custom_all_reduce.cuh): rows of 16-byte packs, at most
-        1024 packs per row, at most 80 tokens, and the byte cap of the
-        one-stage custom allreduce for this TP size and topology. Outside it
-        the fused op runs the two-stage variant (cross-device reduce-scatter
+        1024 packs per row, at most 80 tokens, and the byte cap past which the
+        one-stage launcher loses to the two-stage one at this TP size. Outside
+        it the fused op runs the two-stage variant (cross-device reduce-scatter
         + local norm), which is slower than an explicit ``all_reduce`` + norm,
         so callers that can fall back should require this. Capture-static:
         depends only on shape, dtype, TP size and topology.
@@ -96,10 +96,16 @@ class AiterCustomAllreduce:
         if not ca.fully_connected:
             return False
         total_bytes = inp.numel() * inp.element_size()
+        # One-stage reads every peer's copy, so it costs (world_size - 1) *
+        # total_bytes where two-stage moves 2 * (N-1)/N whatever N is: the
+        # crossover is a byte quantity, and it tightens as TP grows. The bound
+        # is inclusive because a cap lands on a cudagraph capture size often
+        # enough to matter: at hidden 6144 the 16-token capture is 192 KiB on
+        # the nose, and excluding it leaves that whole family unchanged.
         if world_size <= 4:
-            return total_bytes < 256 * 1024
+            return total_bytes <= 320 * 1024
         if world_size <= 8:
-            return total_bytes < 128 * 1024
+            return total_bytes <= 192 * 1024
         return False
 
     def capture(self):
