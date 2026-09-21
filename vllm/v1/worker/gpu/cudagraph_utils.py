@@ -714,7 +714,11 @@ class ModelCudaGraphManager(CudaGraphManager):
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 runtime_mode = cg_mode
-                if warmup and self.use_breakable_cg:
+                if (
+                    warmup
+                    and self.use_breakable_cg
+                    and desc.cg_mode == CUDAGraphMode.PIECEWISE
+                ):
                     # Warm the same kernel paths on the capture stream, while
                     # still calling the model eagerly below.
                     runtime_mode = desc.cg_mode

@@ -418,18 +418,28 @@ def test_model_capture_warms_runtime_kernel_path(monkeypatch, mode, breakable):
     manager.is_first_pp_rank = manager.is_last_pp_rank = True
     manager.hidden_states = None
     manager.init_breakable_cg_runner = lambda model: None
-    manager.run_pw_graph = lambda model, inputs: model(**inputs)
+
+    def run_pw_graph(model, inputs):
+        assert captured, "Warmup must bypass the graph wrapper"
+        return model(**inputs)
+
+    manager.run_pw_graph = run_pw_graph
     monkeypatch.setattr(gpu_cudagraph_utils, "has_compiled_submodule", lambda _: True)
     monkeypatch.setattr(
         gpu_cudagraph_utils, "prepare_inputs_to_capture", lambda *a, **kw: ({}, {})
     )
     captured = False
     warmed_modes = set()
+    capture_mode = (
+        CUDAGraphMode.PIECEWISE
+        if mode == CUDAGraphMode.PIECEWISE
+        else CUDAGraphMode.NONE
+    )
 
     def model(**kwargs):
         runtime_mode = get_forward_context().cudagraph_runtime_mode
         if captured:
-            assert runtime_mode == mode
+            assert runtime_mode == capture_mode
             if breakable:
                 assert runtime_mode in warmed_modes
         else:
@@ -441,7 +451,8 @@ def test_model_capture_warms_runtime_kernel_path(monkeypatch, mode, breakable):
         desc = BatchExecutionDescriptor(mode, num_tokens=1, num_reqs=1)
         create_forward_fn(desc, warmup=True)(CUDAGraphMode.NONE)
         captured = True
-        create_forward_fn(desc, warmup=False)(mode)
+        # FULL capture wraps a direct call in torch.cuda.graph, passing NONE.
+        create_forward_fn(desc, warmup=False)(capture_mode)
 
     monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
     model_state = SimpleNamespace(prepare_dummy_inputs=lambda *args: {})
@@ -454,4 +465,4 @@ def test_model_capture_warms_runtime_kernel_path(monkeypatch, mode, breakable):
         [],
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
     )
-    assert warmed_modes == {mode if breakable else CUDAGraphMode.NONE}
+    assert warmed_modes == {capture_mode if breakable else CUDAGraphMode.NONE}
