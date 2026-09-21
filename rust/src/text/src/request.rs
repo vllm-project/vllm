@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -69,6 +70,8 @@ pub struct SamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
     /// greedy sampling. `None` means no explicit user override.
     pub temperature: Option<f32>,
+    /// Whether to apply the engine's configured watermark to this request.
+    pub watermarking: bool,
     /// Cumulative probability threshold for nucleus sampling.
     pub top_p: Option<f32>,
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
@@ -144,6 +147,7 @@ impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: None,
+            watermarking: true,
             top_p: None,
             top_k: None,
             seed: None,
@@ -208,6 +212,9 @@ pub struct TextRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Optional orchestrator-originated KV hints.
+    #[serde(default)]
+    pub kv_hints: Option<KvHintsEnvelope>,
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     #[serde(default)]
@@ -239,6 +246,7 @@ impl TextRequest {
             add_special_tokens: false,
             data_parallel_rank: None,
             session_id: None,
+            kv_hints: None,
             reasoning_parser_kwargs: None,
             lora_request: None,
             arrival_time: None,

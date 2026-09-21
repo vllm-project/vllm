@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -8,6 +10,7 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     extract_mm_features,
 )
@@ -31,6 +34,9 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.mcp.tool_server import ToolServer
+
 
 class ServingRender(BaseServing):
     def __init__(
@@ -39,6 +45,7 @@ class ServingRender(BaseServing):
         online_renderer: "OnlineRenderer",
         *,
         request_logger: RequestLogger | None = None,
+        tool_server: "ToolServer | None" = None,
     ) -> None:
         super().__init__(
             models=models,
@@ -47,6 +54,7 @@ class ServingRender(BaseServing):
         )
 
         self.online_renderer = online_renderer
+        self.tool_server = tool_server
 
         self._merge_inline_system = (
             AnthropicServingMessages._detect_merge_inline_system(
@@ -118,33 +126,11 @@ class ServingRender(BaseServing):
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
-        assistant_tokens_mask: list[int] | None = engine_input.get(  # type: ignore[assignment]
-            "assistant_tokens_mask"
-        )
-        if assistant_tokens_mask is not None and len(assistant_tokens_mask) != len(
-            token_ids
-        ):
-            logger.warning(
-                "assistant_tokens_mask length (%d) != token_ids length (%d); "
-                "this can happen with multimodal inputs where "
-                "placeholder expansion changes the token count. "
-                "The mask may be positionally misaligned.",
-                len(assistant_tokens_mask),
-                len(token_ids),
-            )
-            if len(assistant_tokens_mask) < len(token_ids):
-                assistant_tokens_mask.extend(
-                    [0] * (len(token_ids) - len(assistant_tokens_mask))
-                )
-            else:
-                assistant_tokens_mask = assistant_tokens_mask[: len(token_ids)]
-
         request_id = f"chatcmpl-{random_uuid()}"
 
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
-            assistant_tokens_mask=assistant_tokens_mask,
             features=self._extract_mm_features(engine_input),
             sampling_params=params,
             model=request.model,
@@ -228,6 +214,64 @@ class ServingRender(BaseServing):
             )
 
         return generate_requests
+
+    async def render_responses_request(
+        self,
+        request: ResponsesRequest,
+    ) -> GenerateRequest | ErrorResponse:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+        if request.previous_response_id is not None:
+            return self.create_error_response(
+                message=(
+                    "previous_response_id is not supported by the stateless "
+                    "render endpoint."
+                ),
+                err_type="invalid_request_error",
+                param="previous_response_id",
+            )
+
+        result = await self.online_renderer.render_responses(
+            request,
+            previous_messages=None,
+            previous_response_outputs=None,
+            tool_server=self.tool_server,
+            skip_mm_cache=True,
+        )
+        if isinstance(result, ErrorResponse):
+            return result
+
+        engine_input = result.engine_input
+        prompt_components = extract_prompt_components(self.model_config, engine_input)
+        token_ids = prompt_components.token_ids
+        if not token_ids:
+            return self.create_error_response("No token_ids rendered")
+
+        input_length = extract_prompt_len(self.model_config, engine_input)
+        max_tokens = get_max_tokens(
+            self.model_config.max_model_len,
+            request.max_output_tokens,
+            input_length,
+            self.default_sampling_params,
+            self.override_max_tokens,
+            truncate_prompt_tokens=(-1 if request.truncation != "disabled" else None),
+        )
+        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+
+        return GenerateRequest(
+            request_id=request.request_id,
+            token_ids=list(token_ids),
+            features=self._extract_mm_features(engine_input),
+            sampling_params=params,
+            model=request.model,
+            stream=bool(request.stream),
+            cache_salt=request.cache_salt,
+            priority=request.priority,
+            kv_transfer_params=request.kv_transfer_params,
+            ec_transfer_params=request.ec_transfer_params,
+            token_offsets=engine_input.get("prompt_token_offsets"),
+        )
 
     def _placeholder_metadata_fields(self, modality: str) -> set[str]:
         """Fields the EC consumer still requires after embeddings transfer."""
