@@ -156,6 +156,12 @@ def _resolve_gdn_prefill_backend(
             return backend, "aiter_flydsl"
         return backend, "triton"
 
+    if backend == "aiter_flydsl":
+        raise RuntimeError(
+            "GDN prefill backend 'aiter_flydsl' was requested but it is a ROCm "
+            f"AITER backend and the current platform is {current_platform.device_name}."
+        )
+
     if not current_platform.is_cuda():
         return backend, "triton"
 
@@ -292,9 +298,7 @@ def _aiter_flydsl_chunk_gated_delta_rule(**kwargs):
             "dtype, or device."
         )
     logger.info_once(
-        "Dispatching AITER FlyDSL GDN prefill "
-        "(prepare=flydsl, chunk=flydsl, indexed_state_pool=%s).",
-        kwargs["initial_state_indices"] is not None,
+        "Dispatching AITER FlyDSL GDN prefill (prepare=flydsl, chunk=flydsl)."
     )
     return chunk_gated_delta_rule_opt_vk(**kwargs)
 
@@ -339,7 +343,6 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
         prefill_metadata: object | None = None,
-        initial_state_indices: torch.Tensor | None = None,
     ):
         o, final_state = fi_chunk_gated_delta_rule(
             q=q,
@@ -373,7 +376,6 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
         prefill_metadata: object | None = None,
-        initial_state_indices: torch.Tensor | None = None,
     ):
         return fla_chunk_gated_delta_rule(
             q=q,
@@ -405,7 +407,6 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
         prefill_metadata: object | None = None,
-        initial_state_indices: torch.Tensor | None = None,
     ):
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             chunk_gated_delta_rule_cutedsl,
@@ -450,7 +451,6 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
         prefill_metadata: object | None = None,
-        initial_state_indices: torch.Tensor | None = None,
     ):
         o, final_state = _aiter_flydsl_chunk_gated_delta_rule(
             q=q,
@@ -465,8 +465,10 @@ class ChunkGatedDeltaRule(CustomOp):
             use_prepare_flydsl=True,
             state_dtype=initial_state.dtype,
             prefill_metadata=prefill_metadata,
-            initial_state_indices=initial_state_indices,
-            inplace_final_state=initial_state_indices is not None,
+            # The caller stages the state densely and writes it back, so the
+            # kernel gets a plain [N, H, V, K] buffer and never an index into
+            # the pool; there is correspondingly nothing to update in place.
+            inplace_final_state=False,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
         if core_attn_out is not None:
@@ -1262,14 +1264,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, T)
         elif self.gdn_prefill_backend == "aiter_flydsl":
-            from aiter.ops.triton.gated_delta_net import (
-                build_gated_delta_rule_prefill_metadata,
-            )
-
-            prefill_metadata = build_gated_delta_rule_prefill_metadata(
+            prefill_metadata = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
                 [T],
                 cu_seqlens=cu_seqlens,
-                chunk_size=FLA_CHUNK_SIZE,
             )
 
         try:
