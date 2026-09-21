@@ -111,3 +111,51 @@ overwrites them**. Backups sit next to each one (`*.bak.sinparche`, `*.orig`).
 
 - `tools/rdna3/perdim_rope/` — per-dimension RoPE factors, the answer to «the YaRN patch».
 - `tools/rdna3/INT8_GDN_PAGEFAULT.md` — the int8/GDN page fault investigation.
+
+---
+
+## 21-sep-2026 — what the two serving boxes actually run now
+
+The table above is from 9-sep and is about *mounted files*. The two biggest wins since then
+are **not patches at all**: one is a kernel, the other is two command-line flags.
+
+| | ainode1 (production) | ainode2 (lab) |
+|---|---|---|
+| GQA decode kernel (`VLLM_RDNA3_GQA_DECODE=1`) | ✅ | ✅ |
+| `--prefix-match-unit 16` | ✅ | ✅ |
+| `--enable-mamba-fine-grained-prefix-cache` | ✅ | ✅ |
+| MTP `k=3` + `--prefix-cache-retention-interval 1584` | ✅ | ✅ |
+| `VLLM_RDNA3_CUSTOM_AR_CAP` | ⛔ | 49152 |
+| `VLLM_RDNA3_TINY_GEMV` | ⛔ | ⛔ **retired** |
+| rocBLAS prefill override | ⛔ | ⛔ **retired** |
+
+### The two flags are the largest single win of the line
+
+They cut the prefill of every follow-up turn by **73×** — not because of any kernel, but
+because the prefix-cache hit granularity was **1.584 tokens**: the attention block is
+inflated to cover the GDN state page (`interface.py:933`), and with MTP a whole block is
+dropped from the tail to protect against **3** lookahead tokens
+(`kv_cache_coordinator.py:107`). Measured on ainode1:
+
+    new tokens per turn        1.645-2.778  ->  37
+    TTFT of a follow-up turn   1,24 s       ->  0,32 s
+    a repeated 163k prompt     ~113 s       ->  0,53 s
+    short decode               110-113      ->  113-116 tok/s
+    163,7k decode              110-117      ->  117-119 tok/s
+
+⚠️ `--prefix-match-unit` **alone does nothing** — without
+`--enable-mamba-fine-grained-prefix-cache` there is no GDN state checkpoint at the fine
+boundary. It had been written off as "inert" in an earlier attempt for exactly that reason,
+and sat commented out in both composes. ⚠️ And note the **int8 KV cache doubles the
+granularity**: fewer bytes per token means more tokens are needed to match the GDN page.
+
+### Two patches were retired the same night
+
+`tiny_gemv` and the rocBLAS prefill override measure well in a single-GPU microbenchmark
+(3,7× / 2,0×, and TTFT −5,9%) and cost **−22/27% of decode under concurrency** at TP4, plus
+they pin one GPU at 100% and 120 W **with the server idle**. Their headers carry the
+numbers. Same trap as always here: a microbenchmark in eager does not predict the cost
+inside `torch.compile` at TP4 — measure the **step** with 4 and 6 sessions, never a kernel
+on its own.
+
+Full write-up, with the bisection that separates each piece: `rdna3_p2p/14` §25-27.
