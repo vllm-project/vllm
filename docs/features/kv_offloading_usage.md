@@ -207,9 +207,7 @@ If you control the process that constructs the vLLM engine (e.g. an embedding ap
 ```python
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
-CachePolicyFactory.register_cache_policy(
-    "my_policy", "my_package.my_module", "MyCachePolicy"
-)
+CachePolicyFactory.register_cache_policy("my_policy", "my_package.my_module", "MyCachePolicy")
 ```
 
 Then set `"eviction_policy": "my_policy"` in `kv_connector_extra_config`, the same as `"lru"`/`"arc"`. This only takes effect within the process that ran the `register_cache_policy` call — it does not help when the server is launched as a separate process (e.g. via the `vllm serve` CLI), where the out-of-tree `cache_policy_module_path` config above is the only option.
