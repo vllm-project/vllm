@@ -140,4 +140,65 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 ## Limitation
 
+### Experimental graph discard and lazy recapture
+
+`VLLM_SLEEP_DISCARD_GRAPHS=1` destroys the model's CUDA graph executables
+before level-1 memory suspension. A complete wake resumes inference eagerly;
+after the first request completes, the engine captures at most one pending
+graph per idle iteration. Captured shapes become usable immediately. Other
+shapes continue eagerly. Ordinary sleep behavior is unchanged by default.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 VLLM_SLEEP_DISCARD_GRAPHS=1 \
+VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
+  --enable-sleep-mode --dtype float16 --max-model-len 256 \
+  --max-num-seqs 8 --max-num-batched-tokens 256 --no-async-scheduling \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL","cudagraph_capture_sizes":[1,2,4,8]}'
+```
+
+The initial prototype requires Linux/CUDA, the V2 runner in a local EngineCore
+process, one GPU, the `uni` executor and `cumem` backend. Only unquantized
+`Qwen3ForCausalLM` and `Qwen3MoeForCausalLM` models with FULL graphs and no
+`torch.compile` are accepted. Additional weight offloaders, KV transfer,
+microbatching, LoRA, speculative decoding, live weight updates and communicator
+suspension are excluded. Level 0 retains its existing behavior. Level 2,
+selective KV discard and another sleep after a partial wake are rejected.
+Partial wake does not permit inference or recapture until all memory is awake.
+
+Graph destruction does not guarantee that the CUDA driver returns its cached
+physical memory. The separate, default-off option
+`VLLM_SLEEP_RECLAIM_GRAPH_MEMORY=1` attempts driver cache reclamation through a
+single device-capacity allocation request. An out-of-memory return is expected;
+it is **not** proof of physical release. Logs record the driver result and the
+observed free-memory difference separately. This is driver-dependent behavior,
+not a CUDA API guarantee, and has no guaranteed time bound. It requires graph
+discard and cannot be combined with CUDA process checkpointing. This option
+does not release the entire CUDA context or vLLM's persistent workspace.
+The physical-release regression samples before allocator suspension, while
+weights and KV remain mapped. That interval includes graph outputs, allocator
+cache cleanup and cuBLAS workspaces; its entire decrease must not be attributed
+to GraphExec alone. The complete wake footprint is not guaranteed to decrease:
+the first tested 30B wake increased total residency despite release during
+graph cleanup. Snapshots after wake are retained separately from the
+before-suspension release check.
+
+Recapture never overlaps an inference step, but a request or sleep arriving
+during capture waits for the current descriptor to finish. Continuous traffic
+can defer completion indefinitely. A recoverable capture allocation failure
+leaves the engine eager; unknown CUDA/capture failures terminate the engine so
+requests receive an error instead of waiting indefinitely. A failed destructive
+sleep or wake refuses further resume operations and requires restarting the
+engine. The main loop reports these failures through the EngineDead path,
+including failures delivered by deferred sleep callbacks, so queued requests
+do not remain waiting. Repeated completed sleep/wake calls remain supported.
+
+Eager and graph execution can have different floating-point results even
+without sleep. This option does not promise cross-mode or batch-invariant
+token equality. Validate the intended model, dtype and batches before use.
+The GPU regression is `tests/v1/cudagraph/test_sleep_graphs.py`; it checks exact
+tokens for its controlled recipe, first-request eager execution and actual
+replay after idle recapture. The prototype does not implement model switching.
+
+### ROCm
+
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.

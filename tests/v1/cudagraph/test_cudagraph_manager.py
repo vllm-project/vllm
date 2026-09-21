@@ -26,6 +26,39 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 pytestmark = pytest.mark.cpu_test
 
 
+def test_partial_full_capture_never_dispatches_an_uncaptured_graph():
+    """After wake, configured sizes are not necessarily ready to replay."""
+    manager = object.__new__(gpu_cudagraph_utils.CudaGraphManager)
+    ready = BatchExecutionDescriptor(CUDAGraphMode.FULL, 4, 4, 1)
+    pending = BatchExecutionDescriptor(CUDAGraphMode.FULL, 8, 8, 1)
+    manager._graphs_captured = True
+    manager._lora_dispatch_map = {}
+    manager._candidates = {(3, 0): [ready], (6, 0): [pending]}
+    manager.graphs = {ready: MagicMock()}
+    assert manager.dispatch(3, 3, 1, 0) == ready
+    assert manager.dispatch(6, 6, 1, 0).cg_mode == CUDAGraphMode.NONE
+
+
+def test_discard_full_graphs_releases_outputs_and_changes_pool(monkeypatch):
+    """Retired graph pools and graph output tensors must not survive sleep."""
+    manager = object.__new__(gpu_cudagraph_utils.ModelCudaGraphManager)
+    manager.cudagraph_mode = CUDAGraphMode.FULL
+    graph = MagicMock()
+    manager.graphs = {BatchExecutionDescriptor(CUDAGraphMode.FULL, 4, 4, 1): graph}
+    manager._graphs_captured = True
+    manager.pool = (1, 1)
+    manager.hidden_states = object()
+    manager.aux_hidden_states = [object()]
+    manager.intermediate_tensors = object()
+    monkeypatch.setattr(torch.cuda, "graph_pool_handle", lambda: (2, 2))
+    manager.discard_full_graphs()
+    graph.reset.assert_called_once()
+    assert not manager.graphs and not manager._graphs_captured
+    assert manager.hidden_states is None and manager.aux_hidden_states == []
+    assert manager.intermediate_tensors is None
+    assert manager.pool == (2, 2)
+
+
 @pytest.fixture(autouse=True)
 def _reset_graph_pool_id():
     pynccl_allocator._graph_pool_id = None
@@ -231,6 +264,9 @@ def _make_spec_decode_manager(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
     )
+    manager.graphs = {
+        desc: MagicMock() for desc in manager._capture_descs.get(CUDAGraphMode.FULL, [])
+    }
     manager._graphs_captured = True
     return manager
 

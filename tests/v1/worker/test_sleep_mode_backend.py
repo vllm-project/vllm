@@ -7,6 +7,8 @@ touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
 in ``tests/basic_correctness/test_cumem.py``.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from vllm.device_allocator.sleep_mode_backend import (
@@ -14,6 +16,102 @@ from vllm.device_allocator.sleep_mode_backend import (
     SleepModeBackend,
     SleepModeBackendFactory,
 )
+
+
+def test_graph_reclaim_oom_does_not_claim_physical_release(monkeypatch):
+    """An OOM is expected, but it is not evidence of recovered bytes."""
+    driver = pytest.importorskip("cuda.bindings.driver")
+    from vllm.v1.worker.gpu.sleep_graphs import reclaim_graph_memory
+
+    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (1024, 4096))
+    monkeypatch.setattr(
+        driver, "cuMemAlloc", lambda size: (driver.CUresult.CUDA_ERROR_OUT_OF_MEMORY, 0)
+    )
+    result = reclaim_graph_memory()
+    assert result["driver_result"] == 2
+    assert result["allocated"] == 0
+    assert result["observed_freed_bytes"] == 0
+
+
+def test_graph_reclaim_propagates_unexpected_driver_error(monkeypatch):
+    driver = pytest.importorskip("cuda.bindings.driver")
+    from vllm.v1.worker.gpu.sleep_graphs import reclaim_graph_memory
+
+    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (1024, 4096))
+    monkeypatch.setattr(
+        driver,
+        "cuMemAlloc",
+        lambda size: (driver.CUresult.CUDA_ERROR_INVALID_CONTEXT, 0),
+    )
+    with pytest.raises(RuntimeError, match="Graph reclaim failed"):
+        reclaim_graph_memory()
+
+
+@pytest.mark.parametrize("unsupported", [None, "tp", "compile", "inproc", "checkpoint"])
+def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupported):
+    from vllm.config import CompilationMode, CUDAGraphMode
+    from vllm.v1.worker.gpu.sleep_graphs import validate_graph_sleep
+
+    config = MagicMock()
+    config.use_v2_model_runner = True
+    mc = config.model_config
+    mc.enable_sleep_mode = True
+    mc.sleep_mode_backend = "cumem"
+    mc.enforce_eager = mc.enable_nccl_comm_suspend = False
+    mc.quantization = None
+    mc.architectures = ["Qwen3ForCausalLM"]
+    pc = config.parallel_config
+    pc.world_size = pc.data_parallel_size = 1
+    pc.prefill_context_parallel_size = pc.decode_context_parallel_size = 1
+    pc.distributed_executor_backend = "uni"
+    pc.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+    pc.use_ubatching = config.scheduler_config.async_scheduling = False
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    config.compilation_config.mode = CompilationMode.NONE
+    config.compilation_config.compile_sizes = None
+    config.lora_config = config.speculative_config = None
+    config.kv_transfer_config = config.weight_transfer_config = None
+    config.offload_config.uva.cpu_offload_gb = 0
+    config.offload_config.prefetch.offload_group_size = 0
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.envs.VLLM_ENABLE_V1_MULTIPROCESSING", True)
+    monkeypatch.delenv("VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", raising=False)
+    if unsupported == "tp":
+        pc.world_size = 2
+    elif unsupported == "compile":
+        config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+    elif unsupported == "inproc":
+        monkeypatch.setattr("vllm.envs.VLLM_ENABLE_V1_MULTIPROCESSING", False)
+    elif unsupported == "checkpoint":
+        monkeypatch.setenv("VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", "1")
+    if unsupported:
+        with pytest.raises(ValueError, match="Graph-discard sleep requires"):
+            validate_graph_sleep(config)
+    else:
+        validate_graph_sleep(config)
+
+
+@pytest.mark.parametrize("poisoned", [False, True])
+def test_graph_recapture_oom_requires_a_healthy_device(monkeypatch, poisoned):
+    import torch
+
+    from vllm.v1.worker.gpu_worker import Worker
+
+    worker = object.__new__(Worker)
+    worker.model_runner = MagicMock()
+    worker.model_runner.capture_one_sleep_graph.side_effect = torch.OutOfMemoryError()
+    worker.synchronize_device = MagicMock()
+    monkeypatch.setattr("torch.accelerator.empty_cache", lambda: None)
+    manager = worker.model_runner.cudagraph_manager
+    if poisoned:
+        worker.synchronize_device.side_effect = RuntimeError("device failure")
+        with pytest.raises(RuntimeError, match="device failure"):
+            worker.recapture_sleep_graph()
+        manager.discard_full_graphs.assert_not_called()
+    else:
+        assert worker.recapture_sleep_graph() == 0
+        manager.discard_full_graphs.assert_called_once()
 
 
 def test_cumem_is_the_default_registered_backend():
