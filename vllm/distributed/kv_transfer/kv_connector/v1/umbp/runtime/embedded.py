@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import threading
+import time
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
@@ -474,6 +475,8 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         )
         self._futures: dict[int, Future[TransferJobState]] = {}
         self._timeout_s = timeout_s
+        self._store_retry_count = 2
+        self._store_retry_backoff_s = 0.01
 
     def register_buffers(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
@@ -598,6 +601,31 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         results = self.client.batch_put_ranges_from_ptr(
             keys, object_sizes, pointers, sizes, offsets
         )
+        failed_indices = [index for index, ok in enumerate(results) if not ok]
+        for attempt in range(self._store_retry_count):
+            if not failed_indices:
+                break
+            self.client.flush()
+            if self._store_retry_backoff_s:
+                time.sleep(self._store_retry_backoff_s * (attempt + 1))
+            for index in failed_indices.copy():
+                retry = self.client.batch_put_ranges_from_ptr(
+                    [keys[index]],
+                    [object_sizes[index]],
+                    [pointers[index]],
+                    [sizes[index]],
+                    [offsets[index]],
+                )
+                if retry and retry[0]:
+                    results[index] = True
+                    failed_indices.remove(index)
+            if failed_indices:
+                logger.warning(
+                    "MORI UMBP store retry %d left %d/%d objects pending",
+                    attempt + 1,
+                    len(failed_indices),
+                    len(plans),
+                )
         completed = [plan.key for plan, ok in zip(plans, results, strict=True) if ok]
         failed = [plan.key for plan, ok in zip(plans, results, strict=True) if not ok]
         if completed:
