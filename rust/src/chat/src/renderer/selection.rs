@@ -22,6 +22,8 @@ pub enum RendererSelection {
     DeepSeekV32,
     /// Force the DeepSeek V4 renderer.
     DeepSeekV4,
+    /// Force the DeepSeek V4.1 renderer.
+    DeepSeekV41,
     /// Force the GPT-OSS Harmony renderer.
     Harmony,
     /// Force the Inkling native token renderer.
@@ -34,6 +36,7 @@ impl RendererSelection {
     pub const AUTO_LITERAL: &str = "auto";
     pub const DEEPSEEK_V32_LITERAL: &str = "deepseek_v32";
     pub const DEEPSEEK_V4_LITERAL: &str = "deepseek_v4";
+    pub const DEEPSEEK_V41_LITERAL: &str = "deepseek_v41";
     pub const GPT_OSS_MODEL_TYPE: &str = "gpt_oss";
     pub const HARMONY_LITERAL: &str = "harmony";
     pub const HF_LITERAL: &str = "hf";
@@ -48,6 +51,7 @@ impl RendererSelection {
             Self::Auto => match model_type {
                 Self::DEEPSEEK_V32_LITERAL => Self::DeepSeekV32,
                 Self::DEEPSEEK_V4_LITERAL => Self::DeepSeekV4,
+                Self::DEEPSEEK_V41_LITERAL => Self::DeepSeekV41,
                 Self::GPT_OSS_MODEL_TYPE => Self::Harmony,
                 Self::INKLING_MODEL_TYPE => Self::Inkling,
                 Self::KIMI_K3_LITERAL => Self::KimiK3,
@@ -70,6 +74,8 @@ impl FromStr for RendererSelection {
             Ok(Self::DeepSeekV32)
         } else if value.eq_ignore_ascii_case(Self::DEEPSEEK_V4_LITERAL) {
             Ok(Self::DeepSeekV4)
+        } else if value.eq_ignore_ascii_case(Self::DEEPSEEK_V41_LITERAL) {
+            Ok(Self::DeepSeekV41)
         } else if value.eq_ignore_ascii_case(Self::HARMONY_LITERAL) {
             Ok(Self::Harmony)
         } else if value.eq_ignore_ascii_case(Self::INKLING_LITERAL) {
@@ -92,6 +98,7 @@ impl fmt::Display for RendererSelection {
             Self::Hf => f.write_str(Self::HF_LITERAL),
             Self::DeepSeekV32 => f.write_str(Self::DEEPSEEK_V32_LITERAL),
             Self::DeepSeekV4 => f.write_str(Self::DEEPSEEK_V4_LITERAL),
+            Self::DeepSeekV41 => f.write_str(Self::DEEPSEEK_V41_LITERAL),
             Self::Harmony => f.write_str(Self::HARMONY_LITERAL),
             Self::Inkling => f.write_str(Self::INKLING_LITERAL),
             Self::KimiK3 => f.write_str(Self::KIMI_K3_LITERAL),
@@ -121,7 +128,7 @@ mod tests {
     fn renderer_selection_expected_error_message() {
         let err = RendererSelection::from_str("unknown").unwrap_err();
         expect_test::expect![
-            "unknown renderer `unknown` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)"
+            "unknown renderer `unknown` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3)"
         ]
         .assert_eq(&err);
     }

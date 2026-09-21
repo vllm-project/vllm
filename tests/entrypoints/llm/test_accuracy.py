@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file test accuracy of the vLLM server via LMEval.
+"""This file test accuracy of the vLLM server via LMEval.
 It uses local-completions, which interacts with vLLM
 through the OAI API with N concurrent connections.
 This simulates real work usage of the API and makes
@@ -33,7 +32,6 @@ EXPECTED_VALUES = {
 
 def run_test(model_name, more_args=None):
     """Run the end to end accuracy test."""
-
     model_args = f"pretrained={model_name},max_model_len=4096"
 
     if more_args is not None:
@@ -64,7 +62,6 @@ TPU_TP_TEST_STR = ""  # "tensor_parallel_size=4"
 @pytest.mark.parametrize("model", MODEL_NAMES)
 def test_lm_eval_accuracy_v1_engine(model):
     """Run with the V1 Engine."""
-
     more_args = None
     if current_platform.is_tpu():
         # Limit compilation time for TPU V1
@@ -81,7 +78,6 @@ def test_lm_eval_accuracy_v1_engine(model):
 @pytest.mark.parametrize("model", FP8_KV_MODEL_NAMES)
 def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(model):
     """Run with the V1 Engine."""
-
     more_args = None
     if current_platform.is_tpu():
         # Limit compilation time for TPU V1

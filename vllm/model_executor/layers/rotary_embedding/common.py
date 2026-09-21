@@ -70,10 +70,10 @@ def yarn_linear_ramp_mask(
     return ramp_func
 
 
-def yarn_get_mscale(scale: float = 1) -> float:
+def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     if scale <= 1:
         return 1.0
-    return 0.1 * math.log(scale) + 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
 
 
 def _flashinfer_rotary_embedding(
@@ -138,14 +138,14 @@ class ApplyRotaryEmb(CustomOp):
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> torch.Tensor:
-        """
-        Args:
-            x: [batch_size (optional), seq_len, num_heads, head_size]
-            cos: [seq_len, head_size // 2]
-            sin: [seq_len, head_size // 2]
-            is_neox_style: Whether to use the Neox-style or GPT-J-style.
-            enable_fp32_compute: Temporarily convert x, cos, sin to FP32 dtype
-                                 for higher accuracy.
+        """Args:
+        x: [batch_size (optional), seq_len, num_heads, head_size]
+        cos: [seq_len, head_size // 2]
+        sin: [seq_len, head_size // 2]
+        is_neox_style: Whether to use the Neox-style or GPT-J-style.
+        enable_fp32_compute: Temporarily convert x, cos, sin to FP32 dtype
+                             for higher accuracy.
+
         """
         origin_dtype = x.dtype
         if enable_fp32_compute:
