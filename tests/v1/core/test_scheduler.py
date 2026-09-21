@@ -139,10 +139,11 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
-def test_routed_experts_prompt_start_at_prompt_end():
+@pytest.mark.parametrize("max_tokens", [1, 2])
+def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     """A prompt-end offset should return empty routing data, not crash."""
     scheduler = create_scheduler()
-    (request,) = create_requests(num_requests=1)
+    (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
     scheduler.aux_output_connector = AuxOutputSchedulerConnector()
     scheduler.add_request(request)
@@ -171,7 +172,7 @@ def test_routed_experts_prompt_start_at_prompt_end():
 
     output = outputs[request.client_index].outputs[0]
     assert output.new_token_ids == [0]
-    assert output.routed_experts is None
+    assert output.routed_experts.shape == (0, 1, 1)
 
 
 def test_finish_request():

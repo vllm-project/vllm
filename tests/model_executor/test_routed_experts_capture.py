@@ -357,7 +357,7 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     assert capturer.device_buffer[0, 0, 0].item() == -1
 
 
-def test_get_aux_output_connector_uses_scheduler_batch_size(monkeypatch):
+def test_get_aux_output_connector_passes_config(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     connector = Mock()
@@ -374,7 +374,6 @@ def test_get_aux_output_connector_uses_scheduler_batch_size(monkeypatch):
     constructor.assert_called_once_with(
         model=model,
         kv_cache_config=kv_cache_config,
-        max_num_batched_tokens=32,
         vllm_config=config,
     )
     assert result is connector
@@ -398,13 +397,13 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
         aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
         kv_transfer_config=None,
         max_concurrent_batches=2,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
     )
     model = Mock()
     connector = aux_output_worker.AuxOutputWorkerConnector(
         vllm_config=config,
         model=model,
         kv_cache_config=SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()]),
-        max_num_batched_tokens=32,
     )
 
     constructor.assert_called_once_with(
@@ -444,7 +443,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
         aux_output_config=SimpleNamespace(max_bytes=None),
         kv_transfer_config=None,
         cache_config=SimpleNamespace(enable_prefix_caching=True),
-        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
         max_concurrent_batches=2,
     )
     kwargs = dict(
@@ -454,7 +453,6 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
             num_blocks=10,
             kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
         ),
-        max_num_batched_tokens=32,
     )
 
     aux_output_worker.AuxOutputWorkerConnector(**kwargs)

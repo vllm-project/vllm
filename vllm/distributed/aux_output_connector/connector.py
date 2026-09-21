@@ -111,7 +111,7 @@ class AuxOutputSchedulerConnector:
         request_output = output[request_id]
         token_end = request.num_tokens - 1
         local_end = token_end - request_output.token_start
-        if local_end <= 0:
+        if local_end < 0:
             assert not request.is_finished(), (
                 "finished auxiliary output output has no accepted token range: "
                 f"request={request_id}, token_end={token_end}, "
