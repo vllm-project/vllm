@@ -119,16 +119,26 @@ def interleaved_to_split(x):
     return x.reshape(*x.shape[:-1], -1, 2).transpose(-1, -2).reshape(*x.shape[:-1], -1)
 
 
-def _is_dense_qk_proj(layer: nn.Module) -> bool:
-    """Whether ``layer`` holds *dense* (unquantized) q/k projection weights.
+def is_rope_weights_folding_supported(
+    qk_proj: nn.Module,
+    dual_chunk_attention_config: dict[str, Any] | None,
+) -> bool:
+    """Whether the partial-RoPE weight-fold path is safe for this attention.
 
-    The partial-RoPE weight-fold only produces correct numerics on dense
-    weights: it permutes the projection's output channels, which would
-    misalign any per-output-channel quant scales/zero-points (fp8 per-channel,
-    MXFP4/MXFP8 block scales, GPTQ/AWQ, ...) or silently no-op on packed
-    tensors. For such layers we keep the runtime channel-permutation path.
+    Folding permutes the q/k projection's output channels at load time, which
+    only produces correct numerics when:
+
+    * the q/k projection is dense/unquantized and
+    * dual-chunk attention is disabled -- the P.RoPE equivalence has not been
+      validated with dual-chunk attention.
+
+    When either condition fails we fall back to the runtime channel-permutation
+    RoPE path instead of folding.
     """
-    return isinstance(getattr(layer, "quant_method", None), UnquantizedLinearMethod)
+    is_dense_qk_proj = isinstance(
+        getattr(qk_proj, "quant_method", None), UnquantizedLinearMethod
+    )
+    return is_dense_qk_proj and dual_chunk_attention_config is None
 
 
 def apply_partial_rope(
@@ -610,15 +620,13 @@ class K2HorizonAttention(nn.Module):
 
         self.rope_head_dim = rope_head_dim or self.head_dim
         # Fold the partial-RoPE channel permutation into the q/k weights only
-        # when they are dense; packed/quantized projections keep the runtime
-        # channel-permutation path (see ``_is_dense_qk_proj``).
-        self.fold_rope_weights = _is_dense_qk_proj(self.qkv_proj)
+        # when supported (dense projections + no dual-chunk attention);
+        # otherwise keep the runtime channel-permutation path
+        # (see ``is_rope_weights_folding_supported``).
+        self.fold_rope_weights = is_rope_weights_folding_supported(
+            self.qkv_proj, dual_chunk_attention_config
+        )
         if self.fold_rope_weights:
-            assert dual_chunk_attention_config is None, (
-                "K2Horizon partial-RoPE weight-fold path has not been validated "
-                "with dual-chunk attention; re-derive P.RoPE equivalence before "
-                "enabling."
-            )
             rope_parameters = dict(rope_parameters)
             rope_parameters["rope_dim"] = self.rope_head_dim
             self.rotary_emb = get_rope(
@@ -810,15 +818,13 @@ class K2HorizonMoVAAttention(nn.Module):
 
         self.rope_head_dim = rope_head_dim or self.head_dim
         # Fold the partial-RoPE channel permutation into the q/k weights only
-        # when they are dense; packed/quantized projections keep the runtime
-        # channel-permutation path.
-        self.fold_rope_weights = _is_dense_qk_proj(self.qk_proj)
+        # when supported (dense projections + no dual-chunk attention);
+        # otherwise keep the runtime channel-permutation path
+        # (see ``is_rope_weights_folding_supported``).
+        self.fold_rope_weights = is_rope_weights_folding_supported(
+            self.qk_proj, dual_chunk_attention_config
+        )
         if self.fold_rope_weights:
-            assert dual_chunk_attention_config is None, (
-                "K2Horizon partial-RoPE weight-fold path has not been validated "
-                "with dual-chunk attention; re-derive P.RoPE equivalence before "
-                "enabling."
-            )
             rope_parameters = dict(rope_parameters)
             rope_parameters["rope_dim"] = self.rope_head_dim
             self.rotary_emb = get_rope(
