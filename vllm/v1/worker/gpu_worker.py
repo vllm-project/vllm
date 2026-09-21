@@ -8,7 +8,6 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
-from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -89,6 +88,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
+from vllm.v1.worker.sleep import restore_sleep_parameters, save_sleep_parameters
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -254,18 +254,7 @@ class Worker(WorkerBase):
             model = self.model_runner.model
             transfer_config = self.vllm_config.weight_transfer_config
             patterns = transfer_config.frozen_weight_names if transfer_config else []
-            parameters = dict(model.named_parameters())
-            retained_names: set[str] = set()
-            for pattern in patterns:
-                matches = fnmatch_filter(parameters, pattern)
-                if not matches:
-                    raise ValueError(f"No parameter matches sleep retention: {pattern}")
-                retained_names.update(matches)
-            self._sleep_saved_parameters = {
-                name: param.detach().to("cpu")
-                for name, param in parameters.items()
-                if name in retained_names and not param.is_cpu
-            }
+            self._sleep_saved_parameters = save_sleep_parameters(model, patterns)
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
@@ -304,11 +293,9 @@ class Worker(WorkerBase):
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
         if wake_weights and self._sleep_saved_parameters:
-            model = self.model_runner.model
-            with torch.no_grad():
-                for name, saved in self._sleep_saved_parameters.items():
-                    model.get_parameter(name).copy_(saved)
-            self._sleep_saved_parameters.clear()
+            restore_sleep_parameters(
+                self.model_runner.model, self._sleep_saved_parameters
+            )
         if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
