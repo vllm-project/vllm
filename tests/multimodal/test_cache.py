@@ -333,6 +333,51 @@ def test_mm_cache_miss_raises_and_recovers():
     assert p1.get_and_update_item(None, mm_hash) == item
 
 
+def test_receiver_cache_replaces_stale_item_when_payload_resent():
+    """A P0 miss can resend a different item under the same identity.
+
+    Independent LRU eviction leaves P1 holding the old tensor. Substituting it
+    for the new payload pairs the request's placeholders with the wrong item
+    and kills EngineCore. Prefer the fresh payload and keep it for later hits.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+    large = MultiModalKwargsItem.dummy(nbytes=256)
+    mm_hash = "shared-id"
+
+    assert p1.get_and_update_item(small, mm_hash) is small
+    assert p1.get_and_update_item(large, mm_hash) is large
+    assert p1.get_and_update_item(None, mm_hash) is large
+
+
+def test_receiver_cache_features_keep_resent_payload():
+    """EngineCore updates features through get_and_update_features."""
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+    large = MultiModalKwargsItem.dummy(nbytes=256)
+    mm_hash = "shared-id"
+
+    def _feature(
+        data: MultiModalKwargsItem | None, length: int
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=length),
+            mm_hash=mm_hash,
+        )
+
+    seeded = p1.get_and_update_features([_feature(small, length=4)])
+    assert seeded[0].data is small
+
+    updated = p1.get_and_update_features([_feature(large, length=2048)])
+    assert updated[0].data is large
+    assert updated[0].mm_position.length == 2048
+
+
 def test_mm_cache_miss_batches_all_drifted_hashes():
     """All hashes drifted within one request must surface in a single error.
 

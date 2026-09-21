@@ -88,9 +88,12 @@ class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
 
     How to update each item:
 
-    - If the item is in the cache, replace the input with the cached item.
-    - If the item is not in the cache, store that item (which includes tensor
-      data) into the cache, and return the input.
+    - If the caller sent tensor data, store it (replacing any cached item
+      under the same key) and return that data. P0 can miss after independent
+      LRU eviction and resend a different item for the same identity.
+    - If the caller sent no data and the item is cached, return the cached item.
+    - If the caller sent no data and the item is not cached, raise
+      `MultiModalCacheMissError`.
     """
 
     def __init__(self, model_config: ModelConfig) -> None:
@@ -109,17 +112,22 @@ class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
+        if mm_item is not None:
+            # P0 sent a payload. Never keep a stale cached tensor under this
+            # identity: a later P0 hit would pair new placeholders with the old
+            # item and crash the engine. Drop first so a too-large replacement
+            # cannot leave the previous entry in place.
+            self._cache.pop(mm_hash, None)
+            self.cache_if_fits(self._cache, mm_hash, mm_item)
+            return mm_item
+
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return cached_item
 
         # No data and not cached here: P0 sent data=None trusting its shadow, but
         # the P0/P1 caches have drifted. Raise a retryable error (not assert) so the
         # engine can have P0 drop the stale entry and the client resend the data.
-        if mm_item is None:
-            raise MultiModalCacheMissError([mm_hash])
-
-        self.cache_if_fits(self._cache, mm_hash, mm_item)
-        return mm_item
+        raise MultiModalCacheMissError([mm_hash])
 
     @override
     def touch_receiver_cache_item(
