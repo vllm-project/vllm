@@ -14,11 +14,12 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
               (hash-based subdirectories to limit directory fan-out)
 """
 
+import errno
 import functools
 import json
 import os
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 try:
     from vllm.fs_io_C import batch_lookup as batch_lookup_C
@@ -29,12 +30,17 @@ except ImportError:
 
 from typing_extensions import override
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
     Medium,
+    OffloadingCounterMetadata,
     OffloadingEvent,
+    OffloadingMetricMetadata,
     OffloadKey,
     ReqContext,
 )
@@ -53,6 +59,7 @@ from vllm.v1.kv_offload.tiering.fs.io import (
     batch_load_block,
     batch_store_block,
     probe_o_direct,
+    probe_xattr,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
@@ -60,6 +67,8 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
+
+CHECKSUM_FAILURES = "vllm:kv_offload_tiering_checksum_failures"
 
 
 class FsAsyncLookupManager(AsyncLookupManager):
@@ -106,6 +115,23 @@ class FileSystemTierManager(SecondaryTierManager):
 
     medium: ClassVar[Medium] = Medium.STORAGE
 
+    @classmethod
+    @override
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingMetricMetadata]:
+        if not extra_config.get("checksum_blocks", False):
+            return {}
+        return {
+            CHECKSUM_FAILURES: OffloadingCounterMetadata(
+                documentation=(
+                    "Number of blocks that failed checksum verification, "
+                    "labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        }
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -116,6 +142,7 @@ class FileSystemTierManager(SecondaryTierManager):
         n_write_threads: int = 16,
         enable_kv_events: bool = False,
         locality: str | None = None,
+        checksum_blocks: bool = False,
         backpressure_detector: BackpressureDetector | None = None,
     ):
         """Args:
@@ -131,6 +158,8 @@ class FileSystemTierManager(SecondaryTierManager):
             cache events are enabled globally (kv_events_config).
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
+        checksum_blocks: Record each block's CRC32C in a user extended
+            attribute on store and verify it on load.
         backpressure_detector: Optional backpressure detector.
 
         """
@@ -164,6 +193,9 @@ class FileSystemTierManager(SecondaryTierManager):
         # the GIL that read cannot observe the finished job without the prior
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
+        # Load jobs that failed checksum verification (as _load_progress).
+        self._checksum_failed_jobs: set[JobId] = set()
+        self._stats = OffloadingConnectorStats()
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -200,6 +232,14 @@ class FileSystemTierManager(SecondaryTierManager):
                 tier_type,
             )
 
+        self._checksum_blocks = checksum_blocks
+        if checksum_blocks and not probe_xattr(os.path.dirname(config_path)):
+            raise ValueError(
+                f"checksum_blocks is enabled for the '{tier_type}' KV offload "
+                "tier, but user extended attributes, where block checksums are "
+                f"stored, could not be used on '{root_dir}'."
+            )
+
         self._pool = DualQueueThreadPool(
             n_read_threads,
             n_write_threads,
@@ -231,6 +271,7 @@ class FileSystemTierManager(SecondaryTierManager):
             [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
             self._block_size,
             self._use_o_direct,
+            self._checksum_blocks,
         )
         self._job_block_counts[job_metadata.job_id] = len(keys)
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
@@ -254,6 +295,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     offsets,
                     self._block_size,
                     self._use_o_direct,
+                    self._checksum_blocks,
                 )
             except OSError as exc:
                 # Runs on the pool worker thread. Record how many blocks loaded
@@ -262,6 +304,8 @@ class FileSystemTierManager(SecondaryTierManager):
                 # under the GIL once the finished queue hands back this job.
                 num_succeeded = getattr(exc, "num_succeeded", 0)
                 self._load_progress[job_id] = num_succeeded
+                if self._checksum_blocks and exc.errno == errno.EBADMSG:
+                    self._checksum_failed_jobs.add(job_id)
                 # Surfaces errno (e.g. EMFILE "Too many open files") for both
                 # the C and Python load paths.
                 logger.debug(
@@ -296,6 +340,11 @@ class FileSystemTierManager(SecondaryTierManager):
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
             num_succeeded = self._load_progress.pop(job_id, 0)
+            if job_id in self._checksum_failed_jobs:
+                self._checksum_failed_jobs.discard(job_id)
+                self._stats.increase_counter(
+                    CHECKSUM_FAILURES, labelvalues=(self.tier_type,)
+                )
             if load_keys is not None and not success:
                 # A batched load stops at the first bad block and reports how
                 # many loaded before it. Those earlier blocks are kept in the
@@ -323,6 +372,13 @@ class FileSystemTierManager(SecondaryTierManager):
                 )
             )
         return results
+
+    @override
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        if self._stats.is_empty():
+            return None
+        stats, self._stats = self._stats, OffloadingConnectorStats()
+        return stats
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
