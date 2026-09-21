@@ -29,6 +29,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
+from .utils import create_requests
+
 pytestmark = pytest.mark.cpu_test
 
 
@@ -177,6 +179,101 @@ def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
     assert peak_held == 7 + in_flight_chunks
     manager.free("r")
     assert pool.get_num_free_blocks() == initial_free
+
+
+def _make_align_mamba_manager() -> tuple[MambaManager, BlockPool]:
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    pool = BlockPool(num_gpu_blocks=12, enable_caching=True, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    return manager, pool
+
+
+def test_mamba_aligned_producer_preserves_published_state():
+    manager, pool = _make_align_mamba_manager()
+    request = create_requests(
+        num_requests=1,
+        num_tokens=4,
+        block_size=4,
+        req_ids=["producer"],
+    )[0]
+    manager.allocate_new_blocks(
+        request.request_id, num_tokens=4, num_tokens_main_model=4
+    )
+    source = manager.req_to_blocks[request.request_id][0]
+
+    manager.cache_blocks(request, 4, replay_boundaries=(4,))
+    published_hash = source.block_hash
+    assert published_hash is not None
+    assert (
+        manager.get_num_blocks_to_allocate(
+            request.request_id,
+            num_tokens=8,
+            new_computed_blocks=(),
+            total_computed_tokens=4,
+            num_local_computed_tokens=4,
+            num_tokens_main_model=8,
+        )
+        == 2
+    )
+
+    manager.allocate_new_blocks(
+        request.request_id, num_tokens=8, num_tokens_main_model=8
+    )
+
+    preserved = pool.get_cached_block(request.block_hashes[0], [0])
+    assert preserved is not None
+    assert preserved[0] is not source
+    assert source.block_hash is None
+    assert manager.req_to_blocks[request.request_id][0] is source
+    assert manager.take_pending_cow_copies() == [(source, preserved[0])]
+
+
+def test_mamba_aligned_hit_is_private_before_first_forward():
+    manager, pool = _make_align_mamba_manager()
+    source = pool.get_new_blocks(1)[0]
+    boundary_hash = BlockHash(b"boundary")
+    published_hash = make_block_hash_with_group_id(boundary_hash, 0)
+    source.set_block_hash(published_hash, num_tokens=4)
+    pool.cached_block_hash_to_block.insert(published_hash, source)
+    pool.free_blocks([source])
+    free_before = pool.get_num_free_blocks()
+    assert (
+        manager.get_num_blocks_to_allocate(
+            "consumer",
+            num_tokens=8,
+            new_computed_blocks=[source],
+            total_computed_tokens=4,
+            num_local_computed_tokens=4,
+            num_tokens_main_model=8,
+        )
+        == 3
+    )
+
+    manager.add_local_computed_blocks(
+        "consumer",
+        [source],
+        num_local_computed_tokens=4,
+        num_external_computed_tokens=0,
+    )
+    manager.allocate_new_blocks("consumer", num_tokens=8, num_tokens_main_model=8)
+    assert pool.get_num_free_blocks() == free_before - 3
+
+    private = manager.req_to_blocks["consumer"][0]
+    assert private is not source
+    assert private.block_hash is None
+    assert pool.get_cached_block(boundary_hash, [0]) == [source]
+    assert manager.take_pending_cow_copies() == [(source, private)]
 
 
 @pytest.mark.parametrize("block_size", [896, 1536])

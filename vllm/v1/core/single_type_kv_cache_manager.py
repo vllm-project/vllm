@@ -1483,6 +1483,11 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # Full aligned states are mutable: resumed requests use the hit
+            # block as their initial and output state, while running producers
+            # overwrite the block when they continue. Preserve a published
+            # snapshot with CoW before either write.
+            self._aligned_state_cow_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1709,6 +1714,36 @@ class MambaManager(SingleTypeKVCacheManager):
             )
         )
 
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        super().add_local_computed_blocks(
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+        if (
+            self.mamba_cache_mode != "align"
+            or num_external_computed_tokens > 0
+            or num_local_computed_tokens <= 0
+            or num_local_computed_tokens % self.block_size != 0
+        ):
+            return
+
+        block_idx = num_local_computed_tokens // self.block_size - 1
+        blocks = self.req_to_blocks[request_id]
+        if block_idx >= len(blocks):
+            return
+        source_block = blocks[block_idx]
+        if source_block.is_null or source_block.block_hash is None:
+            return
+        self._aligned_state_cow_reqs[request_id] = (block_idx, source_block)
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -1769,8 +1804,17 @@ class MambaManager(SingleTypeKVCacheManager):
                 )
                 or request_id in self._partial_hit_reqs
             )
-            if has_partial_hit:
-                num_new_blocks = max(num_new_blocks, 0) + 1
+            has_aligned_state_cow = request_id in self._aligned_state_cow_reqs or (
+                total_computed_tokens == num_local_computed_tokens
+                and num_local_computed_tokens > 0
+                and num_local_computed_tokens % self.block_size == 0
+                and len(new_computed_blocks) > 0
+                and not new_computed_blocks[-1].is_null
+                and new_computed_blocks[-1].block_hash is not None
+            )
+            num_cow_blocks = int(has_partial_hit) + int(has_aligned_state_cow)
+            if num_cow_blocks:
+                num_new_blocks = max(num_new_blocks, 0) + num_cow_blocks
             checkpoint_position = get_mamba_prefill_checkpoint_position(
                 num_tokens,
                 self.block_pool.hash_block_size,
@@ -1795,7 +1839,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     self._checkpoints.pop(request_id, None)
             if num_new_blocks > 0:
                 blocks_allocated = request_id in self._allocated_block_reqs
-                physical_block_cap = 1 + int(has_partial_hit) + checkpoint_block
+                physical_block_cap = 1 + num_cow_blocks + checkpoint_block
                 if not blocks_allocated or checkpoint_block:
                     physical_block_cap += self.num_speculative_blocks
                 num_new_blocks = min(num_new_blocks, physical_block_cap)
@@ -1832,12 +1876,15 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             checkpoint_block = int(request_id in self._checkpoints)
             partial_hit = self._partial_hit_reqs.get(request_id)
+            aligned_state_cow = self._aligned_state_cow_reqs.get(request_id)
             has_partial_hit = partial_hit is not None
+            has_aligned_state_cow = aligned_state_cow is not None
+            num_cow_blocks = int(has_partial_hit) + int(has_aligned_state_cow)
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
             # over-allocated at last round.
             if (
                 num_required_blocks <= len(req_blocks)
-                and not has_partial_hit
+                and not num_cow_blocks
                 and not checkpoint_block
             ):
                 self._allocated_block_reqs.add(request_id)
@@ -1879,16 +1926,20 @@ class MambaManager(SingleTypeKVCacheManager):
                         else:
                             break
                 num_new_blocks = max(num_required_blocks - len(req_blocks), 0)
-                if has_partial_hit:
-                    num_new_blocks = max(num_new_blocks, 0) + 1
-                max_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
+                if num_cow_blocks:
+                    num_new_blocks = max(num_new_blocks, 0) + num_cow_blocks
+                max_new_blocks = 1 + num_cow_blocks + checkpoint_block
                 if not blocks_allocated or checkpoint_block:
                     max_new_blocks += self.num_speculative_blocks
                 assert num_new_blocks <= max_new_blocks
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
-                if partial_hit is not None:
-                    block_idx, source_block = partial_hit
+                pending_cows = [
+                    entry
+                    for entry in (partial_hit, aligned_state_cow)
+                    if entry is not None
+                ]
+                for block_idx, source_block in pending_cows:
                     cow_block = new_blocks[0]
                     new_blocks = new_blocks[1:]
                     if blocks_allocated:
@@ -1901,8 +1952,10 @@ class MambaManager(SingleTypeKVCacheManager):
                         self.block_pool.move_block_hashes(source_block, cow_block)
                         self._pending_cow_copies.append((source_block, cow_block))
                         source_block.ref_cnt += 1
-                        producer_tail = self._producer_partial_tail_reqs.pop(
-                            request_id, None
+                        producer_tail = (
+                            self._producer_partial_tail_reqs.pop(request_id, None)
+                            if partial_hit == (block_idx, source_block)
+                            else None
                         )
                         if producer_tail is not None:
                             marker_block, boundary_tokens = producer_tail
@@ -1928,6 +1981,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 req_blocks.extend(new_blocks)
                 self._allocated_block_reqs.add(request_id)
                 self._partial_hit_reqs.pop(request_id, None)
+                self._aligned_state_cow_reqs.pop(request_id, None)
                 returned_blocks.extend(new_blocks)
                 return returned_blocks
 
@@ -1965,6 +2019,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._num_retired_blocks.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._aligned_state_cow_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
             # the pool now, so drop its not-yet-offered hand-offs rather than
@@ -2030,6 +2085,22 @@ class MambaManager(SingleTypeKVCacheManager):
                             block.block_hash_num_tokens,
                         )
                     )
+            if (
+                self.mamba_cache_mode == "align"
+                and num_tokens > 0
+                and num_tokens % self.block_size == 0
+            ):
+                boundary_idx = num_tokens // self.block_size - 1
+                if num_cached_blocks_before <= boundary_idx < num_cached_blocks_after:
+                    boundary_block = blocks[boundary_idx]
+                    if (
+                        not boundary_block.is_null
+                        and boundary_block.block_hash is not None
+                    ):
+                        self._aligned_state_cow_reqs[request.request_id] = (
+                            boundary_idx,
+                            boundary_block,
+                        )
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
