@@ -504,6 +504,36 @@ class HfRunner:
                     if model_cls is not None:
                         _fix_v4_tied_weights_keys(model_cls)
 
+            from transformers.integrations import is_deepspeed_zero3_enabled
+
+            # On ROCm, avoid a converted CPU copy when downcasting FP32 references.
+            # Same-dtype CPU loads can stay lazily mapped and use less host RAM.
+            # Leave customized, remote, and quantized loading unchanged.
+            if (
+                current_platform.is_rocm()
+                and self.device == "cuda"
+                and auto_cls is AutoModelForCausalLM
+                and revision is None
+                and model_kwargs.keys() == {"dtype"}
+                and self.config.dtype == torch.float32
+                and model_kwargs["dtype"] in (torch.float16, torch.bfloat16)
+                and not (trust_remote_code and hasattr(self.config, "auto_map"))
+                and getattr(self.config, "quantization_config", None) is None
+                and getattr(
+                    self.config.get_text_config(decoder=True),
+                    "quantization_config",
+                    None,
+                )
+                is None
+                and not is_deepspeed_zero3_enabled()
+            ):
+                model_kwargs = {
+                    **model_kwargs,
+                    "device_map": torch.device(
+                        "cuda", torch.accelerator.current_device_index()
+                    ),
+                }
+
             model = cast(
                 nn.Module,
                 auto_cls.from_pretrained(
