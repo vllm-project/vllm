@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import torch
@@ -60,6 +60,8 @@ class GDNAttentionMetadata:
         None  # shape: [batch - num_spec_decodes,]
     )
     spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
+    # CPU mask used to select state indices when reusing metadata across groups.
+    spec_sequence_masks_cpu: torch.Tensor | None = None
     spec_token_indx: torch.Tensor | None = None
     non_spec_token_indx: torch.Tensor | None = None
 
@@ -213,8 +215,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
+        metadata_cache: dict[tuple, GDNAttentionMetadata] | None = None,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
+
+        if metadata_cache is not None:
+            cached = metadata_cache.get(self._key_for_metadata_cache())
+            if cached is not None:
+                return self._build_fast_from_cached(m, cached)
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
@@ -512,6 +520,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_state_indices_tensor=spec_state_indices_tensor,
             non_spec_state_indices_tensor=non_spec_state_indices_tensor,
             spec_sequence_masks=spec_sequence_masks,
+            spec_sequence_masks_cpu=spec_sequence_masks_cpu,
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
@@ -519,10 +528,53 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+        is_pure_spec_decode = (
+            num_spec_decodes > 0 and num_prefills == 0 and num_decodes == 0
+        )
+        if metadata_cache is not None and is_pure_spec_decode:
+            # Later groups replace state indices without mutating this metadata.
+            metadata_cache[self._key_for_metadata_cache()] = attn_metadata
         return attn_metadata
 
+    def _key_for_metadata_cache(self) -> tuple:
+        return (
+            type(self),
+            self.spec_sequence_masks.device,
+            self.num_spec,
+            self.use_full_cuda_graph,
+            self.decode_cudagraph_max_bs,
+        )
+
+    def _build_fast_from_cached(
+        self, m: CommonAttentionMetadata, cached: GDNAttentionMetadata
+    ) -> GDNAttentionMetadata:
+        """Reuse metadata from a compatible GDN group in the same forward pass,
+        provided the batch contains only speculative decodes and padding.
+        """
+        assert cached.spec_sequence_masks_cpu is not None
+        block_table = mamba_get_block_table_tensor(
+            m.block_table_tensor,
+            m.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
+        state_indices = block_table[cached.spec_sequence_masks_cpu, : self.num_spec + 1]
+        fits_cudagraph_buffers = (
+            cached.num_spec_decodes <= self.decode_cudagraph_max_bs
+            and cached.num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+        )
+        if self.use_full_cuda_graph and fits_cudagraph_buffers:
+            self.spec_state_indices_tensor[: cached.num_spec_decodes].copy_(
+                state_indices, non_blocking=True
+            )
+            state_indices = self.spec_state_indices_tensor[: m.num_reqs]
+            state_indices[cached.num_spec_decodes :].fill_(NULL_BLOCK_ID)
+        return replace(cached, spec_state_indices_tensor=state_indices)
+
     def build_for_cudagraph_capture(
-        self, common_attn_metadata: CommonAttentionMetadata
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        metadata_cache: dict[tuple, GDNAttentionMetadata] | None = None,
     ):
         """This method builds the metadata for full cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
@@ -540,8 +592,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"cudagraph capture sizes ({self.decode_cudagraph_max_bs})."
         )
 
+        if metadata_cache is not None:
+            cached = metadata_cache.get(self._key_for_metadata_cache())
+            if cached is not None:
+                return self._build_fast_from_cached(m, cached)
+
         num_accepted_tokens = torch.diff(m.query_start_loc)
         num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
         assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
 
-        return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
+        return self.build(
+            0,
+            m,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            metadata_cache=metadata_cache,
+        )

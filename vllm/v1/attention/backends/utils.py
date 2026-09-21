@@ -18,6 +18,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
+from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
@@ -1131,7 +1132,7 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
-def mamba_get_block_table_tensor(
+def mamba_get_block_table_tensor_reference(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     kv_cache_spec: KVCacheSpec,
@@ -1169,3 +1170,60 @@ def mamba_get_block_table_tensor(
         )
         indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
         return torch.gather(block_table, 1, indices_to_gather)
+
+
+def mamba_get_block_table_tensor(
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    kv_cache_spec: KVCacheSpec,
+    mamba_cache_mode: str,
+) -> torch.Tensor:
+    """Gather aligned Mamba state blocks with a single Triton kernel."""
+    if mamba_cache_mode in ("all", "none"):
+        return block_table
+    if not block_table.is_cuda:
+        return mamba_get_block_table_tensor_reference(
+            block_table, seq_lens, kv_cache_spec, mamba_cache_mode
+        )
+    assert isinstance(kv_cache_spec, MambaSpec)
+    num_columns = 1 + kv_cache_spec.num_speculative_blocks
+    output = block_table.new_empty((seq_lens.numel(), num_columns))
+    if output.numel():
+        _mamba_get_block_table_kernel[(triton.cdiv(output.numel(), 128),)](
+            block_table,
+            seq_lens,
+            output,
+            block_table.stride(0),
+            block_table.stride(1),
+            seq_lens.stride(0),
+            output.numel(),
+            num_columns,
+            kv_cache_spec.block_size,
+            BLOCK_SIZE=128,
+        )
+    return output
+
+
+@triton.jit
+def _mamba_get_block_table_kernel(
+    block_table,
+    seq_lens,
+    output,
+    table_row_stride,
+    table_column_stride,
+    seq_stride,
+    num_elements,
+    num_columns: tl.constexpr,
+    mamba_block_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = offsets < num_elements
+    rows = offsets // num_columns
+    columns = offsets % num_columns
+    lengths = tl.load(seq_lens + rows * seq_stride, valid, other=0)
+    # Clamp before division so padded zero-length rows select the first block.
+    starts = tl.maximum(lengths - 1, 0) // mamba_block_size
+    indices = rows * table_row_stride + (starts + columns) * table_column_stride
+    values = tl.load(block_table + indices, valid, other=0)
+    tl.store(output + offsets, values, valid)

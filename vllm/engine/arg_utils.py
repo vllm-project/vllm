@@ -559,6 +559,7 @@ class EngineArgs:
     prefix_cache_retention_interval: int | None = get_field(
         CacheConfig, "prefix_cache_retention_interval"
     )
+    attn_group_size: int | None = get_field(CacheConfig, "attn_group_size")
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     offload_backend: str = OffloadConfig.offload_backend
@@ -1317,6 +1318,7 @@ class EngineArgs:
         cache_group.add_argument(
             "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
         )
+        cache_group.add_argument("--attn-group-size", **cache_kwargs["attn_group_size"])
         cache_group.add_argument(
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
         )
@@ -2131,6 +2133,7 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             prefix_cache_retention_interval=self.prefix_cache_retention_interval,
+            attn_group_size=self.attn_group_size,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             swa_bounded_replay=self.swa_bounded_replay,

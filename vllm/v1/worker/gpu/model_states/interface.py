@@ -38,6 +38,8 @@ class ModelSpecificAttnMetadata:
         self,
         attn_metadata_builder: Any,
         num_reqs: int,
+        *,
+        for_capture: bool = False,
     ) -> dict[str, Any]:
         return {}
 
