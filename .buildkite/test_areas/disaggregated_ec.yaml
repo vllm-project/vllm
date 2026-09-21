@@ -20,7 +20,6 @@ steps:
       dind: false
       device: mi300_2
       num_devices: 2
-      optional: true
       timeout_in_minutes: 60
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -30,6 +29,7 @@ steps:
       - vllm/entrypoints/scale_out/
       - tests/entrypoints/scale_out/ec_integration/
       - vllm/platforms/rocm.py
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       commands:
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       - bash entrypoints/scale_out/ec_integration/run_scale_out_ec_e2e_test.sh

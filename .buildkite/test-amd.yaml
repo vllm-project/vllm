@@ -954,27 +954,6 @@ steps:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
-- label: ":amd: (MI300) Sharded RDT Weight Transfer"
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/distributed/weight_transfer/
-  - tests/distributed/test_sharded_rdt_plan.py
-  - tests/distributed/test_sharded_rdt_producer.py
-  - tests/distributed/test_sharded_rdt_trainer.py
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - uv pip install --system --no-deps 'ray==2.56.1'
-  - pytest -v -s distributed/test_sharded_rdt_plan.py
-  - pytest -v -s distributed/test_sharded_rdt_producer.py
-  - pytest -v -s distributed/test_sharded_rdt_trainer.py
-
 - label: ":amd: (MI300) Distributed Features" # TBD
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1442,26 +1421,6 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
-- label: ":amd: (MI300) LM Eval Watermarking"
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - .buildkite/test_areas/lm_eval.yaml
-  - tests/evals/gsm8k/
-  - vllm/config/watermarking.py
-  - vllm/sampling_params.py
-  - vllm/v1/watermarking/
-  - vllm/v1/worker/gpu/
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
-
 - label: ":amd: (MI300) MRCR Eval Small Models" # TBD
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1830,7 +1789,6 @@ steps:
   - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-  - tests/kernels/test_top_k_per_row.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
@@ -2889,25 +2847,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not slow_test' v1/spec_decode
 
-- label: ":amd: (MI300) Extract Hidden States Integration Single GPU"
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/extract_hidden_states.py
-  - vllm/model_executor/models/extract_hidden_states.py
-  - vllm/transformers_utils/configs/extract_hidden_states.py
-  - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
-  - tests/v1/kv_connector/extract_hidden_states_integration
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -m 'not distributed' tests/v1/kv_connector/extract_hidden_states_integration
-
 - label: ":amd: (MI300) Extract Hidden States Integration" # TBD
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -3512,6 +3451,27 @@ steps:
 
 #--------------------------------------------------------  mi355 · distributed  --------------------------------------------------------#
 
+- label: ":amd: (MI355) Sharded RDT Weight Transfer"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/weight_transfer/
+  - tests/distributed/test_sharded_rdt_plan.py
+  - tests/distributed/test_sharded_rdt_producer.py
+  - tests/distributed/test_sharded_rdt_trainer.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - uv pip install --system --no-deps 'ray==2.56.1'
+  - pytest -v -s distributed/test_sharded_rdt_plan.py
+  - pytest -v -s distributed/test_sharded_rdt_producer.py
+  - pytest -v -s distributed/test_sharded_rdt_trainer.py
+
 - label: ":amd: (MI355) Distributed DP Basic" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3816,6 +3776,26 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
+
+- label: ":amd: (MI355) LM Eval Watermarking"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/config/watermarking.py
+  - vllm/sampling_params.py
+  - vllm/v1/watermarking/
+  - vllm/v1/worker/gpu/
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
 
 - label: ":amd: (MI355) LM Eval Watermark Feature Combination"
   timeout_in_minutes: 60
@@ -4549,6 +4529,25 @@ steps:
 #   - pytest -s -v tests/quantization/test_gfx950_moe.py
 
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
+
+- label: ":amd: (MI355) Extract Hidden States Integration Single GPU"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/extract_hidden_states.py
+  - vllm/model_executor/models/extract_hidden_states.py
+  - vllm/transformers_utils/configs/extract_hidden_states.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
+  - tests/v1/kv_connector/extract_hidden_states_integration
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -m 'not distributed' tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":amd: (MI355) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 125

@@ -89,7 +89,6 @@ steps:
       dind: false
       device: mi300_2
       num_devices: 2
-      optional: true
       timeout_in_minutes: 60
       working_dir: /vllm-workspace
       depends_on:
@@ -121,19 +120,8 @@ steps:
       - requirements/kv_connectors.txt
       - vllm/platforms/rocm.py
       - requirements/rocm.txt
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+        PYTHON_BIN: "python"
       commands:
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - export PYTHON_BIN='python'
-      - export PYTHONUNBUFFERED='1'
-      - export VLLM_HOST_IP='127.0.0.1'
-      - export VLLM_USE_V2_MODEL_RUNNER='1'
-      - export E_CUDAGRAPH_MM_ENCODER='1'
-      - export E_MM_ENCODER_ATTN_BACKEND='TRITON_ATTN'
-      - export MOONCAKE_EC_PROTOCOL='tcp'
-      - export USE_MM_PROMPTS='1'
-      - export SKIP_BASELINE='0'
-      - export CONCURRENCY='3'
-      - export REPEAT='2'
-      - export LOG_PATH='/tmp/mooncake-ec-e2e'
-      - export BASELINE_FILE='/tmp/mooncake-ec-e2e/baseline.json'
       - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
