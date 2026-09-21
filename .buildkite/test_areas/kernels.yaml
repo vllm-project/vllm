@@ -13,6 +13,22 @@ steps:
   commands:
     - pytest -v -s tests/ir
     - pytest -v -s tests/kernels/ir
+  mirror:
+    amd:
+      label: ":amd: (MI355) vLLM IR"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/ir/
+      - tests/kernels/ir/
+      - vllm/ir
+      - vllm/kernels
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels Shard %N"
   device: h200_35gb
@@ -26,6 +42,29 @@ steps:
   commands:
     - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 3
+  mirror:
+    amd:
+      label: ":amd: (MI355) Core Operation Kernels Shard %N"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 40
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - tests/kernels/core
+      - tests/kernels/test_top_k_per_row.py
+      - tests/kernels/test_concat_mla_q.py
+      - tests/kernels/test_rocm_fp32_router_gemm.py
+      - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+      - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
+      - vllm/model_executor/layers/rotary_embedding/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/kernels/test_fused_qk_norm_rope_gate.py
+      commands:
+      - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -81,6 +120,7 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
+  - vllm/utils/deep_gemm.py
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/models/test_deepseek_v4_mega_moe.py
   commands:
@@ -145,6 +185,7 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
+      parallelism: 6
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -155,6 +196,8 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
@@ -168,6 +211,24 @@ steps:
   - tests/kernels/attention/test_triton_unified_attention_diffkv.py
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Attention DiffKV Kernels"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 35
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention/ops/triton_unified_attention_diffkv.py
+      - vllm/v1/attention/backends/triton_attn_diffkv.py
+      - tests/kernels/attention/test_triton_unified_attention.py
+      - tests/kernels/attention/test_triton_unified_attention_diffkv.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
 - label: ":nvidia: (H100) MLA Kernel Test"
   key: kernels-flashmla-test-h100
@@ -190,6 +251,31 @@ steps:
     - pytest -v -s kernels/attention/test_flashmla_sparse.py
     - pytest -v -s kernels/attention/test_flashinfer_mla_decode.py
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) MLA Kernels"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 40
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+      - vllm/v1/attention/selector.py
+      - vllm/platforms/rocm.py
+      - vllm/_aiter_ops.py
+      - tests/kernels/attention/test_rocm_aiter_mla_decode.py
+      - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+      - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+      - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+      commands:
+      - amd-smi
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
@@ -208,9 +294,6 @@ steps:
       label: ":amd: (MI300) Quantization Kernels Shard %N"
       dind: false
       device: mi300_1
-      # Pin the AMD mirror at its current 2 shards so raising NVIDIA
-      # parallelism does not multiply AMD copies (needs ci-infra #473).
-      parallelism: 2
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -222,6 +305,12 @@ steps:
       - vllm/kernels/aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/model_executor/kernels/
+      - csrc/rocm/
+      - vllm/v1/attention/backends/rocm_aiter_fa.py
+      - tests/kernels/quant_utils.py
+      - tests/kernels/utils.py
+      - vllm/_custom_ops.py
+      - vllm/envs.py
       depends_on:
       - image-build-amd
 
@@ -258,6 +347,10 @@ steps:
       - vllm/config
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - csrc/rocm/
+      - tests/kernels/utils.py
+      - vllm/model_executor/layers/quantization/mxfp4.py
+      - vllm/model_executor/layers/quantization/utils/quant_utils.py
       depends_on:
       - image-build-amd
 
@@ -268,16 +361,20 @@ steps:
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
   commands:
     - pytest -v -s kernels/mamba
   mirror:
     amd:
       label: ":amd: (MI250) Mamba Kernels"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) DeepGEMM Kernels"
   key: kernels-deepgemm-test-h100
@@ -317,6 +414,7 @@ steps:
   - csrc/quantization/fp4/
   - csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu
   - csrc/libtorch_stable/quantization/fp4/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/
   - csrc/attention/mla/
   - csrc/quantization/cutlass_w8a8/moe/
   - vllm/model_executor/layers/fusion/
@@ -358,6 +456,7 @@ steps:
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+  - tests/kernels/quantization/test_block_fp8.py
   - tests/models/quantization/test_nvfp4.py
   commands:
     - nvidia-smi
@@ -392,6 +491,7 @@ steps:
           pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
           pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
           pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+          pytest -v -s tests/kernels/quantization/test_block_fp8.py::test_w8a8_block_fp8_cutlass_matmul
           pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
           pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
           pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
@@ -459,10 +559,14 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Helion Kernels Shard %N"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - scripts/benchmark_helion_kernels.py
 
  
 - label: ":nvidia: (H100) FP8 MoE Kernels"
@@ -491,6 +595,25 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
     - pytest -v -s kernels/moe/test_deepep_moe.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) DeepEP FP8 MoE Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 55
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/moe/
+      - csrc/quantization/w8a8/cutlass/moe/
+      - vllm/model_executor/layers/fused_moe/
+      - tests/kernels/moe/test_deepep_moe.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/envs.py
+      commands:
+      - pytest -v -s kernels/moe/test_deepep_moe.py
 
 - label: ":nvidia: (B200) FP4 MoE Kernels"
   key: kernels-fp4-moe-test-b200
@@ -520,7 +643,30 @@ steps:
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
-
+  mirror:
+    amd:
+      label: ":amd: (MI355) FusedMoE Layer Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 35
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/moe/
+      - csrc/rocm/
+      - tests/kernels/moe
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/distributed/
+      - vllm/config/
+      - vllm/forward_context.py
+      - vllm/v1/worker/workspace.py
+      - vllm/utils/import_utils.py
+      - vllm/utils/math_utils.py
+      - vllm/utils/torch_utils.py
+      - vllm/platforms/
+      - vllm/_aiter_ops.py
 
 - label: ":nvidia: (B200) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-b200s
@@ -538,3 +684,63 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
+
+- label: ":amd: (MI355) FP8 MoE Kernels"
+  key: amd-fp8-moe-kernels-mi355
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/moe/
+  - vllm/model_executor/layers/fused_moe/
+  - tests/kernels/moe/test_deepep_moe.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  - tests/kernels/moe/test_gpt_oss_triton_kernels.py
+  - tests/kernels/moe/test_modular_oai_triton_moe.py
+  - tests/kernels/moe/test_moe.py
+  - tests/kernels/moe/test_block_int8.py
+  - tests/kernels/moe/test_triton_moe_no_act_mul.py
+  - tests/kernels/moe/test_triton_moe_ptpc_fp8.py
+  commands:
+  - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+  - pytest -v -s kernels/moe/test_moe.py
+  - pytest -v -s kernels/moe/test_block_int8.py
+  - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
+  - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
+
+- label: ":amd: (MI355) Kernels"
+  key: amd-kernels-mi355
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  timeout_in_minutes: 25
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - csrc/attention/mla/
+  - csrc/quantization/cutlass_w8a8/moe/
+  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/backends/rocm_attn.py
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/v1/attention/backends/mla/aiter_triton_mla.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  - examples/basic/offline_inference/chat.py
+  - tests/kernels/attention/test_attention_selector.py
+  commands:
+  - amd-smi
+  - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
+  - pytest -v -s tests/kernels/attention/test_attention_selector.py

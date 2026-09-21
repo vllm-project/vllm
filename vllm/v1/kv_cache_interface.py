@@ -154,9 +154,7 @@ class SparseCacheRole(str, Enum):
 
 @dataclass(frozen=True)
 class KVCacheSpec:
-    """
-    A base class for specifying the KV cache format of one layer.
-    """
+    """A base class for specifying the KV cache format of one layer."""
 
     # number of tokens in a block
     block_size: int
@@ -165,6 +163,11 @@ class KVCacheSpec:
     def prefix_cacheable(self) -> bool:
         """Whether this spec's group participates in prefix caching."""
         return True
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        """DeepSeek-V4.1 only: bounded replay. Currently only for DSV41 SWA."""
+        return 0
 
     @property
     def num_heads(self) -> int:
@@ -180,11 +183,11 @@ class KVCacheSpec:
 
     @property
     def page_size_bytes(self) -> int:
-        """
-        The size of a page with `block_size` tokens in bytes.
+        """The size of a page with `block_size` tokens in bytes.
 
         Returns:
             The page size
+
         """
         raise NotImplementedError
 
@@ -202,37 +205,33 @@ class KVCacheSpec:
         return 128
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        """
-        The maximum possible memory usage of this KV cache in bytes.
+        """The maximum possible memory usage of this KV cache in bytes.
 
         Returns:
             The KV cache size in bytes
+
         """
         raise NotImplementedError
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        """
-        The number of block table entries needed per request, i.e. the row
+        """The number of block table entries needed per request, i.e. the row
         length of the worker-side block table for this cache group.
 
         Args:
             vllm_config: The vllm config.
             max_len: The maximum sequence length to size for, including the
                 encoder length for encoder-decoder models.
+
         """
         return cdiv(max_len, self.block_size)
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
-        """
-        Create a new KVCacheSpec from self but replacing the block size.
-        """
+        """Create a new KVCacheSpec from self but replacing the block size."""
         return replace(self, block_size=block_size)
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
-        """
+        """Merge a list of KVCacheSpec objects into a single KVCacheSpec object."""
         if not all(spec == specs[0] for spec in specs[1:]):
             raise AssertionError(
                 "All layers in the same KV cache group must be the same."
@@ -242,9 +241,7 @@ class KVCacheSpec:
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
     ) -> bool:
-        """
-        Whether this KVCacheSpec is uniform with all specs of all layers.
-        """
+        """Whether this KVCacheSpec is uniform with all specs of all layers."""
         uniform_type_base_spec = KVCacheSpecRegistry.get_uniform_type_base_spec(self)
         assert uniform_type_base_spec is not None, (
             f"Unsupported KV cache spec type: {type(self)}. "
@@ -537,8 +534,7 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class FullAttentionSpec(AttentionSpec):
-    """
-    When hybrid allocator is disabled and the model contains both full
+    """When hybrid allocator is disabled and the model contains both full
     attention layers and sliding window attention layers, sliding
     window attention are regarded as full attention in KV cache manager
     (blocks are allocated for all tokens), while computed as sliding window
@@ -582,8 +578,7 @@ class FullAttentionSpec(AttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of FullAttentionSpec objects into a single
+        """Merge a list of FullAttentionSpec objects into a single
         FullAttentionSpec object.
         """
         assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
@@ -918,6 +913,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     # DeepseekV4-only: see MLAAttentionSpec.model_version.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
+    bounded_replay: bool = False
 
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -928,6 +924,14 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
         super().__post_init__()
         _apply_alignment_padding(self)
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return not self.bounded_replay
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        return self.sliding_window if self.bounded_replay else 0
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -940,16 +944,18 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
+        bounded_replay_set = set(spec.bounded_replay for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
             and len(extra_retained_set) == 1
+            and len(bounded_replay_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, sliding "
-            "window size, and retained token count."
+            "window size, retained token count, and replay policy."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -964,6 +970,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
+            bounded_replay=bounded_replay_set.pop(),
         )
 
     def is_uniform_with_collection(
@@ -972,6 +979,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         return all(
             isinstance(spec, SlidingWindowMLASpec)
             and spec.sliding_window == self.sliding_window
+            and spec.bounded_replay == self.bounded_replay
             for spec in kv_cache_specs.values()
         )
 
@@ -995,6 +1003,10 @@ class KpoolTailSpec(SlidingWindowSpec):
 
     @property
     def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def uses_slot_mapping(self) -> bool:
         return False
 
 
@@ -1124,9 +1136,7 @@ class EncoderOnlyAttentionSpec(AttentionSpec):
 
 @dataclass(frozen=True)
 class CrossAttentionSpec(AttentionSpec):
-    """
-    KV cache spec for cross-attention layers in encoder-decoder models.
-    """
+    """KV cache spec for cross-attention layers in encoder-decoder models."""
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # For cross-attention, we need to cache encoder states
@@ -1141,8 +1151,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of FullAttentionSpec objects into a single
+        """Merge a list of FullAttentionSpec objects into a single
         FullAttentionSpec object.
         """
         assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
@@ -1192,8 +1201,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
 
 @dataclass(frozen=True)
 class UniformTypeKVCacheSpecs(KVCacheSpec):
-    """
-    A KV cache spec for multiple layers with the same type of attention. Here,
+    """A KV cache spec for multiple layers with the same type of attention. Here,
     same types means always need the same number of token slots. For example,
     sliding window attentions with different window sizes are not the same type
     and should not be merged into one UniformTypeKVCacheSpecs.
@@ -1204,6 +1212,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def prefix_cacheable(self) -> bool:
         return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        return max(spec.prefix_replay_tokens for spec in self.kv_cache_specs.values())
 
     @property
     def first_spec(self) -> KVCacheSpec:
@@ -1241,8 +1253,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
-        """
-        Whether all layers have the same type of KV cache spec.
+        """Whether all layers have the same type of KV cache spec.
 
         Uses the registry to determine grouping base classes, so custom specs
         that inherit from FullAttentionSpec are treated as full attention.
@@ -1256,8 +1267,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     @classmethod
     def from_specs(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> Self | None:
-        """
-        Return a SameTypeKVCacheSpecs object if all layers have the same type
+        """Return a SameTypeKVCacheSpecs object if all layers have the same type
         of KV cache spec. Return None if not.
         """
         if cls.is_uniform_type(kv_cache_specs):
@@ -1368,8 +1378,7 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
 
 @dataclass
 class KVCacheTensor:
-    """
-    A class for specifying how the workers should initialize the KV cache.
+    """A class for specifying how the workers should initialize the KV cache.
 
     Placement of a set of same-shaped layers in the KV cache allocation.
     Layer ``layers[l]``'s page for block ``b`` starts at
@@ -1399,8 +1408,7 @@ class KVCacheGroupRole(str, Enum):
 
 @dataclass
 class KVCacheGroupSpec:
-    """
-    Represents a group of model layers that share the same KV cache block table.
+    """Represents a group of model layers that share the same KV cache block table.
     These layers are regarded as one layer in the KV cache manager.
     """
 
@@ -1421,9 +1429,7 @@ class KVCacheGroupSpec:
 
 @dataclass
 class KVCacheConfig:
-    """
-    The KV cache configuration of a model.
-    """
+    """The KV cache configuration of a model."""
 
     num_blocks: int
     """The number of KV cache blocks"""

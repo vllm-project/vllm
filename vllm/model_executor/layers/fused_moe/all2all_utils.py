@@ -35,6 +35,7 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
+    has_moonep,
     has_mori,
     has_nixl_ep,
 )
@@ -103,6 +104,13 @@ if current_platform.is_cuda_alike():
             NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
         )
+    if has_moonep():
+        from .prepare_finalize.moonep import (
+            MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+            MOONEP_DEFAULT_NUM_SMS,
+            MOONEP_DEFAULT_TOKEN_PADDING,
+            MoonEPPrepareAndFinalize,
+        )
 
 
 def get_ep_all2all_manager(
@@ -122,8 +130,7 @@ def maybe_roundup_layer_hidden_size(
     act_dtype: torch.dtype,
     moe_parallel_config: FusedMoEParallelConfig,
 ) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
+    """Given layer hidden size and MoE configurations, round up hidden_size
     if necessary.
 
     Args:
@@ -135,6 +142,7 @@ def maybe_roundup_layer_hidden_size(
         Rounded up hidden_size if rounding up is required based on the configs
         and all2all backend.
         Original hidden size otherwise.
+
     """
     if moe_parallel_config.use_deepep_ht_kernels:
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
@@ -276,6 +284,29 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
+            sp_size=moe.moe_parallel_config.sp_size,
+        )
+
+    elif moe.use_moonep_kernels:
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            num_topk=moe.experts_per_token,
+            num_global_experts=moe.num_experts,
+            num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+            token_padding=MOONEP_DEFAULT_TOKEN_PADDING,
+            num_sms=MOONEP_DEFAULT_NUM_SMS,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        # The [E+B] weight layout is picked up from the experts (their
+        # process_weights_after_loading hook) once the layer has loaded and
+        # converted its weights.
+        prepare_finalize = MoonEPPrepareAndFinalize(
+            buffer_pool=handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
         )
 
     elif moe.use_mori_kernels:
@@ -284,13 +315,20 @@ def maybe_make_prepare_finalize(
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = (
-            quant_config.is_per_act_token or quant_config.is_block_quantized
+            quant_config.is_per_act_token
+            or quant_config.is_block_quantized
+            or quant_config.is_per_tensor
         )
         if use_fp8_dispatch:
-            # For PTPC (per token per channel) quant, scale dim is 1
-            # For 1x128 quant, scale dim is hidden_dim // 128
+            # For PTPC (per token per channel) or per-tensor quant,
+            # scale dim is 1. For 1x128 quant, scale dim is
+            # hidden_dim // 128
             quant_dtype = quant_config.quant_dtype
-            scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+            scale_dim = (
+                1
+                if (quant_config.is_per_act_token or quant_config.is_per_tensor)
+                else moe.hidden_dim // 128
+            )
         else:
             # Unquantized dispatch (e.g. AITER with defer_input_quant):
             # dispatch raw BF16/FP16 data, no scales needed.

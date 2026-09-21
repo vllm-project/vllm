@@ -74,6 +74,7 @@ def check_ipc_platform_support() -> None:
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
             CUDA/ROCm.
+
     """
     if current_platform.is_cuda_alike():
         return
@@ -94,6 +95,7 @@ def check_ipc_quant_support(model: torch.nn.Module) -> None:
     Raises:
         UnsupportedQuantForIPCError: If any quant method does not declare
             ``supports_pre_processed_weights``.
+
     """
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)

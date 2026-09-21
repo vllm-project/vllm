@@ -311,7 +311,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         else:
             assert self.topk_indices_buffer is not None
             top_k = self.topk_indices_buffer.shape[-1]
-        combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
+        combined_topk = round_up(top_k + self.window_size, 128)
         current_workspace_manager().get_simultaneous(
             ((self.PREFILL_CHUNK_SIZE, m, q.shape[-1]), torch.bfloat16),
             ((self.max_num_batched_tokens, combined_topk), torch.int32),
@@ -411,7 +411,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
+        combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_n, chunk_m in chunk_plan:
             chunk_size = chunk_end - chunk_start
             kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
@@ -422,7 +422,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             if not swa_only:
                 assert flashmla_metadata is not None
                 dequantize_and_gather_k_cache(
-                    kv_ws[:chunk_size],
+                    kv_ws[:chunk_size, :chunk_n],
                     self._compressed_kv_cache(),
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,
@@ -457,21 +457,6 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 chunk_m,
                 chunk_n,
                 out=(idx_ws[: qe - qs], lens_ws[: qe - qs]),
-                left_visible=(
-                    swa_metadata.prefill_left_visible[
-                        num_decode_tokens + qs : num_decode_tokens + qe
-                    ]
-                    if swa_metadata.prefill_left_visible is not None
-                    else None
-                ),
-                right_visible=(
-                    swa_metadata.prefill_right_visible[
-                        num_decode_tokens + qs : num_decode_tokens + qe
-                    ]
-                    if swa_metadata.prefill_right_visible is not None
-                    else None
-                ),
-                max_image_tokens=self.max_image_tokens,
             )
             chunk_out = _token_slice(out, token_base + qs, token_base + qe)
             # Mega attention over the gathered non-paged bf16 KV (RoPE already

@@ -201,6 +201,9 @@ class Request:
         # in the (sparse) prefix cache; 0 means none. Set at admission for
         # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
         self.shared_prefix_boundary = 0
+        # DeepSeek-V4.1 only: SWA bounded replay. The request holds no
+        # sliding-window KV below this position; 0 when nothing replays.
+        self.replay_start = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
@@ -348,8 +351,7 @@ class Request:
         return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
-        """
-        Compare two requests based on priority, arrival time, and request ID.
+        """Compare two requests based on priority, arrival time, and request ID.
         Used in priority scheduling.
         """
         if self.priority != other.priority:
