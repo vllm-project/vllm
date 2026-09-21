@@ -568,3 +568,34 @@ def test_low_latency_deep_ep_moe(
         use_fp8_dispatch,
         False,
     )
+
+
+def test_validate_deepep_ll_rdma_buffer_size_pass():
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        validate_deepep_ll_rdma_buffer_size,
+    )
+
+    # 448 experts (384 + 64 redundant), max_tokens 1840 -> ~31.94 GiB (valid)
+    validate_deepep_ll_rdma_buffer_size(
+        num_global_experts=448,
+        token_hidden_size=5120,
+        num_ep_ranks=16,
+        max_num_tokens_per_dp_rank=1840,
+    )
+
+
+def test_validate_deepep_ll_rdma_buffer_size_overflow():
+    import pytest
+
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        validate_deepep_ll_rdma_buffer_size,
+    )
+
+    # 448 experts, max_tokens 2048 -> ~35.55 GiB (>32 GiB, raises ValueError)
+    with pytest.raises(ValueError, match="exceeds the 32 GiB"):
+        validate_deepep_ll_rdma_buffer_size(
+            num_global_experts=448,
+            token_hidden_size=5120,
+            num_ep_ranks=16,
+            max_num_tokens_per_dp_rank=2048,
+        )
