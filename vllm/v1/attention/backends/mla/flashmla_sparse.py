@@ -1179,17 +1179,74 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
-        out, lse = flash_mla_with_kvcache(
-            q=q,
-            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
-            block_table=kernel_metadata.dummy_block_table,
-            head_dim_v=512,
-            cache_seqlens=kernel_metadata.cache_lens,
-            tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
-            is_fp8_kvcache=True,
-            indices=topk_indices,
-            softmax_scale=self.softmax_scale,
-        )
+        # Chunk to avoid aten::new_empty integer overflow in the FlashMLA C++ wrapper
+        # during dummy runs where batch * seq_len can be 16k+
+        # 16384 * 128 * 512 = 1.07e9 elements -> 2.14GB which overflows 32-bit int in some PyTorch versions
+        MAX_ELEMENTS = 1024 * 1024 * 128  # Safe threshold
+        elements_per_token = q.size(2) * 512
+        max_tokens = max(1, MAX_ELEMENTS // elements_per_token)
+
+        if q.size(0) * q.size(1) > max_tokens:
+            if q.size(0) > q.size(1):
+                # Chunk along batch dimension
+                chunk_size = max(1, max_tokens // q.size(1))
+                out_chunks, lse_chunks = [], []
+                for i in range(0, q.size(0), chunk_size):
+                    q_chunk = q[i:i + chunk_size]
+                    topk_chunk = topk_indices[i:i + chunk_size]
+                    bt_chunk = kernel_metadata.dummy_block_table[i:i + chunk_size]
+                    cl_chunk = kernel_metadata.cache_lens[i:i + chunk_size]
+                    
+                    chunk_out, chunk_lse = flash_mla_with_kvcache(
+                        q=q_chunk,
+                        k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+                        block_table=bt_chunk,
+                        head_dim_v=512,
+                        cache_seqlens=cl_chunk,
+                        tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
+                        is_fp8_kvcache=True,
+                        indices=topk_chunk,
+                        softmax_scale=self.softmax_scale,
+                    )
+                    out_chunks.append(chunk_out)
+                    lse_chunks.append(chunk_lse)
+                out = torch.cat(out_chunks, dim=0)
+                lse = torch.cat(lse_chunks, dim=0) if lse_chunks[0] is not None else None
+            else:
+                # Chunk along seq_len dimension
+                chunk_size = max(1, max_tokens // q.size(0))
+                out_chunks, lse_chunks = [], []
+                for i in range(0, q.size(1), chunk_size):
+                    q_chunk = q[:, i:i + chunk_size]
+                    topk_chunk = topk_indices[:, i:i + chunk_size]
+                    
+                    chunk_out, chunk_lse = flash_mla_with_kvcache(
+                        q=q_chunk,
+                        k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+                        block_table=kernel_metadata.dummy_block_table,
+                        head_dim_v=512,
+                        cache_seqlens=kernel_metadata.cache_lens,
+                        tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
+                        is_fp8_kvcache=True,
+                        indices=topk_chunk,
+                        softmax_scale=self.softmax_scale,
+                    )
+                    out_chunks.append(chunk_out)
+                    lse_chunks.append(chunk_lse)
+                out = torch.cat(out_chunks, dim=1)
+                lse = torch.cat(lse_chunks, dim=2) if lse_chunks[0] is not None else None
+        else:
+            out, lse = flash_mla_with_kvcache(
+                q=q,
+                k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+                block_table=kernel_metadata.dummy_block_table,
+                head_dim_v=512,
+                cache_seqlens=kernel_metadata.cache_lens,
+                tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
+                is_fp8_kvcache=True,
+                indices=topk_indices,
+                softmax_scale=self.softmax_scale,
+            )
 
         # Slice output and lse back to actual head count if we padded
         if actual_num_heads < padded_num_heads:
