@@ -147,11 +147,31 @@ def test_torch_profiler_device_summary(tmp_path, capsys, activities, dump_device
         wrapper.start()
         wrapper.stop()
 
-    summary = tmp_path / "profiler_out_0.txt"
+    summary = tmp_path / "worker.profiler_out.txt"
     assert summary.exists() == dump_device_time
     assert ("device times" in capsys.readouterr().out) == dump_device_time
     if dump_device_time:
         assert summary.read_text() == "device times\n"
+
+
+def test_torch_profiler_summary_follows_output_name(tmp_path):
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+    )
+    with patch("vllm.profiler.wrapper.torch.profiler.profile") as profile:
+        table = profile.return_value.key_averages.return_value.table
+        table.side_effect = ["first run", "second run"]
+        wrapper = TorchProfilerWrapper(
+            config, worker_name="initial", local_rank=1, activities=["CUDA"]
+        )
+        for output_name in ["first_rank1", "second_rank1"]:
+            wrapper.set_output_name(output_name)
+            wrapper.start()
+            wrapper.stop()
+
+    assert (tmp_path / "first_rank1.profiler_out.txt").read_text() == "first run\n"
+    assert (tmp_path / "second_rank1.profiler_out.txt").read_text() == "second run\n"
 
 
 @pytest.mark.parametrize(
