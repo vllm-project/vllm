@@ -1950,6 +1950,7 @@ class rocm_aiter_ops:
 
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+    _gdn_flydsl_prefill_import_error: str | None = None
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
@@ -2304,10 +2305,23 @@ class rocm_aiter_ops:
                 "initial_state_indices",
                 "inplace_final_state",
             }
-            return required_parameters.issubset(
+            missing = required_parameters.difference(
                 inspect.signature(chunk_gated_delta_rule_opt_vk).parameters
             )
-        except (ImportError, ModuleNotFoundError, TypeError, ValueError):
+            if missing:
+                rocm_aiter_ops._gdn_flydsl_prefill_import_error = (
+                    "chunk_gated_delta_rule_opt_vk is missing parameters "
+                    f"{sorted(missing)}"
+                )
+                return False
+            rocm_aiter_ops._gdn_flydsl_prefill_import_error = None
+            return True
+        except (ImportError, ModuleNotFoundError, TypeError, ValueError) as e:
+            rocm_aiter_ops._gdn_flydsl_prefill_import_error = f"{type(e).__name__}: {e}"
+            logger.warning(
+                "AITER FlyDSL GDN prefill kernels are not importable: %s",
+                rocm_aiter_ops._gdn_flydsl_prefill_import_error,
+            )
             return False
 
     @classmethod
@@ -2333,6 +2347,19 @@ class rocm_aiter_ops:
             is_aiter_found_and_supported()
             and cls._gdn_flydsl_prefill_kernels_importable()
         )
+
+    @classmethod
+    def gdn_flydsl_prefill_unavailable_reason(cls) -> str:
+        """Human-readable reason the FlyDSL GDN prefill path cannot run."""
+        if not is_aiter_found_and_supported():
+            return "AITER is not installed or this GPU is not CDNA 3 or newer"
+        if cls._gdn_flydsl_prefill_import_error:
+            return cls._gdn_flydsl_prefill_import_error
+        if not cls._gdn_flydsl_prefill_kernels_importable():
+            return cls._gdn_flydsl_prefill_import_error or (
+                "AITER FlyDSL GDN prefill APIs are missing"
+            )
+        return "unknown"
 
     @classmethod
     def is_rdna_gdn_triton_kernels_available(cls) -> bool:

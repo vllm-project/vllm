@@ -45,17 +45,15 @@ def test_cli_accepts_aiter_flydsl_gdn_prefill_backend():
 
 
 @pytest.mark.parametrize(
-    "available,head_k_dim,head_v_dim,dtype,expected",
+    "head_k_dim,head_v_dim,dtype,expected",
     [
-        (True, 128, 128, torch.bfloat16, "aiter_flydsl"),
-        (False, 128, 128, torch.bfloat16, "triton"),
-        (True, 64, 128, torch.bfloat16, "triton"),
-        (True, 128, 64, torch.bfloat16, "triton"),
-        (True, 128, 128, torch.float16, "triton"),
+        (128, 128, torch.bfloat16, "aiter_flydsl"),
+        (64, 128, torch.bfloat16, "triton"),
+        (128, 64, torch.bfloat16, "triton"),
+        (128, 128, torch.float16, "triton"),
     ],
 )
 def test_resolve_aiter_flydsl_gdn_prefill_backend(
-    available: bool,
     head_k_dim: int,
     head_v_dim: int,
     dtype: torch.dtype,
@@ -73,13 +71,36 @@ def test_resolve_aiter_flydsl_gdn_prefill_backend(
         patch.object(
             qwen_gdn_linear_attn.rocm_aiter_ops,
             "is_gdn_flydsl_prefill_available",
-            return_value=available,
+            return_value=True,
         ),
     ):
         requested, active = _resolve_gdn_prefill_backend(config)
 
     assert requested == "aiter_flydsl"
     assert active == expected
+
+
+def test_explicit_aiter_flydsl_unavailable_kernels_fail_closed():
+    config = _make_config()
+    with (
+        patch.object(
+            qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=True
+        ),
+        patch.object(
+            qwen_gdn_linear_attn.rocm_aiter_ops,
+            "is_gdn_flydsl_prefill_available",
+            return_value=False,
+        ),
+        patch.object(
+            qwen_gdn_linear_attn.rocm_aiter_ops,
+            "gdn_flydsl_prefill_unavailable_reason",
+            return_value=(
+                "ImportError: No module named 'aiter.ops.flydsl.kernels.gdr_prefill'"
+            ),
+        ),
+        pytest.raises(RuntimeError, match="kernels.gdr_prefill"),
+    ):
+        _resolve_gdn_prefill_backend(config)
 
 
 def test_aiter_flydsl_dispatch_arguments(monkeypatch: pytest.MonkeyPatch):
