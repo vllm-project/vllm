@@ -202,7 +202,7 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
     (the DSpark drafter reuses it), and its NVLink multicast rendezvous is
     collective, so every TP rank must take the same decision here.
     """
-    if not (use_sequence_parallel and envs.VLLM_DSV41_GEMM_RS):
+    if not (use_sequence_parallel and envs.VLLM_ENABLE_GEMM_RS):
         return False
 
     # The kernel module pulls in cute_dsl, so import it only once opted in.
@@ -213,7 +213,7 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
     hidden_size = vllm_config.model_config.hf_config.hidden_size
     if not maybe_init_gemm_rs_ar(vllm_config, N=hidden_size, all_reduce=False):
         return False
-    logger.info_once("To disable DeepSeek-V4.1 GEMM-RS, set VLLM_DSV41_GEMM_RS=0.")
+    logger.info_once("To disable DeepSeek-V4.1 GEMM-RS, set VLLM_ENABLE_GEMM_RS=0.")
     return True
 
 

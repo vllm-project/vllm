@@ -160,7 +160,7 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
     # its singleton to exactly one mode.
     all_reduce = not use_sequence_parallel
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
-    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
+    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_ENABLE_GEMM_RS
     if not enabled:
         return False
 
@@ -175,8 +175,8 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
         vllm_config, N=config.hidden_size, all_reduce=all_reduce
     ):
         return False
-    if all_reduce:
-        logger.info_once("To disable %s, set VLLM_KIMI_K3_GEMM_AR=0.", mode)
+    flag = "VLLM_KIMI_K3_GEMM_AR" if all_reduce else "VLLM_ENABLE_GEMM_RS"
+    logger.info_once("To disable %s, set %s=0.", mode, flag)
     return True
 
 
