@@ -50,6 +50,7 @@ pub(super) struct ParamElement {
 /// Normalized JSON parameter type used for raw string coercion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum JsonParamType {
+    Any,
     String,
     Integer,
     Number,
@@ -185,7 +186,7 @@ impl JsonParamType {
             return Some(Self::object_from_schema(Some(schema)));
         }
 
-        None
+        Some(Self::Any)
     }
 
     /// Normalize a JSON schema `type` value.
@@ -276,7 +277,9 @@ impl JsonParamType {
 
     /// Collapse a candidate type list into one normalized type.
     fn one_of(mut types: Vec<Self>) -> Self {
-        if types.len() == 1 {
+        if types.contains(&Self::Any) {
+            Self::Any
+        } else if types.len() == 1 {
             types.remove(0)
         } else {
             Self::OneOf(types)
@@ -323,6 +326,7 @@ fn try_convert_value(param_type: &JsonParamType, input: &ParamInput) -> Option<V
 /// Convert one raw string value to a normalized JSON type.
 fn try_convert_text_value(param_type: &JsonParamType, value: &str) -> Option<Value> {
     match param_type {
+        JsonParamType::Any => try_convert_any_text_value(value),
         JsonParamType::String => Some(Value::String(value.to_string())),
         JsonParamType::Integer => value.parse::<i64>().ok().map(Number::from).map(Value::Number),
         JsonParamType::Number => try_convert_number(value),
@@ -346,6 +350,11 @@ fn try_convert_elements_value(
     elements: &[ParamElement],
 ) -> Option<Value> {
     match param_type {
+        JsonParamType::Any => Some(Value::Object(convert_elements_to_object(
+            elements,
+            &BTreeMap::new(),
+            None,
+        ))),
         JsonParamType::Object {
             properties,
             additional_properties,
@@ -403,6 +412,18 @@ fn insert_object_value(object: &mut Map<String, Value>, key: String, value: Valu
     } else {
         object.insert(key, value);
     }
+}
+
+/// Convert one raw string value when a JSON schema allows any JSON value.
+fn try_convert_any_text_value(value: &str) -> Option<Value> {
+    value
+        .parse::<i64>()
+        .ok()
+        .map(Number::from)
+        .map(Value::Number)
+        .or_else(|| try_convert_number(value))
+        .or_else(|| try_convert_boolean(value))
+        .or_else(|| serde_json::from_str(value).ok())
 }
 
 /// Convert one raw string value to a JSON number.
@@ -636,6 +657,51 @@ mod tests {
     }
 
     #[test]
+    fn schema_without_type_accepts_any_json_value() {
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "empty": {},
+                "description_only": { "description": "Any JSON value" }
+            }
+        }));
+
+        assert_eq!(params.convert("empty", text("5")), json!(5));
+        assert_eq!(params.convert("empty", text("5.5")), json!(5.5));
+        assert_eq!(params.convert("empty", text("true")), json!(true));
+        assert_eq!(
+            params.convert("empty", text(r#"{"value":5}"#)),
+            json!({ "value": 5 })
+        );
+        assert_eq!(params.convert("empty", text("[1,2]")), json!([1, 2]));
+        assert_eq!(
+            params.convert("empty", text("plain text")),
+            json!("plain text")
+        );
+        assert_eq!(params.convert("empty", text("")), json!(""));
+        assert_eq!(params.convert("description_only", text("5")), json!(5));
+    }
+
+    #[test]
+    fn untyped_union_branch_accepts_any_json_value_regardless_of_order() {
+        for variants in [
+            json!([{ "type": "string" }, {}]),
+            json!([{}, { "type": "string" }]),
+        ] {
+            for keyword in ["anyOf", "oneOf"] {
+                let params = ToolSchema::from_schema(&json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { (keyword): variants.clone() }
+                    }
+                }));
+
+                assert_eq!(params.convert("value", text("5")), json!(5));
+            }
+        }
+    }
+
+    #[test]
     fn converts_params_for_known_tool() {
         let schemas = ToolSchemas::from_tools(&[test_tool(
             "search",
@@ -670,8 +736,7 @@ mod tests {
                     "whole": { "type": "number" },
                     "flag": { "type": "boolean" },
                     "payload": { "type": "object" },
-                    "items": { "type": "array" },
-                    "missing_type": {}
+                    "items": { "type": "array" }
                 }
             }),
         )]);
@@ -683,7 +748,6 @@ mod tests {
                 ("flag".to_string(), "maybe".to_string()),
                 ("payload".to_string(), "not-json".to_string()),
                 ("items".to_string(), "not-json".to_string()),
-                ("missing_type".to_string(), "42".to_string()),
                 ("unknown_param".to_string(), "42".to_string()),
             ],
         );
@@ -692,7 +756,6 @@ mod tests {
         assert_eq!(converted.get("flag"), Some(&json!("maybe")));
         assert_eq!(converted.get("payload"), Some(&json!("not-json")));
         assert_eq!(converted.get("items"), Some(&json!("not-json")));
-        assert_eq!(converted.get("missing_type"), Some(&json!("42")));
         assert_eq!(converted.get("unknown_param"), Some(&json!("42")));
     }
 
@@ -712,7 +775,7 @@ mod tests {
 
         assert_eq!(params.convert("name", text("null")), json!("null"));
         assert_eq!(params.convert("name", text("NULL")), json!("NULL"));
-        // Non-string and schema-less params are unchanged: "null" -> null.
+        // Non-string and untyped params are unchanged: "null" -> null.
         assert_eq!(params.convert("count", text("null")), json!(null));
         assert_eq!(params.convert("anything", text("null")), json!(null));
     }
