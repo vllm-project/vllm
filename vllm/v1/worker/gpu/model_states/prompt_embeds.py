@@ -7,9 +7,13 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.mamba_utils import _reinterpret_u64_as_i64
 
 TOKEN_BLOCK = 16
+
+
+def _reinterpret_u64_as_i64(value: int) -> int:
+    """Preserve a uint64 pointer bit pattern in a torch.int64 tensor."""
+    return value if value < (1 << 63) else value - (1 << 64)
 
 
 class PromptEmbedsState:
