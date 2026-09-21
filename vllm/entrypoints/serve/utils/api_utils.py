@@ -34,7 +34,7 @@ VLLM_SUBCMD_PARSER_EPILOG = (
 
 
 async def listen_for_disconnect(request: Request) -> None:
-    """Returns if a disconnect message is received"""
+    """Returns if a disconnect message is received."""
     while True:
         message = await request.receive()
         if message["type"] == "http.disconnect":
@@ -268,7 +268,7 @@ def jsonify_non_default_args(
 
 
 # Fields whose values must never be logged verbatim.
-_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token"})
+_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token", "watermark_config"})
 
 
 def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
