@@ -426,25 +426,25 @@ def _kernel_paged_view(
     kv_rows: torch.Tensor,
     block_size: int,
     block_stride_rows: int,
-    page: int,
+    page_rows: int,
 ) -> torch.Tensor:
-    """``[pages, 1, page, D]`` view for the TRT-LLM kernels.
+    """``[pages, 1, page_rows, D]`` view for the TRT-LLM kernels.
 
     Top-k indices are flat row ids, so a dense block of the kernel's native
     32/64 rows passes through and everything else (larger blocks, or blocks
-    strided apart by other layers' pages) is re-paged into whole ``page``-row
-    pages.
+    strided apart by other layers' pages) is re-paged into whole
+    ``page_rows``-row pages.
     """
     if block_size in (32, 64) and block_stride_rows == block_size:
         return kv_cache.unsqueeze(1)
-    assert block_size % page == 0 and block_stride_rows % page == 0, (
+    assert block_size % page_rows == 0 and block_stride_rows % page_rows == 0, (
         f"block_size {block_size} / block stride {block_stride_rows} rows are not "
-        f"whole {page}-row kernel pages"
+        f"whole {page_rows}-row kernel pages"
     )
     num_rows, head_dim = kv_rows.shape
     return kv_rows.as_strided(
-        (num_rows // page, 1, page, head_dim),
-        (page * head_dim, page * head_dim, head_dim, 1),
+        (num_rows // page_rows, 1, page_rows, head_dim),
+        (page_rows * head_dim, page_rows * head_dim, head_dim, 1),
     )
 
 

@@ -397,9 +397,8 @@ def test_interleaved_decode_pollution_legacy_vs_circular():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 def test_triton_mapping_matches_cpu():
-    """The CUDA (Triton) path must match the CPU torch reference, including
-    tokens between the last request boundary and num_actual_tokens (mapped to
-    the last request) and untouched padding beyond num_actual."""
+    """CUDA matches CPU for multiple requests, an expanded ring, and
+    untouched padding."""
     per_req = [list(range(10)), list(range(12))]
     num_actual, padded_len, ring_size = 22, 30, 2 * KPOOL
     positions, qsl, slot_mapping, _, num_reqs = make_batch(

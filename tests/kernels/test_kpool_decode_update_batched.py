@@ -338,16 +338,11 @@ def test_decode_writer_matches_prefill_writer_with_expanded_ring():
             round_scale=ROUND_SCALE,
         )
 
-    differing = [
-        p
-        for p in range(n_pools)
-        if not torch.equal(
-            kv_prefill[p // page, p % page], kv_decode[p // page, p % page]
-        )
-    ]
-    assert not differing, (
-        f"decode-written pools differ from prefill-written pools: "
-        f"{len(differing)}/{n_pools} (pool_size={pool_size}, first={differing[:5]})"
+    torch.testing.assert_close(
+        kv_decode.flatten(0, 1)[:n_pools],
+        kv_prefill.flatten(0, 1)[:n_pools],
+        rtol=0,
+        atol=0,
     )
 
 

@@ -143,19 +143,12 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
 
 
 class Glm5NextTailCache(DeepseekV32IndexerCache):
-    """Paged circular buffer for the kpool indexer's in-progress (tail) pool.
+    """Paged ring for the kpool indexer's uncompressed tail rows.
 
-    Holds the trailing incomplete pool's raw K + gate score: one block of
-    ``index_kpool`` slots per request, overwritten in place by ``pos % kpool``
-    as decode/spec-decode advances. Prefill seeds it (instead of discarding the
-    tail raw K+gate); the connector transfers it across PD; decode reads it to
-    compress the boundary pool correctly. ``CircularBufferSpec`` /
-    ``CircularBufferManager`` provide the no-prune, 1-block/req allocation that lets
-    the in-progress pool survive across steps and across transfer.
-
-    Stores raw bf16 K (``head_dim``) as the "K" half of each block and the
-    bf16 gate score (``head_dim``) as the "V" half -- not the fp8-compressed
-    entry, which lives in ``Glm5NextIndexerCache``.
+    Its capacity is rounded to whole pools to hold the committed incomplete
+    pool plus speculative rows, addressed by ``pos % capacity``. Each request
+    owns one block of raw bf16 K and gate scores so the tail survives decode
+    steps and PD transfer; compressed entries live in ``Glm5NextIndexerCache``.
     """
 
     def __init__(
