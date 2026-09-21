@@ -400,6 +400,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=False,
+            dequant_k_out=False,
         )
 
     def do_rope_and_kv_cache_update(
