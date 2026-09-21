@@ -9,7 +9,10 @@ import pytest
 
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
-from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
+from vllm.v1.worker.gpu_worker import (
+    compute_suggested_kv_cache_memory_bytes,
+    maybe_rocm_profiling_fallback,
+)
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -153,6 +156,47 @@ def test_profiling_fallback_declines_off_rocm(rocm):
     result = _profile_result(consumed=-RELEASED_BY_OTHERS)
 
     assert maybe_rocm_profiling_fallback(result) is None
+
+
+def test_kv_cache_suggestion_does_not_double_count_cudagraph():
+    """The --kv-cache-memory suggestion must count CUDAGraph memory once.
+
+    peak_activation_memory is transient activation headroom. Adding a
+    CUDAGraph estimate into it as well as the actual captured pool
+    double-counts graphs and can make both suggestions negative (#57936).
+    """
+    total_consumed = 58 * GiB_bytes
+    transient_peak_headroom = 5 * GiB_bytes
+    cuda_graph_memory_bytes = 64 * GiB_bytes
+    graph_estimate = 57 * GiB_bytes
+    requested_memory = 164 * GiB_bytes
+    init_free_memory = 176 * GiB_bytes
+    buffer = 150 * (1 << 20)
+
+    to_req, to_gpu = compute_suggested_kv_cache_memory_bytes(
+        total_consumed=total_consumed,
+        peak_activation_memory=transient_peak_headroom,
+        cuda_graph_memory_bytes=cuda_graph_memory_bytes,
+        requested_memory=requested_memory,
+        init_free_memory=init_free_memory,
+        redundancy_buffer_memory=buffer,
+    )
+    non_kv = total_consumed + transient_peak_headroom + cuda_graph_memory_bytes
+    assert to_req == requested_memory - non_kv - buffer
+    assert to_gpu == init_free_memory - non_kv - buffer
+    assert to_req > 0
+    assert to_gpu > 0
+
+    bad_req, bad_gpu = compute_suggested_kv_cache_memory_bytes(
+        total_consumed=total_consumed,
+        peak_activation_memory=transient_peak_headroom + graph_estimate,
+        cuda_graph_memory_bytes=cuda_graph_memory_bytes,
+        requested_memory=requested_memory,
+        init_free_memory=init_free_memory,
+        redundancy_buffer_memory=buffer,
+    )
+    assert bad_req < 0
+    assert bad_gpu < 0
 
 
 class _OrderedHandle:
