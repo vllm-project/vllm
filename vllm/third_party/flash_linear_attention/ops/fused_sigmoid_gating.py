@@ -205,11 +205,21 @@ def fused_sigmoid_gating_delta_rule_update(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
+    # V-tile width. The grid is (NK, NV, N*HV) with NV = V/BV, so a wide tile
+    # leaves the GPU starved of workgroups: at Kimi-K3 tp=8 (HV=12, K=V=128),
+    # batch 1 is 4*1*12 = 48 workgroups, 0.19 per CU on a 256-CU MI355X. A
+    # narrower tile trades redundant q/k loads for occupancy, which wins across
+    # the whole measured range rather than only at low batch.
+    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
-    num_warps = 4
+    # One warp per program. The per-program tile is [BV, BK] and the inner loop
+    # is elementwise plus a reduction over K, so extra warps add cross-lane
+    # reduction traffic without adding parallelism. vLLM's CUDA sibling
+    # (models/kimi_k3/nvidia/ops/third_party/kda/fused_recurrent.py) reaches the
+    # same conclusion independently and pins num_warps=1 for its gated path.
+    num_warps = 1
 
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
