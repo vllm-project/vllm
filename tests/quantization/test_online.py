@@ -135,16 +135,29 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     method.moe_kernel = None
 
     layer = Mock()
-    converted_weights = tuple(object() for _ in range(8))
-    convert_weights = Mock(return_value=converted_weights)
-    process_weights = Mock()
+    converted_weights = [
+        tuple(torch.full((2,), value + index) for index in range(8))
+        for value in (1.0, 2.0, 0.5)
+    ]
+    convert_weights = Mock(side_effect=converted_weights)
+    quant_config = SimpleNamespace(
+        g1_alphas=converted_weights[0][2].clone(),
+        g2_alphas=converted_weights[0][6].clone(),
+    )
+    alpha_ptrs = (quant_config.g1_alphas.data_ptr(), quant_config.g2_alphas.data_ptr())
+    observed_scales = []
+    process_weights = Mock(
+        side_effect=lambda _: observed_scales.append(
+            (quant_config.g1_alphas.clone(), quant_config.g2_alphas.clone())
+        )
+    )
     kernel = SimpleNamespace(
         fused_experts=SimpleNamespace(
             process_weights_after_loading=process_weights,
         )
     )
     make_kernel = Mock(return_value=kernel)
-    get_quant_config = Mock(return_value=object())
+    get_quant_config = Mock(return_value=quant_config)
     method.get_fused_moe_quant_config = get_quant_config
 
     monkeypatch.setattr(
@@ -161,14 +174,22 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
         make_kernel,
     )
 
-    method._setup_kernel(layer)
-    method._setup_kernel(layer)
+    for weights in converted_weights:
+        method._setup_kernel(layer)
+        # Expert post-processing must observe fresh scales, with stable storage.
+        torch.testing.assert_close(observed_scales[-1][0], weights[2])
+        torch.testing.assert_close(observed_scales[-1][1], weights[6])
+        assert method.moe_quant_config is quant_config
+        assert (
+            quant_config.g1_alphas.data_ptr(),
+            quant_config.g2_alphas.data_ptr(),
+        ) == alpha_ptrs
 
     assert method.moe_kernel is kernel
-    assert convert_weights.call_count == 2
+    assert convert_weights.call_count == 3
     make_kernel.assert_called_once()
     get_quant_config.assert_called_once()
-    assert process_weights.call_count == 2
+    assert process_weights.call_count == 3
 
 
 def _fully_quantized_quark_config() -> QuarkConfig:
