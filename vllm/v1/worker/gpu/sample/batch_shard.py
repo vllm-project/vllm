@@ -617,8 +617,6 @@ def gather_sampler_output(
         device=device,
     )
     if local_output is not None:
-        assert local_output.num_sampled is not None
-        assert local_output.num_rejected is not None
         assert not gather_num_nans or local_output.num_nans is not None
         num_src_cols = min(
             local_output.sampled_token_ids.shape[1], max_num_logits_per_req
