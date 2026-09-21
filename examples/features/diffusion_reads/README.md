@@ -51,9 +51,7 @@ is among the listed ones, otherwise null) and `alone` (a read of its own).
 
 Images attach as `multipart/form-data`, with the JSON in a part named
 `request` and each image as a file part, or as an `images` array of data
-URLs. With `TEST_PAGE=1` in the environment, `GET /` serves
-`playground.html`, a page for sending requests with an image file or webcam
-frames.
+URLs.
 
 ```bash
 curl -s localhost:8011/v1/systemone -H 'content-type: application/json' -d '{

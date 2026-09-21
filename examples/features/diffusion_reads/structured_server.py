@@ -27,12 +27,8 @@ POST /v1/raw/chat/completions passes the body to vLLM's chat completions
 unchanged, for plain generation through this port.
 
 With API_KEY set in the environment, every POST needs "Authorization:
-Bearer <key>". With TEST_PAGE=1, GET / serves playground.html, a form for
-the request JSON with an image file or webcam frames attached, and GET
-/walk serves walk.html, a phone page that streams the back camera and
-reads one hazard label per frame. Browsers open the webcam only on
-a secure origin, so --tls-port adds an HTTPS listener with a self-signed
-certificate kept in --cert-dir.
+Bearer <key>". --tls-port adds an HTTPS listener with a self-signed
+certificate kept in --cert-dir, for clients that need a secure origin.
 
 Each answer is one distribution per question, from one denoise step over a
 seeded canvas, averaged over a few noise draws. This server handles the
@@ -101,15 +97,9 @@ from transformers import AutoTokenizer
 
 ARGS = None
 TOK = None
-TEST_PAGE = os.environ.get("TEST_PAGE", "") == "1"  # serve the playground at /
 API_KEY = os.environ.get(
     "API_KEY", ""
 )  # when set, POST routes need "Authorization: Bearer <key>"
-PAGES = {  # served with TEST_PAGE=1
-    "/": "playground.html",
-    "/playground": "playground.html",
-    "/walk": "walk.html",
-}
 CANVAS_LEN = 64  # the served canvas length. A request may be narrower.
 CANVAS_STEP = 16  # request widths are multiples of this
 VOCAB = 262144
@@ -1211,18 +1201,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             return self._json(200, {"status": "ok"})
-        if self.path in PAGES and TEST_PAGE:
-            page_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), PAGES[self.path]
-            )
-            with open(page_path, "rb") as fh:
-                body = fh.read()
-            self.send_response(200)
-            self.send_header("content-type", "text/html; charset=utf-8")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         return self._json(404, {"error": {"message": "unknown route"}})
 
     def _read_request(self):
