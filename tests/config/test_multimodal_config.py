@@ -8,6 +8,7 @@ import pytest
 import torch
 from transformers import PretrainedConfig
 
+from tests.models.utils import build_model_context
 from vllm.config.ec_transfer import ECRole, ECTransferConfig
 from vllm.config.model import ModelConfig
 from vllm.config.multimodal import MultiModalConfig
@@ -16,6 +17,26 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+
+@pytest.mark.parametrize(
+    "model_id,limit_mm_per_prompt,expected",
+    [
+        ("Qwen/Qwen2-0.5B-Instruct", {}, False),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", {}, True),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", {"image": 0, "video": 0}, False),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", {"image": 0}, True),
+    ],
+)
+@pytest.mark.core_model
+def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
+    """Test supports_multimodal_inputs returns correct boolean for various
+    configs."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+    assert ctx.model_config.supports_multimodal_inputs is expected
 
 
 def test_mm_encoder_attn_backend_str_conversion():
@@ -104,7 +125,7 @@ def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
     assert model_config.multimodal_config is None
 
     assert model_config._supports_multimodal_for_mm_prefix() is True
-    assert not model_config._supports_multimodal_inputs_cache
+    assert not getattr(model_config, "_supports_multimodal_inputs_cache", None)
 
 
 def test_language_model_only_disables_via_supports_multimodal_inputs():
