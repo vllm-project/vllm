@@ -224,6 +224,52 @@ def test_supported_json_features(schema_type, request):
     )
 
 
+class TestHasXGrammarUnsupportedJsonFeatures:
+    class TestPR48416Regressions:
+        @pytest.mark.parametrize(
+            "schema",
+            [
+                {"type": ["number"], "multipleOf": 3},
+                {
+                    "type": ["string", "null"],
+                    "pattern": "^a+$",
+                    "maxLength": 2,
+                },
+                {
+                    "type": ["array", "null"],
+                    "items": {"type": "integer"},
+                    "uniqueItems": True,
+                },
+                {
+                    "type": ["object", "null"],
+                    "properties": {"Bad": {"type": "integer"}},
+                    "propertyNames": {"pattern": "^[a-z]+$"},
+                },
+            ],
+        )
+        def test_list_type_does_not_bypass_unsupported_feature_check(self, schema):
+            assert has_xgrammar_unsupported_json_features(schema)
+
+        @pytest.mark.parametrize(
+            "schema",
+            [
+                {"type": ["string", "null"]},
+                {"type": ["integer", "string"]},
+                {"type": ["array", "null"], "items": {"type": "string"}},
+                {
+                    "type": ["object", "null"],
+                    "propertyNames": {"pattern": "^[a-z_]+$"},
+                },
+                {
+                    "type": ["object", "null"],
+                    "patternProperties": {"^S": {"type": "string"}},
+                },
+            ],
+        )
+        def test_supported_list_type_json_features(self, schema):
+            assert not has_xgrammar_unsupported_json_features(schema)
+
+
 def test_property_names_constrains_keys(property_names_schema):
     assert grammar_accepts(property_names_schema, '{"score": 5}')
     assert grammar_accepts(property_names_schema, '{"score": "seven"}')
