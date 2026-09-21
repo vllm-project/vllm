@@ -58,13 +58,6 @@ def _trust_dsv4_extra_cache_nan_free(
     )
 
 
-def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
-    lengths = lengths.to(dtype=torch.int32).contiguous()
-    indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
-    torch.cumsum(lengths, dim=0, out=indptr[1:])
-    return indptr
-
-
 def apply_pre_quantized_block_scaled_mm(
     linear: torch.nn.Module,
     x_fp8: torch.Tensor,
@@ -291,15 +284,42 @@ def _pack_global_topk_ragged_kernel(
     block_table_stride,
     block_size,
     topk,
+    topk_lens_ptr,
+    num_tokens,
+    NTOK_PAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """Pack the ragged global top-k table AND emit its indptr in one pass.
+
+    The row offsets are a prefix sum over at most `num_tokens` int32s.  This
+    kernel derives them in-register, with a masked `tl.sum` over NTOK_PAD
+    lanes, instead of having the host launch `torch.zeros` + `torch.cumsum`
+    to materialise them first.  That matters because this function runs once
+    per sparse attention layer -- 38 times per decode step -- so those two
+    launches cost ~305us/step of pure dispatch (measured: a rocprim lookback
+    scan over 193 ints, 38x per step).  CUDA never pays them: its equivalent,
+    `build_flashinfer_mixed_sparse_indices` in
+    common/ops/cache_utils.py, does validity checking, invalid filtering and
+    block-table -> slot translation in a single kernel.
+
+    Every one of the num_tokens+1 indptr entries is written exactly once, by
+    the block_idx == 0 program of its token, BEFORE the short-circuit return
+    -- so the indptr buffer needs no pre-zeroing.
+    """
     token_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
     offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
 
-    out_start = tl.load(topk_indptr_ptr + token_idx)
-    out_end = tl.load(topk_indptr_ptr + token_idx + 1)
-    out_len = out_end - out_start
+    tok = tl.arange(0, NTOK_PAD)
+    lens = tl.load(topk_lens_ptr + tok, mask=tok < num_tokens, other=0)
+    out_start = tl.sum(tl.where(tok < token_idx, lens, 0), axis=0)
+    out_len = tl.load(topk_lens_ptr + token_idx)
+
+    if block_idx == 0:
+        if token_idx == 0:
+            tl.store(topk_indptr_ptr, 0)
+        tl.store(topk_indptr_ptr + token_idx + 1, out_start + out_len)
+
     if block_idx * BLOCK_SIZE >= out_len:
         return
 
@@ -343,7 +363,11 @@ def compute_global_topk_ragged_indices_and_indptr(
         TRITON_BLOCK_SIZE=1024,
     )
 
-    topk_indptr = _build_indptr_from_lengths(topk_lens)
+    # `torch.empty`, not `torch.zeros`: the pack kernel below writes every
+    # indptr entry itself, so the fill launch is dead.
+    topk_indptr = torch.empty(
+        num_tokens + 1, dtype=torch.int32, device=topk_indices.device
+    )
     global_topk_ragged = torch.empty(
         num_tokens * topk,
         dtype=torch.int32,
@@ -361,8 +385,13 @@ def compute_global_topk_ragged_indices_and_indptr(
             block_table.stride(0),
             block_size,
             topk,
+            topk_lens,
+            num_tokens,
+            NTOK_PAD=max(1, triton.next_power_of_2(num_tokens)),
             BLOCK_SIZE=block,
         )
+    else:
+        topk_indptr.zero_()
     return global_topk_ragged, topk_indptr, topk_lens
 
 
