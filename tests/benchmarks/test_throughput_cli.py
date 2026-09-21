@@ -367,6 +367,7 @@ def test_get_requests_random_mm_with_mm_processor_args(
         assert req.prompt[0]["role"] == "user"
         assert any(item.get("type") == "image_url" for item in req.prompt[0]["content"])
 
+
 @pytest.mark.parametrize("backend", ["vllm", "vllm-chat"])
 @pytest.mark.parametrize("measure_energy", [False, True])
 def test_throughput_energy_excludes_loading_and_warmup(
@@ -448,7 +449,8 @@ def test_throughput_energy_excludes_loading_and_warmup(
         str(output),
     ]
     if measure_energy:
-        cli += ["--energy-gpu-ids", "2"]
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2")
+        cli += ["--energy-gpu-ids", "0"]
     throughput.main(parser.parse_args(cli))
 
     results = json.loads(output.read_text())

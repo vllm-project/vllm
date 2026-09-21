@@ -807,11 +807,12 @@ def validate_args(args):
 def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--energy-gpu-ids",
-        type=int,
+        type=str,
         nargs="+",
         default=None,
-        help="Measure whole-device energy for these local physical NVML GPU indices "
-        "(not CUDA_VISIBLE_DEVICES indices). Requires energy-counter support. "
+        help="Measure whole-device energy for CUDA-visible GPU ordinals or GPU/MIG "
+        "UUIDs. Numeric IDs follow CUDA_VISIBLE_DEVICES mapping. Requires "
+        "energy-counter support. "
         "Excludes model loading and warmup; includes request preparation. "
         "Only supported by synchronous vllm and vllm-chat backends.",
     )

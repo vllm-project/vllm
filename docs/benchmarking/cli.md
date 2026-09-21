@@ -1486,14 +1486,21 @@ For the synchronous `vllm` and `vllm-chat` throughput backends,
 CUDA_VISIBLE_DEVICES=2 vllm bench throughput \
   --model facebook/opt-125m --dataset-name random \
   --input-len 128 --output-len 128 --num-prompts 100 \
-  --num-warmups 10 --energy-gpu-ids 2 --output-json results.json
+  --num-warmups 10 --energy-gpu-ids 0 --output-json results.json
 ```
 
-The IDs are physical indices from `nvidia-smi`, not indices remapped by
-`CUDA_VISIBLE_DEVICES`. Select every local GPU used by the benchmark. Devices
-on other hosts are not measured. The readings cover the whole selected GPUs,
-including idle power and other processes; they exclude CPU and host energy.
-Use otherwise idle GPUs for comparisons.
+Numeric IDs are CUDA-visible ordinals, in the same namespace vLLM and PyTorch
+use after applying `CUDA_VISIBLE_DEVICES`; the example therefore measures
+physical GPU 2 via visible ordinal 0. GPU and MIG UUID identifiers are also
+accepted. The benchmark resolves every selection to its physical NVML GPU and
+reports those physical indices in `energy_gpu_ids`. Select every local GPU used
+by the benchmark. Devices on other hosts are not measured.
+
+The NVML cumulative energy counter is available on Volta and newer supported
+GPUs. It measures whole-device/board energy, including idle power and other
+processes. It does not isolate a MIG partition and excludes CPU energy, PSU
+conversion losses, cooling, and other datacenter overhead. Use otherwise idle
+GPUs for comparisons.
 
 The measurement starts after model loading and warmup and covers request
 preparation, inference, and detokenization. Its duration is reported separately

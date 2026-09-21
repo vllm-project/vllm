@@ -11,17 +11,35 @@ from vllm.utils.import_utils import import_pynvml
 logger = init_logger(__name__)
 
 
+def _resolve_physical_device_id(device_id: str) -> int:
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    try:
+        visible_device_id = int(device_id)
+    except ValueError:
+        return NvmlCudaPlatform.device_control_id_to_physical_device_id(device_id)
+    if visible_device_id < 0:
+        raise ValueError("Energy GPU ordinals must be non-negative")
+    return NvmlCudaPlatform.visible_device_id_to_physical_device_id(visible_device_id)
+
+
 class GpuEnergyMeter:
     """Measure whole-device energy on explicitly selected local NVML GPUs."""
 
-    def __init__(self, device_ids: list[int]) -> None:
-        if (
-            not device_ids
-            or any(device_id < 0 for device_id in device_ids)
-            or len(set(device_ids)) != len(device_ids)
-        ):
-            raise ValueError("Energy GPU IDs must be distinct non-negative indices")
+    def __init__(self, device_ids: list[str]) -> None:
+        if not device_ids or any(not device_id for device_id in device_ids):
+            raise ValueError("Energy GPU IDs must be non-empty")
+        if len(set(device_ids)) != len(device_ids):
+            raise ValueError("Energy GPU IDs must be distinct")
+        for device_id in device_ids:
+            try:
+                visible_device_id = int(device_id)
+            except ValueError:
+                continue
+            if visible_device_id < 0:
+                raise ValueError("Energy GPU ordinals must be non-negative")
         self.device_ids = list(device_ids)
+        self.physical_device_ids: list[int] | None = None
         self.energy_j: float | None = None
         self.duration_s = 0.0
 
@@ -35,7 +53,17 @@ class GpuEnergyMeter:
             try:
                 nvml.nvmlInit()
                 initialized = True
-                handles = [nvml.nvmlDeviceGetHandleByIndex(i) for i in self.device_ids]
+                self.physical_device_ids = [
+                    _resolve_physical_device_id(device_id)
+                    for device_id in self.device_ids
+                ]
+                if len(set(self.physical_device_ids)) != len(self.physical_device_ids):
+                    raise ValueError(
+                        "Energy GPU IDs must resolve to distinct physical devices"
+                    )
+                handles = [
+                    nvml.nvmlDeviceGetHandleByIndex(i) for i in self.physical_device_ids
+                ]
                 initial = [nvml.nvmlDeviceGetTotalEnergyConsumption(h) for h in handles]
             except nvml.NVMLError as exc:
                 logger.warning("GPU energy measurement unavailable: %s", exc)
@@ -72,8 +100,9 @@ class GpuEnergyMeter:
     def get_results(self, output_tokens: int) -> dict[str, float | list[int] | None]:
         if self.energy_j is None:
             return {}
+        assert self.physical_device_ids is not None
         return {
-            "energy_gpu_ids": self.device_ids,
+            "energy_gpu_ids": self.physical_device_ids,
             "gpu_energy_j": self.energy_j,
             "gpu_energy_duration_s": self.duration_s,
             "gpu_avg_power_w": self.energy_j / self.duration_s,
