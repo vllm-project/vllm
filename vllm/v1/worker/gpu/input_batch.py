@@ -123,6 +123,9 @@ class InputBatch:
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
 
+    # [num_reqs] CPU lower bound on seq_lens (see CommonAttentionMetadata).
+    seq_lens_cpu_lower_bound: torch.Tensor | None = None
+
     @classmethod
     def make_dummy(
         cls,

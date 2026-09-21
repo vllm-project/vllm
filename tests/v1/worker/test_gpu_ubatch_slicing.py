@@ -121,6 +121,9 @@ def _make_input_batch(
         query_start_loc_np=query_start_loc_np,
         seq_lens=buffers.seq_lens[:num_reqs_padded],
         seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_upper_bound),
+        seq_lens_cpu_lower_bound=torch.from_numpy(
+            np.maximum(seq_lens_upper_bound - 2, 0)
+        ),
         num_computed_tokens_np=np.array(seq_lens, dtype=np.int32)
         - np.array(query_lens, dtype=np.int32),
         prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
@@ -186,6 +189,11 @@ def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
         # which V2 gets from `prepare_attn(for_capture=True)` instead.
         torch.testing.assert_close(
             v2_ubatch.seq_lens_cpu_upper_bound, v1_ubatch.seq_lens_cpu_upper_bound
+        )
+        # The lower bound is sliced and truncated like the upper bound.
+        torch.testing.assert_close(
+            v2_ubatch.seq_lens_cpu_lower_bound,
+            (v2_ubatch.seq_lens_cpu_upper_bound - 2).clamp(min=0),
         )
 
 
