@@ -103,7 +103,7 @@ class AuxOutputWorkerConnector:
         self._return_keys = vllm_config.aux_output_config.backend == "mooncake"
         self._key_namespace = (
             f"{vllm_config.instance_id}:{vllm_config.parallel_config.data_parallel_rank}:"
-            if vllm_config.aux_output_config.backend == "mooncake"
+            if self._return_keys
             else ""
         )
         self._generation = 0
@@ -126,7 +126,7 @@ class AuxOutputWorkerConnector:
         )
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
         store: BlockObjectStore | MooncakeBlockObjectStore
-        if vllm_config.aux_output_config.backend == "mooncake":
+        if self._return_keys:
             from vllm.distributed.aux_output_connector.mooncake import (
                 create_mooncake_block_store,
             )

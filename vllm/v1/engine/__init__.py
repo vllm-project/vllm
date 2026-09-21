@@ -245,7 +245,7 @@ class EngineCoreOutput(
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
-    artifact_keys: list[str] | None = None
+    aux_output_keys: list[str] | None = None
 
     @property
     def finished(self) -> bool:

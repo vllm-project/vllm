@@ -138,6 +138,7 @@ def test_mooncake_decode_crosses_blocks_and_clips_terminal_output(remote_store):
     )
     assert remote_store.get_concatenated(keys) == rows[:9].tobytes()
     connector.close()
+    remote_store._store.close.assert_called_once_with()
 
 
 def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
