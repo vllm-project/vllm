@@ -237,6 +237,15 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # ROCm runs adaptive verification through the per-token flattened
+        # indexer path, which derives row ownership from device decode lengths.
+        return (
+            current_platform.is_rocm()
+            or super().supports_device_cpu_query_lens_mismatch()
+        )
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V4_INDEXER"
@@ -254,6 +263,12 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # The ROCm flattened-query support above is validated for the
+        # DeepSeek-V4 adaptive DSpark path only.
+        return DeepseekV32IndexerBackend.supports_device_cpu_query_lens_mismatch()
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
@@ -802,6 +817,15 @@ def _supports_flattened_device_query_lens() -> bool:
     )
 
 
+def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    return (
+        current_platform.is_rocm()
+        and model_config is not None
+        and "DeepseekV4ForCausalLM" in model_config.architectures
+    )
+
+
 def _supports_native_decode(next_n: int) -> bool:
     """Whether decode can pass `next_n` Q rows per request to the kernel
     instead of flattening to one single-token row per query, which re-reads
@@ -822,7 +846,10 @@ def _use_flattening(vllm_config: VllmConfig) -> bool:
     return not _supports_native_decode(next_n) or (
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
-        and _supports_flattened_device_query_lens()
+        and (
+            _supports_flattened_device_query_lens()
+            or _rocm_supports_flattened_device_query_lens(vllm_config)
+        )
     )
 
 
@@ -1261,7 +1288,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
         compressed_slot_mapping = slot_mapping
-        compressed_seq_lens = seq_lens
         indexer_block_table = block_table
         if self.compress_ratio > 1:
             kernel_block_size = self.kernel_block_size
@@ -1297,10 +1323,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compressed_slot_mapping_buffer[:padded_num_tokens],
                     dim=0,
                 )
-            compressed_seq_lens = seq_lens // self.compress_ratio
 
         prefill_metadata = None
         if num_prefills > 0:
+            compressed_seq_lens = (
+                seq_lens // self.compress_ratio if self.compress_ratio > 1 else seq_lens
+            )
             # This CPU value is an upper bound for async-spec extend rows.  It
             # is safe for chunking/allocation because CUDA metadata below is
             # built from exact device seq_lens and gather ignores the tail.
