@@ -94,6 +94,15 @@ class OffloadConfig:
     prefetch: PrefetchOffloadConfig = Field(default_factory=PrefetchOffloadConfig)
     """Parameters for prefetch offloading backend."""
 
+    moe_expert_pool_rows: int = Field(default=0, ge=0)
+    """Serve MoE expert weights from a shared GPU expert pool: keep this many
+    expert rows per MoE layer resident at startup in one VRAM bank shared by
+    all MoE layers, with the rest of the experts in pinned host memory. A
+    device-side LRU planner moves rows between layers at run time and the
+    forward runs no host code, so the MoE op stays inside CUDA graphs.
+    0 (default) keeps every expert on the GPU. Supported for the ModelOpt
+    NVFP4 Marlin MoE backend without expert/data parallelism."""
+
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":
         """Validate offload configuration constraints."""
