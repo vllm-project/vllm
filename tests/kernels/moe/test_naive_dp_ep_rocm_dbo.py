@@ -15,7 +15,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep_rocm import (
     MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO,
-    MoEPrepareAndFinalizeNaiveDPEPMonolithicROCmDBO,
     _comm_overlap_active,
     _DBOCommRegionMixin,
 )
@@ -164,12 +163,14 @@ def test_modular_subclass_async_wrappers_are_synchronous():
         assert finalize_mock.called
 
 
-def test_factory_returns_rocm_subclasses_on_rocm():
+def test_factory_returns_rocm_subclass_on_rocm():
     rocm_stub = SimpleNamespace(is_rocm=lambda: True)
     with patch.object(naive_dp_ep, "current_platform", rocm_stub):
         mono = make_moe_prepare_and_finalize_naive_dp_ep(use_monolithic=True)
         modular = make_moe_prepare_and_finalize_naive_dp_ep(use_monolithic=False)
-    assert isinstance(mono, MoEPrepareAndFinalizeNaiveDPEPMonolithicROCmDBO)
+    # No ROCm config selects a monolithic expert kernel on this path, so the
+    # monolithic variant falls back to the base class.
+    assert isinstance(mono, naive_dp_ep.MoEPrepareAndFinalizeNaiveDPEPMonolithic)
     assert isinstance(modular, MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO)
 
 
@@ -179,6 +180,5 @@ def test_factory_returns_base_classes_elsewhere():
         mono = make_moe_prepare_and_finalize_naive_dp_ep(use_monolithic=True)
         modular = make_moe_prepare_and_finalize_naive_dp_ep(use_monolithic=False)
     assert isinstance(mono, naive_dp_ep.MoEPrepareAndFinalizeNaiveDPEPMonolithic)
-    assert not isinstance(mono, MoEPrepareAndFinalizeNaiveDPEPMonolithicROCmDBO)
     assert isinstance(modular, naive_dp_ep.MoEPrepareAndFinalizeNaiveDPEPModular)
     assert not isinstance(modular, MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO)

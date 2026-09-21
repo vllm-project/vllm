@@ -254,15 +254,6 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
     def output_is_reduced(self) -> bool:
         return False
 
-    def _comm_region(self) -> AbstractContextManager[None]:
-        """Scope the dispatch/combine collective runs in.
-
-        The base class runs the collective on the calling stream. Subclasses
-        may redirect it, e.g. to a side communication stream so a DBO peer
-        ubatch can compute while the collective is in flight.
-        """
-        return nullcontext()
-
     def prepare(
         self,
         a1: torch.Tensor,
@@ -275,13 +266,12 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
             a1, quant_config, defer_input_quant
         )
 
-        with self._comm_region():
-            res = get_ep_group().dispatch_router_logits(
-                a1q,
-                router_logits,
-                is_sequence_parallel=self.is_sequence_parallel,
-                extra_tensors=scales,
-            )
+        res = get_ep_group().dispatch_router_logits(
+            a1q,
+            router_logits,
+            is_sequence_parallel=self.is_sequence_parallel,
+            extra_tensors=scales,
+        )
 
         if scales is None:
             assert len(res) == 2
@@ -298,10 +288,9 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         self,
         fused_expert_output: torch.Tensor,
     ) -> torch.Tensor:
-        with self._comm_region():
-            out = get_ep_group().combine(
-                fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
-            )
+        out = get_ep_group().combine(
+            fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
+        )
         return out
 
 
@@ -310,21 +299,16 @@ def make_moe_prepare_and_finalize_naive_dp_ep(
     is_sequence_parallel: bool = False,
     num_dispatchers: int = 1,
 ) -> MoEPrepareAndFinalizeNaiveDPEPModular | MoEPrepareAndFinalizeNaiveDPEPMonolithic:
-    if current_platform.is_rocm():
-        # ROCm: use the DBO-aware subclasses so the DP all-gather /
+    if current_platform.is_rocm() and not use_monolithic:
+        # ROCm: use the DBO-aware subclass so the DP all-gather /
         # reduce-scatter runs on the shared comm stream instead of blocking
-        # the compute stream under --enable-dbo.
+        # the compute stream under --enable-dbo. No ROCm config currently
+        # selects a monolithic expert kernel on this path.
         from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep_rocm import (  # noqa: E501
             MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO,
-            MoEPrepareAndFinalizeNaiveDPEPMonolithicROCmDBO,
         )
 
-        cls = (
-            MoEPrepareAndFinalizeNaiveDPEPMonolithicROCmDBO
-            if use_monolithic
-            else MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO
-        )
-        return cls(
+        return MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO(
             is_sequence_parallel=is_sequence_parallel,
             num_dispatchers=num_dispatchers,
         )
