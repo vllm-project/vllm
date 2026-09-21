@@ -76,6 +76,8 @@ class ExtensibleKVCache:
         # Memory to keep free while committing before the final sizing, e.g.
         # the profiled activation peak the warmup steps are about to hit.
         self.reserved_headroom_bytes = 0
+        # The engine's rank-agreed bound on what warmup may commit, once set.
+        self.committable_blocks_cap: int | None = None
         self.buffer = ExtensibleTensor(
             self.size,
             device=device,
@@ -207,8 +209,14 @@ class ExtensibleKVCache:
         Bounds what warmup may commit: free memory plus the committed prefix,
         less the sizing margin and the larger of ``reserved_headroom_bytes`` and
         a share of the headroom, never below what is already committed nor
-        above the capacity.
+        above the capacity. Once ``committable_blocks_cap`` is set, that
+        rank-agreed value is returned instead, so ranks warm up alike.
         """
+        if self.committable_blocks_cap is not None:
+            return min(
+                max(self.committable_blocks_cap, self.num_committed_blocks),
+                self.capacity_blocks,
+            )
         free_memory, _ = torch.accelerator.get_memory_info(self.buffer.device)
         headroom = free_memory + self.physical_bytes
         reserve = max(
@@ -313,31 +321,12 @@ class ExtensibleKVCache:
 
 def num_committable_kv_blocks(runner: "GPUModelRunner") -> int:
     """Blocks warmup may address: all of them, or, for an extensible cache,
-    those whose commit still leaves the reserved headroom free.
-
-    The count is agreed across ranks: it sets the shapes warmup runs and
-    whether a step runs at all, and a rank skipping a step others take part
-    in would leave them waiting in a collective.
-    """
+    those whose commit still leaves the reserved headroom free (agreed across
+    ranks by the engine, see `ExtensibleKVCache.committable_blocks_cap`)."""
     kv_cache = getattr(runner, "extensible_kv_cache", None)
     if kv_cache is not None:
-        return _min_across_ranks(kv_cache.committable_blocks())
+        return kv_cache.committable_blocks()
     return runner.kv_cache_config.num_blocks
-
-
-def _min_across_ranks(value: int) -> int:
-    from vllm.distributed.parallel_state import get_world_group
-
-    if not torch.distributed.is_initialized():
-        return value
-    world = get_world_group()
-    if world.world_size == 1:
-        return value
-    tensor = torch.tensor([value], dtype=torch.int64)
-    torch.distributed.all_reduce(
-        tensor, group=world.cpu_group, op=torch.distributed.ReduceOp.MIN
-    )
-    return int(tensor.item())
 
 
 def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:
