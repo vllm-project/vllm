@@ -180,6 +180,7 @@ class Request:
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        self.full_prompt_kv_import_len = 0
         self.cache_salt: str | None = cache_salt
 
         # Multi-modal related

@@ -52,6 +52,7 @@ class NewRequestData:
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
+    full_prompt_kv_import_len: int = 0
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
 
@@ -79,6 +80,7 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            full_prompt_kv_import_len=request.full_prompt_kv_import_len,
             replay_start=request.replay_start,
         )
 

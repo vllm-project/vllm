@@ -1125,6 +1125,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
+                full_prompt_kv_import_len=new_req_data.full_prompt_kv_import_len,
             )
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
@@ -1251,8 +1252,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=is_prefilling_np,
             has_prefill=bool(is_prefilling_np.any()),
         )
+        graph_has_prefill = batch_state.has_prefill
+        if (
+            graph_has_prefill
+            and self.vllm_config.attention_config.hisparse_config is not None
+            and self.decode_query_len == 1
+            and self.pcp_manager is None
+        ):
+            imported_len = self.req_states.full_prompt_kv_import_len[idx_mapping_np]
+            is_import_replay = (
+                (imported_len > 0)
+                & (imported_len == prefill_len_np)
+                & (num_computed_prefill_tokens_np == imported_len - 1)
+                & (num_scheduled_tokens == 1)
+            )
+            # Keep logical prefill state for loading the replayed prompt token.
+            graph_has_prefill = bool((is_prefilling_np & ~is_import_replay).any())
         return batch_state, get_uniform_decode_token_count(
-            num_reqs, num_toks, max_query_len, batch_state.has_prefill
+            num_reqs, num_toks, max_query_len, graph_has_prefill
         )
 
     def _prepare_padding_mask(

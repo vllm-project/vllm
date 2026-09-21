@@ -538,6 +538,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
     Scheduler._update_waiting_for_remote_kv(scheduler, request)
     assert request.num_tokens - request.num_computed_tokens == 1
+    assert request.full_prompt_kv_import_len == num_tokens
     assert manager.allocate_slots(request, num_new_tokens=1) is not None
     assert coordinator.build_row_mirrors([(request.request_id, num_tokens - 1, 1)])
     # A pending restore must not expose uninitialized GPU copies to prefix hits.

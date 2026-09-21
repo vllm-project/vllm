@@ -55,6 +55,7 @@ class RequestState:
 
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.full_prompt_kv_import_len = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.num_computed_tokens = StagedWriteTensor(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
@@ -95,6 +96,7 @@ class RequestState:
         all_token_ids: list[int],
         num_computed_tokens: int,
         max_tokens: int,
+        full_prompt_kv_import_len: int = 0,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
@@ -111,6 +113,7 @@ class RequestState:
         self.total_len.stage_write_elem(req_idx, prefill_len)
         self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
+        self.full_prompt_kv_import_len[req_idx] = full_prompt_kv_import_len
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 

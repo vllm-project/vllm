@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -56,11 +57,16 @@ def _make_runner(
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = decode_query_len
     runner.adaptive_verification = None
+    runner.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None)
+    )
+    runner.pcp_manager = None
     runner.req_states = SimpleNamespace(
         req_id_to_index={req_id: i for i, req_id in enumerate(req_states)},
         # The runner keeps this as min(num_computed_tokens, prefill_len).
         num_computed_prefill_tokens=np.minimum(num_computed, prefill_lens),
         prefill_len=SimpleNamespace(np=prefill_lens),
+        full_prompt_kv_import_len=np.zeros(len(req_states), dtype=np.int32),
     )
     return runner
 
@@ -142,6 +148,36 @@ def test_dummy_batches_stay_uniform_decode():
     assert uniform_tok_count == 8
 
 
+@pytest.mark.parametrize(
+    "imported_len,computed,query_len,hisparse,pcp,expected",
+    [
+        (40, 39, 1, True, False, 1),
+        (0, 39, 1, True, False, None),
+        (32, 39, 1, True, False, None),
+        (40, 38, 1, True, False, None),
+        (40, 39, 2, True, False, None),
+        (40, 39, 1, False, False, None),
+        (40, 39, 1, True, True, None),
+    ],
+)
+def test_hisparse_full_import_replay_graph_eligibility(
+    imported_len, computed, query_len, hisparse, pcp, expected
+):
+    runner = _make_runner({"replay": (computed, 40), "decode": (16, 16)}, 1)
+    runner.vllm_config.attention_config.hisparse_config = object() if hisparse else None
+    runner.pcp_manager = object() if pcp else None
+    runner.req_states.full_prompt_kv_import_len[0] = imported_len
+    output = SimpleNamespace(
+        num_scheduled_tokens={"decode": 1, "replay": query_len},
+        total_num_scheduled_tokens=1 + query_len,
+        scheduled_spec_decode_tokens={},
+    )
+    state, uniform_count = runner.gather_batch_req_state(output, False)
+    assert uniform_count == expected
+    assert state.has_prefill
+    assert state.is_prefilling_np.tolist() == [False, True]
+
+
 def test_sort_batch_req_ids_no_spec():
     # decode_query_len == 1: plain ascending order (decodes first).
     num_tokens_per_req = {"p1": 100, "d1": 1, "p2": 7, "d2": 1}
@@ -185,6 +221,9 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = 8
     runner.adaptive_verification = None
+    runner.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None)
+    )
     # State arrays in state-index order: a prefilling request, then two decodes.
     runner.req_states = SimpleNamespace(
         req_id_to_index={"prefilling": 0, "decode_a": 1, "decode_b": 2},
