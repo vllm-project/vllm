@@ -1315,7 +1315,15 @@ def _expand_page_indices_kernel(
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
-    token_offsets = chunk_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    # The grid is sized from the block table width, an upper bound over all
+    # requests, so a ragged batch launches chunks past a short request's end.
+    # Returning here keeps those programs from issuing masked-out loads and
+    # stores at all.
+    chunk_start = chunk_idx * BLOCK_SIZE
+    if chunk_start >= num_tokens:
+        return
+
+    token_offsets = chunk_start + tl.arange(0, BLOCK_SIZE)
     mask = token_offsets < num_tokens
 
     # Which block in the block table does this token belong to?
