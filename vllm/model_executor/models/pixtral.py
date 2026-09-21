@@ -228,12 +228,18 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
+        # For test_common.py only
+        mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
         builder = self.dummy_inputs
         tokenizer = self.info.get_tokenizer()
 
         dummy_text = builder.get_dummy_text(mm_counts)
-        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_data = (
+            builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+            if mm_data is None
+            else mm_data
+        )
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
         dummy_images = (
             [] if "image" not in dummy_mm_data else dummy_mm_items["image"].get_all()
