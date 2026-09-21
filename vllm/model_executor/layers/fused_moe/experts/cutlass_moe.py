@@ -1312,7 +1312,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
             setattr(
                 self,
                 name,
-                self._register_persistent_buffer(layer, name, getattr(self, name)),
+                self._publish_helper_buffer(layer, name, getattr(self, name)),
             )
 
     @staticmethod

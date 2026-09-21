@@ -113,6 +113,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         ).to(layer.w2_weight_scale.dtype)
         layer.w2_weight_scale_2.data.fill_(1.0)
 
+        self.refresh_derived_buffers(layer)
+
+    def refresh_derived_buffers(self, layer: torch.nn.Module) -> None:
+        """Recompute values derived from the currently installed weights."""
         # The SM12x kernel uses dynamic per-block quantization for FC2 input
         # activations (the SwiGLU output before the down projection).  The
         # calibrated a2_gscale from the modelopt checkpoint (~tens to hundreds)
@@ -160,7 +164,9 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             setattr(
                 self,
                 name,
-                self._register_persistent_buffer(layer, name, getattr(self, name)),
+                self._publish_helper_buffer(
+                    layer, name, getattr(self, name), derived=True
+                ),
             )
 
     @staticmethod

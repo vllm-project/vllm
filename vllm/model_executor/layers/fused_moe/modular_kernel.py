@@ -492,43 +492,56 @@ class FusedMoEExperts(ABC):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
-    def _register_persistent_buffer(
-        self, layer: torch.nn.Module, name: str, tensor: torch.Tensor | None
+    def _publish_helper_buffer(
+        self,
+        layer: torch.nn.Module,
+        name: str,
+        tensor: torch.Tensor | None,
+        *,
+        derived: bool = False,
     ) -> torch.Tensor | None:
-        """Attach kernel-owned constants to the layer's sleep lifecycle.
+        """Publish helper-owned runtime state on its owning module.
 
-        Expert implementations are not ``nn.Module`` objects, so a tensor kept
-        only on ``self`` is invisible to level-2 sleep buffer recovery. Reuse
-        existing storage during reload to preserve CUDA-graph pointers.
+        ``FusedMoEExperts`` is not an ``nn.Module`` and therefore only keeps an
+        alias. The owning layer controls the tensor storage lifetime.
         """
         if tensor is None:
             return None
         buffer_name = f"_moe_{name}"
-        sleep_buffers = getattr(self, "_sleep_buffer_names", None)
-        if sleep_buffers is None:
-            sleep_buffers = self._sleep_buffer_names = {}
-        sleep_buffers[name] = buffer_name
-        existing = layer._buffers.get(buffer_name)
-        if existing is None:
+        helper_buffers = getattr(self, "_helper_buffer_names", None)
+        if helper_buffers is None:
+            helper_buffers = self._helper_buffer_names = {}
+        helper_buffers[name] = buffer_name
+
+        if derived:
+            from vllm.model_executor.utils import (
+                register_derived_buffer,
+                set_derived_buffer,
+            )
+
+            if buffer_name not in layer._buffers:
+                register_derived_buffer(layer, buffer_name)
+            return set_derived_buffer(layer, buffer_name, tensor)
+
+        if buffer_name not in layer._buffers:
             layer.register_buffer(buffer_name, tensor, persistent=False)
             return tensor
-        if (
-            existing.shape != tensor.shape
-            or existing.dtype != tensor.dtype
-            or existing.device != tensor.device
-        ):
-            raise RuntimeError(
-                f"Cannot replace sleep-managed MoE buffer {buffer_name}: "
-                f"existing={existing.shape}/{existing.dtype}/{existing.device}, "
-                f"new={tensor.shape}/{tensor.dtype}/{tensor.device}"
-            )
-        existing.copy_(tensor)
+
+        existing = layer._buffers[buffer_name]
+        assert existing is not None
         return existing
 
-    def rebind_sleep_buffers(self, layer: torch.nn.Module) -> None:
-        """Rebind helper aliases after layerwise reload restores old storage."""
-        for name, buffer_name in getattr(self, "_sleep_buffer_names", {}).items():
+    def refresh_derived_buffers(self, layer: torch.nn.Module) -> None:  # noqa: B027
+        """Refresh weight-derived helper buffers after stable storage returns."""
+
+    def rebind_runtime_buffers(self, layer: torch.nn.Module) -> None:
+        """Rebind helper aliases to storage owned by ``layer``."""
+        for name, buffer_name in getattr(self, "_helper_buffer_names", {}).items():
             setattr(self, name, layer._buffers[buffer_name])
+
+    def post_weights_reload(self, layer: torch.nn.Module) -> None:
+        self.refresh_derived_buffers(layer)
+        self.rebind_runtime_buffers(layer)
 
     @staticmethod
     def is_monolithic() -> bool:

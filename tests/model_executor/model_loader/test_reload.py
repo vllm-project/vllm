@@ -40,6 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
 )
+from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
 from vllm.platforms import current_platform
 
 
@@ -108,6 +109,47 @@ class _NonPersistentBufferLayer(torch.nn.Module):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(2, 2))
         self.register_buffer("scale", torch.tensor(0.25), persistent=False)
+
+
+class _DerivedBufferHelper:
+    def __init__(self):
+        self.weight_squared: torch.Tensor | None = None
+
+    def refresh(self, layer: torch.nn.Module) -> None:
+        self.weight_squared = set_derived_buffer(
+            layer, "weight_squared", layer.weight.detach().square()
+        )
+
+
+class _DerivedBufferQuantMethod(QuantizeMethodBase):
+    def __init__(self):
+        self.helper = _DerivedBufferHelper()
+
+    def create_weights(self, layer: torch.nn.Module, *args, **kwargs) -> None:
+        return
+
+    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
+        return layer.weight
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.helper.refresh(layer)
+
+    def post_weights_reload(self, layer: torch.nn.Module) -> None:
+        self.helper.refresh(layer)
+        self.helper.weight_squared = layer._buffers["weight_squared"]
+
+
+class _DerivedBufferLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(2, 2))
+        self.weight.weight_loader = default_weight_loader
+        register_derived_buffer(self, "weight_squared")
+        self.quant_method = _DerivedBufferQuantMethod()
+        self.buffer_seen_by_module_post_reload: torch.Tensor | None = None
+
+    def post_weights_reload(self) -> None:
+        self.buffer_seen_by_module_post_reload = self.weight_squared
 
 
 class _ReloadableMMEncoderAttention(MMEncoderAttention):
@@ -220,6 +262,51 @@ def test_reload_lifecycle():
         assert tensor.shape == materialized_tensor.shape
         assert tensor.__class__ == materialized_tensor.__class__
         assert tensor.__dict__ == materialized_tensor.__dict__
+
+
+def test_complete_weight_load_refreshes_derived_buffer_in_stable_storage():
+    """Exercise cold load and reload through the real layerwise load lifecycle."""
+    layer = _DerivedBufferLayer()
+    model = torch.nn.Sequential(layer)
+    model_config = Mock(spec=ModelConfig)
+    first_weight = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    second_weight = torch.tensor([[5.0, 6.0], [7.0, 8.0]])
+
+    # Complete the initial weight load, including post-load processing.
+    initialize_online_processing(layer)
+    layer.weight.weight_loader(layer.weight, first_weight)
+    finalize_layerwise_reload(model, model_config)
+
+    stable_buffer = layer.weight_squared
+    stable_pointer = stable_buffer.data_ptr()
+    assert torch.equal(stable_buffer, first_weight.square())
+    assert layer.quant_method.helper.weight_squared is stable_buffer
+
+    # Complete a second checkpoint load. PWAL first derives into temporary
+    # storage; post_weights_reload must then refresh the restored stable buffer.
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, second_weight)
+    finalize_layerwise_reload(model, model_config)
+
+    assert layer.weight_squared.data_ptr() == stable_pointer
+    assert torch.equal(layer.weight_squared, second_weight.square())
+    assert layer.buffer_seen_by_module_post_reload is layer.weight_squared
+    assert layer.quant_method.helper.weight_squared is layer.weight_squared
+
+
+def test_none_buffer_placeholder_survives_reload_metadata_round_trip():
+    layer = torch.nn.Module()
+    register_derived_buffer(layer, "derived")
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    finalize_layerwise_reload(model, Mock(spec=ModelConfig))
+
+    assert "derived" in layer._buffers
+    assert layer._buffers["derived"] is None
+    assert "derived" in layer._non_persistent_buffers_set
 
 
 def test_restore_layer_replaces_postprocessed_tensor_attribute():
