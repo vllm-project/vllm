@@ -116,7 +116,7 @@ from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
-from vllm.logger import init_logger, suppress_logging
+from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
@@ -2149,6 +2149,9 @@ class EngineArgs:
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
+        logging_config = self.create_logging_config()
+        configure_logging_if_needed(logging_config)
+
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
@@ -2709,7 +2712,6 @@ class EngineArgs:
             )
 
         observability_config = self.create_observability_config()
-        logging_config = self.create_logging_config()
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)

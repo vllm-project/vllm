@@ -78,6 +78,29 @@ def test_default_vllm_root_logger_configuration(monkeypatch):
     assert formatter.datefmt == _DATE_FORMAT
 
 
+def test_offline_llm_configures_logging_before_logging_args(monkeypatch):
+    import vllm.entrypoints.llm as llm_module
+
+    class StopInitialization(Exception):
+        pass
+
+    configured = False
+
+    def configure_logging(_):
+        nonlocal configured
+        configured = True
+
+    def log_args(_):
+        assert configured
+        raise StopInitialization
+
+    monkeypatch.setattr(llm_module, "configure_logging_if_needed", configure_logging)
+    monkeypatch.setattr(llm_module, "log_non_default_args", log_args)
+
+    with pytest.raises(StopInitialization):
+        llm_module.LLM(model="facebook/opt-125m")
+
+
 def test_use_color_force_color(monkeypatch):
     """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
     explicit VLLM_LOGGING_COLOR=0 take precedence over it."""
