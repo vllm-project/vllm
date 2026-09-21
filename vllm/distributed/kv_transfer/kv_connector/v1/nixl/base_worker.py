@@ -432,14 +432,21 @@ class NixlBaseConnectorWorker:
             group_by_layer[name] for name in layer_names
         )
 
-    def _requires_layer_name_routing(self) -> bool:
-        """Whether PP push must match HMA/packed layers by name, not region index."""
+    def _tracks_region_layers(self) -> bool:
+        """Whether regions advertise their member layer names.
+
+        Push workers do so for HMA and packed layouts, so a PP producer can
+        match layers by name instead of by region index.
+        """
         return (
             self._supports_pp_hma
-            and self.pp_size > 1
             and (self._is_hma_required or self._has_packed_cache)
             and not self._has_mamba
         )
+
+    def _requires_layer_name_routing(self) -> bool:
+        """Whether PP push must match HMA/packed layers by name, not region index."""
+        return self._tracks_region_layers() and self.pp_size > 1
 
     def _align_remote_regions_by_layer(
         self, nixl_agent_meta: NixlAgentMetadata
@@ -1474,11 +1481,7 @@ class NixlBaseConnectorWorker:
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
 
-        track_region_layers = (
-            self._supports_pp_hma
-            and (self._is_hma_required or self._has_packed_cache)
-            and not self._has_mamba
-        )
+        track_region_layers = self._tracks_region_layers()
         region_layers: list[list[str]] = []
         packed_member_layouts: dict[str, tuple[int, int]] = {}
 
