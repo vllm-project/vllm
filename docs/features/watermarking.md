@@ -84,6 +84,8 @@ applied to accepted drafts, rejection-recovery tokens, or bonus tokens.
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
 
+Context deduplication and speculative decoding are currently mutually exclusive in effect.
+
 ## Algorithms
 
 ### Gumbel-max
