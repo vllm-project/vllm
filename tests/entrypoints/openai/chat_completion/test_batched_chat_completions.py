@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import AsyncGenerator
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ from vllm.entrypoints.openai.chat_completion.batch_serving import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
 )
+from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 
 # any model with a chat template defined in tokenizer_config should work here
@@ -254,6 +256,83 @@ def _make_request_output(prompt_idx: int, text: str) -> RequestOutput:
 
 async def _generator(prompt_idx: int, text: str) -> AsyncGenerator[RequestOutput, None]:
     yield _make_request_output(prompt_idx, text)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("include_reasoning", [False, True])
+async def test_batched_reasoning_metadata_follows_include_reasoning(
+    include_reasoning: bool,
+) -> None:
+    """Hidden reasoning must not be recoverable from response metadata."""
+    private_reasoning = "PRIVATE_REASONING"
+    public_content = "PUBLIC_ANSWER"
+    raw_output = f"<think>{private_reasoning}</think>{public_content}"
+
+    result = _make_request_output(0, raw_output)
+    result.outputs[0].logprobs = [
+        {
+            4: Logprob(
+                logprob=-0.1,
+                rank=1,
+                decoded_token=f"<think>{private_reasoning}</think>",
+            )
+        },
+        {
+            5: Logprob(
+                logprob=-0.1,
+                rank=1,
+                decoded_token=public_content,
+            )
+        },
+    ]
+
+    async def generator() -> AsyncGenerator[RequestOutput, None]:
+        yield result
+
+    serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
+    serving.response_role = "assistant"
+    serving.system_fingerprint = None
+    serving.return_tokens_as_token_ids = False
+
+    parser = Mock()
+    parser.parse.return_value = (private_reasoning, public_content, [])
+    conversations = [[{"role": "user", "content": "Answer the probe."}]]
+    request = BatchChatCompletionRequest(
+        model="test-model",
+        messages=conversations,
+        include_reasoning=include_reasoning,
+        logprobs=True,
+        top_logprobs=0,
+        return_token_ids=True,
+    )
+
+    response = await serving.chat_completion_full_generator_batch(
+        request=request,
+        generators=[generator()],
+        request_id="req-reasoning-metadata",
+        model_name="test-model",
+        all_conversations=conversations,
+        tokenizer=None,
+        request_metadata=RequestResponseMetadata(request_id="req-reasoning-metadata"),
+        parser=parser,
+    )
+
+    choice = response.choices[0]
+    assert choice.message.content == public_content
+    if include_reasoning:
+        assert choice.message.reasoning == private_reasoning
+        assert choice.logprobs is not None
+        assert choice.logprobs.content is not None
+        assert [item.token for item in choice.logprobs.content] == [
+            f"<think>{private_reasoning}</think>",
+            public_content,
+        ]
+        assert choice.token_ids == [4, 5]
+    else:
+        assert choice.message.reasoning is None
+        assert choice.logprobs is None
+        assert choice.token_ids is None
 
 
 @pytest.mark.asyncio
