@@ -18,7 +18,6 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 
 from .context import BaseProcessingInfo
-from .inputs import ProcessorInputs
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
@@ -60,42 +59,6 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
         """
         raise NotImplementedError
-
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
-    ) -> ProcessorInputs:
-        """Build the input which, after processing, results in
-        the maximum possible number of placeholder tokens.
-
-        Args:
-            seq_len: Sequence length
-            mm_counts: Count of items per modality
-            mm_options: Configurable options per modality (optional)
-
-        """
-        dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
-
-        tokenizer = self.info.ctx.tokenizer
-        dummy_prompt: list[int]
-        if tokenizer is None:
-            # Tokenizer-less models (e.g. `skip_tokenizer_init=True`) only
-            # accept embeddings and have an empty dummy text, so there are no
-            # prompt tokens.
-            dummy_prompt = []
-        else:
-            from .processor import cached_encode
-
-            dummy_prompt = cached_encode(tokenizer, dummy_text, truncation=False)
-
-        return ProcessorInputs(
-            prompt=dummy_prompt,
-            mm_data_items=dummy_mm_items,
-        )
 
     def _get_dummy_audios(
         self,
