@@ -9,7 +9,11 @@ falls through to the next kernel in ``_POSSIBLE_KERNELS[PlatformEnum.CPU]``.
 Symmetric W4 checkpoints take the DA8W4 (W4A8) path, which quantizes activations
 dynamically to int8; everything else stays on W4A16. ``VLLM_CPU_INT4_W4A8=0``
 forces W4A16, mirroring ``CPUWNA16LinearKernel``.
+``ZENTORCH_DA8W4_PREPACK=0`` / ``ZENTORCH_WOQ_PREPACK=0`` keep the unblocked
+weight layout.
 """
+
+import os
 
 import torch
 
@@ -23,6 +27,18 @@ from .cpu import CPUWNA16LinearKernel
 from .MPLinearKernel import MPLinearLayerConfig
 
 logger = init_logger(__name__)
+
+
+def _da8w4_prepack_enabled() -> bool:
+    """``ZENTORCH_DA8W4_PREPACK=0`` keeps the unblocked DA8W4 weight."""
+    if os.environ.get("ZENTORCH_DA8W4_PREPACK", "1") == "0":
+        return False
+    return has_zentorch_op(["zentorch_weight_prepack_for_da8w4_qlinear"])
+
+
+def _woq_prepack_enabled() -> bool:
+    """``ZENTORCH_WOQ_PREPACK=0`` keeps the row-packed W4A16 weight."""
+    return os.environ.get("ZENTORCH_WOQ_PREPACK", "1") != "0"
 
 
 def _import_unpack_from_int32():
@@ -106,11 +122,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
             return False
 
         if not has_zentorch_op(
-            [
-                "zentorch_woq_repack_weight",
-                "zentorch_dynamic_qlinear",
-                "zentorch_weight_prepack_for_da8w4_qlinear",
-            ]
+            ["zentorch_woq_repack_weight", "zentorch_dynamic_qlinear"]
         ):
             return False
 
@@ -142,7 +154,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         with ``transB=true``) and per-group ``{G, N}`` scales in bf16. The weight
         values match the W4A16 path bit for bit; only the packing differs.
         """
-        if self.w_zp_name is not None:
+        if (not self.config.zero_points) and (self.w_zp_name is not None):
             setattr(layer, self.w_zp_name, None)
 
         weight_q = getattr(layer, self.w_q_name)
@@ -167,9 +179,11 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         ).view(torch.int8)
 
         group_size = in_features // num_groups
-        packed = torch.ops.zentorch.zentorch_weight_prepack_for_da8w4_qlinear(
-            packed, group_size
-        )
+        layer._zentorch_da8w4_prepacked = _da8w4_prepack_enabled()
+        if layer._zentorch_da8w4_prepacked:
+            packed = torch.ops.zentorch.zentorch_weight_prepack_for_da8w4_qlinear(
+                packed, group_size
+            )
 
         layer._zentorch_da8w4_packed = packed
         # The CT scale is [N, G]; DA8W4 wants per-group {G, N}.
@@ -191,9 +205,10 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         layer._zentorch_processed_weights = True
         logger.info_once(
             "[zen_cpu] Using zentorch DA8W4 (W4A8) for symmetric W4 "
-            "(weight_type=%s, group_size=%d)",
+            "(weight_type=%s, group_size=%d, weight_prepacked=%s)",
             self.config.weight_type,
             group_size,
+            layer._zentorch_da8w4_prepacked,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -250,7 +265,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         needs_unsigned_offset = self.config.weight_type == scalar_types.uint4
 
         # The blocked reorder is built for a bf16 source.
-        prepacked = self.config.act_type == torch.bfloat16
+        prepacked = _woq_prepack_enabled() and self.config.act_type == torch.bfloat16
 
         if needs_unsigned_offset:
             weight_unpacked = (weight_unpacked.to(torch.int32) + 8).clamp(0, 15)
@@ -313,24 +328,16 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
                 layer._zentorch_da8w4_packed,
                 layer._zentorch_da8w4_scale,
                 bias_c,
-                is_weight_prepacked=True,
+                is_weight_prepacked=layer._zentorch_da8w4_prepacked,
             )
         if getattr(layer, "_zentorch_processed_weights", False):
-            if getattr(layer, "_zentorch_woq_prepacked", False):
-                return torch.ops.zentorch.zentorch_woq_linear.default(
-                    x,
-                    layer._zentorch_woq_packed,
-                    layer._zentorch_woq_scale,
-                    layer._zentorch_woq_zero_point,
-                    bias,
-                    is_weight_prepacked=True,
-                )
             return torch.ops.zentorch.zentorch_woq_linear.default(
                 x,
                 layer._zentorch_woq_packed,
                 layer._zentorch_woq_scale,
                 layer._zentorch_woq_zero_point,
                 bias,
+                is_weight_prepacked=getattr(layer, "_zentorch_woq_prepacked", False),
             )
         return super().apply_weights(layer, x, bias)
 
