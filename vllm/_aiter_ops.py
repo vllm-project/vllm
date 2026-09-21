@@ -1963,6 +1963,8 @@ class rocm_aiter_ops:
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _gdn_flydsl_prefill_import_error: str | None = None
+    # Chunk length the AITER FlyDSL K5 prefill kernels are compiled for.
+    GDN_FLYDSL_CHUNK_SIZE = 64
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
@@ -2398,8 +2400,6 @@ class rocm_aiter_ops:
     @staticmethod
     def _gdn_flydsl_prefill_kernels_importable() -> bool:
         try:
-            import inspect
-
             from aiter.ops.flydsl.linear_attention_prefill_kernels import (  # noqa: F401
                 chunk_gated_delta_rule_fwd_h_flydsl_opt,
                 gdn_prepare_flydsl_supported,
@@ -2410,25 +2410,9 @@ class rocm_aiter_ops:
                 chunk_gated_delta_rule_opt_vk,
             )
 
-            required_parameters = {
-                "use_chunk_flydsl",
-                "use_prepare_flydsl",
-                "prefill_metadata",
-                "initial_state_indices",
-                "inplace_final_state",
-            }
-            missing = required_parameters.difference(
-                inspect.signature(chunk_gated_delta_rule_opt_vk).parameters
-            )
-            if missing:
-                rocm_aiter_ops._gdn_flydsl_prefill_import_error = (
-                    "chunk_gated_delta_rule_opt_vk is missing parameters "
-                    f"{sorted(missing)}"
-                )
-                return False
             rocm_aiter_ops._gdn_flydsl_prefill_import_error = None
             return True
-        except (ImportError, ModuleNotFoundError, TypeError, ValueError) as e:
+        except (ImportError, ModuleNotFoundError) as e:
             rocm_aiter_ops._gdn_flydsl_prefill_import_error = f"{type(e).__name__}: {e}"
             logger.warning(
                 "AITER FlyDSL GDN prefill kernels are not importable: %s",
@@ -2472,6 +2456,28 @@ class rocm_aiter_ops:
                 "AITER FlyDSL GDN prefill APIs are missing"
             )
         return "unknown"
+
+    @classmethod
+    def build_gdn_flydsl_prefill_metadata(
+        cls,
+        seq_lens_cpu: list[int],
+        cu_seqlens: torch.Tensor,
+    ) -> object:
+        """Build the reusable varlen metadata FlyDSL GDN prefill runs against.
+
+        The K5 recurrence is compiled for a fixed 64-token chunk, so the chunk
+        size is a property of the AITER kernel rather than of FLA, and is not
+        the caller's to choose.
+        """
+        from aiter.ops.triton.gated_delta_net import (
+            build_gated_delta_rule_prefill_metadata,
+        )
+
+        return build_gated_delta_rule_prefill_metadata(
+            seq_lens_cpu,
+            cu_seqlens=cu_seqlens,
+            chunk_size=cls.GDN_FLYDSL_CHUNK_SIZE,
+        )
 
     @classmethod
     def is_rdna_gdn_triton_kernels_available(cls) -> bool:
