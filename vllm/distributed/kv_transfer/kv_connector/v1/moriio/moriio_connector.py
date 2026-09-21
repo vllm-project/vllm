@@ -727,9 +727,12 @@ class MoRIIOConnectorScheduler:
             # to wait for a second push that never comes. Hybrid models never
             # get here: register_kv_caches refuses WRITE mode for them.
             params = request.kv_transfer_params
-            if params is not None and params.get("do_remote_prefill"):
-                if num_external_tokens > 0:
-                    return num_external_tokens, True
+            if (
+                params is not None
+                and params.get("do_remote_prefill")
+                and num_external_tokens > 0
+            ):
+                return num_external_tokens, True
             return 0, False
 
         # READ mode always recomputes the last token locally on the decoder.
