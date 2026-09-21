@@ -434,6 +434,7 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     worker.device_kv_caches = {}
     worker.pp_size = 2 if push_pp else 1
     worker._is_hma_required = True
+    worker._has_packed_cache = False
     worker.dcp_size = 1
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"

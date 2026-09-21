@@ -919,7 +919,9 @@ class NixlBaseConnectorWorker:
         # within a block (BLHNC/BHLNC), where stride > block_len.
         self.block_stride_per_layer = list[int]()
 
-        self._has_packed_cache = False
+        # Block-outermost layouts (BLHNC/BHLNC) pack every layer's page into one
+        # block row of a shared allocation.
+        self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
         # Region layer membership is populated for HMA and packed layouts.
         self.region_members = []
         # Local layer order, set by ``_set_region_layers`` only when
@@ -1372,8 +1374,6 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-
-        self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
         use_layer_name_routing = self._requires_layer_name_routing()
         route_packed_layers = self._has_packed_cache and use_layer_name_routing
         self.transfer_topo = TransferTopology(
