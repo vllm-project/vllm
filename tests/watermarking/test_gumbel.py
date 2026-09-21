@@ -4,9 +4,11 @@
 import pytest
 import torch
 
+from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarkDetector,
+    DualKeyGumbelWatermarker,
     GumbelWatermarkDetector,
     GumbelWatermarker,
     derive_watermark_key,
@@ -113,8 +115,12 @@ def test_dual_key_detector_rejects_invalid_alpha():
         DualKeyGumbelWatermarkDetector(key=42, alpha=1.1)
 
 
-def test_dual_key_detector_default_alpha():
-    assert DualKeyGumbelWatermarkDetector(key=42).alpha == 0.2
+def test_dual_key_alpha_defaults_match():
+    config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    watermarker = DualKeyGumbelWatermarker(key=42)
+    detector = DualKeyGumbelWatermarkDetector(key=42)
+
+    assert detector.alpha == watermarker.alpha == config.alpha
 
 
 @pytest.mark.skipif(

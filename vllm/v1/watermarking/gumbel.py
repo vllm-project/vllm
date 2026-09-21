@@ -217,7 +217,7 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
         p_value_threshold: float = 0.01,
         prf: WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,
-        alpha: float = 0.2,
+        alpha: float = 0.1,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise ValueError("alpha must be between 0 and 1")
