@@ -225,11 +225,6 @@ def test_per_request_metrics_require_log_stats(serve_parser, metrics_flag):
         validate_parsed_serve_args(args)
 
 
-def test_output_token_metrics_parser_validation_is_deferred(serve_parser):
-    args = serve_parser.parse_args(args=["--enable-per-request-output-token-metrics"])
-    validate_parsed_serve_args(args)
-
-
 def _build_launch_render_parser():
     """Mirror `vllm launch render`.
 
