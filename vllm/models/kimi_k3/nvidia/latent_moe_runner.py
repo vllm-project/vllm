@@ -151,31 +151,6 @@ class LatentMoERunner(MoERunner):
             self.moe_config.defer_moe_finalize = False
             self.moe_config.defer_moe_finalize_max_num_tokens = -1
 
-    def _get_zero_residual(
-        self,
-        hidden_states: torch.Tensor,
-        max_token_num: int,
-    ) -> torch.Tensor:
-        """Read-only zero ``residual_in`` for the fused AR+RMSNorm kernel.
-
-        flashinfer requires a residual buffer even when there is no residual to
-        add.
-        """
-        buf = getattr(self, "_zero_residual", None)
-        if buf is None:
-            buf = torch.zeros(
-                max_token_num * hidden_states.shape[-1],
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-            self._zero_residual = buf
-
-        assert buf.dtype == hidden_states.dtype
-        assert buf.device == hidden_states.device
-        assert hidden_states.numel() <= buf.numel()
-
-        return buf[: hidden_states.numel()].view_as(hidden_states)
-
     def _use_fused_path(self) -> bool:
         # The fused path merges the latent and shared reductions into one
         # all-reduce, so it needs actual TP parallelism, a shared expert (to
@@ -385,40 +360,10 @@ class LatentMoERunner(MoERunner):
         self,
         hidden_states: torch.Tensor,
         norm: RMSNorm,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """All-reduce + add residual + (standard) RMSNorm, fused via flashinfer."""
-        from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
-            _AR_RESIDUAL_RMS_NORM,
-            _can_use_flashinfer,
-            flashinfer_trtllm_fused_allreduce_norm,
+    ) -> torch.Tensor:
+        """All-reduce + (standard) RMSNorm, fused when a fast path applies."""
+        from vllm.models.common.ops.fused_allreduce_rms_norm import (
+            fused_allreduce_rms_norm_out,
         )
 
-        if self.moe_config.tp_size == 1:
-            return norm(hidden_states)
-
-        if flashinfer_trtllm_fused_allreduce_norm is not None:
-            ok, max_token_num = _can_use_flashinfer(
-                hidden_states, self.moe_config.tp_size
-            )
-            if ok:
-                norm_out = torch.empty_like(hidden_states)
-                # With norm_out provided, the kernel writes the new residual
-                # (all_reduce(hidden_states) + residual) into the hidden_states
-                # buffer and the normalized result into norm_out.
-                flashinfer_trtllm_fused_allreduce_norm(
-                    allreduce_in=hidden_states,
-                    residual=self._get_zero_residual(hidden_states, max_token_num),
-                    rms_gamma=norm.weight,
-                    rms_eps=norm.variance_epsilon,
-                    world_size=self.moe_config.tp_size,
-                    weight_bias=0.0,
-                    launch_with_pdl=True,
-                    fp32_acc=True,
-                    max_token_num=max_token_num,
-                    pattern_code=_AR_RESIDUAL_RMS_NORM,
-                    norm_out=norm_out,
-                )
-                return norm_out
-
-        reduced = tensor_model_parallel_all_reduce(hidden_states)
-        return norm(reduced)
+        return fused_allreduce_rms_norm_out(hidden_states, norm)

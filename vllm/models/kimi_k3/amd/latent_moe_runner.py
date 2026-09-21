@@ -10,6 +10,9 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.models.common.ops.fused_allreduce_rms_norm import (
+    fused_allreduce_rms_norm_out,
+)
 
 logger = init_logger(__name__)
 
@@ -22,6 +25,9 @@ class ROCmLatentMoERunner(MoERunner):
 
     Native path: the replicated up-proj produces the full hidden dim on every
     rank, so the base runner combines routed + shared correctly at any TP size.
+
+    The latent all-reduce is fused with the following RMSNorm via AITER's
+    1-stage custom AR when the tensor fits that gate (decode-sized).
     """
 
     def __init__(
@@ -66,16 +72,22 @@ class ROCmLatentMoERunner(MoERunner):
             self._logged_sharded_tail = True
             logger.info_once(
                 "Kimi-K3 latent-MoE tail: up-projecting only this rank's "
-                "hidden shard into the shared output.",
+                "hidden shard into the shared output. Eager fused AR+RMSNorm "
+                "is used when the AITER 1-stage custom-AR gate admits the "
+                "tensor; larger tensors fall back to unfused all-reduce + "
+                "RMSNorm.",
                 scope="global",
             )
 
         transform = self.routed_output_transform
         assert transform is not None
 
-        latent = tensor_model_parallel_all_reduce(fused_output)
         if transform.norm is not None:
-            latent = transform.norm(latent)
+            # Eager fused AR+RMSNorm (AITER 1-stage custom AR). Decode-sized
+            # tensors hit the fused op; prefill falls back to unfused QR+norm.
+            latent = fused_allreduce_rms_norm_out(fused_output, transform.norm)
+        else:
+            latent = tensor_model_parallel_all_reduce(fused_output)
 
         shard_size = self._up_proj_shard_size
         shard_start = get_tensor_model_parallel_rank() * shard_size
