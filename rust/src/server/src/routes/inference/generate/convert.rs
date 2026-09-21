@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
 use super::types::GenerateRequest;
@@ -29,6 +30,8 @@ pub(super) struct ResponseOptions {
     pub include_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// Whether the caller requested final prompt token metadata.
+    pub return_token_ids: bool,
 }
 
 /// Validate and lower one raw generate request into the internal
@@ -37,6 +40,7 @@ pub(super) fn prepare_generate_request(
     request: GenerateRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
+    mm_features: Option<MmFeatures>,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
@@ -52,9 +56,10 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let include_logprobs = request.sampling_params.logprobs.is_some();
-    let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
-    let mut sampling_params = request.sampling_params;
+    let include_logprobs = request.sampling_params.inner.logprobs.is_some();
+    let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let return_token_ids = request.return_token_ids.unwrap_or(false);
+    let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),
@@ -67,10 +72,11 @@ pub(super) fn prepare_generate_request(
     let text_request = TextRequest {
         request_id: ctx.request_id.clone(),
         prompt: Prompt::TokenIds(request.token_ids),
-        mm_features: None,
+        mm_features,
         sampling_params,
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
+        prompt_truncation: None,
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
@@ -90,6 +96,7 @@ pub(super) fn prepare_generate_request(
             include_continuous_usage,
             include_logprobs,
             include_prompt_logprobs,
+            return_token_ids,
         },
     })
 }
@@ -134,6 +141,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 
@@ -161,6 +169,30 @@ mod tests {
     }
 
     #[test]
+    fn prepare_generate_request_preserves_watermarking_defaults_and_opt_out() {
+        for watermarking in [None, Some(true), Some(false)] {
+            let mut body = json!({
+                "token_ids": [11, 22],
+                "sampling_params": {}
+            });
+            if let Some(watermarking) = watermarking {
+                body["sampling_params"]["watermarking"] = json!(watermarking);
+            }
+            let prepared = prepare_generate_request(
+                serde_json::from_value(body).expect("parse request"),
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare request");
+            assert_eq!(
+                prepared.text_request.sampling_params.watermarking,
+                watermarking.unwrap_or(true)
+            );
+        }
+    }
+
+    #[test]
     fn prepare_generate_request_forwards_thinking_token_budget() {
         let request: GenerateRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
@@ -175,6 +207,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 
@@ -204,6 +237,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 

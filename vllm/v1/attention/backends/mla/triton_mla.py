@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -48,21 +49,20 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-    # Non-causal DSpark block is flattened to one decode row per query token in
-    # forward_mqa, so no intra-block causal masking is required.
+    # forward_mqa flattens a uniform multi-token block to one decode row per
+    # query token, so causal and non-causal blocks both take the decode path.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        # Only the non-causal DSpark draft group serves multi-token blocks via
-        # the decode path; raise its reorder threshold to the spec block length
-        # so full-cudagraph capture admits it. Causal usage stays single-token.
-        if getattr(self, "non_causal_multi_token_decode", False):
-            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        # DCP local sequence lengths are not advanced between draft steps.
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
         self._reserve_attn_logits_workspace()
+
+    def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:
+        pass
 
     def _reserve_attn_logits_workspace(self) -> None:
         """Pre-size the shared workspace for the decode split-KV attn logits.
@@ -74,12 +74,12 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         """
         if not is_workspace_manager_initialized():
             return
-        # Decode reorder threshold is 1, so decode tokens <= max_num_seqs.
-        B = self.vllm_config.scheduler_config.max_num_seqs
-        # Non-causal DSpark draft flattens each request's block to query_len
-        # decode rows; cover max_num_seqs * block_len rows.
-        if getattr(self, "non_causal_multi_token_decode", False):
-            B *= self.reorder_batch_threshold
+        # forward_mqa flattens each request's block to query_len decode rows,
+        # and query_len is bounded by the reorder threshold.
+        B = (
+            self.vllm_config.scheduler_config.max_num_seqs
+            * self.reorder_batch_threshold
+        )
         # DCP all-gathers the query heads before forward_mqa.
         q_num_heads = self.num_heads * self.dcp_world_size
         max_splits = _compute_num_kv_splits(
@@ -117,14 +117,6 @@ class TritonMLABackend(MLACommonBackend):
         return block_size % 16 == 0
 
     @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (1, 0, 2, 3)
-        return (0, 1, 2)
-
-    @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
 
@@ -154,6 +146,7 @@ class TritonMLABackend(MLACommonBackend):
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
 
     def __init__(
         self,
@@ -285,14 +278,32 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
-        if not attn_metadata.causal:
-            # Non-causal DSpark block: flatten to one decode row per query token.
-            # Each row attends to the same committed KV prefix (per-row seq_lens)
-            # and never to sibling block tokens = non-causal block semantics.
-            # Mirrors FlashInferMLA's non-causal path.
-            query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
-            if query_len > 1:
-                block_table = block_table.repeat_interleave(query_len, dim=0)
+        # decode_attention_fwd has no causal flag: it launches one program per
+        # row of q and reads that row's KV extent from seq_lens, so intra-block
+        # causality is expressed as per-row extents. Deriving query_len from the
+        # tensors the kernel indexes keeps the three row counts in step.
+        num_decodes = seq_lens.shape[0]
+        query_len, remainder = divmod(B, num_decodes) if num_decodes else (1, 0)
+        assert remainder == 0, (
+            f"non-uniform decode block: {B} query rows over {num_decodes} requests"
+        )
+        if query_len > 1:
+            block_table = block_table.repeat_interleave(query_len, dim=0)
+            if attn_metadata.causal:
+                # Per-row extents are offsets off the global sequence length;
+                # under DCP seq_lens is this rank's local slice instead.
+                assert self.dcp_world_size == 1, (
+                    "causal multi-token decode is not supported with DCP"
+                )
+                # Row t attends the prefix plus block tokens 0..t. Clamp holds
+                # padding rows at extent 0; the kernel skips them either way
+                # (split_kv_end == split_kv_start).
+                offsets = torch.arange(
+                    1 - query_len, 1, device=seq_lens.device, dtype=seq_lens.dtype
+                )
+                seq_lens = (seq_lens.unsqueeze(1) + offsets).flatten().clamp(min=0)
+            else:
+                # Non-causal draft block: every row sees the same prefix.
                 seq_lens = seq_lens.repeat_interleave(query_len)
 
         # Run MQA — always pass layer scales. When KV cache is

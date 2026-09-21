@@ -53,7 +53,7 @@ def _bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[in
 
 
 class BeamSearchOfflineMixin(OfflineInferenceMixin):
-    """Offline inference for beam search"""
+    """Offline inference for beam search."""
 
     def beam_search(
         self,
@@ -63,8 +63,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         use_tqdm: bool = False,
         concurrency_limit: int | None = None,
     ) -> list[BeamSearchOutput]:
-        """
-        Generate sequences using beam search.
+        """Generate sequences using beam search.
 
         Args:
             prompts: A list of prompts. Each prompt can be a string or a list
@@ -74,6 +73,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             use_tqdm: Whether to use tqdm to display the progress bar.
             concurrency_limit: The maximum number of concurrent requests.
                 If None, the number of concurrent requests is unlimited.
+
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
@@ -82,6 +82,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        self.llm_engine.vllm_config._check_watermarking_unsupported(beam_search=True)
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -119,6 +120,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
+            detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
@@ -184,7 +186,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             best_beams = sorted_completed[:beam_width]
 
             for beam in best_beams:
-                beam.text = tokenizer.decode(beam.tokens)
+                beam.text = tokenizer.decode(
+                    beam.tokens, skip_special_tokens=params.skip_special_tokens
+                )
 
             outputs.append(BeamSearchOutput(sequences=best_beams))
 
@@ -289,6 +293,18 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     allowed_sets[i] = set(entry[1])
 
         for (start, end), instance in zip(instance_start_and_end, instances_batch):
+            instance_output = output[start:end]
+            if any(
+                result is not None and result.outputs[0].finish_reason == "abort"
+                for result in instance_output
+            ):
+                for beam, result in zip(all_beams[start:end], instance_output):
+                    if result is not None:
+                        beam.finish_reason = "abort"
+                        instance.completed.append(beam)
+                instance.beams = []
+                continue
+
             instance_new_beams = []
             for i in range(start, end):
                 current_beam = all_beams[i]
@@ -298,8 +314,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     continue
 
                 if result.outputs[0].logprobs is not None:
-                    # if logprobs is None, the sequence completed
-                    # due to max-model-len or abortion.
                     logprobs = result.outputs[0].logprobs[0]
                     allowed = allowed_sets[i]
                     for token_id, logprob_obj in logprobs.items():
@@ -443,6 +457,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 logprobs=base_params.logprobs,
                 max_tokens=1,
                 temperature=base_params.temperature,
+                detokenize=False,
                 allowed_token_ids=(
                     allowed_ids
                     if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS

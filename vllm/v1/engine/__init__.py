@@ -16,8 +16,12 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.metrics.stats import (
+    PrefillStats,
+    RequestSpecDecodeMetrics,
+    SchedulerStats,
+)
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
 from vllm.v1.serial_utils import UtilityResult
 
 # Type for pause_generation mode parameter.
@@ -41,8 +45,7 @@ class EEPNotificationType(enum.Enum):
 
 
 class FinishReason(enum.IntEnum):
-    """
-    Reason a request finished - stop, length, abort, error, or repetition.
+    """Reason a request finished - stop, length, abort, error, or repetition.
 
     Int rather than Str for more compact serialization.
 
@@ -88,10 +91,18 @@ class EngineCoreReadyResponse:
     max_num_seqs: int
     max_num_batched_tokens: int
     instance_id: str
+    supports_lora: bool
+    max_loras: int
+    mamba_block_size: int | None = None
     # KV cache capacity (None for encoder-only/attention-free models).
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
     kv_events_config: KVEventsConfig | None = None
+    weight_transfer_backend: str | None = None
+    enable_sleep_mode: bool = False
+    supports_draft_weight_updates: bool = False
+    # Full-attention block size in tokens after initialization, or unavailable.
+    effective_attention_block_size: int | None = None
 
 
 class EngineCoreRequest(
@@ -211,6 +222,17 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+    # Multi-modal hashes missing from the P1 receiver cache (P0/P1 drift; see
+    # `MultiModalCacheMissError`). Non-empty => retryable: the frontend drops these
+    # from its sender cache and the request is resent with the data. Appended last
+    # so `array_like` positional serialization stays backward compatible.
+    mm_cache_miss_hashes: list[str] | None = None
+
+    new_sampling_mask: SamplingMaskLists | None = None
+
+    # Per-request spec-decode acceptance; attached only on the final output.
+    # Appended last so `array_like` positional serialization stays compatible.
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
     @property
     def finished(self) -> bool:
@@ -261,8 +283,7 @@ class EngineCoreOutputs(
 
 
 class EngineCoreRequestType(enum.Enum):
-    """
-    Request types defined as hex byte strings, so it can be sent over sockets
+    """Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
     """
 
@@ -287,9 +308,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
 
 
 class ReconfigureRankType(enum.IntEnum):
-    """
-    Rank type for reconfiguring distributed request.
-    """
+    """Rank type for reconfiguring distributed request."""
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Mock-based unit tests for ObjectStoreSecondaryTierManager.
+"""Mock-based unit tests for ObjectStoreSecondaryTierManager.
 
 These tests replace the NIXL backend with an in-memory mock so they run
 without S3 credentials or a live object store. They verify the manager's
@@ -34,7 +33,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -74,6 +73,8 @@ def _make_offloading_config(
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
@@ -104,14 +105,14 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    block_ids: list[int] | None = None,
-) -> JobMetadata:
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
-    return JobMetadata(
+    chunk_ids: list[int] | None = None,
+) -> TransferJob:
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
+    return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        chunk_ids=np.array(chunk_ids, dtype=np.int32),
         is_promotion=False,
         req_context=_CTX,
     )
@@ -200,6 +201,9 @@ class MockNixlAgent:
 
     def release_dlist_handle(self, handle):
         pass
+
+    def get_xfer_telemetry(self, handle):
+        return SimpleNamespace(xferDuration=1000)
 
     def _query_memory(self, queries, mem_type, agent_name):
         return [object() if q[3] in self._stored_obj_keys else None for q in queries]
@@ -536,7 +540,7 @@ class TestMockObjTierFailures:
         mmap_region = MagicMock()
         mmap_region.create_kv_memoryview.return_value = primary_kv_view
         primary_tier = CPUPrimaryTierOffloadingManager(
-            num_blocks=num_blocks, mmap_region=mmap_region
+            num_chunks=num_blocks, mmap_region=mmap_region
         )
         obj_tier, agent = _make_tier(
             num_blocks=num_blocks, primary_kv_view=primary_kv_view

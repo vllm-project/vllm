@@ -1,24 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
-from collections.abc import Callable
-from dataclasses import dataclass, field, fields, make_dataclass
+import math
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field, fields
 from typing import (
     TYPE_CHECKING,
     Any,
-    Literal,
     Protocol,
-    get_args,
+    TypeVar,
+    cast,
 )
 
 import numpy as np
 import torch
 from typing_extensions import runtime_checkable
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config.cache import _layout_from_name
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -39,11 +42,29 @@ from vllm.v1.attention.backend import (
 )
 
 logger = init_logger(__name__)
-KVCacheLayoutType = Literal["NHD", "HND"]
-_KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
+
+
+ImplT = TypeVar("ImplT", bound=AttentionImpl)
+
+
+def find_attention_impl_variant(
+    impl: AttentionImpl, impl_cls: type[ImplT]
+) -> ImplT | None:
+    for variant in impl.get_impl_variants():
+        if isinstance(variant, impl_cls):
+            return cast(ImplT, variant)
+    return None
+
+
+_LN_2 = math.log(2.0)
+
+
+def log2_lse_to_ln(lse: torch.Tensor) -> torch.Tensor:
+    """Convert a base-2 log-sum-exp tensor to natural-log units."""
+    return lse * _LN_2
 
 
 def compute_mm_prefix_range_tensor(
@@ -146,50 +167,164 @@ def fill_mm_prefix_query_ranges(
     return num_actual_tokens
 
 
-def is_valid_kv_cache_layout(value: str) -> bool:
-    return value in get_args(KVCacheLayoutType)
+_FLASHINFER_LAYOUT_NAMES = {
+    "LBNHC": "NHD",
+    "LBHNC": "HND",
+    "BLHNC": "HND",
+    "BLNHC": "NHD",
+    "BHLNC": "HND",
+}
 
 
-@functools.lru_cache
-def get_kv_cache_layout():
-    # Format specified by the code.
-    global _KV_CACHE_LAYOUT_OVERRIDE
+def get_flashinfer_layout_string(layout: KVCacheLayout) -> str:
+    """Return the layout name in FlashInfer's convention (NHD/HND)."""
+    assert layout.name in _FLASHINFER_LAYOUT_NAMES, (
+        f"KV cache layout {layout.name} has no FlashInfer equivalent; FlashInfer "
+        "rejects it in supported_kv_cache_layouts"
+    )
+    return _FLASHINFER_LAYOUT_NAMES[layout.name]
 
-    cache_layout: Literal["NHD", "HND"] | None = None
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
-        logger.debug_once(
-            "`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. "
-            "Setting KV cache layout to %s.",
-            cache_layout,
+
+# Preference order when no backend declares a supported set; LBNHC (NHD)
+# first to match main's default.
+_DEFAULT_LAYOUT_PREFERENCE = (
+    KVCacheLayout.LBNHC,
+    KVCacheLayout.LBHNC,
+    KVCacheLayout.BLNHC,
+    KVCacheLayout.BLHNC,
+    KVCacheLayout.BHLNC,
+    KVCacheLayout.LHBNC,
+)
+
+
+def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
+    return [layout.name for layout in layouts]
+
+
+def get_supported_kv_cache_layouts(
+    backends: Iterable[type[AttentionBackend]],
+) -> list[KVCacheLayout]:
+    """Layouts every one of the worker's backends supports, most preferred first.
+
+    Every backend declares the layouts its kernels support, most preferred first
+    (``supported_kv_cache_layouts``), or None when any layout works; workers where
+    nothing declares follow the default preference. Identical declarations keep
+    their order; otherwise the layout the most backends put first wins, ties
+    keeping the enum order. An empty intersection is a hard error.
+    """
+    supported_layouts_lists: list[Sequence[KVCacheLayout]] = [
+        layouts
+        for backend in backends
+        if (layouts := backend.supported_kv_cache_layouts()) is not None
+    ] or [_DEFAULT_LAYOUT_PREFERENCE]
+
+    first = supported_layouts_lists[0]
+    if all(layouts == first for layouts in supported_layouts_lists[1:]):
+        return list(first)
+
+    priorities: dict[KVCacheLayout, int] = defaultdict(int)
+    for preferred_layout, *_ in supported_layouts_lists:
+        priorities[preferred_layout] += 1
+    supported_layouts = set.intersection(*map(set, supported_layouts_lists))
+    candidates = sorted(
+        (layout for layout in KVCacheLayout if layout in supported_layouts),
+        key=lambda layout: priorities[layout],
+        reverse=True,
+    )
+    if not candidates:
+        raise ValueError(
+            "No KV cache layout satisfies every supported set: "
+            f"{list(map(_layout_names, supported_layouts_lists))}."
         )
-        return cache_layout
+    return candidates
 
-    # Format specified by the user.
-    cache_layout = envs.VLLM_KV_CACHE_LAYOUT
-    # When neither the user nor the override specified a layout, get default
-    if cache_layout is None:
-        cache_layout = get_kv_connector_cache_layout()
+
+def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
+    """Adopt a layout resolved elsewhere (the engine core) in this process."""
+    layout = _layout_from_name(layout_name)
+    existing = cache_config.kv_cache_layout
+    if existing is not None and existing != layout.name:
+        raise ValueError(
+            f"KV cache layout is already resolved to {existing}; "
+            f"cannot change it to {layout.name}."
+        )
+    cache_config.kv_cache_layout = layout.name
+
+
+def resolve_kv_cache_layout(
+    vllm_config: VllmConfig,
+    supported_layouts: list[list[str]],
+    kv_cache_specs: Iterable[KVCacheSpec] | None = None,
+) -> KVCacheLayout:
+    """Resolve one KV cache layout for the whole model.
+
+    Runs once in the engine core. Every worker reports the layouts its backends
+    support, most preferred first (``get_supported_kv_cache_layouts``); all
+    ranks run the same backends, so their lists must agree. Specs mixing HNC
+    shapes narrow the candidates to block-compact layouts. An explicit
+    ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
+    with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
+    connector's preference is used when compatible and dropped with a warning
+    otherwise. A layout already present on ``cache_config`` wins outright, and
+    the result is recorded there (see ``CacheConfig.kv_cache_layout``); it
+    reaches workers through the ``set_kv_cache_layout`` RPC and
+    ``KVCacheConfig.kv_cache_layout``.
+    """
+    cache_config = vllm_config.cache_config
+    if cache_config.kv_cache_layout is not None:
+        return cache_config.get_resolved_kv_cache_layout()
+
+    assert supported_layouts and all(supported_layouts), (
+        "No worker reported supported KV cache layouts."
+    )
+    assert all(names == supported_layouts[0] for names in supported_layouts[1:]), (
+        f"Workers disagree on supported KV cache layouts: {supported_layouts}."
+    )
+    candidates = [_layout_from_name(name) for name in supported_layouts[0]]
+
+    # A block-compact layout means the block is densely packed in memory, so any mix of
+    # specs can re-interpret HNC with different sizes as long as the total number of
+    # bytes is the same. If not block-compact, each spec must agree on HNC to alias
+    # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
+    hnc_shapes = {
+        (spec.num_heads, spec.num_states, spec.page_size_bytes)
+        for spec in kv_cache_specs or ()
+    }
+    if len(hnc_shapes) > 1:
+        candidates = [m for m in candidates if m.is_block_compact]
+        if not candidates:
+            raise ValueError(
+                "Specs with mixed HNC shapes need a block-compact layout, but "
+                f"none is in every supported set: {supported_layouts}."
+            )
+
+    if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
+        layout = _layout_from_name(requested)
+        if layout not in candidates:
+            raise ValueError(
+                f"VLLM_KV_CACHE_LAYOUT={requested} does not satisfy every "
+                f"supported set; valid layouts: {_layout_names(candidates)}."
+            )
+    elif (connector := get_kv_connector_cache_layout(vllm_config)) is not None:
+        layout = _layout_from_name(connector)
+        if layout not in candidates:
+            logger.warning_once(
+                f"KV connector cache layout {connector} does not satisfy every "
+                f"supported set; valid layouts: {_layout_names(candidates)}. "
+                f"Using {candidates[0].name} instead."
+            )
+            layout = candidates[0]
     else:
-        assert is_valid_kv_cache_layout(cache_layout)
-        logger.info_once(
-            "`VLLM_KV_CACHE_LAYOUT` environment variable "
-            "detected. Setting KV cache layout to %s.",
-            cache_layout,
-        )
-    return cache_layout
+        layout = candidates[0]
 
-
-def set_kv_cache_layout(cache_layout: KVCacheLayoutType | None):
-    global _KV_CACHE_LAYOUT_OVERRIDE
-    _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
-    get_kv_cache_layout.cache_clear()
+    logger.info_once("Using %s KV cache layout.", layout.name)
+    cache_config.kv_cache_layout = layout.name
+    return layout
 
 
 @dataclass
 class PerLayerParameters:
-    """
-    Currently, FlashInfer backend only support models in which all layers share
+    """Currently, FlashInfer backend only support models in which all layers share
     the same values for the following hyperparameters. Should not be used for
     trtllm-gen backend since it supports different values for the following
     hyperparameters.
@@ -207,11 +342,9 @@ class PerLayerParameters:
 def get_per_layer_parameters(
     vllm_config: VllmConfig, layer_names: list[str], cls_: type["AttentionImpl"]
 ) -> dict[str, PerLayerParameters]:
-    """
-    Scan layers in `layer_names` and determine some hyperparameters
+    """Scan layers in `layer_names` and determine some hyperparameters
     to use during `plan`.
     """
-
     layers = get_layers_from_vllm_config(
         vllm_config,
         AttentionLayerBase,  # type: ignore[type-abstract]
@@ -220,8 +353,8 @@ def get_per_layer_parameters(
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
-        impl = layer.impl
-        assert isinstance(impl, cls_)
+        impl = find_attention_impl_variant(layer.impl, cls_)
+        assert impl is not None
 
         # Infer hyperparameters from the attention layer
         window_size = getattr(impl, "sliding_window", None)
@@ -255,7 +388,10 @@ def get_num_attention_heads_from_layers(
     )
     if not attn_layers:
         return None
-    heads = {layer.impl.num_heads for layer in attn_layers.values()}
+    heads = {
+        cast(Any, getattr(layer, "impl", layer)).num_heads
+        for layer in attn_layers.values()
+    }
     assert len(heads) == 1, (
         f"All layers in one attention group must share num_heads; "
         f"got {heads} for {layer_names}."
@@ -266,8 +402,7 @@ def get_num_attention_heads_from_layers(
 def infer_global_hyperparameters(
     per_layer_params: dict[str, PerLayerParameters],
 ) -> PerLayerParameters:
-    """
-    Currently, FlashInfer backend other than trtllm-gen
+    """Currently, FlashInfer backend other than trtllm-gen
     only support models in which all layers share
     the same values for the following hyperparameters:
     - `window_left`
@@ -277,7 +412,6 @@ def infer_global_hyperparameters(
     So this function asserts that all layers share the same values for these
     hyperparameters and returns the global values.
     """
-
     assert len(per_layer_params) > 0, "No attention layers found in the model."
 
     param_sets = list(per_layer_params.values())
@@ -351,7 +485,9 @@ def make_local_attention_virtual_batches(
     block_size: int = 0,
 ) -> tuple[CommonAttentionMetadata, Callable[[torch.Tensor], torch.Tensor]]:
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
-    seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
+    with gpu_sync_allowed():
+        # TODO see https://github.com/vllm-project/vllm/pull/31852
+        seq_lens_np = common_attn_metadata.seq_lens.cpu().numpy()
     block_table = common_attn_metadata.block_table_tensor
     device = common_attn_metadata.query_start_loc.device
 
@@ -414,8 +550,6 @@ def make_local_attention_virtual_batches(
     #   seqlens_k_local = [4, 2, 4, 4, 4, 1, 4, 1]
     seqlens_k_local = np.full(cu_num_blocks[-1], attn_chunk_size, dtype=np.int32)
     seqlens_k_local[cu_num_blocks - 1] = tokens_in_last_block
-    num_computed_tokens_local = seqlens_k_local - seqlens_q_local
-
     k_seqstarts_absolute = np.repeat(seq_lens_np, local_blocks) - (
         rarange * attn_chunk_size + np.repeat(tokens_in_last_block, local_blocks)
     )
@@ -485,9 +619,7 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
-        seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
     ), make_block_table
 
 
@@ -499,8 +631,13 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         # Skip computing fast prefill path
         return common_attn_metadata
 
-    assert common_attn_metadata.logits_indices_padded is not None
-    assert common_attn_metadata.num_logits_indices is not None
+    if (
+        common_attn_metadata.logits_indices_padded is None
+        or common_attn_metadata.num_logits_indices is None
+    ):
+        # Fast prefill not armed for this step (e.g. cudagraph capture, or a
+        # pure-decode step): run the KV-sharing layers on the full batch.
+        return common_attn_metadata
 
     logits_indices_padded = common_attn_metadata.logits_indices_padded
     num_logits_indices = common_attn_metadata.num_logits_indices
@@ -539,8 +676,14 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-    decode_max_query_len = int(num_decode_tokens.max().item())
-    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+
+    # `num_decode_tokens` is a histogram over `logits_indices`, so its total is
+    # just how many there were -- already known as a Python int.
+    total_num_decode_tokens = num_logits_indices
+
+    # Largest per-request logits count.
+    decode_max_query_len = common_attn_metadata.max_logits_per_req
+    assert decode_max_query_len is not None
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
@@ -554,8 +697,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
         seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
-        _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
-        _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
 
@@ -564,8 +705,7 @@ def split_decodes_prefills_and_extends(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
 ) -> tuple[int, int, int, int, int, int]:
-    """
-    Assuming a reordered batch, finds the boundary between prefill and decode
+    """Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
 
     Args:
@@ -580,6 +720,7 @@ def split_decodes_prefills_and_extends(
         num_decode_tokens: The number of tokens in the decode requests.
         num_extend_tokens: The number of tokens in the extend requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
+
     """
     max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
@@ -638,8 +779,7 @@ def split_decodes_and_prefills(
     require_uniform: bool = False,
     treat_short_extends_as_decodes: bool = True,
 ) -> tuple[int, int, int, int]:
-    """
-    Assuming a reordered batch, finds the boundary between prefill and decode
+    """Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
 
     The batch is expected to be ordered as:
@@ -661,6 +801,7 @@ def split_decodes_and_prefills(
         num_prefills: The number of prefill requests.
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
+
     """
     max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
@@ -709,16 +850,17 @@ def split_decodes_and_prefills(
 def split_prefill_chunks(
     seq_lens_cpu: torch.Tensor, workspace_size: int, request_offset: int = 0
 ) -> list[tuple[int, int]]:
-    """
-    Split the prefill requests into chunks such that the total sequence length
+    """Split the prefill requests into chunks such that the total sequence length
     of each chunk is less than or equal to the workspace size.
 
     Args:
         seq_lens_cpu: The sequence lengths of the prefill requests on CPU.
         workspace_size: The maximum workspace size (in tokens) per chunk.
         request_offset: The offset to add to the request indices.
+
     Returns:
         A list of tuples of (reqs_start, reqs_end) representing chunk boundaries.
+
     """
     chunk_bounds = []
     i, n = 0, len(seq_lens_cpu)
@@ -738,8 +880,7 @@ def reorder_batch_to_split_decodes_and_prefills(
     scheduler_output: "SchedulerOutput",
     decode_threshold: int = 1,
 ) -> bool:
-    """
-    Reorders the batch to split into prefill and decode requests; places all
+    """Reorders the batch to split into prefill and decode requests; places all
     requests with <= decode_threshold tokens at the front of the batch.
 
     The batch is reordered into 4 regions:
@@ -750,6 +891,7 @@ def reorder_batch_to_split_decodes_and_prefills(
 
     Returns:
         True if the batch was modified, False otherwise.
+
     """
     num_reqs = len(input_batch.req_ids)
     num_scheduled_tokens = [
@@ -814,8 +956,7 @@ def reorder_batch_to_split_decodes_and_prefills(
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
-    """
-    Reshapes the query tensor for the specified batch size, so that
+    """Reshapes the query tensor for the specified batch size, so that
     it has shape (batch_size, seq_len, num_heads, head_dim).
     """
     assert query.dim() == 3, f"query must be 3D, got {query.dim()}D"
@@ -830,8 +971,7 @@ def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch
 
 
 def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tensor:
-    """
-    Reshapes the attention output tensor, so that
+    """Reshapes the attention output tensor, so that
     the batch_size and seq_len dimensions are combined.
     """
     if attn_output.dim() == 3:
@@ -840,19 +980,6 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
     assert attn_output.dim() == 4, f"attn_output must be 4D, got {attn_output.dim()}D"
     total_tokens = attn_output.shape[0] * attn_output.shape[1]
     return attn_output.view(total_tokens, attn_output.shape[2], attn_output.shape[3])
-
-
-def subclass_attention_metadata(
-    name_prefix: str,
-    metadata_cls: Any,
-    fields: list[tuple[str, Any, Any]],
-) -> Any:
-    """
-    Return a new subclass of `metadata_cls` with additional fields
-    """
-    name: str = name_prefix + metadata_cls.__name__  # type: ignore
-    Wrapped = make_dataclass(name, fields, bases=(metadata_cls,))
-    return Wrapped
 
 
 @runtime_checkable
@@ -894,6 +1021,9 @@ def create_fast_prefill_custom_backend(
                         common_attn_metadata.logits_indices_padded
                     )
                     self.num_logits_indices = common_attn_metadata.num_logits_indices
+                    self._attention_backend_variant = getattr(
+                        metadata, "_attention_backend_variant", 0
+                    )
 
             return KVSharingFastPrefillAttentionMetadata(metadata, common_attn_metadata)
 
@@ -958,7 +1088,7 @@ def compute_causal_conv1d_metadata(
 def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int = 1,
-    dcp_rank: int | None = None,
+    dcp_rank: int | torch.Tensor | None = None,
     cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     """While using dcp, kv_cache size stored on each rank may be different,
@@ -976,6 +1106,12 @@ def get_dcp_local_seq_lens(
             dcp_size,
         )
         seq_lens_tiled = seq_lens_i32.unsqueeze(-1)
+    elif isinstance(dcp_rank, torch.Tensor):
+        assert dcp_rank.dtype == torch.int32
+        assert dcp_rank.device == seq_lens.device
+        assert dcp_rank.numel() == 1
+        rank_offsets = dcp_rank
+        seq_lens_tiled = seq_lens_i32
     else:
         rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
         seq_lens_tiled = seq_lens_i32
@@ -1001,8 +1137,7 @@ def mamba_get_block_table_tensor(
     kv_cache_spec: KVCacheSpec,
     mamba_cache_mode: str,
 ) -> torch.Tensor:
-    """
-    Get the block table tensor for mamba kernels from the input
+    """Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
 
     - "all":   input  (#requests, cdiv(max_model_len, block_size)

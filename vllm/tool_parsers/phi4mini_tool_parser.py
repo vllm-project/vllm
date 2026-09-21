@@ -9,14 +9,14 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -28,8 +28,7 @@ logger = init_logger(__name__)
 
 
 class Phi4MiniJsonToolParser(ToolParser):
-    """
-    Tool call parser for phi-4-mini models intended for use with the
+    """Tool call parser for phi-4-mini models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
     Used when --enable-auto-tool-choice --tool-call-parser phi4_mini_json
@@ -55,9 +54,7 @@ class Phi4MiniJsonToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Extract the tool calls from a complete model response.
-        """
+        """Extract the tool calls from a complete model response."""
         logger.debug("Model output: %s", model_output)
 
         pattern = r"functools\[(.*?)\]"

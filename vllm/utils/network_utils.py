@@ -5,6 +5,7 @@ import ipaddress
 import os
 import socket
 import sys
+import tempfile
 import warnings
 from collections.abc import (
     Iterator,
@@ -131,6 +132,21 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
 
 
+def get_file_store_init_method() -> str:
+    return f"file://{tempfile.gettempdir()}/vllm_dist_{uuid4().hex}"
+
+
+def aiter_requires_tcp_store() -> bool:
+    """AITER custom all-reduce requires a pure-TCP default store (its IPC
+    metadata exchange asserts on ``TCPStore``); the file:// rendezvous yields a
+    ``FileStore`` and trips that assertion. Prefer the TCP rendezvous
+    (pre-#50999) for ROCm + AITER custom AR until AITER accepts FileStore.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return rocm_aiter_ops.is_custom_all_reduce_enabled()
+
+
 def get_tcp_uri(ip: str, port: int) -> str:
     if is_valid_ipv6_address(ip):
         return f"tcp://[{ip}]:{port}"
@@ -156,8 +172,7 @@ def _get_reserved_port_range() -> range:
 
 
 def get_open_port() -> int:
-    """
-    Get an open port for the vLLM process to listen on.
+    """Get an open port for the vLLM process to listen on.
     An edge case to handle, is when we run data parallel,
     we need to avoid ports that are potentially used by
     the data parallel master process.
@@ -282,6 +297,7 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
     Returns:
         A properly formatted ZMQ path string.
+
     """
     if port is None:
         return f"{scheme}://{host}"
@@ -301,7 +317,6 @@ def make_zmq_socket(
     router_handover: bool = False,
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
-
     mem = psutil.virtual_memory()
     socket = ctx.socket(socket_type)
 
@@ -361,8 +376,7 @@ def zmq_socket_ctx(
     identity: bytes | None = None,
     router_handover: bool = False,
 ) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
+    """Context manager for a ZMQ socket."""
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
         yield make_zmq_socket(

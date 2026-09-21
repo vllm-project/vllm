@@ -330,6 +330,12 @@ def test_rms_norm(
         and dtype == torch.bfloat16
         and quant_dtype == current_platform.fp8_dtype()
     )
+    allow_cuda_fp8_rounding_outliers = (
+        current_platform.is_cuda()
+        and group_size is None
+        and dtype == torch.bfloat16
+        and quant_dtype == current_platform.fp8_dtype()
+    )
 
     def scales_close(rtol: float, atol: float) -> bool:
         if torch.allclose(ref_scales, ops_scales, rtol=rtol, atol=atol):
@@ -358,8 +364,15 @@ def test_rms_norm(
                 # Valid gfx950 reduction trees can straddle an E4M3 boundary.
                 ok = fp8_allclose(ops_out, ref_out, rtol=0.125, atol=2e-3)
                 ok = ok and int(fp8_ulp_distance(ops_out, ref_out).max()) <= 1
+            elif allow_cuda_fp8_rounding_outliers:
+                # A valid BF16 reduction can cross an E4M3 boundary for
+                # isolated values.
+                ulp = fp8_ulp_distance(ref_out, ops_out)
+                max_outliers = ulp.numel() // 100_000 + 8
+                ok = int(ulp.max()) <= 1
+                ok = ok and int((ulp > 0).sum().item()) <= max_outliers
             else:
-                # CUDA (& non-bf16): compare dequantized values with relaxed tolerance.
+                # Compare dequantized values with relaxed tolerance.
                 if group_size is None:
                     a_deq = a * ref_scales.view(-1, 1)
                     b_deq = b * ops_scales.view(-1, 1)

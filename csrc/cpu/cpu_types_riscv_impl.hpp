@@ -427,7 +427,10 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
   explicit FP32Vec8(const float* ptr)
       : reg(RVVI(__riscv_vle32_v_f32, LMUL_256)(ptr, VEC_ELEM_NUM)) {};
   explicit FP32Vec8(fixed_fp32x8_t data) : reg(data) {};
-  explicit FP32Vec8(const FP32Vec8& data) : reg(data.reg) {};
+  // Not explicit: copy-initialisation (`auto v = pair.first`) in
+  // cpu_attn_vec.hpp requires a converting copy constructor, and every other
+  // CPU backend leaves this implicit.
+  FP32Vec8(const FP32Vec8& data) : reg(data.reg) {};
   explicit FP32Vec8(const FP16Vec8& v)
       : reg(RVVI(__riscv_vfwcvt_f_f_v_f32, LMUL_256)(v.reg, VEC_ELEM_NUM)) {};
   explicit FP32Vec8(fixed_fp16x8_t v)
@@ -628,7 +631,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(const FP32Vec8& data)
       : reg(RVVI4(__riscv_vcreate_v_f32, LMUL_256, _f32, LMUL_512)(
             data.reg, data.reg)) {};
-  explicit FP32Vec16(const FP32Vec16& data) : reg(data.reg) {};
+  // Not explicit: see FP32Vec8's copy constructor.
+  FP32Vec16(const FP32Vec16& data) : reg(data.reg) {};
   explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
     // Split into two 32-bit halves to avoid u64 @ LMUL_1024 (m8 on
     // VLEN=128 / m4 on VLEN=256), which causes heavy register spilling.
