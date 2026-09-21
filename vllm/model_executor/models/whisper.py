@@ -19,7 +19,7 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (
@@ -724,21 +724,18 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -770,6 +767,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
             hf_kwargs=dict(
                 hf_inputs.hf_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
+                truncation=True,
             )
         )
 

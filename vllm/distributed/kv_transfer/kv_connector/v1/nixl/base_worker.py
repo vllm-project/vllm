@@ -1306,6 +1306,8 @@ class NixlBaseConnectorWorker:
                             error=e,
                             remote_engine_id=eid,
                         )
+                        # Count once per handshake, regardless of waiting requests.
+                        self.xfer_stats.record_failed_handshake()
 
             fut.add_done_callback(done_callback)
             return fut
@@ -2811,13 +2813,17 @@ class NixlBaseConnectorWorker:
         done_sending.update(self._replicated_pcp_done_sending)
         self._replicated_pcp_done_sending.clear()
 
-        # Process receive failures reported by background threads.
+        # Process receive failures reported by background threads. Each
+        # producer already recorded a specific metric (handshake or
+        # notification), so only the failure bookkeeping runs here.
         while not self._failed_recv_reqs.empty():
             try:
                 req_id = self._failed_recv_reqs.get_nowait()
             except queue.Empty:
                 break
-            self._handle_failed_transfer(req_id, None, self._recv_failures)
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
 
         failed_recv_reqs: set[ReqId] = set()
         if self._recv_failures:
@@ -3059,10 +3065,27 @@ class NixlBaseConnectorWorker:
         return True
 
     def _handle_failed_transfer(
-        self, req_id: str, handle: int | None, failed_req_ids: set[str] | None = None
+        self,
+        req_id: str,
+        handle: int | None,
+        failed_req_ids: set[str] | None = None,
+        record_failed_transfer: bool = True,
     ) -> bool:
-        """Record a failure and release its handle, returning False to retain it."""
-        self.xfer_stats.record_failed_transfer()
+        """Record a failure and release its handle, returning False to retain it.
+
+        Args:
+            req_id: The request ID.
+            handle: The transfer handle.
+            failed_req_ids: Requests observed as failed; each stays listed
+                until it has no outstanding handles.
+            record_failed_transfer: Whether to count the failure toward the
+                transport-failure metric. Callers that already recorded a more
+                specific metric (eg KV expiry, reported separately from
+                transport failures) pass False.
+
+        """
+        if record_failed_transfer:
+            self.xfer_stats.record_failed_transfer()
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
@@ -3278,7 +3301,8 @@ class NixlBaseConnectorWorker:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
         if not any(decode_block_ids):
-            return [], prefill_block_ids
+            empty_regions: list[list[int]] = [[] for _ in decode_block_ids]
+            return empty_regions, empty_regions.copy()
 
         if num_computed_blocks is not None:
             assert num_remote_blocks is not None
