@@ -17,7 +17,6 @@ import torch
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
     MoEPrepareAndFinalizeNaiveDPEPModular,
-    MoEPrepareAndFinalizeNaiveDPEPMonolithic,
 )
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -48,12 +47,6 @@ class _DBOCommRegionMixin:
             yield
         finally:
             dbo_switch_to_compute_sync()
-
-
-class MoEPrepareAndFinalizeNaiveDPEPMonolithicROCmDBO(
-    _DBOCommRegionMixin, MoEPrepareAndFinalizeNaiveDPEPMonolithic
-):
-    """Monolithic naive DP/EP prepare/finalize with ROCm DBO comm overlap."""
 
 
 class MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO(
