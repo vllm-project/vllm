@@ -4,7 +4,6 @@
 import ctypes
 import dataclasses
 import enum
-import heapq
 import math
 from abc import ABC, abstractmethod
 from collections import deque
@@ -102,36 +101,12 @@ class FCFSQueue(JobQueue):
         return bool(self.q)
 
 
-class SJFHeapQueue(JobQueue):
-    """Min-heap queue that returns the shortest job (fewest tasks) first."""
-
-    def __init__(self, block_size: int):
-        super().__init__(block_size)
-        # heap entries: (num_tasks, job_id)
-        self._heap: list[tuple[int, JobId]] = []
-
-    def put(self, job_id: JobId, num_tasks: int):
-        heapq.heappush(self._heap, (num_tasks, job_id))
-
-    def get(self) -> JobId | None:
-        if not self._heap:
-            return None
-        _, job_id = heapq.heappop(self._heap)
-        return job_id
-
-    def clear(self):
-        self._heap.clear()
-
-    def maybe_has_work(self):
-        return bool(self._heap)
-
-
 # put tuples (job_id, num_tasks) as and when they arrive.
 # On get(), return the FCFS job in the minimum bucket
 class SJFBucketQueue(JobQueue):
     """
     Assign incoming jobs into buckets based on the size of the job.
-    When queried, determine if the current workload and multi-modal,
+    When queried, determine if the current workload is multi-modal,
     i.e. could be classified in to short / long jobs, and return a
     job from the short bucket.
     - Advantages of a bucket approach:
@@ -142,7 +117,7 @@ class SJFBucketQueue(JobQueue):
           the current workload. For example,
            - if only one bucket is filled. Then it is uni-modal
            - if contiguous buckets are filled, then it is somewhat bi-modal
-           - if 2 non contiguous buckets are filled, the it definitely
+           - if 2 non contiguous buckets are filled, it definitely
              bi-modal.
 
     Implementation:
@@ -254,6 +229,37 @@ class LoadQueue(JobQueue):
 StoreQueue = SJFBucketQueue
 
 
+def _batch_tasks(tasks: list[Any], n_threads: int) -> Iterator[list[Any]]:
+    """Split tasks evenly across n_threads, largest batches first."""
+    assert n_threads > 0
+    n_tasks = len(tasks)
+    q, r = divmod(n_tasks, n_threads)
+    batch_sizes = [q + 1 if i < r else q for i in range(n_threads)]
+    assert sum(batch_sizes) == n_tasks
+    start = 0
+    for bs in batch_sizes[: min(n_tasks, n_threads)]:
+        yield tasks[start : start + bs]
+        start += bs
+
+
+def make_batches(
+    state: Any,
+    tasks: list[Any],
+    make_batch_fn: Callable,
+    n_threads: int,
+) -> list[WorkItem]:
+    """Build work-queue-ready WorkItems from raw tasks.
+
+    Must be called outside the condition lock — list-slicing and
+    make_batch_fn closure construction are O(n_tasks) and must not
+    block other threads waiting on the condition variable.
+    """
+    return [
+        WorkItem(make_batch_fn=make_batch_fn, fn=make_batch_fn(b), tasks=b, state=state)
+        for b in _batch_tasks(tasks, n_threads)
+    ]
+
+
 class Scheduler:
     def __init__(
         self,
@@ -273,7 +279,7 @@ class Scheduler:
 
         _rw_threads = self._n_read_threads + self._n_write_threads
         if self._locality == Locality.LOCAL:
-            # Assume SSD
+            # Assume local SSD
             self._n_read_batch_threads = n_read_threads or _rw_threads
             # Limit concurrent SSD writes to 1 thread. When a NAND die is
             # busy with a write, any read to that die stalls until the write
@@ -311,7 +317,10 @@ class Scheduler:
         n_wake_threads = 0
         if is_load:
             self._load_job_q.put(job_id, n_tasks)
-            n_wake_threads = self._n_read_threads + self._n_write_threads
+            # wakeup of write_excl threads will be a no-op for loads.
+            # Wake up extra (n_write_excl_threads) threads to make sure
+            # the load is not left in the queue with threads sleeping.
+            n_wake_threads = self._n_write_excl_threads + self._n_read_batch_threads
         else:
             self._store_job_q.put(job_id, n_tasks)
             # Update running mean — used as the steal quanta for write threads.
@@ -319,8 +328,8 @@ class Scheduler:
             self._avg_store_tasks += (
                 n_tasks - self._avg_store_tasks
             ) / self._n_store_jobs
-            # Any awoken thread can do this store
-            n_wake_threads = self._n_write_batch_threads + self._n_write_excl_threads
+            # Any awoken up thread can do this store
+            n_wake_threads = self._n_write_batch_threads
 
         return n_wake_threads
 
@@ -331,48 +340,8 @@ class Scheduler:
             return has_store_work
         return has_load_work or has_store_work
 
-    def _batch_tasks(
-        self,
-        tasks: list[Any],
-        n_threads: int,
-    ) -> Iterator[list[Any]]:
-        """
-        Batch tasks so that the request's tasks are split evenly across the
-        n_threads.
-        """
-        assert n_threads > 0
-
-        n_tasks = len(tasks)
-        q, r = divmod(n_tasks, n_threads)
-        batch_sizes = [q + 1 if i < r else q for i in range(n_threads)]
-        assert sum(batch_sizes) == n_tasks
-        start = 0
-        for bs in batch_sizes[: min(n_tasks, n_threads)]:
-            yield tasks[start : start + bs]
-            start += bs
-
-    def make_batches(
-        self,
-        state: Any,
-        tasks: list[Any],
-        make_batch_fn: Callable,
-        is_load: bool,
-    ) -> list[WorkItem]:
-        """Build work-queue-ready items from raw tasks.
-
-        Must be called outside the condition lock — list-slicing and
-        make_batch_fn closure construction are O(n_tasks) and must not
-        block other threads waiting on the condition variable.
-        """
-        n_threads = (
-            self._n_read_batch_threads if is_load else self._n_write_batch_threads
-        )
-        return [
-            WorkItem(
-                make_batch_fn=make_batch_fn, fn=make_batch_fn(b), tasks=b, state=state
-            )
-            for b in self._batch_tasks(tasks, n_threads)
-        ]
+    def n_batch_threads(self, is_load: bool) -> int:
+        return self._n_read_batch_threads if is_load else self._n_write_batch_threads
 
     def _maybe_populate_work_q(self, work_q: deque, job_q: JobQueue):
         """Move the next job's pre-batched items into work_q.

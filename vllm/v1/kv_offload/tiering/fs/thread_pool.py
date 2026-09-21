@@ -22,6 +22,7 @@ from vllm.v1.kv_offload.tiering.fs.policy import (
     Scheduler,
     StoreQueue,
     ThreadMode,
+    make_batches,
 )
 
 logger = init_logger(__name__)
@@ -168,9 +169,8 @@ class DualQueueThreadPool:
         # Build batches before acquiring the lock: list-slicing and
         # make_batch_fn closures are O(n_tasks) and must not hold up
         # other threads waiting on the condition variable.
-        work_items = self._scheduler.make_batches(
-            state, task_lst, make_batch_fn, is_load
-        )
+        n_threads = self._scheduler.n_batch_threads(is_load)
+        work_items = make_batches(state, task_lst, make_batch_fn, n_threads)
         with self._condition:
             self._inflight_jobs += 1
             n_wake = self._scheduler.submit(job_id, work_items, n_tasks, is_load)
