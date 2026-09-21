@@ -39,13 +39,36 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class MultiModalProcessorCacheItem:
+class MultiModalCacheMissError(RuntimeError):
+    """Raised by the P1 receiver cache when items are requested with no data and
+    are not cached.
+
+    P0 (frontend) keeps a metadata-only shadow of P1 (engine) and sends
+    ``data=None`` on a shadow hit. The two caches are updated in different orders
+    across processes, so they can drift -- leaving P0 referencing items P1 has
+    evicted. Raising (instead of asserting) lets the engine return a retryable
+    response and have P0 drop the stale entries
+    (``BaseMultiModalProcessorCache.invalidate``) so the client resends the data.
+    Carries every drifted ``mm_hash`` in the request so P0 can drop them all in one
+    pass -- one retry then recovers the whole request, not one item per retry.
     """
-    The data to store inside `MultiModalProcessorOnlyCache`.
+
+    def __init__(self, mm_hashes: list[str]) -> None:
+        super().__init__(
+            f"Multi-modal items {mm_hashes} are not in the receiver (P1) cache and "
+            "no data was provided to recompute them (P0/P1 cache drift); the request "
+            "should be retried with the multi-modal data attached."
+        )
+        self.mm_hashes = mm_hashes
+
+
+class MultiModalProcessorCacheItem:
+    """The data to store inside `MultiModalProcessorOnlyCache`.
 
     Args:
         item: The processed tensor data corresponding to a multi-modal item.
         prompt_updates: The prompt updates corresponding to `item`.
+
     """
 
     def __init__(
@@ -60,8 +83,7 @@ class MultiModalProcessorCacheItem:
 
 
 class MultiModalProcessorCacheItemMetadata:
-    """
-    The metadata to store inside `MultiModalProcessorSenderCache`.
+    """The metadata to store inside `MultiModalProcessorSenderCache`.
 
     Args:
         item: The processed tensor data corresponding to a multi-modal item.
@@ -71,6 +93,7 @@ class MultiModalProcessorCacheItemMetadata:
         prompt_updates: The prompt updates corresponding to `item`.
             This needs to stay on P0 because for some models, they are
             dependent on the processed tensor data (cached on P1).
+
     """
 
     def __init__(
@@ -140,8 +163,7 @@ class MultiModalCache:
 
     @classmethod
     def get_item_complexity(cls, value: MultiModalCacheValue) -> int:
-        """
-        Get the number of leaf elements in a multi-modal cache value.
+        """Get the number of leaf elements in a multi-modal cache value.
 
         This provides a measure of structural complexity that can be useful
         for debugging cache performance and understanding data patterns.
@@ -151,6 +173,7 @@ class MultiModalCache:
 
         Returns:
             The number of leaf elements in the nested structure.
+
         """
         return json_count_leaves(value)
 
@@ -173,8 +196,7 @@ _O = TypeVar("_O", covariant=True)
 
 
 class BaseMultiModalCache(ABC, Generic[_I, _O]):
-    """
-    Abstract base class to read/write multi-modal items from cache.
+    """Abstract base class to read/write multi-modal items from cache.
 
     The idea of multi-modal caching is based on having a client and server
     where the client executes in the frontend process (=P0) and
@@ -203,8 +225,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         mm_item: _I,
         mm_hash: str,
     ) -> _O:
-        """
-        Possibly update a multi-modal item based on whether it is
+        """Possibly update a multi-modal item based on whether it is
         in the underlying cache.
 
         This update is done out-of-place and updates the cache eviction order.
@@ -215,6 +236,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
 
         Returns:
             The update multi-modal item.
+
         """
         raise NotImplementedError
 
@@ -223,8 +245,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         mm_items: Sequence[_I],
         mm_hashes: list[str],
     ) -> list[_O]:
-        """
-        Possibly update a sequence of multi-modal items based on whether they
+        """Possibly update a sequence of multi-modal items based on whether they
         are in the underlying cache.
 
         This update is done out-of-place and updates the cache eviction order.
@@ -235,6 +256,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
 
         Returns:
             A new list of updated multi-modal items.
+
         """
         assert len(mm_items) == len(mm_hashes)
 
@@ -242,6 +264,43 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
             self.get_and_update_item(mm_item, mm_hash)
             for mm_item, mm_hash in zip(mm_items, mm_hashes)
         ]
+
+    def cache_if_fits(
+        self,
+        cache: LRUCache[str, _V],
+        key: str,
+        value: _V,
+    ) -> bool:
+        """Insert `value` if it fits in `cache`.
+
+        `cachetools.Cache` raises `ValueError("value too large")` when a
+        single item exceeds `maxsize`. An item bigger than the whole
+        processor cache can never be a hit, so skip the insert and serve it
+        uncached instead of aborting engine startup.
+
+        LRU P0/P1 caches call this so they stay mirrored. SHM subclasses do
+        not use it; they already skip oversize items in `put()`.
+
+        Args:
+            cache: The LRU cache to update.
+            key: Cache key (typically the multi-modal item hash).
+            value: Value to insert.
+
+        Returns:
+            `True` if the item was cached, otherwise `False`.
+
+        """
+        if cache.put_if_fits(key, value):
+            return True
+        logger.warning_once(
+            "Skipping multi-modal processor cache insert for an item of "
+            "%s GiB because it exceeds --mm-processor-cache-gb=%s. "
+            "The item will be processed uncached; increase "
+            "--mm-processor-cache-gb to cache items of this size.",
+            format_gib(int(cache.getsizeof(value))),
+            format_gib(int(cache.maxsize)),
+        )
+        return False
 
     @abstractmethod
     def clear_cache(self) -> None:
@@ -266,8 +325,7 @@ class BaseMultiModalProcessorCache(
 
     @abstractmethod
     def is_cached_item(self, mm_hash: str) -> bool:
-        """
-        Check whether a multi-modal item is
+        """Check whether a multi-modal item is
         in the underlying cache.
 
         This **DOES NOT** update the cache eviction order.
@@ -277,12 +335,12 @@ class BaseMultiModalProcessorCache(
 
         Returns:
             `True` if the item is cached, otherwise `False`.
+
         """
         raise NotImplementedError
 
     def is_cached(self, mm_hashes: list[str]) -> list[bool]:
-        """
-        Check whether a sequence of multi-modal items are
+        """Check whether a sequence of multi-modal items are
         in the underlying cache.
 
         This **DOES NOT** update the cache eviction order.
@@ -292,8 +350,16 @@ class BaseMultiModalProcessorCache(
 
         Returns:
             For each item, `True` if the item is cached, otherwise `False`.
+
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
+
+    def invalidate(self, mm_hash: str) -> None:
+        """Drop ``mm_hash`` from this P0 shadow cache to recover from P0/P1 drift.
+
+        No-op by default; shadow caches that can drift from P1 override this.
+        """
+        pass
 
     def close(self) -> None:
         """Close the underlying cache, if needed."""
@@ -301,31 +367,30 @@ class BaseMultiModalProcessorCache(
 
     @abstractmethod
     def touch_sender_cache_item(self, mm_hash: str) -> None:
-        """
-        Update the cache eviction order for a multi-modal item.
+        """Update the cache eviction order for a multi-modal item.
 
         This is used to touch the item in the cache without changing
         its value.
 
         Args:
             mm_hash: The hash of the multi-modal item.
+
         """
         raise NotImplementedError
 
     @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
-        """
-        Get (and reset) the multi-modal cache stats.
+        """Get (and reset) the multi-modal cache stats.
 
         Returns:
             The current multi-modal caching stats.
+
         """
         raise NotImplementedError
 
 
 class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
-    """
-    The cache which is used on P0 when IPC caching is disabled.
+    """The cache which is used on P0 when IPC caching is disabled.
 
     How to update each item:
 
@@ -359,8 +424,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalProcessorCacheItem(*mm_item)
-
+        self.cache_if_fits(self._cache, mm_hash, MultiModalProcessorCacheItem(*mm_item))
         return mm_item
 
     @override
@@ -377,8 +441,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
 
 class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
-    """
-    The cache which is used on P0 when IPC caching is enabled.
+    """The cache which is used on P0 when IPC caching is enabled.
 
     How to update each item:
 
@@ -417,8 +480,9 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalProcessorCacheItemMetadata(*mm_item)
-
+        self.cache_if_fits(
+            self._cache, mm_hash, MultiModalProcessorCacheItemMetadata(*mm_item)
+        )
         return mm_item
 
     @override
@@ -433,10 +497,15 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         return self._cache.stat(delta=delta)
 
+    @override
+    def invalidate(self, mm_hash: str) -> None:
+        # Drop our stale shadow entry so the next request for this hash re-sends the
+        # data and repopulates P1 (see MultiModalCacheMissError).
+        self._cache.pop(mm_hash, None)
+
 
 class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
-    """
-    The cache which is used on P0 when IPC caching is enabled.
+    """The cache which is used on P0 when IPC caching is enabled.
 
     How to update each item:
 
@@ -590,8 +659,7 @@ class BaseMultiModalReceiverCache(
         self,
         mm_features: list["MultiModalFeatureSpec"],
     ) -> list["MultiModalFeatureSpec"]:
-        """
-        Update multimodal features with cached encoder outputs.
+        """Update multimodal features with cached encoder outputs.
         Touch all identifier at first before update to avoid
         item in updated list evict during update.
 
@@ -602,9 +670,19 @@ class BaseMultiModalReceiverCache(
             cache_key = feature.mm_hash or feature.identifier
             self.touch_receiver_cache_item(cache_key, feature.data)
 
+        missing_mm_hashes: list[str] = []
         for feature in mm_features:
             cache_key = feature.mm_hash or feature.identifier
-            feature.data = self.get_and_update_item(feature.data, cache_key)
+            try:
+                feature.data = self.get_and_update_item(feature.data, cache_key)
+            except MultiModalCacheMissError as e:
+                # Collect every drifted hash in this request before raising, so the
+                # engine can have P0 invalidate them all at once -- otherwise a
+                # request with k drifted items needs k client retries (each resend
+                # only un-shadows the one reported hash).
+                missing_mm_hashes.extend(e.mm_hashes)
+        if missing_mm_hashes:
+            raise MultiModalCacheMissError(missing_mm_hashes)
         return mm_features
 
     @abstractmethod
@@ -613,8 +691,7 @@ class BaseMultiModalReceiverCache(
         mm_hash: str,
         mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
-        """
-        Update the cache eviction order for a multi-modal item.
+        """Update the cache eviction order for a multi-modal item.
 
         This is used to touch the item in the cache without changing
         its value.
@@ -623,13 +700,13 @@ class BaseMultiModalReceiverCache(
             mm_hash: The hash of the multi-modal item.
             mm_item: The multi-modal item itself. This is optional and
                 may not be needed by some cache implementations.
+
         """
         raise NotImplementedError
 
 
 class MultiModalReceiverCache(BaseMultiModalReceiverCache):
-    """
-    The cache which is used on P1 when IPC caching is enabled.
+    """The cache which is used on P1 when IPC caching is enabled.
 
     How to update each item:
 
@@ -657,9 +734,13 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return cached_item
 
-        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+        # No data and not cached here: P0 sent data=None trusting its shadow, but
+        # the P0/P1 caches have drifted. Raise a retryable error (not assert) so the
+        # engine can have P0 drop the stale entry and the client resend the data.
+        if mm_item is None:
+            raise MultiModalCacheMissError([mm_hash])
 
-        self._cache[mm_hash] = mm_item
+        self.cache_if_fits(self._cache, mm_hash, mm_item)
         return mm_item
 
     @override
@@ -676,8 +757,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
 
 
 class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
-    """
-    The cache which is used on P1 Worker Process when IPC caching is enabled.
+    """The cache which is used on P1 Worker Process when IPC caching is enabled.
 
     How to update each item:
 
@@ -707,6 +787,18 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
             serde_class=MsgpackSerde,
             reader_lock=shared_worker_lock,
         )
+
+    @override
+    def get_and_update_features(
+        self, mm_features: list["MultiModalFeatureSpec"]
+    ) -> list["MultiModalFeatureSpec"]:
+        # strip_covered_mm_data preserves address items, so None here represents
+        # a stripped uncached payload and has no SHM reference to acknowledge.
+        features_with_data = [
+            feature for feature in mm_features if feature.data is not None
+        ]
+        super().get_and_update_features(features_with_data)
+        return mm_features
 
     @override
     def get_and_update_item(

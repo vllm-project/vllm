@@ -9,10 +9,10 @@
 
 #include "torch_utils.h"
 
-#include "../cub_helpers.h"
+#include "cub_helpers.h"
 #include "../core/batch_invariant.hpp"
 #include "../quantization/w8a8/fp8/common.cuh"
-#include "../type_convert.cuh"
+#include "type_convert.cuh"
 #include "dispatch_utils.h"
 #include "quantization/vectorization_utils.cuh"
 
@@ -66,8 +66,13 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      // Multiply in weight's native dtype to match rms_norm_kernel.
-      scalar_t out_norm = static_cast<scalar_t>(x * s_variance) * src2.val[j];
+      float w = static_cast<float>(src2.val[j]);
+      // Round normalized result through scalar_t to match the precision of the
+      // unfused composite (rms_norm writes scalar_t, then
+      // static_scaled_fp8_quant re-loads it as float before FP8 conversion).
+      // Without this round, the fused path is strictly more accurate and
+      // disagrees with the composite at exact E4M3 quantization tie boundaries.
+      scalar_t out_norm = static_cast<scalar_t>(x * s_variance * w);
       out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
           scaled_fp8_conversion<true, fp8_type>(static_cast<float>(out_norm),
                                                 scale_inv);
@@ -137,8 +142,12 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 #pragma unroll
     for (int i = 0; i < width; ++i) {
       float x = Converter::convert(res.data[i]);
-      // Multiply in weight's native dtype to match fused_add_rms_norm_kernel.
-      HipT out_norm_h = Converter::convert(x * s_variance) * w.data[i];
+      float wf = Converter::convert(w.data[i]);
+      // See note in rms_norm_static_fp8_quant_kernel: round through scalar_t
+      // to match the unfused composite path at FP8 boundaries. We use the
+      // backend's hip_type for the intermediate since c10::Half/BFloat16 has
+      // ambiguous conversions on CUDA and no implicit conversion on ROCm.
+      HipT out_norm_h = Converter::convert(x * s_variance * wf);
       out[id * width + i] = scaled_fp8_conversion<true, fp8_type>(
           Converter::convert(out_norm_h), scale_inv);
     }
@@ -183,8 +192,10 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
-    // Multiply in weight's native dtype to match fused_add_rms_norm_kernel.
-    scalar_t out_norm = static_cast<scalar_t>(x * s_variance) * weight[idx];
+    float w = (float)weight[idx];
+    // See note in rms_norm_static_fp8_quant_kernel: round through scalar_t
+    // to match the unfused composite path at FP8 boundaries.
+    scalar_t out_norm = static_cast<scalar_t>(x * s_variance * w);
     out[blockIdx.x * hidden_size + idx] = scaled_fp8_conversion<true, fp8_type>(
         static_cast<float>(out_norm), scale_inv);
   }
@@ -204,7 +215,9 @@ void rms_norm_static_fp8_quant(
   int num_tokens = input.numel() / hidden_size;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  const int max_block_size =
+      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 grid(num_tokens);
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -268,7 +281,9 @@ void fused_add_rms_norm_static_fp8_quant(
      When num_tokens is large, a smaller block size allows
      for increased block occupancy on CUs and better latency
      hiding on global mem ops. */
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  const int max_block_size =
+      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 block(std::min(hidden_size, max_block_size));
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -285,7 +300,6 @@ void fused_add_rms_norm_static_fp8_quant(
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
   bool ptrs_are_aligned =
       inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
-  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   if (ptrs_are_aligned && hidden_size % 8 == 0 && input_stride % 8 == 0 &&
       !batch_invariant_launch) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);

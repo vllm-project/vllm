@@ -19,7 +19,7 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/util/packed_stride.hpp"
 
-#include "core/math.hpp"
+#include "libtorch_stable/core/math.hpp"
 #include "libtorch_stable/cutlass_extensions/common.hpp"
 // clang-format on
 
@@ -37,6 +37,7 @@ void cutlass_gemm_caller(
     typename GemmKernel::MainloopArguments mainloop_args,
     typename GemmKernel::EpilogueArguments epilogue_args,
     typename GemmKernel::TileSchedulerArguments scheduler = {}) {
+  const torch::stable::accelerator::DeviceGuard device_guard(device.index());
   cutlass::KernelHardwareInfo hw_info;
   typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
                                       prob_shape,

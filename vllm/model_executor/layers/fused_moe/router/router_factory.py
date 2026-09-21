@@ -9,10 +9,12 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
+    get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
     AiterSharedRoutedFusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.router.cpu_router import CPURouter
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
@@ -34,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
+from vllm.platforms import current_platform
 
 
 def create_fused_moe_router(
@@ -47,6 +50,7 @@ def create_fused_moe_router(
     topk_group: int | None = None,
     scoring_func: str = "softmax",
     num_fused_shared_experts: int = 0,
+    shared_expert_weight: float = 1.0,
     # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
@@ -58,15 +62,19 @@ def create_fused_moe_router(
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    # Deepseek V4 vision routing bias parameters
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
+    skip_padding: bool = False,
 ) -> FusedMoERouter:
-    """
-    Factory function to create the appropriate FusedMoERouter subclass based on
+    """Factory function to create the appropriate FusedMoERouter subclass based on
     the provided parameters.
 
     The selection logic follows this priority order:
     1. RoutingSimulatorRouter - if VLLM_MOE_ROUTING_SIMULATION_STRATEGY env var is set
     2. ZeroExpertRouter - if zero_expert_type is not None
-    3. GroupedTopKRouter - if use_grouped_topk is True
+    3. GroupedTopKRouter - if use_grouped_topk is True and the grouping is not
+       degenerate (at most one group, with topk_group <= 1)
     4. CustomRoutingRouter - if custom_routing_function is not None
     5. FusedTopKBiasRouter - if e_score_correction_bias is not None
     6. AiterSharedRoutedFusedMoERouter - if num_fused_shared_experts > 0
@@ -84,6 +92,7 @@ def create_fused_moe_router(
         topk_group: Top-k within each group (for grouped routing)
         scoring_func: Scoring function to use ("softmax" or "sigmoid")
         num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
+        skip_padding: Whether to invalidate routes for padding rows
 
     Grouped topk and fused topk bias arguments:
         routed_scaling_factor: Scaling factor for routed weights
@@ -106,8 +115,8 @@ def create_fused_moe_router(
 
     Returns:
         An instance of the appropriate FusedMoERouter subclass
-    """
 
+    """
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
         return RoutingSimulatorRouter(
@@ -135,6 +144,26 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
         )
 
+    if current_platform.is_cpu():
+        # CPURouter covers every routing scheme CPU MoE experts support
+        # (plain softmax, grouped topk, custom routing functions, and
+        # DeepSeek V4's sqrtsoftplus/hash routing) in a single class, so it
+        # takes priority over the scheme-specific routers below.
+        return CPURouter(
+            top_k=top_k,
+            global_num_experts=global_num_experts,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            renormalize=renormalize,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            custom_routing_function=custom_routing_function,
+            hash_indices_table=hash_indices_table,
+            eplb_state=eplb_state,
+        )
+
     if use_grouped_topk:
         assert custom_routing_function is None
         if num_expert_group is None or topk_group is None:
@@ -142,30 +171,49 @@ def create_fused_moe_router(
                 "num_expert_group and topk_group must be provided when "
                 "use_grouped_topk is True"
             )
-        grouped_topk_router = GroupedTopKRouter(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            renormalize=renormalize,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=num_fused_shared_experts,
-        )
-        if (
-            grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
-            or num_expert_group > 1
-            or topk_group > 1
-        ):
-            return grouped_topk_router
 
-        # If routing_method for GroupedTopKRouter is Unspecified and there is only
-        # one group, fallback to standard top-k routing
-        use_grouped_topk = False
-        num_expert_group = None
-        topk_group = None
+        # For topk_group <= 1, grouped implementation is pure overhead.
+        degenerate_grouping = num_expert_group <= 1 and topk_group <= 1
+        # FusedTopKRouter cannot apply routed_scaling_factor, FusedTopKBiasRouter can.
+        scaling_handled_downstream = (
+            routed_scaling_factor == 1.0 or e_score_correction_bias is not None
+        )
+
+        # Degenerating must not change the advertised routing method, which drives
+        # kernel selection. num_expert_group only affects it for biased routing.
+        def advertised_routing_method(groups: int | None) -> RoutingMethodType:
+            return get_routing_method_type(
+                scoring_func=scoring_func,
+                top_k=top_k,
+                renormalize=renormalize,
+                num_expert_group=groups,
+                has_e_score_bias=e_score_correction_bias is not None,
+                routed_scaling_factor=routed_scaling_factor,
+            )
+
+        routing_method_preserved = advertised_routing_method(
+            num_expert_group
+        ) == advertised_routing_method(None)
+
+        if not (
+            degenerate_grouping
+            and scaling_handled_downstream
+            and routing_method_preserved
+        ):
+            return GroupedTopKRouter(
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                eplb_state=eplb_state,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
+                e_score_correction_bias=e_score_correction_bias,
+                num_fused_shared_experts=num_fused_shared_experts,
+                skip_padding=skip_padding,
+            )
+        # Otherwise fall through to the non-grouped chain below.
 
     if custom_routing_function is not None:
         return CustomRoutingRouter(
@@ -188,6 +236,10 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             scoring_func=scoring_func,
             hash_indices_table=hash_indices_table,
+            num_fused_shared_experts=num_fused_shared_experts,
+            shared_expert_weight=shared_expert_weight,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
         )
 
     if (

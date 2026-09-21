@@ -4,15 +4,14 @@ import torch
 from mistral_common.protocol.instruct.chunk import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
-from transformers import BatchFeature, ProcessorMixin, TensorType
+from transformers import BatchFeature, ImageProcessingMixin, ProcessorMixin, TensorType
 from transformers.image_utils import ImageInput
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
 
-class MistralCommonImageProcessor:
-    """
-    Provide a HF-compatible interface for
+class MistralCommonImageProcessor(ImageProcessingMixin):
+    """Provide a HF-compatible interface for
     `mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
     """
 

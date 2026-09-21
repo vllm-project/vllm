@@ -15,7 +15,8 @@ from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.platforms import current_platform
-from vllm.utils.mem_utils import KiB_bytes, MiB_bytes, format_mib
+from vllm.utils.mem_constants import KiB_bytes, MiB_bytes
+from vllm.utils.mem_utils import format_mib
 
 MODEL_NAME = "Qwen/Qwen3-VL-4B-Instruct"
 RANDOM_PREFIX_LEN = 100
@@ -25,7 +26,7 @@ TEST_IMAGE_NAMES = [
 ]
 MAX_MODEL_LEN = 8192
 REQUESTS_PER_ROUND = 4
-WARMUP_ROUNDS = 1
+WARMUP_ROUNDS = 2
 MEASURED_ROUNDS = 16
 GPU_GROWTH_THRESHOLD_MIB = 0
 CPU_PEAK_GROWTH_THRESHOLD_MIB = 0
@@ -83,7 +84,7 @@ def _ru_maxrss_bytes() -> int | None:
 
 def _gpu_used_bytes() -> int:
     torch.accelerator.synchronize()
-    free_bytes, total_bytes = current_platform.mem_get_info()
+    free_bytes, total_bytes = torch.accelerator.get_memory_info()
     return int(total_bytes - free_bytes)
 
 

@@ -3,18 +3,125 @@
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
+    backend_to_kernel_cls,
     select_unquantized_moe_backend,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 
 skipif_not_cuda_rocm = pytest.mark.skipif(
     not (current_platform.is_cuda() or current_platform.is_rocm()),
     reason="Only supported on CUDA/ROCm platforms.",
 )
+
+
+@pytest.mark.parametrize(
+    ("amx_supported", "in_dtype", "expect_amx_kernel"),
+    [
+        (True, torch.bfloat16, True),
+        (False, torch.bfloat16, False),
+        (True, torch.float16, False),
+    ],
+)
+def test_x86_cpu_unquantized_kernel_selection(
+    amx_supported: bool,
+    in_dtype: torch.dtype,
+    expect_amx_kernel: bool,
+):
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUUnquantizedExperts,
+        X86CPUUnquantizedExperts,
+    )
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(
+            current_platform,
+            "get_cpu_architecture",
+            return_value=CpuArchEnum.X86,
+        ),
+        patch("torch.cpu._is_amx_tile_supported", return_value=amx_supported),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128,
+            intermediate_size=128,
+            in_dtype=in_dtype,
+        )
+        kernel_cls = next(
+            cls
+            for cls in backend_to_kernel_cls(UnquantizedMoeBackend.CPU)
+            if cls.is_supported_config(
+                cls,
+                moe_config,
+                None,
+                None,
+                CPUUnquantizedExperts.activation_format(),
+            )[0]
+        )
+
+    expected_kernel_cls = (
+        X86CPUUnquantizedExperts if expect_amx_kernel else CPUUnquantizedExperts
+    )
+    assert kernel_cls is expected_kernel_cls
+
+
+@pytest.mark.parametrize(
+    ("platform", "in_dtype", "expect_arm_kernel"),
+    [
+        ("linux", torch.bfloat16, True),
+        ("linux", torch.float16, False),
+        ("darwin", torch.bfloat16, False),
+    ],
+)
+def test_arm_cpu_unquantized_kernel_selection(
+    platform: str,
+    in_dtype: torch.dtype,
+    expect_arm_kernel: bool,
+):
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        ArmCPUUnquantizedExperts,
+        CPUUnquantizedExperts,
+    )
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(
+            current_platform,
+            "get_cpu_architecture",
+            return_value=CpuArchEnum.ARM,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.experts.cpu_moe.sys.platform",
+            platform,
+        ),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128,
+            intermediate_size=128,
+            in_dtype=in_dtype,
+        )
+        kernel_cls = next(
+            cls
+            for cls in backend_to_kernel_cls(UnquantizedMoeBackend.CPU)
+            if cls.is_supported_config(
+                cls,
+                moe_config,
+                None,
+                None,
+                CPUUnquantizedExperts.activation_format(),
+            )[0]
+        )
+
+    expected_kernel_cls = (
+        ArmCPUUnquantizedExperts if expect_arm_kernel else CPUUnquantizedExperts
+    )
+    assert kernel_cls is expected_kernel_cls
 
 
 @pytest.mark.parametrize(
@@ -68,14 +175,20 @@ def test_select_default_backend_by_platform(
         patch.object(current_platform, "is_out_of_tree", return_value=False),
         patch.object(current_platform, platform_method, return_value=True),
     ):
-        moe_config = make_dummy_moe_config()
+        # CPU's grouped-gemm kernels require hidden/intermediate sizes
+        # aligned to 32; the size-1 defaults only work for backends that
+        # don't check shapes at selection time.
+        moe_config = (
+            make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+            if expected_backend == UnquantizedMoeBackend.CPU
+            else make_dummy_moe_config()
+        )
         selected_backend, expert_cls = select_unquantized_moe_backend(
             moe_config=moe_config
         )
 
         assert selected_backend == expected_backend
         if expected_backend in [
-            UnquantizedMoeBackend.CPU,
             UnquantizedMoeBackend.OOT,
             UnquantizedMoeBackend.TPU,
         ]:
@@ -117,13 +230,74 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
 
 
 @patch(
-    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16Experts.is_supported_config",
+    "vllm.utils.flashinfer.has_flashinfer",
+    return_value=False,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops."
+    "is_fused_moe_enabled",
+    return_value=True,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops."
+    "is_rdna_aiter_enabled",
+    return_value=False,
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_select_rocm_aiter_backend_non_gated_activation_falls_back(
+    mock_rdna_disabled, mock_aiter_enabled, mock_has_flashinfer, monkeypatch
+):
+    """Test ROCm backend selection falls back (not raises) for non-gated MoE."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
+    ) as mock_platform:
+        mock_platform.is_cuda.return_value = False
+        mock_platform.is_rocm.return_value = True
+        mock_platform.is_cpu.return_value = False
+        mock_platform.is_xpu.return_value = False
+        mock_platform.is_tpu.return_value = False
+        mock_platform.is_out_of_tree.return_value = False
+
+        moe_config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+        assert moe_config.is_act_and_mul is False
+
+        selected_backend, expert_cls = select_unquantized_moe_backend(
+            moe_config=moe_config,
+        )
+
+        assert selected_backend != UnquantizedMoeBackend.AITER
+        assert expert_cls is not None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_explicit_aiter_backend_non_gated_activation_still_raises():
+    """Explicit `--moe-backend aiter` still raises for non-gated MoE;
+    only the env-var opt-in path falls back."""
+    moe_config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+    moe_config.moe_backend = "aiter"  # explicit pin, not "auto"
+    assert moe_config.is_act_and_mul is False
+
+    with pytest.raises(ValueError):
+        select_unquantized_moe_backend(moe_config=moe_config)
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
     return_value=(True, None),
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
 )
-def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
+def test_select_cuda_flashinfer_trtllm_backend(
+    mock_is_supported_trtllm_monolithic,
+):
     """Test CUDA backend selection when FlashInfer TRTLLM is available and enabled."""
     with (
         patch.object(current_platform, "is_cuda", return_value=True),
@@ -146,6 +320,162 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
 
         assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
         assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsMonolithic"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
+    return_value=(False, "monolithic unsupported"),
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsModular.is_supported_config",
+    return_value=(True, None),
+)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
+)
+def test_select_cuda_flashinfer_trtllm_modular_backend(
+    mock_is_supported_trtllm_modular,
+    mock_is_supported_trtllm_monolithic,
+):
+    """Test CUDA backend selection falls back to FlashInfer TRTLLM modular."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(current_platform, "has_device_capability", return_value=True),
+    ):
+        moe_config = make_dummy_moe_config()
+        moe_config.moe_backend = "flashinfer_trtllm"
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.use_dp = False
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+@pytest.mark.parametrize(
+    "all2all_backend",
+    [
+        "mori_high_throughput",
+        "mori_low_latency",
+        "flashinfer_nvlink_two_sided",
+        "flashinfer_nvlink_one_sided",
+    ],
+)
+def test_select_cuda_flashinfer_trtllm_modular_for_standard_all2all(
+    mock_supports_current_device,
+    all2all_backend,
+):
+    """Test non-AG/RS standard-format all2all backends select modular BF16."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
+    ):
+        moe_config = make_dummy_moe_config(num_experts=4, num_local_experts=2)
+        moe_config.moe_backend = "flashinfer_trtllm"
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.dp_size = 2
+        moe_config.moe_parallel_config.ep_size = 2
+        moe_config.moe_parallel_config.all2all_backend = all2all_backend
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+def test_select_cuda_deepep_ht_falls_back_from_trtllm(
+    mock_supports_current_device,
+):
+    """Test DeepEP HT avoids the unsupported BF16 TRTLLM modular path."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
+    ):
+        moe_config = make_dummy_moe_config(num_experts=4, num_local_experts=2)
+        moe_config.moe_backend = "auto"
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.dp_size = 2
+        moe_config.moe_parallel_config.ep_size = 2
+        moe_config.moe_parallel_config.all2all_backend = "deepep_high_throughput"
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.TRITON
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TritonExperts"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+def test_select_cuda_flashinfer_trtllm_ag_rs_uses_monolithic(
+    mock_supports_current_device,
+):
+    """Test AG/RS stays on BF16 TRTLLM monolithic when TRTLLM is supported."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
+    ):
+        moe_config = make_dummy_moe_config(num_experts=4, num_local_experts=2)
+        moe_config.moe_backend = "flashinfer_trtllm"
+        moe_config.routing_method = RoutingMethodType.Renormalize
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.dp_size = 2
+        moe_config.moe_parallel_config.ep_size = 2
+        moe_config.moe_parallel_config.all2all_backend = "allgather_reducescatter"
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsMonolithic"
 
 
 @patch(
@@ -153,7 +483,11 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
     return_value=True,
 )
 @patch(
-    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16Experts.is_supported_config",
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
+    return_value=(False, None),
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsModular.is_supported_config",
     return_value=(False, None),
 )
 @patch(
@@ -164,9 +498,10 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
     not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
 )
 def test_select_cuda_flashinfer_cutlass_backend(
-    mock_has_flashinfer,
-    mock_is_supported_trtllm,
     mock_is_supported_cutlass,
+    mock_is_supported_trtllm_modular,
+    mock_is_supported_trtllm_monolithic,
+    mock_has_flashinfer,
 ):
     """Test CUDA backend selection when FlashInfer TRTLLM is not available
     and FlashInfer CUTLASS is available."""

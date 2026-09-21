@@ -13,9 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Processor class for MiniCPMV.
-"""
+"""Processor class for MiniCPMV."""
 
 from typing import TypeAlias
 
@@ -36,8 +34,7 @@ MiniCPMVBatchFeature: TypeAlias = BatchFeature
 
 
 class MiniCPMVProcessor(ProcessorMixin):
-    r"""
-    Constructs a MiniCPMV processor which wraps a MiniCPMV image
+    r"""Constructs a MiniCPMV processor which wraps a MiniCPMV image
     processor and a MiniCPMV tokenizer into a single processor.
 
     [`MiniCPMVProcessor`] offers all the functionalities of
@@ -50,20 +47,16 @@ class MiniCPMVProcessor(ProcessorMixin):
             The image processor is a required input.
         tokenizer ([`LlamaTokenizerWrapper`], *optional*):
             The tokenizer is a required input.
+
     """
 
     attributes = ["image_processor", "tokenizer"]
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None):
+    def __init__(self, image_processor=None, tokenizer=None, version=None):
         super().__init__(image_processor, tokenizer)
-        # Newer (transformers v5.7+) MiniCPM-V image processors, e.g.
-        # MiniCPMV4_6ImageProcessor, no longer carry a `version` attribute.
-        # Fall back to None instead of hard-crashing: `version` is only used
-        # to special-case the 2.5 tokenization path in `_convert`, and any
-        # value other than 2.5 takes the default branch anyway.
-        self.version = getattr(image_processor, "version", None)
+        self.version = version
 
     def __call__(
         self,
@@ -98,9 +91,8 @@ class MiniCPMVProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor
     # .batch_decode with CLIP->Llama
     def batch_decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to LlamaTokenizerFast's
-        [`~PreTrainedTokenizer.batch_decode`]. Please refer to the
+        """This method forwards all its arguments to LlamaTokenizerFast's
+        [`~PythonBackend.batch_decode`]. Please refer to the
         docstring of this method for more information.
         """
         output_ids = args[0]
@@ -131,9 +123,8 @@ class MiniCPMVProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor
     # .decode with CLIP->Llama
     def decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to LlamaTokenizerFast's
-        [`~PreTrainedTokenizer.decode`]. Please refer to the docstring
+        """This method forwards all its arguments to LlamaTokenizerFast's
+        [`~PythonBackend.decode`]. Please refer to the docstring
         of this method for more information.
         """
         result = args[0]
@@ -161,7 +152,7 @@ class MiniCPMVProcessor(ProcessorMixin):
 
     def _convert(self, input_str, max_inp_length: int | None = None):
         add_bos = getattr(self.tokenizer, "add_bos_token", False)
-        if self.version == 2.5 or add_bos:
+        if self.version == (2, 5) or add_bos:
             input_ids = self.tokenizer.encode(input_str)
         else:
             bos_id = getattr(

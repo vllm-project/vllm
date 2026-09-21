@@ -47,9 +47,7 @@ class SpeculatorsConfig(PretrainedConfig):
     def extract_transformers_pre_trained_config(
         cls, config_dict: dict[str, Any]
     ) -> dict[str, Any]:
-        """
-        Extract standard Transformers PreTrainedConfig config from speculators config.
-        """
+        """Extract the Transformers `PreTrainedConfig` from a speculators config."""
         speculators_model_type = config_dict.get("speculators_model_type")
         if speculators_model_type not in SUPPORTED_SPECULATORS_TYPES:
             raise ValueError(
@@ -110,8 +108,7 @@ class SpeculatorsConfig(PretrainedConfig):
     def build_vllm_speculative_config(
         cls, config_dict: dict[str, Any]
     ) -> dict[str, Any]:
-        """
-        Build vLLM-compatible speculative configuration from speculators format.
+        """Build vLLM-compatible speculative configuration from speculators format.
 
         This method extracts and transforms speculative configuration from the
         speculators format into the structure expected by vLLM.
@@ -121,6 +118,7 @@ class SpeculatorsConfig(PretrainedConfig):
 
         Returns:
             Dictionary with vLLM-compatible speculative configuration
+
         """
         # Extract speculators configuration
         spec_config = config_dict["speculators_config"]
@@ -145,4 +143,6 @@ class SpeculatorsConfig(PretrainedConfig):
         }
         if result["method"] == "peagle":
             result.update({"method": "eagle3", "parallel_drafting": True})
+        elif result["method"] == "dflash2":
+            result["method"] = "dflash"
         return result

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import Field, field_validator
 
@@ -11,12 +11,13 @@ from vllm.utils.hashing import safe_hash
 
 DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS = 8
 DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
+SafetensorsLoadStrategy: TypeAlias = Literal["lazy", "eager", "prefetch", "torchao"]
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 else:
-    LoadFormats = Any
+    LoadFormats = str
     TensorizerConfig = Any
 
 logger = init_logger(__name__)
@@ -37,6 +38,10 @@ class LoadConfig:
     - "instanttensor" will load the Safetensors weights on CUDA devices using
       InstantTensor, which enables distributed loading with pipelined prefetching
       and fast direct I/O.
+    - "ipc_cache" will map post-quantized weights from a local weight cache
+      daemon via CUDA IPC for fast engine restarts. See
+      `vllm/model_executor/model_loader/weight_cache/daemon.py` for how to
+      launch the daemon.
     - "npcache" will load the weights in pytorch format and store a numpy cache
       to speed up the loading.
     - "dummy" will initialize the weights with random values, which is mainly
@@ -48,7 +53,6 @@ class LoadConfig:
       Streamer.
     - "runai_streamer_sharded" will load weights from pre-sharded checkpoint
       files using Run:ai Model Streamer.
-    - "bitsandbytes" will load the weights using bitsandbytes quantization.
     - "sharded_state" will load weights from pre-sharded checkpoint files,
       supporting efficient loading of tensor-parallel models.
     - "mistral" will load weights from consolidated safetensors files used by
@@ -59,7 +63,7 @@ class LoadConfig:
     download_dir: str | None = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    safetensors_load_strategy: str | None = None
+    safetensors_load_strategy: SafetensorsLoadStrategy | None = None
     """
     Specifies the loading strategy for safetensors weights.
 
@@ -114,8 +118,7 @@ class LoadConfig:
     """
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 

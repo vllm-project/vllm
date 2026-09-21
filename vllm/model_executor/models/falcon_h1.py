@@ -35,10 +35,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 
@@ -52,7 +48,7 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -144,8 +140,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
         self._init_mup_vector()
 
     def _init_mup_vector(self):
-        """
-        Non learnable per-block scaling vector composed of element-wise
+        """Non learnable per-block scaling vector composed of element-wise
         multipliersapplied to each separate contiguous block of the output
         of the linear projection (in_proj) before further processing
         (gating, convolution, SSM):
@@ -317,8 +312,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
 
 
 class FalconH1ParallelHybrid(nn.Module):
-    """
-    A hybrid decoder layer for FalconH1 where the input is processed
+    """A hybrid decoder layer for FalconH1 where the input is processed
     in parallel through both the self-attention branch and the SSM (Mamba)
     branch. Their outputs are then summed to produce the final hidden state.
 
@@ -453,8 +447,10 @@ class FalconH1Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        # FalconH1ParallelHybrid recomputes residual internally each layer,
+        # it is never threaded across the PP boundary.
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states"], config.hidden_size
         )
         if get_pp_group().is_last_rank:
             self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -496,63 +492,6 @@ class FalconH1Model(nn.Module):
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            if "A_log" in name:
-                name = name.replace("A_log", "A")
-
-            if "mamba" in name:
-                name = name.replace("mamba", "mamba.mamba")
-
-            if "scale" in name:
-                # Remapping the name of kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
-
 
 class FalconH1ForCausalLM(
     nn.Module,
@@ -566,6 +505,20 @@ class FalconH1ForCausalLM(
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "A_log": "A",
+            "mamba": "mamba.mamba",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
 
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -597,6 +550,7 @@ class FalconH1ForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -690,8 +644,5 @@ class FalconH1ForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

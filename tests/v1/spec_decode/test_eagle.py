@@ -116,8 +116,7 @@ def _create_proposer(
 
 
 def test_prepare_next_token_ids():
-    """
-    Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
+    """Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
     Each will produce a device tensor of next_token_ids, taking as input
     either the GPU tensor of sampled_token_ids with -1 for rejected tokens,
     or the CPU python list[list[int]] with the rejected tokens removed.
@@ -196,8 +195,7 @@ def test_prepare_next_token_ids():
 
 
 def test_prepare_inputs():
-    """
-    cu_target_query_lens: [0, a, a + b, a + b + c]
+    """cu_target_query_lens: [0, a, a + b, a + b + c]
     num_rejected_tokens: [n1, n2, n3]
     num_tokens_per_req: [a - n1, b - n2, c - n3]
     cu_num_tokens: [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
@@ -286,8 +284,7 @@ def test_prepare_inputs():
 
 
 def test_prepare_inputs_padded():
-    """
-    Input scenario is 3 requests with num_speculative_tokens == 2 and:
+    """Input scenario is 3 requests with num_speculative_tokens == 2 and:
     - Request 1: query_len = 3, rejected = 1
     - Request 2: query_len = 3, rejected = 0
     - Request 3: query_len = 3, rejected = 2
@@ -297,7 +294,6 @@ def test_prepare_inputs_padded():
     Reason: After accounting for rejections, these are the valid token positions
             from the original indices to sample from.
     """
-
     device = torch.device(DEVICE_TYPE)
 
     expected_token_indices_to_sample = torch.tensor(
@@ -350,8 +346,7 @@ def test_prepare_inputs_padded():
 
 
 def test_set_inputs_first_pass_default_eagle():
-    """
-    Test for set_inputs_first_pass without extra input slots (default EAGLE).
+    """Test for set_inputs_first_pass without extra input slots (default EAGLE).
 
     This tests the path where needs_extra_input_slots=False, which is the
     default EAGLE pathway. In this case:
@@ -436,8 +431,7 @@ def test_set_inputs_first_pass_default_eagle():
 
 
 def test_set_inputs_first_pass_draft_model():
-    """
-    Test for set_inputs_first_pass with a draft model (extra input slots,
+    """Test for set_inputs_first_pass with a draft model (extra input slots,
     no shift).
 
     This tests the path where needs_extra_input_slots=True and
@@ -578,8 +572,7 @@ def test_set_inputs_first_pass_draft_model():
 
 
 def test_set_inputs_first_pass_parallel_drafting():
-    """
-    Test for set_inputs_first_pass with parallel drafting (extra input slots,
+    """Test for set_inputs_first_pass with parallel drafting (extra input slots,
     with shift).
 
     This tests the path where needs_extra_input_slots=True and
@@ -1002,7 +995,11 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     assert torch.equal(result, expected_tokens)
 
 
-def test_propose_stores_probabilistic_draft_probs(monkeypatch):
+@pytest.mark.parametrize(
+    "attn_backend",
+    ["ROCM_ATTN", "TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"],
+)
+def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
@@ -1053,7 +1050,7 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     )
 
     attn_metadata_builder_cls, _ = try_get_attention_backend(
-        AttentionBackendEnum.FLASH_ATTN
+        AttentionBackendEnum[attn_backend]
     )
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
@@ -1070,6 +1067,7 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
 
     sampling_metadata = mock.MagicMock()
     sampling_metadata.all_greedy = False
+    sampling_metadata.temperature = torch.ones(batch_size, device=device)
 
     result = proposer.propose(
         num_speculative_tokens=num_speculative_tokens,
@@ -1102,8 +1100,7 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
 
 
 def test_set_inputs_first_pass_dflash():
-    """
-    Test for DFlash set_inputs_first_pass.
+    """Test for DFlash set_inputs_first_pass.
 
     DFlash uses cross-attention: context tokens become K/V and only
     query tokens (bonus + mask) are Q. This tests the DFlash-specific

@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use thiserror_ext::AsReport as _;
-use thiserror_ext::{Construct, Macro};
+use thiserror_ext::{AsReport as _, Construct, Macro};
 
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 
@@ -68,6 +71,12 @@ impl ApiError {
     }
 }
 
+impl From<JsonRejection> for ApiError {
+    fn from(error: JsonRejection) -> Self {
+        Self::json_parse_error(error.body_text())
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status_code(), Json(self.to_error_response())).into_response()
@@ -78,7 +87,7 @@ impl IntoResponse for ApiError {
 /// the client's fault and map to HTTP 400, mirroring the Python frontend.
 /// Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
-    if is_request_validation_error(&error) {
+    if error.is_request_validation_error() {
         return invalid_request!("{error}");
     }
     server_error!("{}: {}", context, error.to_report_string())
@@ -87,26 +96,10 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 /// Like [`text_submit_error`], for the chat pipeline (which both wraps the
 /// text errors and raises its own prompt-length variant).
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
-    match &error {
-        vllm_chat::Error::PromptTooLong { .. } => invalid_request!("{error}"),
-        vllm_chat::Error::Text(text_error) if is_request_validation_error(text_error) => {
-            invalid_request!("{error}")
-        }
-        _ => server_error!("{}: {}", context, error.to_report_string()),
+    if error.is_request_validation_error() {
+        return invalid_request!("{error}");
     }
-}
-
-fn is_request_validation_error(error: &vllm_text::Error) -> bool {
-    matches!(
-        error,
-        vllm_text::Error::PromptTooLong { .. }
-            | vllm_text::Error::EmptyPromptTokenIds { .. }
-            | vllm_text::Error::Logprobs(_)
-            | vllm_text::Error::OutOfVocab(_)
-            // An empty tokenized prompt detected later, at request prepare
-            // time, surfaces through the transparent Llm wrapper.
-            | vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds { .. })
-    )
+    server_error!("{}: {}", context, error.to_report_string())
 }
 
 #[cfg(test)]
@@ -128,6 +121,50 @@ mod tests {
     }
 
     #[test]
+    fn invalid_thinking_token_budget_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::InvalidThinkingTokenBudget,
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("thinking_token_budget"));
+    }
+
+    #[test]
+    fn min_tokens_above_max_tokens_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::MinTokensExceedsMaxTokens {
+                min_tokens: 5,
+                max_tokens: 4,
+            },
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("min_tokens=5"));
+        assert!(response.error.message.contains("max_tokens=4"));
+    }
+
+    #[test]
+    fn sampling_params_validation_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::SamplingParams(vllm_text::SamplingParamsError::OutOfRange {
+                parameter: "top_p",
+                value: 0.0,
+                expected: "(0, 1]",
+            }),
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("top_p"));
+    }
+
+    #[test]
     fn chat_wrapped_prompt_too_long_maps_to_invalid_request() {
         let error = vllm_chat::Error::Text(vllm_text::Error::PromptTooLong {
             max_model_len: 8192,
@@ -135,6 +172,25 @@ mod tests {
         });
         let api_error = chat_submit_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn invalid_reasoning_parameters_map_to_invalid_request() {
+        for error in [
+            vllm_chat::Error::InvalidReasoningEffort(
+                "DeepSeek V4.1 reasoning_effort must be within [1, 100]".to_string(),
+            ),
+            vllm_chat::Error::InvalidReasoningControl {
+                message: "template kwarg `thinking` must be a boolean".to_string(),
+            },
+        ] {
+            let api_error = chat_submit_error("failed to submit chat request", error);
+            assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                api_error.to_error_response().error.error_type,
+                "invalid_request_error"
+            );
+        }
     }
 
     #[test]
@@ -175,13 +231,48 @@ mod tests {
 
     #[test]
     fn out_of_vocab_validation_maps_to_invalid_request() {
-        let error = vllm_text::Error::OutOfVocab(vllm_text::OutOfVocabError {
+        let error = vllm_text::Error::TokenIds(vllm_text::TokenIdsError::OutOfVocab {
             parameter: "logprob_token_ids",
             token_ids: vec![1000],
             vocab_size: 1000,
         });
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn empty_allowed_token_ids_maps_to_invalid_request() {
+        let error = vllm_text::Error::TokenIds(vllm_text::TokenIdsError::EmptyAllowedTokenIds);
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("allowed_token_ids"));
+    }
+
+    #[test]
+    fn truncate_exceeds_budget_maps_to_invalid_request() {
+        let error = vllm_text::Error::TruncatePromptTokensExceedsBudget {
+            value: 8000,
+            budget: 4000,
+        };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
+        assert!(response.error.message.contains("max_tokens = 4000"));
+    }
+
+    #[test]
+    fn invalid_truncate_prompt_tokens_maps_to_invalid_request() {
+        let error = vllm_text::Error::InvalidTruncatePromptTokens { value: -2 };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("-2"));
+        assert!(response.error.message.contains("must be >= -1"));
     }
 
     #[test]

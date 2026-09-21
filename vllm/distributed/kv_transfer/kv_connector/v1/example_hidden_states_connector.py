@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -38,8 +39,10 @@ def extract_from_kv_cache(
     num_tokens: int,
 ) -> torch.Tensor:
     """Extract data from KV cache."""
-    block_size = kv_cache.shape[1]
-    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+    block_size = kv_cache.shape[2]
+    return kv_cache[slot_mapping // block_size, :, slot_mapping % block_size][
+        :num_tokens
+    ]
 
 
 def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
@@ -54,6 +57,7 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
 
     Returns:
         Dict with "hidden_states" and "token_ids" tensors.
+
     """
     lock_path = path + ".lock"
     with open(lock_path) as lf:
@@ -93,21 +97,66 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
-    """
-    Simple debug implementation of a HiddenStatesConnector.
+    """Simple debug implementation of a HiddenStatesConnector.
 
     Simply extracts the hidden states from the kv cache and stores them to disk.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
 
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
+    def get_finished_count(self) -> int:
+        """Number of ``finished_sending`` notifications expected per request.
+
+        Only TP rank 0 writes hidden states to disk, so each request yields a
+        single notification. The default (``None``) makes ``KVOutputAggregator``
+        wait for every worker in the world size; since ranks 1..N-1 never submit
+        a copy, the request would never be reported as finished and its blocks
+        would be leaked forever (the scheduler then spins on
+        ``has_finished_requests()``).
         """
-        Indicates whether this connector prefers KV blocks that hold KV data for all
-        layers, which can speed up KV data transfers. Defaults to False.
+        return 1
+
+    @classmethod
+    def _find_cache_kv_group_id(cls, kv_cache_config: "KVCacheConfig | None") -> int:
+        """Index of the KV cache group holding the extracted hidden states.
+
+        Located by spec type so it resolves on both scheduler and worker side.
         """
-        # Must be False so that drafter kv cache isn't merged with verifier's
-        return False
+        if kv_cache_config is None:
+            return 0
+
+        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+
+        groups = kv_cache_config.kv_cache_groups
+        group_ids = [
+            gid
+            for gid, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+        ]
+        if len(group_ids) == 1:
+            return group_ids[0]
+        if not group_ids and len(groups) == 1:
+            return 0
+        raise ValueError(
+            "Could not uniquely identify the extract-hidden-states KV cache "
+            f"group among {len(groups)} groups; the hidden-states layer must be "
+            "isolated in its own group (MLA verifiers are unsupported)."
+        )
+
+    @staticmethod
+    def _get_cache_block_size(
+        vllm_config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig | None",
+        cache_kv_group_id: int,
+    ) -> int:
+        """Block size of the hidden-states group, read from its own spec.
+
+        cache_config.block_size is bumped to a common multiple for hybrid
+        verifiers; the page-aligned hidden-states group keeps a smaller one.
+        """
+        if kv_cache_config is None:
+            return vllm_config.cache_config.block_size
+        cache_group = kv_cache_config.kv_cache_groups[cache_kv_group_id]
+        return cache_group.kv_cache_spec.block_size
 
     def __init__(
         self,
@@ -120,7 +169,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             role=role,
             kv_cache_config=kv_cache_config,
         )
-        self._block_size = vllm_config.cache_config.block_size
+        # Read the hidden-states group and its block size from the group spec;
+        # cache_config.block_size is bumped (wrong) for hybrid verifiers.
+        self._cache_kv_group_id = self._find_cache_kv_group_id(kv_cache_config)
+        self._block_size = self._get_cache_block_size(
+            vllm_config, kv_cache_config, self._cache_kv_group_id
+        )
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
@@ -150,7 +204,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Worker-side state (set by register_kv_caches).
         self._kv_cache: torch.Tensor | None = None
-        self._hs_group_idx: int = 0
+
         # Only TP rank 0 writes hidden states to disk; other TP ranks no-op.
         # Set in register_kv_caches (after distributed init).
         self._is_tp_rank_zero: bool = True
@@ -260,12 +314,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self._kv_cache = kv_caches[self.cache_layers[0]]
 
-        # Find the KV cache group index for hidden states
-        if self._kv_cache_config is not None:
-            for i, group in enumerate(self._kv_cache_config.kv_cache_groups):
-                if self.cache_layers[0] in group.layer_names:
-                    self._hs_group_idx = i
-                    break
+        # Block size must match the indexed buffer, else reads hit the wrong
+        # slots. Raise (not assert) so the check survives `python -O`.
+        # Views are [num_blocks, num_heads, block_size, head_size], matching what
+        # extract_from_kv_cache() indexes.
+        if self._block_size != self._kv_cache.shape[2]:
+            raise ValueError(
+                f"Hidden-states block-size mismatch: derived {self._block_size} "
+                f"but buffer block size is {self._kv_cache.shape[2]}; read slots "
+                "would be wrong (likely a hybrid block-size resolution bug)."
+            )
 
     @staticmethod
     def _write_tensors(
@@ -332,10 +390,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         with torch.cuda.stream(copy_stream):
             # Move the CPU slot_mapping to GPU on the copy stream so the
             # implicit H2D inside fancy indexing doesn't sync the default
-            # stream.
-            slot_mapping_gpu = slot_mapping.to(
-                device=self._kv_cache.device, non_blocking=True
-            )
+            # stream. Deliberate bulk transfer in this reference connector.
+            with gpu_sync_allowed():
+                slot_mapping_gpu = slot_mapping.to(
+                    device=self._kv_cache.device, non_blocking=True
+                )
             hidden_states_gpu = extract_from_kv_cache(
                 self._kv_cache, slot_mapping_gpu, num_tokens
             )
@@ -389,8 +448,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
+        """Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -401,6 +459,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
+
         """
         # This connector is store-only, so we don't need to load any tokens
         return 0, False
@@ -424,6 +483,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         meta = ExampleHiddenStatesConnectorMetadata()
 
@@ -462,15 +522,20 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called exactly once when a request has finished, before its blocks are
+        """Called exactly once when a request has finished, before its blocks are
         freed.
 
         Returns True to delay block freeing until get_finished extracts
         the hidden states from the KV cache.
         """
         req_id = request.request_id
-        filename = self._request_filenames.pop(req_id)
+        filename = self._request_filenames.pop(req_id, None)
+        if filename is None:
+            # Request was aborted before it was ever scheduled, so
+            # build_connector_meta never recorded a filename for it. There are
+            # no hidden states to save and no blocks worth delaying.
+            self._pending_saves.pop(req_id, None)
+            return False, None
         kv_params = request.kv_transfer_params or {}
         if kv_params.get("include_output_tokens", False):
             # Exclude the final token — it was the model's output, never an
@@ -519,15 +584,18 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         done_sending: set[str] = set()
         for req_id in list(self._accumulated_finished_req_ids):
             event = self._req_copy_events.get(req_id)
-            if event is None or event.query():
-                self._req_copy_events.pop(req_id, None)
+            if event is not None and not event.query():
+                continue  # DtoH copy still in flight
+            self._req_copy_events.pop(req_id, None)
+            self._accumulated_finished_req_ids.discard(req_id)
+            # Only report requests we actually tracked for sending.
+            if event is not None:
                 done_sending.add(req_id)
-                self._accumulated_finished_req_ids.discard(req_id)
-                # Clean up any leftover lock fds (e.g. aborted requests
-                # that never went through _submit_async_write).
-                lock_fd = self._lock_fds.pop(req_id, None)
-                if lock_fd is not None:
-                    os.close(lock_fd)
+            # Clean up any leftover lock fds (e.g. aborted requests that never
+            # went through _submit_async_write).
+            lock_fd = self._lock_fds.pop(req_id, None)
+            if lock_fd is not None:
+                os.close(lock_fd)
 
         return done_sending or None, None
 
@@ -536,28 +604,32 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        return self.request_finished(request, block_ids[self._hs_group_idx])
+        if not 0 <= self._cache_kv_group_id < len(block_ids):
+            # No per-group block table (e.g. a request that was never
+            # scheduled); treat as a no-op instead of indexing out of bounds.
+            return False, None
+        return self.request_finished(request, block_ids[self._cache_kv_group_id])
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """
-        Get the required KV cache layout for this connector.
+        """Get the required KV cache layout for this connector.
+
         Args:
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
-        """
 
+        """
         if cls is KVConnectorBase_V1:
             raise TypeError(
                 "get_required_kvcache_layout should not be called "
                 "on the abstract base class"
             )
-        # NHD means we have (num_tokens, num_heads)
-        # HND means we have (num_heads, num_tokens)
-        # For now, we only support NHD layout since this keeps the
+        # LBNHC means we have (num_tokens, num_heads)
+        # LBHNC means we have (num_heads, num_tokens)
+        # For now, we only support LBNHC layout since this keeps the
         # hidden states for each token together in memory.
-        # HND is primarily used when sharding heads across devices.
-        return "NHD"
+        # LBHNC is primarily used when sharding heads across devices.
+        return "LBNHC"
