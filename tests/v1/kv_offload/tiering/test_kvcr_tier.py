@@ -5,12 +5,13 @@ from collections.abc import Collection, Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
+import msgspec
 import numpy as np
 import pytest
 
 pytest.importorskip("kvcr")
 
-from kvcr import ROUTER_HINT_KEY, KVCRBindings
+from kvcr import KVCRBindings
 from kvcr.config import G3Options, KVCRBackendConfigs, KVCRConfig, KVCRGuardConfig
 from kvcr.policy import FIFOPolicy, G3FIFOPolicy, G3LRUPolicy, LRUPolicy
 from kvcr.types import (
@@ -27,6 +28,7 @@ from kvcr.types import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
@@ -271,10 +273,10 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch):
     """Check hint forwarding, key conversion, load descriptors, and cleanup."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
-    router_hint = {"opaque": True}
+    kv_hint = KvHintsEnvelope(protocol_version="0.1", message_id="msg", actions=[])
     ctx = ReqContext(
         req_id="req",
-        kv_transfer_params={ROUTER_HINT_KEY: router_hint, "unrelated": object()},
+        kv_hints=kv_hint,
     )
     key = make_offload_key((123).to_bytes(8, "big"), 0)
     same_hash_other_group = make_offload_key((123).to_bytes(8, "big"), 7)
@@ -282,7 +284,9 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch):
 
     tier.on_new_request(ctx)
 
-    assert kvcr.submit_hint_calls == [((), {"request_id": "req", "hints": router_hint})]
+    assert kvcr.submit_hint_calls == [
+        ((), {"request_id": "req", "hints": msgspec.to_builtins(kv_hint)})
+    ]
 
     bindings = kvcr.constructor_bindings
     assert bindings is not None
