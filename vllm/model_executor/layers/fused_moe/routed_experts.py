@@ -16,9 +16,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
 )
-from vllm.model_executor.layers.fused_moe.expert_substitution import (
-    ConstantExpertSubstitution,
-)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -56,6 +53,8 @@ class RoutedExperts(PluggableLayer):
     - Executing routed experts via quant_method.apply()
     """
 
+    _non_expert_parameter_prefixes: tuple[str, ...] = ()
+
     def __init__(
         self,
         layer_name: str,
@@ -84,7 +83,6 @@ class RoutedExperts(PluggableLayer):
         swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-        expert_substitution: ConstantExpertSubstitution | None = None,
     ):
         super().__init__()
         self.layer_name = layer_name
@@ -121,7 +119,6 @@ class RoutedExperts(PluggableLayer):
         self.swiglu_beta = swiglu_beta
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
-        self.expert_substitution = expert_substitution
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
 
@@ -936,21 +933,6 @@ class RoutedExperts(PluggableLayer):
         ckpt_up_proj_name: str | None = None,
         include_fused: bool = False,
     ) -> list[tuple[str, str, int, str]]:
-        if self.expert_substitution is not None:
-            if include_fused:
-                logger.warning_once(
-                    "Fused expert checkpoint tensors are not supported with "
-                    "expert substitution"
-                )
-            return self.expert_substitution.make_expert_params_mapping(
-                moe_prefix=self.layer_name,
-                ckpt_gate_proj_name=ckpt_gate_proj_name or self.ckpt_gate_proj_name,
-                ckpt_down_proj_name=ckpt_down_proj_name or self.ckpt_down_proj_name,
-                ckpt_up_proj_name=ckpt_up_proj_name or self.ckpt_up_proj_name,
-                routed_experts_prefix="",
-                base_layer=self.lora_base_layer_prefix,
-            )
-
         moe_config = self.moe_config
         num_fused_shared_experts = self.expert_map_manager.num_fused_shared_experts
         num_redundant_experts = moe_config.num_experts - moe_config.num_logical_experts
@@ -983,66 +965,19 @@ class RoutedExperts(PluggableLayer):
         `build_expert_params_mapping` instead (which take the prefix directly).
         See `build_expert_params_mapping` for the returned tuple format.
         """
-        routed_modules = [
-            (name, module)
-            for name, module in model.named_modules()
-            if isinstance(module, RoutedExperts)
-        ]
-        if any(module.expert_substitution is not None for _, module in routed_modules):
-            mapping: list[tuple[str, str, int, str]] = []
-            for module_name, module in routed_modules:
-                if not module_name.endswith(".routed_experts"):
-                    raise ValueError(
-                        "expert substitution runtime module path "
-                        f"{module_name!r} must end with '.routed_experts'"
-                    )
-                moe_prefix = module_name.removesuffix(".routed_experts")
-                substitution = module.expert_substitution
-                if substitution is not None:
-                    target_prefix = substitution.target.module_path
-                    if target_prefix == moe_prefix or target_prefix.endswith(
-                        f".{moe_prefix}"
-                    ):
-                        ckpt_prefix = moe_prefix
-                    elif moe_prefix.endswith(f".{target_prefix}"):
-                        ckpt_prefix = target_prefix
-                    else:
-                        raise ValueError(
-                            "expert substitution target path "
-                            f"{target_prefix!r} does not match runtime MoE module "
-                            f"{moe_prefix!r}; expected one path to be an "
-                            "unambiguous suffix of the other"
-                        )
-                    mapping.extend(
-                        substitution.make_expert_params_mapping(
-                            moe_prefix=moe_prefix,
-                            ckpt_prefix=ckpt_prefix,
-                            ckpt_gate_proj_name=ckpt_gate_proj_name,
-                            ckpt_down_proj_name=ckpt_down_proj_name,
-                            ckpt_up_proj_name=ckpt_up_proj_name,
-                        )
-                    )
-                    continue
+        from vllm.model_executor.layers.fused_moe.expert_substitution import (
+            make_substituted_expert_params_mapping,
+        )
+        from vllm.model_executor.layers.fused_moe.substituted_routed_experts import (
+            SubstitutedRoutedExperts,
+        )
 
-                layer_prefix = moe_prefix.removesuffix(".experts")
-                mapping.extend(
-                    (
-                        f"{layer_prefix}.{param_name}",
-                        f"{layer_prefix}.{weight_name}",
-                        expert_id,
-                        shard_id,
-                    )
-                    for param_name, weight_name, expert_id, shard_id in (
-                        RoutedExperts.build_expert_params_mapping(
-                            ckpt_gate_proj_name,
-                            ckpt_down_proj_name,
-                            ckpt_up_proj_name,
-                            num_experts=module.moe_config.num_logical_experts,
-                            routed_experts_prefix="routed_experts",
-                        )
-                    )
-                )
-            return mapping
+        if any(
+            isinstance(module, SubstitutedRoutedExperts) for module in model.modules()
+        ):
+            return make_substituted_expert_params_mapping(
+                model, ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name
+            )
 
         has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
         prefix = "base_layer." if has_base_layer else ""
@@ -1229,7 +1164,7 @@ class RoutedExperts(PluggableLayer):
 
         # Parameters of non-expert submodules that live inside runner (RoutedExperts).
         # These must be excluded from EPLB weight rearrangement.
-        NON_EXPERT_PREFIXES = ("expert_substitution.",)
+        NON_EXPERT_PREFIXES = self._non_expert_parameter_prefixes
 
         assert all(
             weight.is_contiguous()

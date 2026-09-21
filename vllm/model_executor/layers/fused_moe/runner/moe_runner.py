@@ -614,8 +614,6 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        expert_substitution = self.routed_experts.expert_substitution
-        substitution_output = None
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
@@ -632,15 +630,6 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
             )
 
-            if expert_substitution is not None:
-                topk_weights, topk_ids, substitution_output = (
-                    expert_substitution.transform_routes(
-                        hidden_states,
-                        topk_weights,
-                        topk_ids,
-                    )
-                )
-
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,
                 topk_weights=topk_weights,
@@ -648,13 +637,6 @@ class MoERunner(MoERunnerInterface):
                 shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
             )
-
-        # Unreduced TP outputs are summed later, so only rank 0 contributes the
-        # replicated constant. Backends returning reduced output add it locally.
-        if substitution_output is not None and (
-            self._fused_output_is_reduced or self.moe_config.tp_rank == 0
-        ):
-            cast(torch.Tensor, fused_out).add_(substitution_output)
 
         if shared_experts_overlapping:
             assert self._shared_experts is not None

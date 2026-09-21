@@ -11,6 +11,23 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from torch import nn
 from typing_extensions import Self
 
+from vllm.platforms import current_platform
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def _compute_constant_substitution_output(
+    output: torch.Tensor,
+    values: torch.Tensor,
+    substitution_rows: torch.Tensor,
+    substitution_mask: torch.Tensor,
+    topk_weights: torch.Tensor,
+) -> None:
+    # Explicit compilation fuses these intermediates inside the opaque MoE op.
+    gathered = values[substitution_rows.clamp_min(0)].float()
+    scales = topk_weights.float() * substitution_mask
+    result = torch.sum(gathered * scales.unsqueeze(-1), dim=1)
+    output[..., : values.size(-1)].copy_(result.to(output.dtype))
+
 
 class _SchemaModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -242,10 +259,15 @@ class ConstantExpertSubstitution(nn.Module):
         )
         for expert_id, row in self._substituted_expert_to_row.items():
             substitution_index[expert_id] = row
-        self.register_buffer(
+        # Routing metadata is independent of checkpoint parameters. Keeping it
+        # separate lets layerwise reload preserve these buffers unchanged.
+        self._routing = nn.Module()
+        self._routing.register_buffer(
             "logical_to_physical", logical_to_physical, persistent=False
         )
-        self.register_buffer("substitution_index", substitution_index, persistent=False)
+        self._routing.register_buffer(
+            "substitution_index", substitution_index, persistent=False
+        )
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -257,6 +279,16 @@ class ConstantExpertSubstitution(nn.Module):
             ),
             requires_grad=False,
         )
+        self.values.weight_loader = self.weight_loader
+        self._layerwise_load: tuple[nn.Parameter, set[int]] | None = None
+
+    @property
+    def logical_to_physical(self) -> torch.Tensor:
+        return self._routing.logical_to_physical
+
+    @property
+    def substitution_index(self) -> torch.Tensor:
+        return self._routing.substitution_index
 
     @property
     def compute_expert_ids(self) -> tuple[int, ...]:
@@ -267,25 +299,43 @@ class ConstantExpertSubstitution(nn.Module):
         loaded_weight: torch.Tensor,
         expert_id: int,
     ) -> None:
+        self.values.weight_loader(self.values, loaded_weight, expert_id)
+
+    def weight_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        expert_id: int,
+    ) -> None:
         row = self._substituted_expert_to_row.get(int(expert_id))
         if row is None:
             raise ValueError(
                 f"logical expert {expert_id} is not a constant substitution"
             )
-        target = self.values.data[row]
+        target = param.data[row]
         if loaded_weight.ndim != 1 or loaded_weight.shape[0] != target.shape[0]:
             raise ValueError(
                 f"substitution value for expert {expert_id} has shape "
                 f"{tuple(loaded_weight.shape)}, expected {(target.shape[0],)}"
             )
+        if param.is_meta:
+            if self._layerwise_load is None or self._layerwise_load[0] is not param:
+                self._layerwise_load = (param, set())
+            self._layerwise_load[1].add(expert_id)
+        elif self._layerwise_load is not None:
+            missing = set(self.substituted_expert_ids) - self._layerwise_load[1]
+            if missing:
+                raise ValueError(
+                    "layerwise reload requires all constant expert value tensors "
+                    f"for {self.target.module_path!r}; missing expert IDs: "
+                    f"{sorted(missing)}"
+                )
+            self._layerwise_load = None
         target.copy_(
             loaded_weight.reshape_as(target).to(
                 device=target.device, dtype=target.dtype
             )
         )
-
-    def clear_loaded_values(self) -> None:
-        self.values.data.fill_(torch.nan)
 
     def validate_loaded_values(self, prefix: str) -> None:
         missing_rows = torch.isnan(self.values).any(dim=1).nonzero().flatten().tolist()
@@ -316,12 +366,12 @@ class ConstantExpertSubstitution(nn.Module):
         safe_ids = torch.where(valid, topk_ids, torch.zeros_like(topk_ids)).long()
         substitution_rows = self.substitution_index[safe_ids].long()
         substitution_mask = valid & (substitution_rows >= 0)
-        # Keep router weights and constant accumulation in FP32 until the final cast.
-        gathered = self.values[substitution_rows.clamp_min(0)].float()
-        scales = topk_weights.float() * substitution_mask
-        result = torch.sum(gathered * scales.unsqueeze(-1), dim=1)
-        substitution_output[..., : result.shape[-1]].copy_(
-            result.to(substitution_output.dtype)
+        _compute_constant_substitution_output(
+            substitution_output,
+            self.values,
+            substitution_rows,
+            substitution_mask,
+            topk_weights,
         )
 
         physical_ids = self.logical_to_physical[safe_ids]
@@ -394,21 +444,51 @@ def make_expert_substitution(
     )
 
 
-def validate_expert_substitution_model(config: Any, module: nn.Module) -> None:
-    """Validate that configured targets were bound exactly once."""
+def validate_expert_substitution_model(
+    config: Any, module: nn.Module, prefix: str = ""
+) -> set[str]:
+    """Validate local bindings and return targets owned by other pipeline stages."""
+    from vllm.model_executor.models.utils import PPMissingLayer, StageMissingLayer
+
     substitution_config = parse_expert_substitution_config(config)
     if substitution_config is None:
-        return
+        return set()
 
     matched = Counter(
         child.target.module_path
         for child in module.modules()
         if isinstance(child, ConstantExpertSubstitution)
     )
+    modules = dict(module.named_modules())
+
+    def belongs_to_missing_stage(path: str) -> bool:
+        path = path.removeprefix(f"{prefix}.") if prefix else path
+        while path:
+            matches = (
+                [modules[path]]
+                if path in modules
+                else [
+                    child
+                    for name, child in modules.items()
+                    if name.endswith(f".{path}") or path.endswith(f".{name}")
+                ]
+            )
+            if matches:
+                return len(matches) == 1 and isinstance(
+                    matches[0], (PPMissingLayer, StageMissingLayer)
+                )
+            path = path.rpartition(".")[0]
+        return False
+
+    remote = {
+        target.module_path
+        for target in substitution_config.targets
+        if belongs_to_missing_stage(target.module_path)
+    }
     missing = sorted(
         target.module_path
         for target in substitution_config.targets
-        if matched[target.module_path] == 0
+        if matched[target.module_path] == 0 and target.module_path not in remote
     )
     duplicate = sorted(path for path, count in matched.items() if count > 1)
     if missing or duplicate:
@@ -420,11 +500,14 @@ def validate_expert_substitution_model(config: Any, module: nn.Module) -> None:
         raise ValueError(
             "invalid expert_substitution model binding; " + "; ".join(details)
         )
+    return remote
 
 
 def intercept_expert_substitution_weights(
     module: nn.Module,
     weights: Iterable[tuple[str, torch.Tensor]],
+    *,
+    ignored_tensor_names: set[str] | None = None,
 ) -> tuple[Iterator[tuple[str, torch.Tensor]], set[str]]:
     """Load explicitly named substitution tensors before model-specific loaders."""
     mappings: dict[str, list[tuple[str, ConstantExpertSubstitution, int]]] = {}
@@ -441,7 +524,8 @@ def intercept_expert_substitution_weights(
         for name, loaded_weight in weights:
             substitution_mappings = mappings.get(name)
             if substitution_mappings is None:
-                yield name, loaded_weight
+                if ignored_tensor_names is None or name not in ignored_tensor_names:
+                    yield name, loaded_weight
                 continue
             for param_name, substitution, expert_id in substitution_mappings:
                 substitution.load_value(loaded_weight, expert_id)
@@ -450,15 +534,76 @@ def intercept_expert_substitution_weights(
     return remaining_weights(), loaded_params
 
 
-def clear_expert_substitution_load_state(module: nn.Module) -> None:
-    """Clear substitution load tracking before a checkpoint load."""
-    for child in module.modules():
-        if isinstance(child, ConstantExpertSubstitution):
-            child.clear_loaded_values()
-
-
 def validate_expert_substitution_weights_loaded(module: nn.Module) -> None:
     """Ensure every declared substitution supplied its constant value."""
     for name, child in module.named_modules():
         if isinstance(child, ConstantExpertSubstitution):
             child.validate_loaded_values(name or child.__class__.__name__)
+
+
+def make_substituted_expert_params_mapping(
+    model: nn.Module,
+    ckpt_gate_proj_name: str,
+    ckpt_down_proj_name: str,
+    ckpt_up_proj_name: str,
+) -> list[tuple[str, str, int, str]]:
+    """Build per-layer mappings for models containing compact expert layouts."""
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.substituted_routed_experts import (
+        SubstitutedRoutedExperts,
+    )
+
+    mapping: list[tuple[str, str, int, str]] = []
+    for module_name, module in model.named_modules():
+        if not isinstance(module, RoutedExperts):
+            continue
+        if not module_name.endswith(".routed_experts"):
+            raise ValueError(
+                "expert substitution runtime module path "
+                f"{module_name!r} must end with '.routed_experts'"
+            )
+        moe_prefix = module_name.removesuffix(".routed_experts")
+        if isinstance(module, SubstitutedRoutedExperts):
+            substitution = module.expert_substitution
+            target_prefix = substitution.target.module_path
+            if target_prefix == moe_prefix or target_prefix.endswith(f".{moe_prefix}"):
+                ckpt_prefix = moe_prefix
+            elif moe_prefix.endswith(f".{target_prefix}"):
+                ckpt_prefix = target_prefix
+            else:
+                raise ValueError(
+                    "expert substitution target path "
+                    f"{target_prefix!r} does not match runtime MoE module "
+                    f"{moe_prefix!r}; expected one path to be an "
+                    "unambiguous suffix of the other"
+                )
+            mapping.extend(
+                substitution.make_expert_params_mapping(
+                    moe_prefix=moe_prefix,
+                    ckpt_prefix=ckpt_prefix,
+                    ckpt_gate_proj_name=ckpt_gate_proj_name,
+                    ckpt_down_proj_name=ckpt_down_proj_name,
+                    ckpt_up_proj_name=ckpt_up_proj_name,
+                )
+            )
+            continue
+
+        layer_prefix = moe_prefix.removesuffix(".experts")
+        mapping.extend(
+            (
+                f"{layer_prefix}.{param_name}",
+                f"{layer_prefix}.{weight_name}",
+                expert_id,
+                shard_id,
+            )
+            for param_name, weight_name, expert_id, shard_id in (
+                RoutedExperts.build_expert_params_mapping(
+                    ckpt_gate_proj_name,
+                    ckpt_down_proj_name,
+                    ckpt_up_proj_name,
+                    num_experts=module.moe_config.num_logical_experts,
+                    routed_experts_prefix="routed_experts",
+                )
+            )
+        )
+    return mapping

@@ -48,6 +48,12 @@ def initialize_model(
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
 
+    from vllm.model_executor.models.expert_substitution import (
+        as_expert_substitution_model,
+    )
+
+    model_class = as_expert_substitution_model(model_class, model_config.hf_config)
+
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
 

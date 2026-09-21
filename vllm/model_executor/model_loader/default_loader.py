@@ -424,10 +424,7 @@ class DefaultModelLoader(BaseModelLoader):
 
         self._init_ep_weight_filter(model_config)
 
-        loaded_weights = self._load_weights_from_iterator(
-            model,
-            self.get_all_weights(model_config, model),
-        )
+        loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(

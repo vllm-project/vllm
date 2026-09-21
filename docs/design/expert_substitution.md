@@ -124,6 +124,18 @@ works without substitution-specific backend support, but it may schedule dummy
 GEMMs. Full MLP weights are allocated only for retained experts, preserving the
 checkpoint's weight-memory saving.
 
+`FusedMoEFactory` selects a specialized `RoutedExperts` implementation for
+substituted layers; the shared runner and backend do not interpret substitution
+metadata. Constant gathering, FP32 accumulation, and the output cast use an
+explicitly compiled helper, including when called inside the opaque MoE custom op.
+
+Substitution tensors are handled at the model's `load_weights` boundary, so
+initial checkpoint loading and direct weight reloads use the same path. Initial
+finalization checks that every local constant was loaded. Direct incremental
+updates preserve untouched values; a layerwise checkpoint reload requires all
+constant rows of each updated layer. Pipeline stages validate their local targets
+and ignore tensors belonging only to actual missing-layer placeholders.
+
 ## Supported configurations
 
 Models use expert substitution automatically when:
@@ -133,8 +145,8 @@ Models use expert substitution automatically when:
 - They use standard logical top-k routing and apply router weights to expert
   outputs.
 - Replacement values are in the routed expert output space.
-- Their checkpoint uses the standard `RoutedExperts` expert-weight loading
-  contract.
+- They use the standard `RoutedExperts` implementation and its per-expert
+  checkpoint loading contract.
 
 The initial implementation supports:
 

@@ -37,6 +37,9 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
     MoERunner,
 )
+from vllm.model_executor.layers.fused_moe.substituted_routed_experts import (
+    SubstitutedRoutedExperts,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -415,7 +418,17 @@ def FusedMoEFactory(
 
     # Create RoutedExperts instance BEFORE create_weights()
     # This will hold all expert weight parameters
-    if routed_experts_cls is None:
+    if expert_substitution is not None:
+        if routed_experts_cls not in (None, RoutedExperts, SubstitutedRoutedExperts):
+            raise NotImplementedError(
+                "expert substitution requires the standard RoutedExperts class"
+            )
+        routed_experts_cls = SubstitutedRoutedExperts
+        routed_experts_args = {
+            **(routed_experts_args or {}),
+            "expert_substitution": expert_substitution,
+        }
+    elif routed_experts_cls is None:
         routed_experts_cls = RoutedExperts
 
     assert params_dtype is not None
@@ -447,14 +460,9 @@ def FusedMoEFactory(
         # TODO get from router? needs to be truncated?
         e_score_correction_bias=e_score_correction_bias,
         apply_router_weight_on_input=apply_router_weight_on_input,
-        expert_substitution=expert_substitution,
         **routed_experts_args if routed_experts_args is not None else {},
     )
 
-    if expert_substitution is not None and routed_experts.quant_method.is_monolithic:
-        raise NotImplementedError(
-            "expert substitution requires a decomposed MoE backend"
-        )
     if expert_substitution is not None:
         logger.info_once("Using the generic zero-weight expert-substitution path.")
 

@@ -135,6 +135,6 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
-        self._load_weights_from_iterator(
-            model, self._get_weights_iterator(model_weights, model_config.revision)
+        model.load_weights(
+            self._get_weights_iterator(model_weights, model_config.revision)
         )
