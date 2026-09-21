@@ -114,6 +114,7 @@ def create_sampling_metadata(
         all_random=not all_greedy,
         top_p=top_p,
         top_k=top_k,
+        has_top_k_one=top_k is not None and bool((top_k == 1).any().item()),
         generators=generators,
         max_num_logprobs=None,
         no_penalties=no_penalties,
