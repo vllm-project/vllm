@@ -201,14 +201,18 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if rotary embedding custom op is active and
-    use_inductor_graph_partition is enabled.
+    """Enable if the KV cache update stays inside the compiled graph and the
+    rotary embedding custom op is not disabled.
+
+    Cannot require the custom op: ``CompilationConfig.__post_init__`` appends it
+    only when ``fuse_rope_kvcache`` is set, and runs before the optimization
+    level resolves that flag. The append is re-run once splitting ops settle.
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
     return (
         rocm_aiter_ops.is_enabled()
-        and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+        and "-rotary_embedding" not in cfg.compilation_config.custom_ops
         and (
             cfg.compilation_config.use_inductor_graph_partition
             or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
@@ -241,12 +245,15 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
-    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER."""
+    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER.
+
+    Reads the custom op as an opt-out, per :func:`enable_rope_kvcache_fusion`.
+    """
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_enabled():
         return False
-    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+    return "-rotary_embedding" not in cfg.compilation_config.custom_ops
 
 
 OPTIMIZATION_LEVEL_00 = {
@@ -1940,6 +1947,19 @@ class VllmConfig:
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,
         )
+
+        # `__post_init__` appends "+rotary_embedding" before the optimization
+        # level resolves these flags. Re-run it after set_splitting_ops_for_v1,
+        # which can still turn the fusions back off.
+        # TODO(Rohan138): support rope native forward match and remove this.
+        # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+        rope_pass_config = self.compilation_config.pass_config
+        if (
+            rope_pass_config.fuse_rope_kvcache
+            or rope_pass_config.fuse_qk_norm_rope_kvcache
+            or rope_pass_config.enable_qk_norm_rope_fusion
+        ) and "+rotary_embedding" not in self.compilation_config.custom_ops:
+            self.compilation_config.custom_ops.append("+rotary_embedding")
 
         if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism, native rms norm tracing errors due to
