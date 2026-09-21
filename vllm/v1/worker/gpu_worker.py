@@ -102,7 +102,7 @@ from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.reload.frozen import FrozenWeights
+    from vllm.v1.worker.frozen_weights import FrozenWeights
 
 logger = init_logger(__name__)
 
@@ -523,7 +523,7 @@ class Worker(WorkerBase):
 
         if self.vllm_config.weight_transfer_config is not None:
             if self.vllm_config.weight_transfer_config.frozen_weight_modules:
-                from vllm.model_executor.model_loader.reload.frozen import FrozenWeights
+                from vllm.v1.worker.frozen_weights import FrozenWeights
 
                 self._frozen_weights = FrozenWeights(
                     self.model_runner.get_model(),

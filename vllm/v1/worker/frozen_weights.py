@@ -1,17 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
 from fnmatch import fnmatchcase
 
 import torch
 
 
-def _reject_frozen_update(*args, **kwargs):
-    raise ValueError("Cannot reload a frozen weight; restart to change frozen weights")
-
-
 class FrozenWeights:
-    """Retain explicitly frozen modules across L2 sleep and partial reloads.
+    """Retain explicitly frozen parameters across level-2 sleep.
 
     Patterns name runtime modules, not checkpoint tensors. Configure after initial
     loading. Frozen modules must keep their parameter objects and storage intact.
@@ -38,7 +33,6 @@ class FrozenWeights:
             )
         }
         self.model = model
-        self.module_names = names
         self.parameters = {
             name: param
             for name, param in model.named_parameters(remove_duplicate=False)
@@ -66,31 +60,12 @@ class FrozenWeights:
                 in frozen_storage
             ):
                 raise ValueError(f"Frozen storage aliases mutable buffer: {name}")
-        for name in names:
-            modules[name]._vllm_frozen_weights = True
-        for param in self.parameters.values():
-            param.weight_loader = _reject_frozen_update
         self.backups: dict[str, torch.Tensor] = {}
+        self._needs_restore = False
         self.layouts = {
             name: (param.data_ptr(), param.shape, param.stride(), param.dtype)
             for name, param in self.parameters.items()
         }
-
-    def checkpoint_names(self, names: Iterable[str]) -> set[str]:
-        """Resolve a sender's checkpoint names using the model's own mapper."""
-        mapper = getattr(self.model, "hf_to_vllm_mapper", None)
-        result = set()
-        for name in names:
-            mapped = mapper.apply_list([name]) if mapper is not None else [name]
-            if mapped and all(
-                any(
-                    not module or key.startswith(module + ".")
-                    for module in self.module_names
-                )
-                for key in mapped
-            ):
-                result.add(name)
-        return result
 
     def _validate_storage(self) -> None:
         for name, param in self.parameters.items():
@@ -108,9 +83,13 @@ class FrozenWeights:
         for name, param in self.parameters.items():
             if param.device.type != "cpu" and name not in self.backups:
                 self.backups[name] = param.to(device="cpu", copy=True)
+        self._needs_restore = True
 
     @torch.no_grad()
     def restore(self) -> None:
+        if not self._needs_restore:
+            return
         self._validate_storage()
         for name, backup in self.backups.items():
             self.parameters[name].copy_(backup)
+        self._needs_restore = False

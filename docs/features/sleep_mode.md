@@ -87,12 +87,12 @@ later cycles. Already CPU-resident parameters are reused without another copy.
 Budget host memory for these retained local shards alongside trainer offload.
 Level 1 retains its existing full-weight backup behavior.
 
-The sender must omit the corresponding checkpoint tensors. Layerwise reload
-leaves the selected modules intact, and their parameter loaders reject incoming
-updates. Use the model's checkpoint-name mapping and validate the sender/receiver
-exclusion sets before transfer. Restart the instance to change frozen weights;
-direct writes that bypass weight loaders are unsupported. Selection applies to
-the target model, not a separately instantiated draft model.
+This option only controls sleep/wake; it does not modify weight loaders or
+filter incoming updates. The trainer (for example, VERL) must omit these
+parameters and leave their values and storage unchanged during reload and
+post-processing. Restart the instance to change frozen weights. Reload paths
+that replace selected parameters with meta tensors are not supported by this
+option alone. Selection applies to the target, not a separate draft model.
 
 #### Release only KV cache memory
 
