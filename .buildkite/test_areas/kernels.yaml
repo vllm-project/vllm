@@ -213,12 +213,11 @@ steps:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
   mirror:
     amd:
-      label: ":amd: (MI250) Attention DiffKV Kernels"
+      label: ":amd: (MI355) Attention DiffKV Kernels"
       dind: false
-      device: mi250_1
+      device: mi355_1
       num_devices: 1
       timeout_in_minutes: 35
-      optional: true
       working_dir: /vllm-workspace/tests
       depends_on:
       - image-build-amd

@@ -117,9 +117,9 @@ steps:
     - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
   mirror:
     amd:
-      label: ":amd: (MI300) E2E Core Large Memory"
+      label: ":amd: (MI355) E2E Core Large Memory"
       dind: false
-      device: mi300_1
+      device: mi355_1
       num_devices: 1
       timeout_in_minutes: 65
       working_dir: /vllm-workspace/tests

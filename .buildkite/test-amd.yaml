@@ -317,23 +317,6 @@ steps:
 
 #----------------------------------------------------------  mi250 · kernels  ----------------------------------------------------------#
 
-- label: ":amd: (MI250) Attention DiffKV Kernels"
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/attention/ops/triton_unified_attention_diffkv.py
-  - vllm/v1/attention/backends/triton_attn_diffkv.py
-  - tests/kernels/attention/test_triton_unified_attention.py
-  - tests/kernels/attention/test_triton_unified_attention_diffkv.py
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
-
 - label: ":amd: (MI250) Helion Kernels Shard %N"
   timeout_in_minutes: 45
   parallelism: 2
@@ -666,46 +649,6 @@ steps:
   - vllm/v1/
   commands:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
-
-- label: ":amd: (MI300) PyTorch Compilation H100 Cases"
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/__init__.py
-  - vllm/_aiter_ops.py
-  - vllm/_custom_ops.py
-  - vllm/compilation/
-  - vllm/config/
-  - vllm/distributed/
-  - "!vllm/distributed/kv_transfer/"
-  - vllm/engine/
-  - vllm/env_override.py
-  - vllm/envs.py
-  - vllm/forward_context.py
-  - vllm/inputs/
-  - vllm/ir/
-  - vllm/kernels/
-  - vllm/logger.py
-  - vllm/model_executor/
-  - vllm/multimodal/
-  - vllm/platforms/
-  - vllm/plugins/
-  - vllm/sampling_params.py
-  - vllm/sequence.py
-  - vllm/transformers_utils/
-  - vllm/triton_utils/
-  - vllm/utils/
-  - vllm/v1/
-  - tests/compile/h100/
-  - tests/utils.py
-  - csrc/
-  commands:
-  - pytest -v -s compile/h100/test_startup.py
 
 - label: ":amd: (MI300) Fusion E2E Config Sweep" # TBD
   timeout_in_minutes: 40
@@ -2053,21 +1996,6 @@ steps:
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
-- label: ":amd: (MI300) GLM5Next"
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/models/glm5next/
-  - tests/models/glm5next/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s models/glm5next
-
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
 - label: ":amd: (MI300) Language Models (MTEB)" # TBD
@@ -2617,26 +2545,6 @@ steps:
   commands:
   - pytest -v -s samplers -k "not test_beam_search_passes_multimodal_data"
 
-- label: ":amd: (MI300) Samplers Multimodal Beam Search"
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
-  - vllm/v1/sample/
-  - vllm/entrypoints/generate/beam_search/
-  - tests/samplers
-  - tests/conftest.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
-
 #------------------------------------------------------------  mi300 · misc  ------------------------------------------------------------#
 
 - label: ":amd: (MI300) Regression" # TBD
@@ -2698,22 +2606,6 @@ steps:
   commands:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
-
-- label: ":amd: (MI300) E2E Core Large Memory"
-  timeout_in_minutes: 65
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/
-  - tests/v1/e2e/general/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-  - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
 
 - label: ":amd: (MI300) E2E Scheduling" # TBD
   timeout_in_minutes: 55
@@ -3449,6 +3341,48 @@ steps:
   commands:
   - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k"
 
+#----------------------------------------------------------  mi355 · compile  ----------------------------------------------------------#
+
+- label: ":amd: (MI355) PyTorch Compilation H100 Cases"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/__init__.py
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
+  - vllm/engine/
+  - vllm/env_override.py
+  - vllm/envs.py
+  - vllm/forward_context.py
+  - vllm/inputs/
+  - vllm/ir/
+  - vllm/kernels/
+  - vllm/logger.py
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/transformers_utils/
+  - vllm/triton_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/compile/h100/
+  - tests/utils.py
+  - csrc/
+  commands:
+  - pytest -v -s compile/h100/test_startup.py
+
 #--------------------------------------------------------  mi355 · distributed  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Distributed DP Basic" # TBD
@@ -3875,6 +3809,23 @@ steps:
 
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
+- label: ":amd: (MI355) Attention DiffKV Kernels"
+  timeout_in_minutes: 35
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention/ops/triton_unified_attention_diffkv.py
+  - vllm/v1/attention/backends/triton_attn_diffkv.py
+  - tests/kernels/attention/test_triton_unified_attention.py
+  - tests/kernels/attention/test_triton_unified_attention_diffkv.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+
 - label: ":amd: (MI355) Core Operation Kernels Shard %N" # TBD
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -4133,6 +4084,21 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_moe.py
 
 #------------------------------------------------------  mi355 · models / basic  -------------------------------------------------------#
+
+- label: ":amd: (MI355) GLM5Next"
+  timeout_in_minutes: 35
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/glm5next/
+  - tests/models/glm5next/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s models/glm5next
 
 - label: ":amd: (MI355) Basic Models (Extra Initialization) Shard %N" # TBD
   timeout_in_minutes: 60
@@ -4412,7 +4378,45 @@ steps:
 #   commands:
 #   - pytest -s -v tests/quantization/test_gfx950_moe.py
 
+#---------------------------------------------------------  mi355 · samplers  ----------------------------------------------------------#
+
+- label: ":amd: (MI355) Samplers Multimodal Beam Search"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/layers
+  - vllm/sampling_metadata.py
+  - vllm/v1/sample/
+  - vllm/entrypoints/generate/beam_search/
+  - tests/samplers
+  - tests/conftest.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
+
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
+
+- label: ":amd: (MI355) E2E Core Large Memory"
+  timeout_in_minutes: 65
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/
+  - tests/v1/e2e/general/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
+  - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
 
 - label: ":amd: (MI355) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 125
