@@ -725,11 +725,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     cudagraph_runtime_mode=cg_mode,
-                    cudagraph_warmup_mode=(
-                        desc.cg_mode
-                        if warmup and cg_mode == CUDAGraphMode.NONE
-                        else CUDAGraphMode.NONE
-                    ),
                     num_tokens_across_dp=num_tokens_across_dp,
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,

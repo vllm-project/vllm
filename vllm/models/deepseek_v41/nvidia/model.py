@@ -383,10 +383,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         previous_aux: torch.Tensor | None = None
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
-            in_piecewise_cudagraph(include_warmup=True)
+            in_piecewise_cudagraph()
             or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            or not torch.cuda.is_current_stream_capturing()
         ):
-            # A side stream cannot remain unjoined across breakable graph segments.
+            # Use overlap only in FULL graphs; eager warmup initializes Mega mHC.
             mhc_stream = None
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, stream=mhc_stream)
