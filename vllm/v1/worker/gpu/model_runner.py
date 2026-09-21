@@ -2245,6 +2245,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.aux_output_connector.close()
         self.cudagraph_manager = None
         self.fast_prefill = None
+        self.pooling_runner = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
