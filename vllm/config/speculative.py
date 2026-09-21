@@ -37,6 +37,7 @@ else:
 logger = init_logger(__name__)
 
 MTPModelTypes = Literal[
+    "alice_ai_mtp",
     "deepseek_mtp",
     "dots3_note_mtp",
     "mimo_mtp",
@@ -834,6 +835,18 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["NemotronHMTPModel"]}
+            )
+
+        if hf_config.model_type == "alice_ai":
+            hf_config.model_type = "alice_ai_mtp"
+        if hf_config.model_type == "alice_ai_mtp":
+            n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": ["AliceAIMTP"],
+                }
             )
 
         if hf_config.model_type == "qwen3_next":
