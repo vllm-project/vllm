@@ -883,12 +883,18 @@ class DelegatingParser(Parser):
 
     @classmethod
     def supports_token_phase_classification(cls) -> bool:
+        # Legacy reasoning parsers can count one particular output shape
+        # without being able to classify every shape they accept. For example,
+        # some treat text before a lone closing marker as reasoning while their
+        # token counter requires an opening marker. ParserEngine adapters expose
+        # complete reasoning/content/control accounting and are safe to enable.
+        from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+
         reasoning_parser_cls = cls.reasoning_parser_cls
         return (
             reasoning_parser_cls is not None
             and cls.tool_parser_cls is None
-            and reasoning_parser_cls.count_reasoning_tokens
-            is not ReasoningParser.count_reasoning_tokens
+            and issubclass(reasoning_parser_cls, ParserEngineReasoningAdapter)
         )
 
     def _flush_engine_parsers(

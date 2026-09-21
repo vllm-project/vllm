@@ -1442,6 +1442,24 @@ def test_output_token_metrics_accept_harmony_without_reasoning_parser():
     assert serving.parser is HarmonyParser
 
 
+def test_output_token_metrics_accept_parser_engine_reasoning_parser():
+    serving = _make_serving_instance(
+        reasoning_parser="qwen3",
+        enable_per_request_output_token_metrics=True,
+    )
+
+    assert serving.parser is not None
+    assert serving.parser.supports_token_phase_classification()
+
+
+def test_output_token_metrics_reject_legacy_reasoning_parser():
+    with pytest.raises(ValueError, match="requires a parser configuration"):
+        _make_serving_instance(
+            reasoning_parser="deepseek_r1",
+            enable_per_request_output_token_metrics=True,
+        )
+
+
 def test_output_token_metrics_reject_unsupported_parser_combination():
     with pytest.raises(ValueError, match="requires a parser configuration"):
         _make_serving_instance(
