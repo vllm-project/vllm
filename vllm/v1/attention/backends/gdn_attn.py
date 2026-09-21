@@ -105,6 +105,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             "triton", "flashinfer", "cutedsl", "aiter_flydsl"
         ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+        self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -166,6 +167,30 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
+        )
+
+    @staticmethod
+    def _check_chunk_metadata_override(builder_cls: type, backend: str) -> None:
+        """Reject a subclass whose chunk metadata the AITER path would skip.
+
+        AITER brings its own varlen prefill metadata and never calls
+        ``_build_chunk_metadata``, so a builder that overrides it would lose
+        that override without a word. No in-tree subclass can get here --
+        ``_resolve_gdn_prefill_backend`` only selects this backend for models
+        with 128-dim GDN key and value heads, which the KDA builders are not --
+        but a future one should be told rather than quietly ignored.
+        """
+        if backend != "aiter_flydsl":
+            return
+        if (
+            builder_cls._build_chunk_metadata
+            is GDNAttentionMetadataBuilder._build_chunk_metadata
+        ):
+            return
+        raise RuntimeError(
+            f"{builder_cls.__name__} builds its own FLA chunk metadata, which "
+            "the 'aiter_flydsl' GDN prefill backend does not use. Select a "
+            "different gdn_prefill_backend for this model."
         )
 
     def _build_chunk_metadata(
