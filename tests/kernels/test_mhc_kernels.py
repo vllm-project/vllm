@@ -50,6 +50,40 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.mark.parametrize(
+    "tp,ep,hidden,hc,multicast,expected",
+    [
+        (4, False, 5120, 4, 1, True),
+        (2, False, 5120, 4, 1, False),
+        (4, True, 5120, 4, 1, False),
+        (4, False, 4096, 4, 1, False),
+        (4, False, 5120, 2, 1, False),
+        (4, False, 5120, 4, 0, False),
+    ],
+)
+def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
+    monkeypatch, tp, ep, hidden, hc, multicast, expected
+):
+    """Eligibility depends on kernel inputs, not serving or attention settings."""
+    from vllm.models.deepseek_v41.nvidia import model
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp, enable_expert_parallel=ep
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(hidden_size=hidden, hc_mult=hc)
+        ),
+    )
+    group = SimpleNamespace(
+        device_communicator=SimpleNamespace(
+            ca_comm=SimpleNamespace(mnnvl_lamport_ag_multicast_ptr=multicast)
+        )
+    )
+    monkeypatch.setattr(model, "get_tp_group", lambda: group)
+    assert model._use_mhc_all_reduce(config) is expected
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize(
     "num_tokens,hc_mult,hidden_size",

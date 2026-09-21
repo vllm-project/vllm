@@ -121,7 +121,8 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
             graph.replay()
             check()
 
-        for n in (1, 8, 16, 3, 1):
+        # Cover fixed Q6 and shrinking/growing adaptive verification batches.
+        for n in (1, 6, 12, 8, 16, 3, 5, 2, 4, 1):
             run(n)
 
 

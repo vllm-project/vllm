@@ -196,15 +196,12 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
 
 def _use_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
-    if not (
-        parallel.tensor_parallel_size == 4
-        and parallel.data_parallel_size == parallel.pipeline_parallel_size == 1
-        and not parallel.enable_expert_parallel
-        and vllm_config.lora_config is None
-        and vllm_config.speculative_config is None
-        and vllm_config.model_config.hf_config.hidden_size == 5120
-        and vllm_config.model_config.hf_config.hc_mult == 4
-        and _select_dsv4_attn_cls(vllm_config) is DeepseekV4FlashInferMLAAttention
+    config = vllm_config.model_config.hf_config
+    if (
+        parallel.tensor_parallel_size != 4
+        or parallel.enable_expert_parallel
+        or config.hidden_size != 5120
+        or config.hc_mult != 4
     ):
         return False
     comm = typing.cast("CudaCommunicator", get_tp_group().device_communicator).ca_comm
