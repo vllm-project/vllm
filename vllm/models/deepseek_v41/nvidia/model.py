@@ -33,6 +33,7 @@ from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -212,6 +213,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_stream = mhc_stream
         self.fuse_mhc_all_reduce = fuse_mhc_all_reduce
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
+        # Decided by the attention layer once it exists (see below).
+        self.use_deepgemm_fp8_chain = False
 
         self.engram: Engram | None = None
         if engram_layout is not None:
@@ -233,6 +236,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
             candidate_block_buffer=candidate_block_buffer,
+        )
+        self.use_deepgemm_fp8_chain = bool(
+            getattr(self.attn, "use_deepgemm_fp8_chain", False)
         )
         if self.use_sequence_parallel or fuse_mhc_all_reduce:
             self.attn.wo_b.reduce_results = False
@@ -381,6 +387,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         torch.Tensor | None,
     ]:
         previous_aux: torch.Tensor | None = None
+        x_q: QuantizedActivation | None = None
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
@@ -464,7 +471,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         else:
             # The collapse already reads the post-mapped streams, so the mean
             # aux consumers want comes out of the same kernel.
-            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
+            residual, post_mix, res_mix, x, attn_pre, aux, x_q = mhc_shifted_post_pre(
                 x,
                 residual,
                 post_mix,
@@ -483,20 +490,29 @@ class DeepseekV4DecoderLayer(nn.Module):
                 capture_aux=capture_previous_aux,
                 stream=mhc_stream,
                 reduce_results=self.fuse_mhc_all_reduce,
+                fp8_out="gemm" if self.use_deepgemm_fp8_chain else None,
             )
             if capture_previous_aux:
                 previous_aux = aux
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
+            # The pre-quantized copy is this rank's shard; the gathered input
+            # is quantized by the projection itself.
+            x_q = None
 
-        x = self.attn(positions, x, None)
+        x = self.attn(positions, x, None, hidden_states_q=x_q)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
-        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
+        moe_target = (
+            self.ffn.experts.fp8_input_target(x.shape[0])
+            if self.use_deepgemm_fp8_chain and self.ffn.use_mega_moe
+            else None
+        )
+        residual, post_mix, res_mix, x, ffn_pre, _, ffn_fp8 = mhc_shifted_post_pre(
             x,
             residual,
             post_mix,
@@ -514,8 +530,10 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=self.ffn_norm.variance_epsilon,
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
+            fp8_out="moe" if moe_target is not None else None,
+            moe_target=moe_target,
         )
-        x = self.ffn(x, input_ids, mega_gate_metadata)
+        x = self.ffn(x, input_ids, mega_gate_metadata, prequantized=ffn_fp8 is True)
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux

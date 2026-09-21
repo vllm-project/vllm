@@ -111,6 +111,7 @@ from vllm.model_executor.kernels.linear.mxfp8.b12x import (
 )
 from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
     DeepGemmMxfp8BmmLinearKernel,
+    DeepGemmMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
@@ -314,6 +315,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "deep_gemm": {
         DeepGemmFp8BlockScaledMMKernel,
         DeepGemmMxfp8BmmLinearKernel,
+        DeepGemmMxfp8LinearKernel,
     },
     "torch": {
         PerTensorTorchFP8ScaledMMLinearKernel,

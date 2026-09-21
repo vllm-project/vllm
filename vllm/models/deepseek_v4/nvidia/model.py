@@ -82,7 +82,10 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
+    MegaMoeFp8Target,
+    prepare_megamoe_inputs,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.flashinfer_moe_ep import (
@@ -596,6 +599,34 @@ class DeepseekV4MegaMoEExperts(nn.Module):
     def has_fused_shared_experts(self) -> bool:
         return self._transformed_shared_l1_weights is not None
 
+    def fp8_input_target(self, num_tokens: int):
+        """Symmetric-buffer views a producer fills to skip input quantization.
+
+        Returns ``None`` when the shared experts are not fused into the mega
+        kernel: Mega mHC's FP8 MoE output requires both the routed and the
+        shared-expert scale layouts.
+        """
+        if not self.has_fused_shared_experts:
+            return None
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        symm_buffer = self.get_symm_buffer()
+        shared_block_m = deep_gemm.get_block_m_for_mega_moe(
+            get_ep_group().world_size,
+            self.num_experts,
+            symm_buffer.num_max_tokens_per_rank,
+            num_tokens,
+            self.top_k,
+            "fp8xfp4",
+        )
+        return MegaMoeFp8Target(
+            x=symm_buffer.x,
+            x_sf=symm_buffer.x_sf,
+            shared_sf=symm_buffer.shared_l1_acts_sf,
+            shared_block_m=shared_block_m,
+        )
+
     def get_symm_buffer(self):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
@@ -687,7 +718,14 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         *,
         activation_clamp: float | None,
         fast_math: bool = True,
+        prequantized: bool = False,
     ) -> torch.Tensor:
+        """Run the routed (and fused shared) experts.
+
+        ``prequantized``: the producer already wrote this batch's FP8 tokens and
+        both scale layouts into the symmetric buffer (Mega mHC FP8 output), so
+        input staging only repacks the routing tensors.
+        """
         if hidden_states.shape[0] > self.max_num_tokens:
             raise ValueError(
                 f"DeepSeek V4 MegaMoE got {hidden_states.shape[0]} tokens, "
@@ -755,6 +793,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             is_padding=is_padding,
             shared_x_sf=shared_x_sf,
             shared_block_m=shared_block_m,
+            skip_quant=prequantized,
         )
 
         assert self._transformed_l1_weights is not None
@@ -1040,6 +1079,7 @@ class DeepseekV4MoE(nn.Module):
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
+        prequantized: bool = False,
     ) -> torch.Tensor:
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
@@ -1115,6 +1155,7 @@ class DeepseekV4MoE(nn.Module):
             topk_weights,
             topk_ids,
             activation_clamp=activation_clamp,
+            prequantized=prequantized,
         )
 
         if (

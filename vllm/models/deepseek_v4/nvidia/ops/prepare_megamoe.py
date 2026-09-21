@@ -7,9 +7,26 @@ routing top-k tensors into the int64/float32 layout that the DeepGEMM
 MegaMoE kernels consume.
 """
 
+from dataclasses import dataclass
+
 import torch
 
 from vllm.triton_utils import tl, triton
+
+
+@dataclass
+class MegaMoeFp8Target:
+    """Symmetric-buffer views a producer fills to skip MoE input quantization.
+
+    ``x`` / ``x_sf`` are the routed input views (row-major tokens, K-major
+    packed UE8M0 scales); ``shared_sf`` is the shared-expert scale view
+    (MN-major) with the runtime ``shared_block_m`` the MoE scheduler picked.
+    """
+
+    x: torch.Tensor
+    x_sf: torch.Tensor
+    shared_sf: torch.Tensor
+    shared_block_m: int
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
@@ -48,10 +65,36 @@ def _prepare_megamoe_inputs_kernel(
     GROUP_K: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
     SHARED_BLOCK_M: tl.constexpr,
+    SKIP_QUANT: tl.constexpr,
 ) -> None:
     token_id = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     token_mask = token_id < num_tokens
     k_block_id = tl.program_id(1)
+    if SKIP_QUANT:
+        # The producer (Mega mHC) already wrote x_fp8 / x_sf / shared_x_sf;
+        # only the routing tensors are repacked here (grid is (tokens, 1)).
+        _pack_topk(
+            topk_ids,
+            topk_weights,
+            is_padding,
+            topk_idx_out,
+            topk_weights_out,
+            token_id,
+            token_mask,
+            topk_ids_stride_m,
+            topk_ids_stride_k,
+            topk_weights_stride_m,
+            topk_weights_stride_k,
+            is_padding_stride_m,
+            topk_idx_stride_m,
+            topk_idx_stride_k,
+            topk_weights_out_stride_m,
+            topk_weights_out_stride_k,
+            top_k,
+            BLOCK_M,
+            BLOCK_TOPK,
+        )
+        return
 
     k_offsets = k_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
     k_mask = token_mask[:, None] & (k_offsets[None, :] < hidden_size)
@@ -117,47 +160,92 @@ def _prepare_megamoe_inputs_kernel(
         )
 
     if k_block_id == 0:
-        topk_offsets = tl.arange(0, BLOCK_TOPK)
-        topk_mask = token_mask[:, None] & (topk_offsets[None, :] < top_k)
-        token_is_padding = tl.full((BLOCK_M,), False, tl.int1)
-        if is_padding is not None:
-            token_is_padding = tl.load(
-                is_padding + token_id * is_padding_stride_m,
-                mask=token_mask,
-                other=True,
-            )
-
-        ids = tl.load(
-            topk_ids
-            + token_id[:, None] * topk_ids_stride_m
-            + topk_offsets[None, :] * topk_ids_stride_k,
-            mask=topk_mask,
-            other=0,
-        ).to(tl.int64)
-        ids = tl.where(token_is_padding[:, None], -1, ids)
-        tl.store(
-            topk_idx_out
-            + token_id[:, None] * topk_idx_stride_m
-            + topk_offsets[None, :] * topk_idx_stride_k,
-            ids,
-            mask=topk_mask,
+        _pack_topk(
+            topk_ids,
+            topk_weights,
+            is_padding,
+            topk_idx_out,
+            topk_weights_out,
+            token_id,
+            token_mask,
+            topk_ids_stride_m,
+            topk_ids_stride_k,
+            topk_weights_stride_m,
+            topk_weights_stride_k,
+            is_padding_stride_m,
+            topk_idx_stride_m,
+            topk_idx_stride_k,
+            topk_weights_out_stride_m,
+            topk_weights_out_stride_k,
+            top_k,
+            BLOCK_M,
+            BLOCK_TOPK,
         )
 
-        weights = tl.load(
-            topk_weights
-            + token_id[:, None] * topk_weights_stride_m
-            + topk_offsets[None, :] * topk_weights_stride_k,
-            mask=topk_mask,
-            other=0.0,
+
+@triton.jit
+def _pack_topk(
+    topk_ids,
+    topk_weights,
+    is_padding,
+    topk_idx_out,
+    topk_weights_out,
+    token_id,
+    token_mask,
+    topk_ids_stride_m: tl.constexpr,
+    topk_ids_stride_k: tl.constexpr,
+    topk_weights_stride_m: tl.constexpr,
+    topk_weights_stride_k: tl.constexpr,
+    is_padding_stride_m: tl.constexpr,
+    topk_idx_stride_m: tl.constexpr,
+    topk_idx_stride_k: tl.constexpr,
+    topk_weights_out_stride_m: tl.constexpr,
+    topk_weights_out_stride_k: tl.constexpr,
+    top_k: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+):
+    topk_offsets = tl.arange(0, BLOCK_TOPK)
+    topk_mask = token_mask[:, None] & (topk_offsets[None, :] < top_k)
+    token_is_padding = tl.full((BLOCK_M,), False, tl.int1)
+    if is_padding is not None:
+        token_is_padding = tl.load(
+            is_padding + token_id * is_padding_stride_m,
+            mask=token_mask,
+            other=True,
         )
-        weights = tl.where(token_is_padding[:, None], 0.0, weights)
-        tl.store(
-            topk_weights_out
-            + token_id[:, None] * topk_weights_out_stride_m
-            + topk_offsets[None, :] * topk_weights_out_stride_k,
-            weights,
-            mask=topk_mask,
-        )
+
+    ids = tl.load(
+        topk_ids
+        + token_id[:, None] * topk_ids_stride_m
+        + topk_offsets[None, :] * topk_ids_stride_k,
+        mask=topk_mask,
+        other=0,
+    ).to(tl.int64)
+    ids = tl.where(token_is_padding[:, None], -1, ids)
+    tl.store(
+        topk_idx_out
+        + token_id[:, None] * topk_idx_stride_m
+        + topk_offsets[None, :] * topk_idx_stride_k,
+        ids,
+        mask=topk_mask,
+    )
+
+    weights = tl.load(
+        topk_weights
+        + token_id[:, None] * topk_weights_stride_m
+        + topk_offsets[None, :] * topk_weights_stride_k,
+        mask=topk_mask,
+        other=0.0,
+    )
+    weights = tl.where(token_is_padding[:, None], 0.0, weights)
+    tl.store(
+        topk_weights_out
+        + token_id[:, None] * topk_weights_out_stride_m
+        + topk_offsets[None, :] * topk_weights_out_stride_k,
+        weights,
+        mask=topk_mask,
+    )
 
 
 def prepare_megamoe_inputs(
@@ -171,7 +259,13 @@ def prepare_megamoe_inputs(
     is_padding: torch.Tensor | None = None,
     shared_x_sf: torch.Tensor | None = None,
     shared_block_m: int | None = None,
+    skip_quant: bool = False,
 ) -> None:
+    """Stage Mega MoE inputs.
+
+    With ``skip_quant`` the FP8 tokens and scales are already in place (Mega
+    mHC wrote them) and only the top-k routing tensors are repacked.
+    """
     num_tokens, hidden_size = hidden_states.shape
     if num_tokens == 0:
         return
@@ -212,7 +306,10 @@ def prepare_megamoe_inputs(
     block_k = 128
     # On GB200, eight-row tiles win from 64 tokens; keep smaller batches untiled.
     block_m = 8 if num_tokens >= 64 else 1
-    grid = (triton.cdiv(num_tokens, block_m), triton.cdiv(hidden_size, block_k))
+    grid = (
+        triton.cdiv(num_tokens, block_m),
+        1 if skip_quant else triton.cdiv(hidden_size, block_k),
+    )
     block_topk = triton.next_power_of_2(top_k)
     padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
     _prepare_megamoe_inputs_kernel[grid](
@@ -250,5 +347,6 @@ def prepare_megamoe_inputs(
         GROUP_K=32,
         BLOCK_TOPK=block_topk,
         SHARED_BLOCK_M=shared_block_m or 1,
+        SKIP_QUANT=skip_quant,
         num_warps=4,
     )

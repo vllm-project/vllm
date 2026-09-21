@@ -168,6 +168,60 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
+def _maybe_bind_deepgemm_fp8_chain(
+    attn: "DeepseekV4Attention", config, prefix: str
+) -> bool:
+    """Route fused_wqa_wkv / wo_b to DeepGEMM when the FP8 chain is opted in.
+
+    Runs at construction, before weights load, so the DeepGEMM kernel packs the
+    weights instead of FlashInfer. Every precondition failure logs once and
+    leaves the layer on its default kernels.
+    """
+    if not envs.VLLM_DSV41_DEEPGEMM_FP8_CHAIN:
+        return False
+    from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+        DeepGemmMxfp8LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        expose_input_quant_key,
+        get_input_quant_key,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+    from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import is_mega_mhc_supported
+
+    supported, reason = DeepGemmMxfp8LinearKernel.is_supported()
+    if not supported:
+        logger.warning_once("DeepGEMM FP8 chain disabled: %s", reason)
+        return False
+    if not is_mega_mhc_supported(config.hidden_size, config.hc_mult):
+        logger.warning_once("DeepGEMM FP8 chain disabled: Mega mHC unsupported.")
+        return False
+    layers = [attn.fused_wqa_wkv, attn.wo_b]
+    for layer in layers:
+        kernel = getattr(getattr(layer, "quant_method", None), "kernel", None)
+        if kernel is None or get_input_quant_key(layer) != kMxfp8Dynamic:
+            logger.warning_once(
+                "DeepGEMM FP8 chain disabled: %s is not an MXFP8 linear (kernel=%s).",
+                prefix,
+                type(kernel).__name__,
+            )
+            return False
+    for layer in layers:
+        kernel = DeepGemmMxfp8LinearKernel(Mxfp8LinearLayerConfig())
+        layer.quant_method.kernel = kernel
+        expose_input_quant_key(layer, kernel)
+    logger.info_once(
+        "DeepSeek-V4.1 DeepGEMM FP8 chain enabled: fused_wqa_wkv and wo_b run on "
+        "DeepGEMM with pre-quantized inputs."
+    )
+    return True
+
+
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
@@ -388,6 +442,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.wo_b",
+        )
+        # Keep activations in MXFP8 between DeepGEMM kernels: Mega mHC feeds
+        # fused_wqa_wkv and the wo_a einsum feeds wo_b, both pre-quantized with
+        # DeepGEMM packed scales, so those two projections run on DeepGEMM.
+        self.use_deepgemm_fp8_chain = _maybe_bind_deepgemm_fp8_chain(
+            self, config, prefix
         )
 
         # Initialize rotary embedding before the indexer/compressor consume it.
@@ -638,7 +698,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
+        hidden_states_q: QuantizedActivation | None = None,
     ) -> torch.Tensor:
+        """``hidden_states_q``: the same normalized input already quantized for
+        ``fused_wqa_wkv`` (DeepGEMM FP8 chain); the BF16 tensor still feeds the
+        compressor / indexer projections."""
         # The eager attention region writes into a caller-owned buffer
         # (breakable_cudagraph needs in-place outputs); its shape and how it is
         # projected afterwards follow the interface contract above.
@@ -647,7 +711,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
         qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
-            hidden_states
+            hidden_states, hidden_states_q
         )
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
@@ -827,7 +891,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
 
-    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _fused_wqa_wkv_gemm(
+        self, hidden_states: torch.Tensor | QuantizedActivation
+    ) -> torch.Tensor:
         # Override point: the ROCm layer preshuffles this weight in place, so
         # it cannot go through fused_wqa_wkv directly.
         # MergedColumnParallelLinear returns (output, bias); bias is None.
@@ -844,7 +910,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         return self.wq_b(qr)
 
     def _run_parallel_input_projections(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        hidden_states_q: QuantizedActivation | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -884,8 +952,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
             aux_fns[1] = indexer_weights_proj
 
+        wqa_input = hidden_states if hidden_states_q is None else hidden_states_q
         qr_kv, (kv_score, indexer_weights) = execute_in_parallel(
-            lambda: self._fused_wqa_wkv_gemm(hidden_states),
+            lambda: self._fused_wqa_wkv_gemm(wqa_input),
             aux_fns,
             self.ln_events[0],
             self.ln_events[1:3],

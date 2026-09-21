@@ -2,15 +2,38 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from typing import Any
 
 import torch
 
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8DynamicDeepGemm,
+)
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import MegaMoeFp8Target
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     _import_deep_gemm,
+    get_tma_aligned_size,
     is_deep_gemm_supported,
     mega_mhc,
 )
+
+# Hidden elements per packed int32 scale word: 4 UE8M0 scales x 32-element groups.
+_HIDDEN_PER_SF_WORD = 128
+
+
+def make_deep_gemm_packed_scale(
+    num_tokens: int, hidden: int, device: torch.device
+) -> torch.Tensor:
+    """Allocate a [T, H/128] int32 scale in DeepGEMM's MN-major TMA-aligned layout."""
+    aligned = get_tma_aligned_size(num_tokens, torch.int32.itemsize)
+    return torch.empty_strided(
+        (num_tokens, hidden // _HIDDEN_PER_SF_WORD),
+        (1, aligned),
+        dtype=torch.int32,
+        device=device,
+    )
 
 
 @functools.cache
@@ -44,8 +67,27 @@ def mhc_shifted_post_pre_deep_gemm(
     num_sinkhorn_iters: int,
     rmsnorm_weight: torch.Tensor,
     rmsnorm_eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run DSV4.1 shifted post, next pre, and BF16 RMSNorm with Mega mHC."""
+    fp8_out: str | None = None,
+    moe_target: MegaMoeFp8Target | None = None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    QuantizedActivation | None,
+]:
+    """Run DSV4.1 shifted post, next pre, and BF16 RMSNorm with Mega mHC.
+
+    ``fp8_out`` additionally emits the normalized output as MXFP8 straight from
+    the kernel (the BF16 output is always produced for the BF16 consumers):
+
+    * ``"gemm"``: returns a ``QuantizedActivation`` with DeepGEMM packed scales
+      for a ``fp8_gemm_nt`` consumer (the attention ``fused_wqa_wkv``).
+    * ``"moe"``: writes the FP8 tokens and both scale layouts into
+      ``moe_target`` (the Mega MoE symmetric buffer), so the MoE input staging
+      no longer quantizes; returns ``None``.
+    """
     num_tokens, hidden_size = x.shape
     hc_mult = residual.shape[1]
     new_residual = torch.empty_like(residual)
@@ -53,6 +95,29 @@ def mhc_shifted_post_pre_deep_gemm(
     new_post_mix = torch.empty_like(post_mix)
     new_comb_res_mix = torch.empty_like(comb_res_mix)
     y_bf16 = x.new_empty(num_tokens, hidden_size, dtype=torch.bfloat16)
+    fp8_kwargs: dict[str, Any] = {}
+    y_quant: QuantizedActivation | None = None
+    if fp8_out == "gemm":
+        y_fp8 = x.new_empty(num_tokens, hidden_size, dtype=torch.float8_e4m3fn)
+        y_gemm_sf = make_deep_gemm_packed_scale(num_tokens, hidden_size, x.device)
+        fp8_kwargs = {"y_fp8": y_fp8, "y_gemm_sf": y_gemm_sf}
+        y_quant = QuantizedActivation(
+            y_fp8, y_gemm_sf, torch.bfloat16, y_fp8.shape, kMxfp8DynamicDeepGemm
+        )
+    elif fp8_out == "moe":
+        assert moe_target is not None
+        y_fp8 = moe_target.x[:num_tokens]
+        assert y_fp8.is_contiguous() and y_fp8.shape == (num_tokens, hidden_size)
+        fp8_kwargs = {
+            "y_fp8": y_fp8,
+            "y_routed_sf": moe_target.x_sf[:num_tokens],
+            # DeepGEMM checks every SF as [num_tokens, H/128]; the strides and
+            # storage of the full shared-expert view stay those of the buffer.
+            "y_shared_sf": moe_target.shared_sf[:num_tokens],
+            "shared_sf_block_m": moe_target.shared_block_m,
+        }
+    elif fp8_out is not None:
+        raise ValueError(f"unknown fp8_out={fp8_out!r}")
     mega_mhc(
         x=x,
         residual=residual,
@@ -76,6 +141,7 @@ def mhc_shifted_post_pre_deep_gemm(
         new_post_mix=new_post_mix,
         new_comb_res_mix=new_comb_res_mix,
         y_bf16=y_bf16,
+        **fp8_kwargs,
     )
     return (
         new_residual,
@@ -83,4 +149,5 @@ def mhc_shifted_post_pre_deep_gemm(
         new_comb_res_mix,
         y_bf16,
         new_prev_mix.squeeze(-1),
+        y_quant,
     )
