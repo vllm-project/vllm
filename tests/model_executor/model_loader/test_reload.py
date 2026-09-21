@@ -519,6 +519,7 @@ def test_padded_moe_reload_releases_each_layer(
         method = object.__new__(UnquantizedFusedMoEMethod)
         torch.nn.Module.__init__(method)
         method.moe = config
+        method.unquantized_backend = None
         # The regression concerns streaming reload, not kernel conversion.
         monkeypatch.setattr(method, "process_weights_after_loading", processed.append)
         layer = object.__new__(RoutedExperts)
