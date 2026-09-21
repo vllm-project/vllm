@@ -11,27 +11,9 @@ from http import HTTPStatus
 from fastapi import HTTPException
 
 from vllm.engine.protocol import EngineClient
+from vllm.utils.weight_checksum import combine_weight_checksums
 
 _ACTIONS = ("checksum", "reset", "compare")
-
-
-def combine_weight_checksums(per_worker: list[dict[str, str]]) -> dict[str, str]:
-    """Merge per-worker checksum maps into one rank-qualified map.
-
-    Worker keys carry their parallel ranks, so the same logical weight appears
-    once per shard. An overlapping key means a worker failed to qualify it.
-
-    Raises:
-        RuntimeError: If two workers report the same key.
-    """
-    combined: dict[str, str] = {}
-    for worker_checksums in per_worker:
-        duplicate_keys = combined.keys() & worker_checksums.keys()
-        if duplicate_keys:
-            duplicates = ", ".join(sorted(duplicate_keys))
-            raise RuntimeError(f"Duplicate weight checksum keys: {duplicates}")
-        combined.update(worker_checksums)
-    return combined
 
 
 def compare_weight_checksums(
