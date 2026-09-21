@@ -36,10 +36,8 @@ class GPUWatermarkSampler(Sampler):
         self.watermarking.np.fill(True)
         self.watermarking.copy_to_uva()
 
-    def add_request(
-        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
-    ) -> None:
-        super().add_request(req_idx, prompt_len, sampling_params)
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+        super().add_request(req_idx, sampling_params)
         self.watermarking.np[req_idx] = sampling_params.watermarking
         if sampling_params.watermarking and sampling_params.temperature == 0:
             logger.warning_once(
