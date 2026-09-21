@@ -304,3 +304,66 @@ def test_cudagraph_capture_batch_stays_decode_only():
     assert staged is not None
     assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
+def test_checkpoint_metadata_preserves_non_spec_order(
+    num_spec, prefix_match_unit, expected_offset
+):
+    """Only eligible non-spec rows get a checkpoint in their reserved page."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B",
+        block_size=BLOCK_SIZE,
+    )
+    if num_spec > 0:
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=num_spec,
+        )
+    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    mamba_spec = MambaSpec(
+        block_size=64,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_spec,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+    batch = BatchSpec(
+        seq_lens=[65, 100, 100], query_lens=[3 if num_spec else 1, 100, 99]
+    )
+    common = create_common_attn_metadata(batch, 64, DEVICE, arange_block_indices=True)
+    table = common.block_table_tensor + 1
+    if num_spec:
+        table = torch.cat([table, torch.zeros(3, num_spec, dtype=table.dtype)], dim=1)
+    common = common.replace(block_table_tensor=table)
+    kwargs = {}
+    if num_spec:
+        kwargs = dict(
+            num_decode_draft_tokens_cpu=torch.tensor([2, -1, -1], dtype=torch.int32),
+            num_accepted_tokens=torch.ones(3, dtype=torch.int32),
+        )
+
+    actual = builder.build(0, common, **kwargs)
+    assert actual.checkpoint is not None
+    offsets = [expected_offset, 0] if num_spec else [0, expected_offset, 0]
+    slots = [common.block_table_tensor[1, 0].item(), NULL_BLOCK_ID]
+    if not num_spec:
+        slots.insert(0, NULL_BLOCK_ID)
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets, torch.tensor(offsets, dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices, torch.tensor(slots, dtype=torch.int32)
+    )
