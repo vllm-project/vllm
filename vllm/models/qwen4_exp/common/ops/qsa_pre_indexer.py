@@ -3,8 +3,42 @@
 """Fused QSA pre-indexer kernel for Qwen4Exp."""
 
 import torch
+from torch import nn
 
 from vllm.triton_utils import tl, triton
+
+
+def supports_fused_pre_indexer(
+    rotary_emb: nn.Module,
+    head_dim: int,
+    num_kv_heads: int,
+    compress_ratio: int,
+) -> bool:
+    """Report whether this indexer's shapes match the fused kernel's assumptions.
+
+    The kernel hard-codes the rotary layout and the single-KV-head group
+    compression it was written for; everything it rejects has a working unfused
+    path. The conditions are all config-shaped, so they hold or fail identically
+    on every platform.
+    """
+    rotary_dim = int(rotary_emb.rotary_dim)
+    mrope_section = getattr(rotary_emb, "mrope_section", None)
+    return (
+        bool(getattr(rotary_emb, "is_neox_style", False))
+        and (
+            not mrope_section
+            or (
+                len(mrope_section) == 3
+                and sum(mrope_section) == rotary_dim // 2
+                and bool(getattr(rotary_emb, "mrope_interleaved", False))
+            )
+        )
+        and head_dim == 128
+        and rotary_dim == 64
+        and num_kv_heads == 1
+        and compress_ratio > 1
+        and compress_ratio & (compress_ratio - 1) == 0
+    )
 
 
 @triton.jit
@@ -451,6 +485,8 @@ def qsa_pre_indexer(
     section = mrope_section if mrope_section is not None else (0, 0, 0)
     assert len(section) == 3
 
+    # Tuned on 32-lane warps. A ROCm wavefront is 64 lanes, so the same tile is
+    # half the work per lane there; correct either way, not yet retuned.
     if num_tokens <= 4096:
         TILE_T_Q, TILE_H_Q = 2, 2
     else:
@@ -505,4 +541,4 @@ def qsa_pre_indexer(
     )
 
 
-__all__ = ["qsa_pre_indexer"]
+__all__ = ["qsa_pre_indexer", "supports_fused_pre_indexer"]
