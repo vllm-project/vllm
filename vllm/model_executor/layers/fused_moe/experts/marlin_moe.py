@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
+    apply_moe_activation_masked_supported,
     apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -34,7 +35,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
+    get_marlin_workspace,
     marlin_moe_intermediate_size,
     marlin_quant_input,
 )
@@ -80,10 +81,6 @@ def _fused_marlin_moe(
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
@@ -91,7 +88,6 @@ def _fused_marlin_moe(
     intermediate_cache2: torch.Tensor | None = None,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
-    is_k_full: bool = True,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
@@ -99,7 +95,7 @@ def _fused_marlin_moe(
     N = marlin_moe_intermediate_size(w1, w2)
     w13_num_shards = 2 if activation.is_gated else 1
     if workspace is None:
-        workspace = marlin_make_workspace_new(hidden_states.device, 4)
+        workspace = get_marlin_workspace(hidden_states.device)
 
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
@@ -141,8 +137,6 @@ def _fused_marlin_moe(
         a_scales1,
         global_scale1,
         w1_zeros,
-        g_idx1,
-        sort_indices1,
         workspace,
         sorted_token_ids,
         expert_ids,
@@ -155,7 +149,6 @@ def _fused_marlin_moe(
         size_m=M,
         size_n=w13_num_shards * N,
         size_k=K,
-        is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
@@ -208,8 +201,6 @@ def _fused_marlin_moe(
         a_scales2,
         global_scale2,
         w2_zeros,
-        g_idx2,
-        sort_indices2,
         workspace,
         sorted_token_ids,
         expert_ids,
@@ -222,7 +213,6 @@ def _fused_marlin_moe(
         size_m=M * num_topk,
         size_n=K,
         size_k=N,
-        is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
@@ -252,46 +242,65 @@ def fused_marlin_moe(
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
     intermediate_cache13: torch.Tensor | None = None,
     intermediate_cache2: torch.Tensor | None = None,
-    is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
-    """
-    This function computes a Mixture of Experts (MoE) layer using two sets of
+    """This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
 
-    Parameters:
-    - hidden_states (torch.Tensor): The input tensor to the MoE layer.
-    - w1 (torch.Tensor): The first set of expert weights.
-    - w2 (torch.Tensor): The second set of expert weights.
-    - w1_scale (torch.Tensor): Scale to be used for w1.
-    - w2_scale (torch.Tensor): Scale to be used for w2.
-    - g_idx1 (torch.Tensor|None): The first set of act_order indices.
-    - g_idx2 (torch.Tensor|None): The second set of act_order indices.
-    - sort_indices1 (torch.Tensor|None): The first act_order input
-        permutation.
-    - sort_indices2 (torch.Tensor|None): The second act_order input
-        permutation.
-    - topk_weights (torch.Tensor): Top-k weights.
-    - topk_ids (torch.Tensor): Indices of topk-k elements.
-    - w1_zeros (torch.Tensor|None): Optional zero points to be used for w1.
-    - w2_zeros (torch.Tensor|None): Optional zero points to be used for w2.
-    - num_bits (bool): The number of bits in expert weights quantization.
+    Args:
+        hidden_states (torch.Tensor): The input tensor to the MoE layer.
+        w1 (torch.Tensor): The first set of expert weights.
+        w2 (torch.Tensor): The second set of expert weights.
+        bias1 (torch.Tensor|None): Optional bias for the first GEMM.
+        bias2 (torch.Tensor|None): Optional bias for the second GEMM.
+        w1_scale (torch.Tensor): Scale to be used for w1.
+        w2_scale (torch.Tensor): Scale to be used for w2.
+        topk_weights (torch.Tensor): Top-k weights.
+        topk_ids (torch.Tensor): Indices of topk-k elements.
+        quant_type_id (int): Id of the `ScalarType` the expert weights are
+            quantized to. Determines the 4- or 8-bit Marlin kernel path.
+        apply_router_weight_on_input (bool): Apply the topk weights to the
+            input rather than the output. Only valid when topk is 1.
+        global_num_experts (int): Total number of experts across all expert
+            parallel shards. -1 means the local expert count.
+        activation (MoEActivation): Activation applied between the two GEMMs.
+        activation_func (Callable|None): Override for the activation
+            implementation.
+        moe_sum (Callable|None): Override for the final reduction over the
+            topk dimension. Defaults to `ops.moe_sum` / `torch.sum`.
+        expert_map (torch.Tensor|None): Maps global expert indices to the
+            local expert space of this expert parallel shard.
+        input_global_scale1 (torch.Tensor|None): NVFP4 global input scale for
+            the first GEMM.
+        input_global_scale2 (torch.Tensor|None): NVFP4 global input scale for
+            the second GEMM.
+        global_scale1 (torch.Tensor|None): NVFP4 global weight scale for w1.
+        global_scale2 (torch.Tensor|None): NVFP4 global weight scale for w2.
+        w1_zeros (torch.Tensor|None): Optional zero points to be used for w1.
+        w2_zeros (torch.Tensor|None): Optional zero points to be used for w2.
+        workspace (torch.Tensor|None): Scratch buffer for the Marlin kernels.
+        intermediate_cache13 (torch.Tensor|None): Scratch buffer for the
+            first and third intermediate activations.
+        intermediate_cache2 (torch.Tensor|None): Scratch buffer for the
+            second intermediate activation.
+        output (torch.Tensor|None): Tensor to write the result into. A new
+            tensor is allocated when omitted.
+        input_dtype (torch.dtype|None): dtype the activations are quantized
+            to. A 1-byte dtype raises the M block size to at least 16.
+        activation_config (ApplyMoEActivationConfig|None): Extra
+            configuration forwarded to the activation.
 
     Returns:
-    - torch.Tensor: The output tensor after applying the MoE layer.
-    """
+        torch.Tensor: The output tensor after applying the MoE layer.
 
+    """
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
         scalar_types.uint4,
@@ -371,10 +380,6 @@ def fused_marlin_moe(
         input_global_scale2=input_global_scale2,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
-        g_idx1=g_idx1,
-        g_idx2=g_idx2,
-        sort_indices1=sort_indices1,
-        sort_indices2=sort_indices2,
         w1_zeros=w1_zeros,
         w2_zeros=w2_zeros,
         workspace=workspace,
@@ -382,7 +387,6 @@ def fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=None,
         input_dtype=input_dtype,
-        is_k_full=is_k_full,
     ).view(-1, topk, K)
 
     if output is None:
@@ -415,23 +419,17 @@ def batched_fused_marlin_moe(
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
     intermediate_cache13: torch.Tensor | None = None,
     intermediate_cache2: torch.Tensor | None = None,
-    is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     activation_func: Callable[..., None] | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
-    """
-    This function massages the inputs so the batched hidden_states can be
+    """This function massages the inputs so the batched hidden_states can be
     presented as a 2D contiguous tensor that could be used with
     _fused_marlin_moe.
 
@@ -454,7 +452,6 @@ def batched_fused_marlin_moe(
     expert_ids tensors, so only relevant/valid rows of A (hidden_states)
     are accessed and are processed with the correct expert_ids.
     """
-
     assert hidden_states.ndim == 3, (
         f"hidden states must be batched. e.g. [B, MAX_TOKENS, K]."
         f"But got {hidden_states.size()}"
@@ -547,10 +544,6 @@ def batched_fused_marlin_moe(
         input_global_scale2=input_global_scale2,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
-        g_idx1=g_idx1,
-        g_idx2=g_idx2,
-        sort_indices1=sort_indices1,
-        sort_indices2=sort_indices2,
         w1_zeros=w1_zeros,
         w2_zeros=w2_zeros,
         workspace=workspace,
@@ -558,7 +551,6 @@ def batched_fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=output.view(-1, K) if output is not None else output,
         input_dtype=input_dtype,
-        is_k_full=is_k_full,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
@@ -573,11 +565,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
         assert (
@@ -587,11 +574,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             or quant_config.use_int8_w8a16
             or quant_config.use_fp8_w8a16
         ), "Supports only {mxfp,nvfp,int}4_w4a16, int8_w8a16 or fp8_w8a16"
-        self.w13_g_idx = w13_g_idx
-        self.w2_g_idx = w2_g_idx
-        self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
-        self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
-        self.is_k_full = is_k_full
         self.input_dtype = get_marlin_input_dtype()
 
         super().__init__(
@@ -785,11 +767,6 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 # output buffer allocation. Please refer to workspace_shapes().
                 intermediate_cache13=workspace2,
                 intermediate_cache2=workspace13,
-                g_idx1=self.w13_g_idx,
-                g_idx2=self.w2_g_idx,
-                sort_indices1=self.w13_g_idx_sort_indices,
-                sort_indices2=self.w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
                 input_dtype=self.input_dtype,
             )
             return
@@ -900,11 +877,6 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             output=output,
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
-            g_idx1=self.w13_g_idx,
-            g_idx2=self.w2_g_idx,
-            sort_indices1=self.w13_g_idx_sort_indices,
-            sort_indices2=self.w2_g_idx_sort_indices,
-            is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
         )
 
@@ -930,22 +902,12 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
     ):
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
         )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -954,6 +916,10 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return apply_moe_activation_masked_supported(activation)
 
     def workspace_shapes(
         self,
@@ -1000,26 +966,18 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             act: MoEActivation,
             act_output: torch.Tensor,
             act_input: torch.Tensor,
-            **kwargs,
+            *,
+            topk_ids: torch.Tensor | None = None,
+            expert_map: torch.Tensor | None = None,
         ) -> None:
-            if act != MoEActivation.SITU:
-                self.activation(
-                    act,
-                    act_output,
-                    act_input,
-                    **kwargs,
-                )
-                return
-
             num_experts, max_num_tokens = hidden_states.shape[:2]
-            beta = self.activation_config.activation_situ_beta
-            linear_beta = self.activation_config.activation_situ_linear_beta
-            torch.ops._C.masked_situ_and_mul(
+            self.activation(
+                act,
                 act_output.view(num_experts, max_num_tokens, -1),
                 act_input.view(num_experts, max_num_tokens, -1),
-                expert_tokens_meta.expert_num_tokens,
-                1.0 if beta is None else beta,
-                -1.0 if linear_beta is None else linear_beta,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
+                valid_token_counts=expert_tokens_meta.expert_num_tokens,
             )
 
         return batched_fused_marlin_moe(
@@ -1041,14 +999,9 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             output=output,
             intermediate_cache13=workspace13,
             intermediate_cache2=workspace2,
-            g_idx1=self.w13_g_idx,
-            g_idx2=self.w2_g_idx,
-            sort_indices1=self.w13_g_idx_sort_indices,
-            sort_indices2=self.w2_g_idx_sort_indices,
             w1_zeros=self.w1_zp,
             w2_zeros=self.w2_zp,
             input_dtype=self.input_dtype,
-            is_k_full=self.is_k_full,
             activation_func=activation_func,
             activation_config=self.activation_config,
         )

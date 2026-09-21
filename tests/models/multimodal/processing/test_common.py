@@ -13,6 +13,7 @@ from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     ImageDummyOptions,
+    MultiModalDummyOptions,
     VideoDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict, MultiModalInput
@@ -33,9 +34,7 @@ from ...registry import (
 
 
 def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Add metadata to video mm_data
-    """
+    """Add metadata to video mm_data."""
 
     def create_metadata(frames: np.ndarray):
         num_frames = len(frames)
@@ -61,8 +60,7 @@ def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 
 
 def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Patch the multimodal data for GLM-ASR model.
+    """Patch the multimodal data for GLM-ASR model.
     GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
     """
     if "audio" in mm_data:
@@ -74,6 +72,8 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 
 
 _IGNORE_MM_KEYS = {
+    # Dithering causes minor divergence
+    "cohere_asr": {"input_features"},
     # In Ultravox, the audio_features can be different depending on padding
     # The slight difference should not be a problem though, since
     # attention_mask lets us ignore the difference.
@@ -90,6 +90,11 @@ _XPU_EXCLUDED_MODEL_IDS = {
     "moonshotai/Kimi-K3",
     "Qwen/Qwen2.5-Omni-7B-AWQ",
     "thinkingmachines/Inkling-NVFP4",
+}
+
+_CPU_EXCLUDED_MODEL_IDS = {
+    # DeepSeek-V4 vision variant is only supported on NVIDIA GPUs for now.
+    "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
 }
 
 
@@ -110,6 +115,11 @@ def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
 
     if current_platform.is_xpu():
         for excluded_model_id in _XPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
+
+    if current_platform.is_cpu():
+        for excluded_model_id in _CPU_EXCLUDED_MODEL_IDS:
             while excluded_model_id in model_ids:
                 model_ids.remove(excluded_model_id)
 
@@ -145,10 +155,10 @@ def get_transformers_backend_model_ids_to_test():
     )
 
 
-def get_text_token_prompts(
+def get_token_prompt(
     processor: BaseMultiModalProcessor,
     mm_data: MultiModalDataDict,
-):
+) -> list[int]:
     dummy_inputs = processor.dummy_inputs
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
@@ -167,7 +177,7 @@ def get_text_token_prompts(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
-            mm_options={},
+            mm_options=MultiModalDummyOptions(),
             # Assume all Mistral models define this extra argument
             mm_data=mm_data,  # type: ignore[call-arg]
         )
@@ -175,24 +185,13 @@ def get_text_token_prompts(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
-            mm_options={},
+            mm_options=MultiModalDummyOptions(),
         )
 
-    text_prompt: str | None
-    token_prompt: list[int]
-    if isinstance(inputs.prompt, list):
-        text_prompt = None
-        token_prompt = inputs.prompt
-    elif isinstance(inputs.prompt, str):
-        text_prompt = inputs.prompt
-        token_prompt = tokenizer.encode(
-            text_prompt,
-            **processor.info.get_default_tok_params().get_encode_kwargs(),
-        )
-    else:
+    if not isinstance(inputs.prompt, list):
         raise TypeError(type(inputs.prompt))
 
-    return text_prompt, token_prompt
+    return inputs.prompt
 
 
 def random_vision_chunk(
@@ -282,13 +281,14 @@ def _test_processing_correctness(
         return BaseDummyOptions(count=count)
 
     # Assign normalized DummyOptions to the model config
-    model_config.get_multimodal_config().limit_per_prompt = {
-        modality: _to_dummy_options(modality, count)
-        for modality, count in limit_mm_per_prompt_ints.items()
-    }
+    model_config.get_multimodal_config().limit_per_prompt = MultiModalDummyOptions(
+        {
+            modality: _to_dummy_options(modality, count)
+            for modality, count in limit_mm_per_prompt_ints.items()
+        }
+    )
 
-    baseline_processor = factories.build_processor(ctx, cache=None)
-    cached_processor = factories.build_processor(ctx, cache=cache)
+    processor = factories.build_processor(ctx)
 
     rng = np.random.RandomState(0)
 
@@ -337,41 +337,42 @@ def _test_processing_correctness(
         _test_processing_correctness_one(
             model_config,
             mm_data,
-            baseline_processor,
-            cached_processor,
+            processor,
             batch_idx,
             hit_rate,
             num_batches,
             simplify_rate,
+            cache=cache,
         )
 
 
 def _test_processing_correctness_one(
     model_config: ModelConfig,
     mm_data: MultiModalDataDict,
-    baseline_processor: BaseMultiModalProcessor,
-    cached_processor: BaseMultiModalProcessor,
+    processor: BaseMultiModalProcessor,
     batch_idx: int,
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
+    cache: MultiModalProcessorOnlyCache,
 ):
     model_type = model_config.hf_config.model_type
 
-    text_prompt, token_prompt = get_text_token_prompts(baseline_processor, mm_data)
-    mm_items = baseline_processor.info.parse_mm_data(mm_data)
+    token_prompt = get_token_prompt(processor, mm_data)
+    mm_items = processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
-    baseline_tokenized_result = baseline_processor(
+    baseline_tokenized_result = processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
-    cached_tokenized_result = cached_processor(
+    cached_tokenized_result = processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
+        cache=cache,
     )
 
     _assert_inputs_equal(
@@ -381,54 +382,9 @@ def _test_processing_correctness_one(
         msg=(
             f"Failed ({batch_idx=}, {hit_rate=}, "
             f"{num_batches=}, {simplify_rate=}, "
-            f"{text_prompt=}, {token_prompt=}, {mm_data=})"
+            f"{token_prompt=}, {mm_data=})"
         ),
     )
-
-    if text_prompt is not None:
-        baseline_text_result = baseline_processor(
-            text_prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs={},
-        )
-        cached_text_result = cached_processor(
-            text_prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs={},
-        )
-
-        _assert_inputs_equal(
-            baseline_text_result,
-            cached_text_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
-
-        _assert_inputs_equal(
-            baseline_text_result,
-            baseline_tokenized_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
-
-        _assert_inputs_equal(
-            cached_text_result,
-            cached_tokenized_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
 
 
 @pytest.mark.parametrize("model_id", get_model_ids_to_test())
@@ -441,17 +397,11 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    if model_id == "google/gemma-3n-E2B-it":
-        pytest.skip("Fix later")
-    if model_id == "OpenGVLab/InternVL2-2B":
-        pytest.skip("Fix later")
     if model_id == "openvla/openvla-7b":
         pytest.skip(
             "OpenVLA uses a custom vLLM processor because its HF remote "
             "processor is incompatible with current Transformers."
         )
-    if model_id == "jinaai/jina-reranker-m0":
-        pytest.skip("Fix later")
     if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
             "Voxtral Realtime doesn't make use of any place-holder "
@@ -459,21 +409,11 @@ def test_processing_correctness(
             "correctness test as is. Let's revisit adapting this "
             "test once more realtime models exist."
         )
-    if model_id == "CohereLabs/cohere-transcribe-03-2026":
-        pytest.skip("Fix later")
     if model_id.startswith("OpenMOSS-Team/MOSS-Audio-"):
         pytest.skip(
             "MOSS-Audio uses a custom processor that dynamically expands "
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
-        )
-    # TODO: Remove when transformers 5.15.0 is released, which contains
-    # https://github.com/huggingface/transformers/pull/47483.
-    if model_id == "microsoft/VibeVoice-ASR-HF":
-        pytest.skip(
-            "VibeVoice ASR requires audio as a positional argument and hence "
-            "cannot pass the processing correctness test as is. Its generation "
-            "is covered by test_transformers_audio.py."
         )
     if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
         pytest.skip(
