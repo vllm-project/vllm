@@ -887,12 +887,8 @@ class MessageQueue:
             total_bytes += len(raw_buf) + 4
             return False
 
-        # CPU tensors are routed through `_reduce_tensor` so their bytes are
-        # emitted as out-of-band buffers instead of being copied into the
-        # pickle stream by torch's default reducer. Start from
-        # `copyreg.dispatch_table` to preserve globally registered reducers
-        # (e.g. `re.Pattern`); the per-pickler dispatch table would otherwise
-        # shadow them.
+        # Start from `copyreg.dispatch_table` so globally registered reducers
+        # (e.g. `re.Pattern`) aren't shadowed by the per-pickler table below.
         dispatch_table = dict(copyreg.dispatch_table)
         dispatch_table[torch.Tensor] = _reduce_tensor
         arena = self.tensor_arena
