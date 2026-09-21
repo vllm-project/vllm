@@ -713,17 +713,8 @@ class ModelCudaGraphManager(CudaGraphManager):
             input_buffers.is_padding.fill_(True)
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
-                runtime_mode = cg_mode
-                if (
-                    warmup
-                    and self.use_breakable_cg
-                    and desc.cg_mode == CUDAGraphMode.PIECEWISE
-                ):
-                    # Warm the same kernel paths on the capture stream, while
-                    # still calling the model eagerly below.
-                    runtime_mode = desc.cg_mode
                 batch_descriptor = None
-                if runtime_mode == CUDAGraphMode.PIECEWISE:
+                if cg_mode == CUDAGraphMode.PIECEWISE:
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
                         has_lora=has_lora,
@@ -733,7 +724,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
-                    cudagraph_runtime_mode=runtime_mode,
+                    cudagraph_runtime_mode=cg_mode,
                     num_tokens_across_dp=num_tokens_across_dp,
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,

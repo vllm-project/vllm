@@ -744,7 +744,7 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
     not current_platform.is_device_capability_family(100),
     reason="DeepGEMM Mega mHC requires SM100-family CUDA",
 )
-@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
+@pytest.mark.parametrize("num_tokens", [0, 1, 8, 16, 17, 128, 1024])
 @pytest.mark.parametrize("hidden_size", [5120, 7168])
 def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
     set_random_seed(0)
@@ -820,11 +820,35 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
 
     if num_tokens:
+        from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_shifted_post_pre
+
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            # DeepGEMM initializes barriers per stream before capture.
-            mhc_shifted_post_pre_deep_gemm(*args)
+            if num_tokens <= 16:
+                # Warm overlap on a fresh stream, then capture the Mega mHC path.
+                side = torch.cuda.Stream()
+                mhc_shifted_post_pre(
+                    x,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    fn,
+                    scale,
+                    base,
+                    2e-5,
+                    3e-4,
+                    2e-6,
+                    1.25,
+                    10,
+                    pre_mix=previous_mix,
+                    norm_weight=norm_weight,
+                    norm_eps=7e-6,
+                    stream=side,
+                )
+                stream.wait_stream(side)
+            else:
+                mhc_shifted_post_pre_deep_gemm(*args)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
                 captured = mhc_shifted_post_pre_deep_gemm(*args)

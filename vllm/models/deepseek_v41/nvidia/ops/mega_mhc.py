@@ -28,6 +28,32 @@ def is_mega_mhc_supported(hidden_size: int, hc_mult: int) -> bool:
     return deep_gemm is not None and callable(getattr(deep_gemm, "mega_mhc", None))
 
 
+@functools.cache
+def warmup_mega_mhc(
+    stream: torch.cuda.Stream, num_tokens: int, hidden_size: int, hc_mult: int
+) -> None:
+    """Initialize Mega mHC's stream-local barriers before graph capture."""
+    with torch.cuda.stream(stream), torch.device(stream.device):
+        mix_size = hc_mult * (hc_mult + 2)
+        mhc_shifted_post_pre_deep_gemm(
+            torch.zeros(num_tokens, hidden_size, dtype=torch.bfloat16),
+            torch.zeros(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16),
+            torch.zeros(num_tokens, hc_mult, dtype=torch.float32),
+            torch.zeros(num_tokens, hc_mult, 1, dtype=torch.float32),
+            torch.zeros(num_tokens, hc_mult, hc_mult, dtype=torch.float32),
+            torch.zeros(mix_size, hc_mult * hidden_size, dtype=torch.float32),
+            torch.zeros(3, dtype=torch.float32),
+            torch.zeros(mix_size, dtype=torch.float32),
+            1e-6,
+            1e-6,
+            2.0,
+            1e-6,
+            20,
+            torch.ones(hidden_size, dtype=torch.bfloat16),
+            1e-6,
+        )
+
+
 def mhc_shifted_post_pre_deep_gemm(
     x: torch.Tensor,
     residual: torch.Tensor,
