@@ -2311,6 +2311,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_USAGE_STATS_SERVER",
         "VLLM_NO_USAGE_STATS",
         "VLLM_DO_NOT_TRACK",
+        "VLLM_TRACE_HIDE_TOKEN_IDS",
         "VLLM_LOGGING_LEVEL",
         "VLLM_LOGGING_PREFIX",
         "VLLM_LOGGING_STREAM",
