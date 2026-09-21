@@ -66,6 +66,7 @@ class BlockTable:
         kernel_block_size: int,
         cp_kv_cache_interleave_size: int,
         slot_mapping_mode: SlotMappingMode = SlotMappingMode.TOKEN_TO_KV_SLOT,
+        dcp_world_size: int | None = None,
     ):
         """
         Args:
@@ -81,6 +82,11 @@ class BlockTable:
             slot_mapping_mode: How this cache group maps scheduled tokens to
                 cache slots. Mamba-like state caches do not use token slot
                 mappings and should use SlotMappingMode.NONE.
+            dcp_world_size: DCP world size of this cache group's geometry.
+                None reads the process-wide DCP group (sharded groups). Pass 1
+                for groups whose per-rank state is replicated under DCP
+                (e.g. sliding-window groups) so their slot mappings stay in
+                plain dcp=1 form.
         """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -134,13 +140,23 @@ class BlockTable:
             # PCP might not be initialized in testing
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        try:
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
+        if dcp_world_size == 1:
+            # Replicated group: plain dcp=1 slot mappings on every rank.
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        else:
+            try:
+                self.dcp_world_size = get_dcp_group().world_size
+                self.dcp_rank = get_dcp_group().rank_in_group
+            except AssertionError:
+                # DCP might not be initialized in testing
+                self.dcp_world_size = 1
+                self.dcp_rank = 0
+            if dcp_world_size is not None:
+                assert dcp_world_size == self.dcp_world_size, (
+                    f"Group dcp_world_size {dcp_world_size} disagrees with "
+                    f"the process DCP group ({self.dcp_world_size})."
+                )
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
         self.slot_mapping_mode = slot_mapping_mode
         if self.slot_mapping_mode == SlotMappingMode.TOKEN_TO_KV_SLOT:
@@ -299,6 +315,7 @@ class MultiGroupBlockTable:
         max_num_blocks: list[int],
         cp_kv_cache_interleave_size: int = 1,
         slot_mapping_modes: list[SlotMappingMode] | None = None,
+        dcp_world_sizes: list[int | None] | None = None,
     ) -> None:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
@@ -330,6 +347,14 @@ class MultiGroupBlockTable:
             )
         ]
 
+        if dcp_world_sizes is None:
+            dcp_world_sizes = [None] * len(block_sizes)
+        if len(dcp_world_sizes) != len(block_sizes):
+            raise ValueError(
+                f"dcp_world_sizes length ({len(dcp_world_sizes)}) "
+                f"must match block_sizes length ({len(block_sizes)})"
+            )
+
         self.block_tables = [
             BlockTable(
                 block_size,
@@ -341,14 +366,20 @@ class MultiGroupBlockTable:
                 kernel_block_size,
                 cp_kv_cache_interleave_size,
                 slot_mapping_mode=slot_mapping_mode,
+                dcp_world_size=dcp_world_size,
             )
             for (
                 block_size,
                 kernel_block_size,
                 max_num_blocks_per_req,
                 slot_mapping_mode,
+                dcp_world_size,
             ) in zip(
-                block_sizes, kernel_block_sizes, max_num_blocks, slot_mapping_modes
+                block_sizes,
+                kernel_block_sizes,
+                max_num_blocks,
+                slot_mapping_modes,
+                dcp_world_sizes,
             )
         ]
 
