@@ -539,7 +539,7 @@ def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried, capture_
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("entry", ["broadcast", "pipeline", "residual", "engram"])
 @pytest.mark.parametrize(
-    "mhc_mode", ["disabled", "overlap", "piecewise", "large_batch"]
+    "mhc_mode", ["disabled", "overlap", "piecewise", "piecewise_warmup", "large_batch"]
 )
 def test_deepseek_v41_decoder_mixes_match_torch(
     entry, mhc_mode, monkeypatch, default_vllm_config
@@ -568,7 +568,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         ):
             pytest.skip("SM100 DeepGEMM required for overlap")
         decoder.mhc_stream = torch.cuda.Stream()
-    if mhc_mode in ("piecewise", "large_batch"):
+    if mhc_mode in ("piecewise", "piecewise_warmup", "large_batch"):
 
         def unexpected_overlap(*args, **kwargs):
             pytest.fail("unsupported execution must retain native mHC")
@@ -624,7 +624,17 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     from vllm.forward_context import set_forward_context
 
     mode = CUDAGraphMode.PIECEWISE if mhc_mode == "piecewise" else CUDAGraphMode.NONE
-    with set_forward_context(None, default_vllm_config, cudagraph_runtime_mode=mode):
+    warmup_mode = (
+        CUDAGraphMode.PIECEWISE
+        if mhc_mode == "piecewise_warmup"
+        else CUDAGraphMode.NONE
+    )
+    with set_forward_context(
+        None,
+        default_vllm_config,
+        cudagraph_runtime_mode=mode,
+        cudagraph_warmup_mode=warmup_mode,
+    ):
         actual = decoder(x, positions, None, **kwargs)
 
     def reference(*args, norm_weight, norm_eps, **kwargs):
@@ -744,9 +754,9 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
     not current_platform.is_device_capability_family(100),
     reason="DeepGEMM Mega mHC requires SM100-family CUDA",
 )
-@pytest.mark.parametrize("num_tokens", [0, 1, 8, 16, 17, 128, 1024])
+@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
 @pytest.mark.parametrize("hidden_size", [5120, 7168])
-def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size, monkeypatch):
+def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
     set_random_seed(0)
     hc_mult = 4
     if not is_mega_mhc_supported(hidden_size, 4):
@@ -820,58 +830,11 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size, monkeypatch):
         torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
 
     if num_tokens:
-        from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_shifted_post_pre
-
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            if num_tokens <= 16:
-                from vllm.models.deepseek_v41.nvidia.model_state import (
-                    DeepseekV41ModelState,
-                )
-                from vllm.v1.worker.gpu.model_states.default import DefaultModelState
-
-                monkeypatch.setattr(
-                    DefaultModelState, "prepare_dummy_inputs", lambda *a: {}
-                )
-                state = DeepseekV41ModelState.__new__(DeepseekV41ModelState)
-                state.model_config = SimpleNamespace(
-                    hf_config=SimpleNamespace(hidden_size=hidden_size, hc_mult=hc_mult)
-                )
-                state.lookback_token_ids = None
-                # Prepare capture on a fresh stream; runtime overlap must not warm.
-                state.prepare_dummy_inputs(num_tokens, num_tokens)
-
-                def unexpected_warmup(*args, **kwargs):
-                    pytest.fail("Runtime overlap must not invoke scratch warmup")
-
-                with monkeypatch.context() as warmup_patch:
-                    warmup_patch.setattr(
-                        "vllm.models.deepseek_v41.nvidia.ops.mega_mhc.warmup_mega_mhc",
-                        unexpected_warmup,
-                    )
-                    side = torch.cuda.Stream()
-                    mhc_shifted_post_pre(
-                        x,
-                        residual,
-                        post_mix,
-                        res_mix,
-                        fn,
-                        scale,
-                        base,
-                        2e-5,
-                        3e-4,
-                        2e-6,
-                        1.25,
-                        10,
-                        pre_mix=previous_mix,
-                        norm_weight=norm_weight,
-                        norm_eps=7e-6,
-                        stream=side,
-                    )
-                    stream.wait_stream(side)
-            else:
-                mhc_shifted_post_pre_deep_gemm(*args)
+            # DeepGEMM initializes barriers per stream before capture.
+            mhc_shifted_post_pre_deep_gemm(*args)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
                 captured = mhc_shifted_post_pre_deep_gemm(*args)

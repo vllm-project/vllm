@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -168,18 +167,6 @@ class DeepseekV41ModelState(DefaultModelState):
         return model_inputs
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
-        # Called on the capture stream before capture, never by runtime forwards.
-        if current_platform.is_cuda() and num_tokens > 0:
-            from .ops.mega_mhc import is_mega_mhc_supported, warmup_mega_mhc
-            from .ops.mhc import MHC_OVERLAP_MAX_TOKENS
-
-            config = self.model_config.hf_config
-            if is_mega_mhc_supported(config.hidden_size, config.hc_mult):
-                warmup_mega_mhc(
-                    min(num_tokens, MHC_OVERLAP_MAX_TOKENS),
-                    config.hidden_size,
-                    config.hc_mult,
-                )
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
         if self.lookback_token_ids is not None:
             # The captured graph reads this buffer; replays refill it in place.

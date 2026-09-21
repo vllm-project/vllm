@@ -185,6 +185,10 @@ class ForwardContext:
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
+    # Target mode for kernel selection during eager pre-capture warmup.
+    # Graph wrappers must continue to dispatch on cudagraph_runtime_mode.
+    cudagraph_warmup_mode: CUDAGraphMode = CUDAGraphMode.NONE
+
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
@@ -207,12 +211,13 @@ def is_forward_context_available() -> bool:
     return _forward_context is not None
 
 
-def in_piecewise_cudagraph() -> bool:
-    """Whether the current forward runs in piecewise cudagraph mode (graph
-    segments separated by eager breaks), at capture or replay time."""
-    return (
-        is_forward_context_available()
-        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+def in_piecewise_cudagraph(*, include_warmup: bool = False) -> bool:
+    """Whether the forward uses piecewise graphs, optionally including warmup."""
+    if not is_forward_context_available():
+        return False
+    ctx = get_forward_context()
+    return ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE or (
+        include_warmup and ctx.cudagraph_warmup_mode == CUDAGraphMode.PIECEWISE
     )
 
 
@@ -227,6 +232,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    cudagraph_warmup_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -240,6 +246,7 @@ def create_forward_context(
         slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
+        cudagraph_warmup_mode=cudagraph_warmup_mode,
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
@@ -275,6 +282,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    cudagraph_warmup_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -344,6 +352,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        cudagraph_warmup_mode=cudagraph_warmup_mode,
     )
 
     try:

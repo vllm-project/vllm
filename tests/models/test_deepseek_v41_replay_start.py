@@ -4,7 +4,6 @@
 the sliding-window builders, and the replayed tokens' slots are padded in the
 prefix-cacheable groups only."""
 
-import builtins
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -111,20 +110,3 @@ def test_only_prefills_carry_a_replay_start(state):
     replay_start, slots = _prepare(state, batch)
     assert replay_start == [0]
     assert slots.tolist() == [[0], [1]]
-
-
-def test_non_cuda_capture_preparation_skips_nvidia_mhc(state, monkeypatch):
-    """AMD shares this model state without needing NVIDIA mHC dependencies."""
-    from vllm.models.deepseek_v41.nvidia import model_state
-
-    monkeypatch.setattr(
-        model_state, "current_platform", SimpleNamespace(is_cuda=lambda: False)
-    )
-    original_import = builtins.__import__
-
-    def checked_import(name, *args, **kwargs):
-        assert name not in ("ops.mega_mhc", "ops.mhc")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", checked_import)
-    assert state.prepare_dummy_inputs(1, 1) == {}
