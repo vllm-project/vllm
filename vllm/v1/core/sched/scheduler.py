@@ -863,8 +863,8 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
-            # Set once a request fails to get KV blocks in this step.
-            kv_blocked = False
+            # Set once a request holding no KV blocks is passed over.
+            blockless_ahead = False
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
@@ -877,24 +877,9 @@ class Scheduler(SchedulerInterface):
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
-                if kv_blocked:
-                    # Admit nothing new past a request that could not get
-                    # blocks, but keep visiting skipped requests that already
-                    # hold blocks: they are not preemptible, so scheduling
-                    # them is the only way those blocks are ever freed.
-                    if not self.skipped_waiting:
-                        break
-                    request_queue = self.skipped_waiting
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-
-                if kv_blocked and not any(
-                    self.kv_cache_manager.get_block_ids(request_id)
-                ):
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
-                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -907,6 +892,7 @@ class Scheduler(SchedulerInterface):
                         )
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
+                    blockless_ahead |= not self._holds_kv_blocks(request)
                     continue
 
                 if (
@@ -918,6 +904,7 @@ class Scheduler(SchedulerInterface):
                     # It drains within the pipeline depth.
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
+                    blockless_ahead |= not self._holds_kv_blocks(request)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -933,6 +920,7 @@ class Scheduler(SchedulerInterface):
                     # Scheduling would exceed max_loras, skip.
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
+                    blockless_ahead |= not self._holds_kv_blocks(request)
                     continue
 
                 num_external_computed_tokens = 0
@@ -973,6 +961,7 @@ class Scheduler(SchedulerInterface):
                             # the number of matched tokens.
                             request_queue.pop_request()
                             step_skipped_waiting.prepend_request(request)
+                            blockless_ahead |= not self._holds_kv_blocks(request)
                             continue
 
                         if self.prefix_replay_tokens:
@@ -1044,6 +1033,7 @@ class Scheduler(SchedulerInterface):
                     if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
+                        blockless_ahead |= not self._holds_kv_blocks(request)
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
@@ -1066,6 +1056,7 @@ class Scheduler(SchedulerInterface):
                     if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
+                        blockless_ahead |= not self._holds_kv_blocks(request)
                         continue
 
                 encoder_inputs_to_schedule = None
@@ -1077,6 +1068,15 @@ class Scheduler(SchedulerInterface):
                 # rewriting its cached KV. An async load replays once the KV
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
+
+                if load_kv_async and blockless_ahead:
+                    # An async load is not preemptible and only runs once the
+                    # scan reaches it. Never let it take blocks while a request
+                    # ahead of it holds none: that request may then not fit, the
+                    # scan stops at it, and the load's blocks are never freed.
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -1245,11 +1245,7 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    if request_queue is self.skipped_waiting:
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
-                    kv_blocked = True
-                    continue
+                    break
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -2405,6 +2401,9 @@ class Scheduler(SchedulerInterface):
             RequestStatus.WAITING_FOR_REMOTE_KVS,
             RequestStatus.WAITING_FOR_STREAMING_REQ,
         )
+
+    def _holds_kv_blocks(self, request: Request) -> bool:
+        return any(self.kv_cache_manager.coordinator.get_blocks(request.request_id))
 
     def _enqueue_waiting_request(self, request: Request) -> None:
         if self._is_blocked_waiting_status(request.status):

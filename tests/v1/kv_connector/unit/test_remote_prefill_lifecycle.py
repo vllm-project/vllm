@@ -793,15 +793,14 @@ def test_async_load_reserves_blocks_for_promotion_margin():
     assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
 
 
-def test_kv_blocked_skipped_request_does_not_strand_finished_load():
-    """A skipped request that cannot get blocks must not hide a finished load.
+def test_async_load_not_admitted_behind_blockless_request():
+    """No async load may take KV blocks while a request ahead of it holds none.
 
-    A connector may ask the scheduler to retry a lookup later, which parks the
-    request in ``skipped_waiting`` holding no blocks and with nothing reserved
-    for it. An async load admitted behind it can then take the pool below what
-    the parked request needs. Once its lookup resolves it fails
-    ``allocate_slots`` every step; if the scan stops there, the finished load
-    behind it is never promoted, so it never runs and never frees its blocks.
+    A connector can defer a lookup, which parks the request in
+    ``skipped_waiting`` holding no blocks and with nothing reserved for it. If an
+    async load behind it then takes the pool below what the parked request needs,
+    the scan stops at the parked request every step. The load is never promoted,
+    so it never runs and never frees its blocks: a permanent deadlock.
     """
     vllm_config = create_vllm_config()
     BLOCK_SIZE = vllm_config.cache_config.block_size
@@ -819,36 +818,38 @@ def test_kv_blocked_skipped_request_does_not_strand_finished_load():
     )
     scheduler.add_request(parked)
     scheduler.add_request(load)
-
-    lookups = {parked.request_id: [(None, False)], load.request_id: []}
+    deferrals = [(None, False)]
 
     def lookup(request, num_computed_tokens):
-        pending = lookups[request.request_id]
-        if pending:
-            return pending.pop(0)
-        return (BLOCK_SIZE * 5, True) if request is load else (0, False)
+        if request is load:
+            return BLOCK_SIZE * 5, True
+        return deferrals.pop() if deferrals else (0, False)
+
+    def schedule():
+        output = scheduler.schedule()
+        blockless_seen = False
+        for request in scheduler.skipped_waiting:
+            holds_blocks = scheduler._holds_kv_blocks(request)
+            assert not (blockless_seen and holds_blocks)
+            blockless_seen |= not holds_blocks
+        return output
 
     with patch.object(
         scheduler.connector, "get_num_new_matched_tokens", side_effect=lookup
     ):
-        # The lookup is deferred, then the load takes 5 of the 7 blocks.
-        scheduler.schedule()
+        # The lookup is deferred. The load fits (5 of 7) but must not be admitted.
+        schedule()
         assert list(scheduler.skipped_waiting) == [parked, load]
-        assert load.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert load.status == RequestStatus.WAITING
 
-        # The load lands. The parked request now needs 4 blocks with 2 free.
-        scheduler.update_from_output(
-            scheduler.schedule(),
-            create_model_runner_output([], finished_recving={load.request_id}),
-        )
-        scheduler_output = scheduler.schedule()
-        assert load.status == RequestStatus.RUNNING
-        assert scheduler_output.num_scheduled_tokens[load.request_id] > 0
-        assert parked.status == RequestStatus.WAITING
-
-        # The load finishes and frees its blocks, so the parked request runs.
-        scheduler.update_from_output(
-            scheduler_output, create_model_runner_output([load])
-        )
-        scheduler_output = scheduler.schedule()
+        # The lookup resolves and the parked request gets its 4 blocks first.
+        scheduler_output = schedule()
         assert parked.status == RequestStatus.RUNNING
+        assert load.status == RequestStatus.WAITING
+
+        # It finishes and frees them; only now is the load admitted.
+        scheduler.update_from_output(
+            scheduler_output, create_model_runner_output([parked])
+        )
+        schedule()
+        assert load.status == RequestStatus.WAITING_FOR_REMOTE_KVS
