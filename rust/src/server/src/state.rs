@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
@@ -55,6 +55,8 @@ pub struct AppState {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// Whether a profiling session is awaiting an explicit stop request.
+    profile_active: AtomicBool,
 }
 
 impl AppState {
@@ -83,6 +85,7 @@ impl AppState {
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
+            profile_active: AtomicBool::new(false),
         }
     }
 
@@ -108,6 +111,16 @@ impl AppState {
     pub fn with_profiler(mut self, profiler: Option<String>) -> Self {
         self.profiler = profiler;
         self
+    }
+
+    pub(crate) fn try_start_profile(&self) -> bool {
+        self.profile_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(crate) fn finish_profile(&self) {
+        self.profile_active.store(false, Ordering::Release);
     }
 
     /// Attach the runtime server information snapshot used by `/server_info`.
