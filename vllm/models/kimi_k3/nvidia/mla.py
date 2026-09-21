@@ -165,9 +165,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             rope_parameters = dict(config.rope_parameters)
             if rope_parameters["rope_type"] != "default":
                 rope_parameters["rope_type"] = (
-                    "deepseek_yarn"
-                    if rope_parameters.get("apply_yarn_scaling", True)
-                    else "deepseek_llama_scaling"
+                    "deepseek_llama_scaling"
+                    if rope_parameters.get("attention_factor") == 1.0
+                    else "deepseek_yarn"
                 )
             self.rotary_emb = get_rope(
                 qk_rope_head_dim,

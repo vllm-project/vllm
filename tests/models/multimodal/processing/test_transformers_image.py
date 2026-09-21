@@ -245,6 +245,7 @@ def test_repeated_image_hits_the_processor_cache():
             prompt="<image>\nWhat is this?",
             mm_items=mm_processor.info.parse_mm_data({"image": image}),
             hf_processor_mm_kwargs={},
+            cache=cache,
         )
 
     first, second = process(), process()
