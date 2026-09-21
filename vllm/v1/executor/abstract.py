@@ -23,7 +23,11 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
+from vllm.v1.worker.worker_base import (
+    CompilationTimes,
+    ExtensibleKVCacheProbe,
+    WorkerBase,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -119,14 +123,30 @@ class Executor(ABC):
     def _init_executor(self) -> None:
         raise NotImplementedError
 
-    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-        """Initialize the KV caches on the underlying workers."""
-        self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
+    def initialize_from_config(
+        self, kv_cache_configs: list[KVCacheConfig]
+    ) -> int | None:
+        """Initialize the KV caches on the underlying workers.
 
-    def compile_or_warm_up_model(self) -> list[CompilationTimes]:
+        Returns:
+            With an extensible KV cache, the blocks warmup may commit on every
+            rank (the minimum over workers), to pass to
+            `compile_or_warm_up_model`; otherwise None.
+
+        """
+        committable: list[int | None] = self.collective_rpc(
+            "initialize_from_config", args=(kv_cache_configs,)
+        )
+        return min((c for c in committable if c is not None), default=None)
+
+    def compile_or_warm_up_model(
+        self, num_committable_kv_blocks: int | None = None
+    ) -> list[CompilationTimes]:
         """Compile/warm up the model and capture cudagraphs on workers."""
+        # Only extensible-KV-cache workers take the argument.
+        args = () if num_committable_kv_blocks is None else (num_committable_kv_blocks,)
         compilation_times: list[CompilationTimes] = self.collective_rpc(
-            "compile_or_warm_up_model"
+            "compile_or_warm_up_model", args=args
         )
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main
@@ -143,11 +163,18 @@ class Executor(ABC):
 
     def resolve_extensible_kv_cache(
         self, kv_cache_specs: list[dict[str, KVCacheSpec]]
-    ) -> None:
-        """Disable the extensible KV cache, everywhere, where it cannot be used."""
-        reason = self._extensible_kv_cache_unsupported_reason(kv_cache_specs)
-        if reason is None:
-            return
+    ) -> int | None:
+        """Disable the extensible KV cache, everywhere, where it cannot be used.
+
+        Returns:
+            The commit granule in bytes (the largest over workers) when the
+            feature stays enabled, otherwise None.
+
+        """
+        probe = self._probe_extensible_kv_cache(kv_cache_specs)
+        if probe.unsupported_reason is None:
+            return probe.commit_granule
+        reason = probe.unsupported_reason
         logger.warning(
             "Disabling the extensible KV cache: %s. The KV cache will be sized "
             "from profiling estimates instead of measured memory.",
@@ -155,16 +182,24 @@ class Executor(ABC):
         )
         self.vllm_config.cache_config.enable_extensible_kv_cache = False
         self.collective_rpc("disable_extensible_kv_cache")
+        return None
 
-    def _extensible_kv_cache_unsupported_reason(
+    def _probe_extensible_kv_cache(
         self, kv_cache_specs: list[dict[str, KVCacheSpec]]
-    ) -> str | None:
+    ) -> ExtensibleKVCacheProbe:
         if not any(kv_cache_specs):
-            return "the model has no KV cache"
-        unsupported: list[str | None] = self.collective_rpc(
-            "extensible_kv_cache_unsupported_reason"
+            return ExtensibleKVCacheProbe("the model has no KV cache")
+        probes: list[ExtensibleKVCacheProbe] = self.collective_rpc(
+            "probe_extensible_kv_cache"
         )
-        return next((r for r in unsupported if r), None)
+        reason = next(
+            (p.unsupported_reason for p in probes if p.unsupported_reason), None
+        )
+        if reason is not None:
+            return ExtensibleKVCacheProbe(reason)
+        return ExtensibleKVCacheProbe(
+            None, max(p.commit_granule for p in probes if p.commit_granule is not None)
+        )
 
     def extend_kv_cache(self, num_blocks: int) -> None:
         """Commit the final size of an extensible KV cache on the workers."""

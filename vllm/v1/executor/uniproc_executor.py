@@ -22,10 +22,14 @@ from vllm.utils.network_utils import (
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
-from vllm.v1.worker.worker_base import CompilationTimes, WorkerWrapperBase
+from vllm.v1.worker.worker_base import (
+    CompilationTimes,
+    ExtensibleKVCacheProbe,
+    WorkerWrapperBase,
+)
 
 logger = init_logger(__name__)
 
@@ -202,23 +206,39 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         memory = super().determine_available_memory()
         return [self._all_reduce_min(memory[0])]
 
-    def _extensible_kv_cache_unsupported_reason(
+    def _probe_extensible_kv_cache(
         self, kv_cache_specs: list[dict[str, KVCacheSpec]]
-    ) -> str | None:
+    ) -> ExtensibleKVCacheProbe:
         # Every rank must reach the same decision: one that keeps the feature
         # would wait in the block-count all-reduce for one that dropped it.
-        reason = super()._extensible_kv_cache_unsupported_reason(kv_cache_specs)
-        if self._all_reduce(int(reason is not None), dist.ReduceOp.MAX):
-            return reason or "another rank cannot use it"
-        return None
+        probe = super()._probe_extensible_kv_cache(kv_cache_specs)
+        if self._all_reduce(
+            int(probe.unsupported_reason is not None), dist.ReduceOp.MAX
+        ):
+            return ExtensibleKVCacheProbe(
+                probe.unsupported_reason or "another rank cannot use it"
+            )
+        assert probe.commit_granule is not None
+        return probe._replace(
+            commit_granule=self._all_reduce(probe.commit_granule, dist.ReduceOp.MAX)
+        )
 
-    def compile_or_warm_up_model(self) -> list[CompilationTimes]:
+    def initialize_from_config(
+        self, kv_cache_configs: list[KVCacheConfig]
+    ) -> int | None:
+        # Every rank's engine must warm up the same shapes.
+        committable = super().initialize_from_config(kv_cache_configs)
+        return None if committable is None else self._all_reduce_min(committable)
+
+    def compile_or_warm_up_model(
+        self, num_committable_kv_blocks: int | None = None
+    ) -> list[CompilationTimes]:
         # Every rank's engine must size the KV cache identically.
         return [
             times
             if times.num_kv_blocks is None
             else times._replace(num_kv_blocks=self._all_reduce_min(times.num_kv_blocks))
-            for times in super().compile_or_warm_up_model()
+            for times in super().compile_or_warm_up_model(num_committable_kv_blocks)
         ]
 
     @classmethod

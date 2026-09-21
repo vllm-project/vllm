@@ -100,7 +100,11 @@ from vllm.v1.worker.startup_plan import (
     maybe_save_startup_plan,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
-from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
+from vllm.v1.worker.worker_base import (
+    CompilationTimes,
+    ExtensibleKVCacheProbe,
+    WorkerBase,
+)
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
@@ -801,8 +805,16 @@ class Worker(WorkerBase):
         logger.debug("Updated max_model_len to %d", max_model_len)
 
     @instrument(span_name="Allocate KV cache")
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
-        """Allocate GPU KV cache with the specified kv_cache_config."""
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> int | None:
+        """Allocate GPU KV cache with the specified kv_cache_config.
+
+        Returns:
+            For an extensible KV cache, the blocks warmup may commit on this
+            rank. The engine hands the minimum over ranks back through
+            `compile_or_warm_up_model`, so every rank warms up the same shapes.
+
+        """
+        committable_blocks: int | None = None
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
@@ -836,6 +848,7 @@ class Worker(WorkerBase):
             kv_cache.reserved_headroom_bytes = getattr(
                 self, "peak_activation_memory", 0
             )
+            committable_blocks = kv_cache.committable_blocks()
         else:
             ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
             self.model_runner.initialize_kv_cache(
@@ -849,13 +862,14 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+        return committable_blocks
 
-    def extensible_kv_cache_unsupported_reason(self) -> str | None:
-        return vmm_unavailable_reason()
-
-    def kv_cache_commit_granule(self) -> int:
-        """Bytes one physical KV cache commit is rounded to on this device."""
-        return granule_size(torch.accelerator.current_device_index())
+    def probe_extensible_kv_cache(self) -> ExtensibleKVCacheProbe:
+        if (reason := vmm_unavailable_reason()) is not None:
+            return ExtensibleKVCacheProbe(reason)
+        return ExtensibleKVCacheProbe(
+            None, granule_size(torch.accelerator.current_device_index())
+        )
 
     def disable_extensible_kv_cache(self) -> None:
         self.cache_config.enable_extensible_kv_cache = False
@@ -934,8 +948,13 @@ class Worker(WorkerBase):
         return num_blocks
 
     @instrument(span_name="Warmup (GPU)")
-    def compile_or_warm_up_model(self) -> CompilationTimes:
+    def compile_or_warm_up_model(
+        self, num_committable_kv_blocks: int | None = None
+    ) -> CompilationTimes:
         if self.cache_config.enable_extensible_kv_cache:
+            kv_cache = self._v2_model_runner().extensible_kv_cache
+            assert kv_cache is not None
+            kv_cache.committable_blocks_cap = num_committable_kv_blocks
             # Track the transient peak of the warmup steps themselves; they
             # reach shapes (spec-decode drafts, encoder batches) profiling
             # does not, and `_measure_kv_cache_blocks` keeps that peak free.
