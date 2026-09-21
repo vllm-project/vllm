@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -11,7 +11,10 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionMetadata,
+    GDNAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadataBuilder,
@@ -41,6 +44,9 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    # Fresh per forward/microbatch; GPU buffers belong to the first builder.
+    # Capture and replay must visit builders in the same order.
+    metadata_cache: dict[tuple, GDNAttentionMetadata] = field(default_factory=dict)
 
     def get_extra_common_attn_kwargs(
         self,
@@ -53,7 +59,14 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
         self,
         attn_metadata_builder: Any,
         num_reqs: int,
+        *,
+        for_capture: bool = False,
     ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+            kwargs["metadata_cache"] = self.metadata_cache
+        if for_capture:
+            return kwargs
         if not isinstance(
             attn_metadata_builder,
             (
@@ -65,6 +78,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
         ):
             return {}
         return {
+            **kwargs,
             "num_accepted_tokens": None
             if self.num_accepted_tokens is None
             else self.num_accepted_tokens[:num_reqs],
