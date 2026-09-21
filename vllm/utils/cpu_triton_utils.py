@@ -266,7 +266,7 @@ def _copy_and_expand_eagle_inputs_kernel_impl(
     if ANCHOR:
         # The C++ kernel does not know about the PARD-2 anchor row, so build
         # the anchored layout here instead. Same semantics as the ANCHOR path
-        # of the Triton kernel (tests/v1/spec_decode/test_anchor_kernel.py
+        # of the Triton kernel (tests/v1/spec_decode/test_pard2_anchor_kernel.py
         # checks the two against each other).
         _copy_and_expand_eagle_inputs_anchored(
             target_token_ids_ptr,
