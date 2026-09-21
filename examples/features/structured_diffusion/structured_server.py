@@ -106,6 +106,9 @@ VOCAB = 262144
 TURN_CLOSE = 106
 PAD = 0
 TOPK = 20
+MAX_QUESTIONS = 64  # per request
+MAX_SAMPLES = 32  # reads per question, fixed or auto
+MAX_PARALLEL = 16  # question groups read at once
 # the empty thought block the chat template leaves to the model
 SCAFFOLD_TEXT = "<|channel>thought\n<channel|>"
 SCAFFOLD = None
@@ -129,6 +132,8 @@ def parse_schema(value):
         or not value["questions"]
     ):
         raise SchemaError("schema: needs a non-empty questions array")
+    if len(value["questions"]) > MAX_QUESTIONS:
+        raise SchemaError(f"schema: at most {MAX_QUESTIONS} questions")
     qs = []
     seen = set()
     for q in value["questions"]:
@@ -212,11 +217,11 @@ def parse_schema(value):
     if samples == "auto":
         policy = {
             "mode": "auto",
-            "max": int(value.get("auto_max", 4)),
+            "max": max(1, min(int(value.get("auto_max", 4)), MAX_SAMPLES)),
             "threshold": float(value.get("auto_threshold", 0.1)),
         }
     elif isinstance(samples, int) and samples >= 1:
-        policy = {"mode": "fixed", "n": min(samples, 32)}
+        policy = {"mode": "fixed", "n": min(samples, MAX_SAMPLES)}
     else:
         raise SchemaError('schema: samples must be a positive count or "auto"')
     ask = value.get("ask")
@@ -828,7 +833,7 @@ def decide(schema, state_content, seed):
                 absorb(group, body, rows)
                 k += 1
         else:
-            with ThreadPoolExecutor(max_workers=len(groups)) as ex:
+            with ThreadPoolExecutor(max_workers=min(len(groups), MAX_PARALLEL)) as ex:
                 results = list(
                     ex.map(
                         lambda gk, conditioned=conditioned: run(
