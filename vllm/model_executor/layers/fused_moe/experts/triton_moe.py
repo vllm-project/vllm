@@ -477,10 +477,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         a2q_scale: torch.Tensor | None = None
 
         # Fuse SiLU+Mul + FP8 block quantize into a single kernel
-        # when conditions permit (gated SiLU, fp8 block quant with
-        # group_size=128, no LoRA requiring the BF16 intermediate).
+        # when conditions permit (gated SiLU with no clamp limit, since the
+        # fused kernel cannot clamp, fp8 block quant with group_size=128, no
+        # LoRA requiring the BF16 intermediate).
         if (
             activation == MoEActivation.SILU
+            and self.activation_config.clamp_limit is None
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
