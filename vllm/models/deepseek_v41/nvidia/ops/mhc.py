@@ -16,7 +16,10 @@ from vllm.model_executor.kernels.mhc.tilelang import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
-from .mega_mhc import is_mega_mhc_supported, mhc_shifted_post_pre_deep_gemm
+from .mega_mhc import (
+    can_use_mega_mhc,
+    mhc_shifted_post_pre_deep_gemm,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
@@ -223,13 +226,8 @@ def mhc_shifted_post_pre(
         )
         return residual, *pre_outputs, aux
 
-    if (
-        pre_mix is not None
-        and norm_weight is not None
-        and not capture_aux
-        and x.shape[0] <= 1 << 20
-        and is_mega_mhc_supported(x.shape[1], residual.shape[1])
-    ):
+    if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
+        assert pre_mix is not None and norm_weight is not None
         outputs = mhc_shifted_post_pre_deep_gemm(
             x,
             residual,
