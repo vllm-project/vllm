@@ -652,6 +652,15 @@ def test_v2_model_runner_supports_extract_hidden_states():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
+def test_v2_model_runner_supports_custom_logits_processors():
+    config = VllmConfig()
+    config.model_config = cast(
+        ModelConfig, SimpleNamespace(logits_processors=["a.b:C"])
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
+
+
 def test_dflash2_draft_forces_v2_model_runner():
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
@@ -1290,7 +1299,7 @@ def test_engram_dp_shared_memory_config_validation(
     monkeypatch, dp_size, load_format, multithread, error
 ):
     """Reject invalid shared configs before distributed init; allow threaded loads."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     config = cast(
         VllmConfig,
         SimpleNamespace(
@@ -1315,7 +1324,7 @@ def test_engram_dp_shared_memory_config_validation(
 
 
 @pytest.mark.parametrize(
-    "architecture, ple_layers, cuda, supported",
+    "architecture, ple_layers, accelerator, supported",
     [
         ("DeepseekV41ForCausalLM", [1], True, True),
         ("DeepseekV41ForCausalLM", [], True, False),
@@ -1330,9 +1339,11 @@ def test_engram_dp_shared_memory_config_validation(
         (None, None, True, False),
     ],
 )
-def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, supported):
+def test_engram_model_support(
+    monkeypatch, architecture, ple_layers, accelerator, supported
+):
     """A similarly named HF field must not enable unsupported implementations."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: accelerator)
     model = (
         cast(
             ModelConfig,
@@ -1421,7 +1432,7 @@ def test_engram_explicit_config_requires_supported_model():
 @pytest.mark.parametrize("explicit", [False, True])
 def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, explicit):
     """MTP may inherit cross-DP sharding without having its own PLE layers."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     target = SimpleNamespace(
         architecture="Qwen4ExpForCausalLM",
         hf_text_config=SimpleNamespace(ple_layer_ids=[1] if target_has_ple else []),
