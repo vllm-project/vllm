@@ -1091,6 +1091,14 @@ class VllmConfig:
 
     def _verify_aux_output_compatibility(self) -> None:
         """Reject configurations unsupported by enabled auxiliary outputs."""
+        if (
+            self.aux_output_config.enable_omit_prefix_routed_experts
+            and not self.aux_output_config.enable_return_routed_experts
+        ):
+            raise ValueError(
+                "--enable-omit-prefix-routed-experts requires "
+                "--enable-return-routed-experts."
+            )
         if not self.aux_output_config.enabled:
             return
         if not self.use_v2_model_runner:

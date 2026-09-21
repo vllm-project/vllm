@@ -44,7 +44,8 @@ class AuxRequestOutput:
 class AuxOutputSchedulerConnector:
     """Build worker metadata without owning auxiliary output payloads or stores."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, enable_omit_prefix_routed_experts: bool = False) -> None:
+        self.enable_omit_prefix_routed_experts = enable_omit_prefix_routed_experts
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
@@ -71,6 +72,11 @@ class AuxOutputSchedulerConnector:
                 request.sampling_params.routed_experts_prompt_start,
                 0 if request.num_output_tokens == 0 else request.num_tokens - 1,
             )
+            if self.enable_omit_prefix_routed_experts:
+                assert request.num_cached_tokens >= 0
+                scheduled_requests[request_id] = max(
+                    scheduled_requests[request_id], request.num_cached_tokens
+                )
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         if len(self._sent_hash_counts) != len(scheduled_requests):
