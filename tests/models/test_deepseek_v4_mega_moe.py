@@ -691,12 +691,14 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
     not torch.cuda.is_available(),
     reason="DeepSeek V4 MegaMoE fused input staging requires CUDA.",
 )
-def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
+@pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 16384])
+@pytest.mark.parametrize("hidden_size", [256, 5120])
+def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact(
+    num_tokens, hidden_size
+):
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
 
     device = torch.device("cuda")
-    num_tokens = 7
-    hidden_size = 256
     top_k = 8
 
     generator = torch.Generator(device=device)
@@ -851,6 +853,7 @@ def test_deepseek_v4_mega_moe_stages_shared_scale_tma_layout(shared_block_m):
     assert torch.equal(fused_x.view(torch.uint8), ref_x.view(torch.uint8))
     assert torch.equal(fused_x_sf, ref_x_sf)
     assert torch.equal(fused_shared_x_sf[populated], ref_shared_x_sf[populated])
+    assert torch.all(fused_shared_x_sf[~populated] == -1)
 
 
 def test_deepseek_v4_pwal_hook_finalizes_mega_moe_and_mhc_broadcast():
@@ -955,11 +958,13 @@ def test_dspark_draft_registers_mixture_of_experts(
     reason="DeepSeek V4 MegaMoE fused input staging requires CUDA.",
 )
 @pytest.mark.parametrize("nonfinite_padding", [False, True])
-def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding(nonfinite_padding):
+@pytest.mark.parametrize("num_tokens", [7, 65, 135])
+def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding(
+    nonfinite_padding, num_tokens
+):
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
 
     device = torch.device("cuda")
-    num_tokens = 7
     hidden_size = 256
     top_k = 8
 
@@ -987,10 +992,9 @@ def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding(nonfinite_paddin
         dtype=torch.float32,
         generator=generator,
     )
-    is_padding = torch.tensor(
-        [False, True, False, False, True, False, True],
-        device=device,
-    )
+    is_padding = torch.zeros(num_tokens, device=device, dtype=torch.bool)
+    is_padding[1::3] = True
+    is_padding[-1] = True
     if nonfinite_padding:
         topk_weights[is_padding] = float("nan")
 
