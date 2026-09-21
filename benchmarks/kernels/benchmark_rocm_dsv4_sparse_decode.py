@@ -120,7 +120,7 @@ def _ragged(
     return indices, indptr.to(device)
 
 
-def build_inputs(case: Case, device: torch.device) -> Inputs:
+def build_inputs(case: Case, device: torch.device, nan_free: bool = True) -> Inputs:
     gen = torch.Generator(device=device).manual_seed(0)
     rows = case.rows
     prof = case.profile
@@ -166,6 +166,7 @@ def build_inputs(case: Case, device: torch.device) -> Inputs:
         extra_indices=extra_indices,
         extra_indptr=extra_indptr,
         scale=HEAD_DIM**-0.5,
+        kwargs={"extra_cache_nan_free": nan_free},
     )
 
 
@@ -202,6 +203,7 @@ def run_decode(inputs: Inputs, adaptive_splits: bool) -> torch.Tensor:
         extra_indices=inputs.extra_indices,
         extra_indptr=inputs.extra_indptr,
         adaptive_splits=adaptive_splits,
+        **inputs.kwargs,
     )
 
 
@@ -279,6 +281,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--query-len", type=str, default="1,2,3,4,5,6")
     p.add_argument("--adaptive-splits", action="store_true")
     p.add_argument(
+        "--extra-cache-nan-free",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="trust the compressed cache and skip the topk NaN scrubs, as "
+        "gfx950 does for an fp8_ds_mla cache with no KV transfer",
+    )
+    p.add_argument(
         "--sweep-splits",
         type=str,
         default=None,
@@ -325,7 +334,7 @@ def main() -> int:
         )
         for h, conc, qlen in itertools.product(heads, concs, qlens):
             case = Case(prof, h, conc, qlen)
-            inputs = build_inputs(case, device)
+            inputs = build_inputs(case, device, args.extra_cache_nan_free)
             r = measure(case, device, args.adaptive_splits, inputs)
 
             if not split_candidates:
