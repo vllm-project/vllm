@@ -512,6 +512,7 @@ def _check_dummy_hash_model_forward(
     model = SimpleNamespace(
         use_mega_moe=False,
         use_sequence_parallel=False,
+        fuse_mhc_all_reduce=False,
         engram_hash=state,
         engram_swa_prefix="swa",
         engram_dp_shared_memory=dp_shared_memory,
