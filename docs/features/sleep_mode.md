@@ -77,24 +77,16 @@ llm.wake_up(tags=["kv_cache"])
 #### Retaining frozen weights during RLHF updates
 
 Set `weight_transfer_config.frozen_weight_names` to runtime parameter-name glob
-patterns, such as `*.engram.*`, for weights that never change during training.
-These match `model.named_parameters()`, not checkpoint keys; do not infer them from
-`requires_grad=False`, which is also used for ordinary inference weights.
-Each pattern must match at least one parameter, including CPU-resident parameters.
+patterns for weights that stay frozen during training. Each pattern must match
+`model.named_parameters()`; checkpoint names and `requires_grad` are not used.
 
-With level 2 sleep, their GPU parameters are copied to pageable CPU memory.
-`wake_up(tags=["weights"])` restores them in place and releases the CPU copies.
-Each sleep/wake cycle saves and restores the current values, just like buffers.
-Already CPU-resident parameters need no copy. Budget host memory for these
-backups alongside trainer offload.
-Level 1 retains its existing full-weight backup behavior.
+Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
+wake-up restores them in place and releases the backups. CPU parameters need no
+copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
 
-This option only controls sleep/wake; it does not modify weight loaders or
-filter incoming updates. The trainer (for example, VERL) must omit these
-parameters and leave their values and storage unchanged during reload and
-post-processing. Restart the instance to change frozen weights. Reload paths
-that replace selected parameters with meta tensors are not supported by this
-option alone. Selection applies to the target, not a separate draft model.
+The trainer must omit these parameters from updates, and reload/post-processing
+must preserve their values and storage (including avoiding replacement with meta
+tensors). This option does not filter updates and applies only to the target model.
 
 #### Release only KV cache memory
 
