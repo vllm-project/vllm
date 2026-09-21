@@ -1003,6 +1003,7 @@ class OnlineDerenderer:
                             gen.prompt_token_ids if return_token_ids else None
                         ),
                         token_ids=choice.token_ids if return_token_ids else None,
+                        prompt_logprobs=gen.prompt_logprobs,
                     )
                 )
                 total_completion_tokens += len(choice.token_ids)
