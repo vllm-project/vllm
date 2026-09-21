@@ -318,3 +318,34 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+  mirror:
+    amd:
+      label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      optional: true
+      timeout_in_minutes: 105
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/models/kimi_k3/
+      - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+      - tests/v1/kv_connector/nixl_integration/
+      - requirements/kv_connectors_rocm.txt
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - export ENABLE_HMA_FLAG='1'
+      - export DP_EP='1'
+      - export GPU_MEMORY_UTILIZATION='0.9'
+      - export VLLM_SSM_CONV_STATE_LAYOUT='DS'
+      - export PREFILLER_TP_SIZE='2'
+      - export DECODER_TP_SIZE='2'
+      - export MODEL_NAMES='moonshotai/Kimi-Linear-48B-A3B-Instruct'
+      - export PREFILL_BLOCK_SIZE='2048'
+      - export DECODE_BLOCK_SIZE='2048'
+      - export VLLM_SERVE_EXTRA_ARGS='--trust-remote-code,--mamba-cache-mode align,--max-model-len 32768'
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
