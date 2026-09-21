@@ -19,7 +19,10 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
+from vllm.models.minimax_m3.common.sparse_attention import (
+    MiniMaxM3SparseTritonImpl,
+    minimax_m3_rebase_slots_to_page16,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
@@ -28,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
+    get_kv_quant_mode,
 )
 
 if not (current_platform.is_cuda() or current_platform.is_rocm()):
@@ -45,8 +49,7 @@ def kv_layout(request) -> KVCacheLayout:
 
 def _layer_stride_order(layout: KVCacheLayout, ndim: int) -> tuple[int, ...]:
     """Per-layer physical stride order for the given layout; the 3-dim
-    indexer side cache (H=1) is contiguous, so identity.
-    """
+    indexer side cache (H=1) is contiguous, so identity."""
     if ndim == 3:
         return (0, 1, 2)
     stride_order = layout.layer_view_order
@@ -66,8 +69,7 @@ def _main_spec() -> FullAttentionSpec:
 
 def _main_kv_logical_shape(num_pages: int) -> tuple[int, ...]:
     """Standardized per-layer logical shape [B, H, N, C] for the main cache,
-    derived the same way the production allocator does.
-    """
+    derived the same way the production allocator does."""
     shape_bytes = compute_layer_kv_cache_shape_bytes(_main_spec(), num_pages)
     return (*shape_bytes[:-1], shape_bytes[-1] // DTYPE.itemsize)
 
@@ -77,8 +79,7 @@ def _allocate_main_kv_via_contract(
 ) -> torch.Tensor:
     """Build the main KV cache exactly as the production allocator does for the
     given layout: allocate the physical (permuted) tensor, then expose the
-    inverse-permuted logical [B, H, N, C] view the backend sees.
-    """
+    inverse-permuted logical [B, H, N, C] view the backend sees."""
     logical_shape = _main_kv_logical_shape(num_pages)
     stride_order = _layer_stride_order(layout, len(logical_shape))
     physical_shape = tuple(logical_shape[i] for i in stride_order)
@@ -1379,8 +1380,7 @@ def test_amd_decode_index_topk_end_to_end(
 @pytest.mark.parametrize("num_idx_heads", [1, 4])
 def test_decode_index_topk_fp8(num_idx_heads: int):
     """The standalone Triton path must score FP8 inputs in FP32 so its top-k
-    matches a reference computed from the dequantized FP8 values.
-    """
+    matches a reference computed from the dequantized FP8 values."""
     torch.manual_seed(0)
     topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
     decode_query_len = 1
@@ -1653,8 +1653,7 @@ def test_prefill_sparse_attention_correctness(
 def test_main_cache_layout_contract():
     """The standardized per-layer logical shape is [B, H, N, C] with packed
     K/V content, and the legacy layout aliases resolve to the expected
-    per-layer stride orders.
-    """
+    per-layer stride orders."""
     nb, bs, h, d = 7, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
     logical = _main_kv_logical_shape(nb)
     assert logical == (nb, h, bs, 2 * d)
@@ -1677,8 +1676,9 @@ def test_main_cache_layout_contract():
         assert set(order) == set(range(len(order)))
 
 
-def test_aiter_sparse_pa_layout_contract(monkeypatch):
-    """The shuffle-only AITER path retains separately contiguous K/V storage."""
+@pytest.mark.parametrize("layout", [KVCacheLayout.LHBNC, KVCacheLayout.LBHNC])
+def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
+    """Build the exact separate and packed page-16 views used by the model."""
     import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
 
     monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
@@ -1690,21 +1690,43 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
     assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
+    assert KVCacheLayout.LBHNC in backend.supported_kv_cache_layouts()
 
-    nb, h = 7, 1
+    nb, h = 3, 1
+    cache_dtype = current_platform.fp8_dtype()
     spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=h,
         head_size=HEAD_DIM,
-        dtype=DTYPE,
+        dtype=cache_dtype,
+        kv_quant_mode=get_kv_quant_mode("fp8"),
         num_head_slots=2,
-        state_content_bytes=h * HEAD_DIM * DTYPE.itemsize,
+        state_content_bytes=h * HEAD_DIM * cache_dtype.itemsize,
     )
     raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
-    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LHBNC)[0]
-    key_cache, value_cache = view.unbind(1)
-    assert key_cache.is_contiguous()
-    assert value_cache.is_contiguous()
+    kv_cache = dense_kv_cache_views(raw, spec, nb, 1, layout)[0].view(cache_dtype)
+    key_cache, value_cache = kv_cache.unbind(1)
+    x = 16 // cache_dtype.itemsize
+    pages_per_side = BLOCK_SIZE // 16
+    if key_cache.is_contiguous() and value_cache.is_contiguous():
+        k_src, v_src = key_cache, value_cache
+        block_pages, v_page_offset = pages_per_side, 0
+    else:
+        assert kv_cache.is_contiguous()
+        k_src = v_src = kv_cache
+        block_pages, v_page_offset = 2 * pages_per_side, pages_per_side
+
+    num_phys16 = nb * block_pages
+    k_view = k_src.view(num_phys16, h, HEAD_DIM // x, 16, x)
+    v_view = v_src.view(num_phys16, h, 16 // x, HEAD_DIM, x)[v_page_offset:]
+    assert k_view.is_contiguous()
+    assert v_view.is_contiguous()
+    if layout is KVCacheLayout.LHBNC:
+        assert k_view.shape == (24, 1, 8, 16, 16)
+        assert v_view.shape == (24, 1, 1, 128, 16)
+    else:
+        assert k_view.shape == (48, 1, 8, 16, 16)
+        assert v_view.shape == (40, 1, 1, 128, 16)
 
 
 def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
@@ -1774,12 +1796,335 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     assert reason is None or "AITER sparse PA attend" not in reason
 
 
+def test_aiter_consolidated_qknorm_enabled(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+
+    scale = torch.tensor([0.25])
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8", scale, scale)
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e4m3", scale, scale)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8")
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8", scale, None)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e5m2", scale, scale)
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", False)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: False)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+
+
+def _fake_aiter_qknorm_args(kv_cache_dtype: str = "auto") -> dict:
+    tensor = torch.empty(1)
+    return {
+        "qkv": tensor,
+        "q_norm_weight": tensor,
+        "k_norm_weight": tensor,
+        "cos_sin_cache": tensor,
+        "positions": tensor,
+        "num_heads": 16,
+        "num_kv_heads": 1,
+        "rotary_dim": 64,
+        "eps": 1e-6,
+        "slot_mapping": tensor,
+        "kv_cache_k": tensor,
+        "kv_cache_v": tensor,
+        "q_out": tensor,
+        "kv_cache_dtype": kv_cache_dtype,
+    }
+
+
+def _install_fake_aiter_qknorm(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Stub ``aiter.fused_qknorm_idxrqknorm`` so mapping tests run without AITER."""
+    import sys
+    import types
+    from typing import Any
+
+    calls: list[dict] = []
+
+    def fake_op(*args, **kwargs):
+        calls.append(kwargs)
+
+    existing = sys.modules.get("aiter")
+    if existing is not None:
+        monkeypatch.setattr(existing, "fused_qknorm_idxrqknorm", fake_op, raising=False)
+    else:
+        fake_mod: Any = types.ModuleType("aiter")
+        fake_mod.fused_qknorm_idxrqknorm = fake_op
+        monkeypatch.setitem(sys.modules, "aiter", fake_mod)
+    return calls
+
+
+def test_aiter_consolidated_qknorm_packed_shuffle_unequal_spans(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args()
+    call_args["kv_cache_k"] = torch.empty(2, 1)
+    call_args["kv_cache_v"] = torch.empty(1, 1)
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "aiter_dtype", "passes_scales"),
+    [
+        ("auto", "auto", False),
+        ("fp8", "fp8_e4m3_static", True),
+        ("fp8_e4m3", "fp8_e4m3_static", True),
+    ],
+)
+def test_aiter_consolidated_qknorm_dtype_and_layout_mapping(
+    monkeypatch, kv_cache_dtype, aiter_dtype, passes_scales
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args(kv_cache_dtype)
+    k_scale = torch.tensor([0.25])
+    v_scale = torch.tensor([0.5])
+    call_args.update(k_scale=k_scale, v_scale=v_scale)
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert len(calls) == 1
+    kwargs = calls[0]
+    assert kwargs["kv_cache_dtype"] == aiter_dtype
+    assert kwargs["index_cache_dtype"] == "auto"
+    assert kwargs["block_size"] == 16
+    assert kwargs["asm_layout"] is True
+    if passes_scales:
+        assert kwargs["k_scale"] is k_scale
+        assert kwargs["v_scale"] is v_scale
+    else:
+        assert kwargs["k_scale"] is None
+        assert kwargs["v_scale"] is None
+
+
+def test_aiter_consolidated_qknorm_fp8_index_dtype_mapping(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    fp8 = current_platform.fp8_dtype()
+    call_args = _fake_aiter_qknorm_args("fp8")
+    call_args.update(
+        k_scale=torch.tensor([0.25]),
+        v_scale=torch.tensor([0.5]),
+        index_cache=torch.empty(1, dtype=fp8),
+        index_q_out=torch.empty(1, dtype=fp8),
+        num_index_heads=1,
+    )
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert calls[0]["index_cache_dtype"] == "fp8"
+    assert calls[0]["kv_cache_dtype"] == "fp8_e4m3_static"
+
+
+@pytest.mark.parametrize("skip_index_branch", [False, True])
+def test_aiter_consolidated_qknorm_full_and_skip_index_args(
+    monkeypatch, skip_index_branch
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args()
+    if skip_index_branch:
+        call_args.update(skip_index_branch=True)
+    else:
+        tensor = torch.empty(1)
+        call_args.update(
+            index_q_norm_weight=tensor,
+            index_k_norm_weight=tensor,
+            num_index_heads=1,
+            index_cache=tensor,
+            index_q_out=tensor,
+            index_slot_mapping=tensor,
+        )
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    kwargs = calls[0]
+    assert kwargs["skip_index_branch"] is skip_index_branch
+    if skip_index_branch:
+        assert kwargs["index_q_norm_weight"] is None
+        assert kwargs["index_k_norm_weight"] is None
+        assert kwargs["index_cache"] is None
+        assert kwargs["index_q_out"] is None
+        assert kwargs["index_slot_mapping"] is None
+    else:
+        assert kwargs["index_q_norm_weight"] is not None
+        assert kwargs["index_k_norm_weight"] is not None
+        assert kwargs["index_cache"] is not None
+        assert kwargs["index_q_out"] is not None
+        assert kwargs["index_slot_mapping"] is not None
+
+
+def test_aiter_consolidated_qknorm_rejects_fp8_e5m2(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    scale = torch.tensor([0.25])
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e5m2", scale, scale)
+
+
+def test_aiter_sparse_pa_slot_rebase_preserves_page_offsets():
+    slots = torch.tensor([0, 15, 16, 127, 128, 129, -1])
+    actual = minimax_m3_rebase_slots_to_page16(slots, block_size=128)
+    expected = torch.tensor([0, 15, 16, 127, 256, 257, -1])
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="The consolidated packed-SHUFFLE AITER op is ROCm-only",
+)
+@pytest.mark.parametrize("skip_index_branch", [False, True])
+@pytest.mark.parametrize("fp8_index", [False, True])
+def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_index):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    torch.manual_seed(20260831)
+    num_tokens = 4
+    num_heads = 16
+    num_kv_heads = 1
+    num_index_heads = 1
+    rotary_dim = 64
+    head_dim = 128
+    logical_block_size = 128
+    num_blocks = 3
+    fp8_dtype = current_platform.fp8_dtype()
+
+    qkv = torch.randn(
+        num_tokens,
+        (num_heads + 2 * num_kv_heads + num_index_heads + 1) * head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    weights = [
+        torch.randn(head_dim, dtype=torch.bfloat16, device="cuda") for _ in range(4)
+    ]
+    cos_sin_cache = torch.randn(16, rotary_dim, dtype=torch.bfloat16, device="cuda")
+    positions = torch.arange(num_tokens, dtype=torch.int64, device="cuda")
+    logical_slots = torch.tensor([0, 127, 128, -1], dtype=torch.int64, device="cuda")
+    slot_mapping = minimax_m3_rebase_slots_to_page16(logical_slots, logical_block_size)
+    index_slot_mapping = logical_slots.clone()
+
+    packed = torch.zeros(
+        num_blocks,
+        2,
+        logical_block_size,
+        head_dim,
+        dtype=fp8_dtype,
+        device="cuda",
+    )
+    x = 16 // packed.element_size()
+    pages_per_side = logical_block_size // 16
+    num_phys16 = num_blocks * 2 * pages_per_side
+    kv_cache_k = packed.view(num_phys16, num_kv_heads, head_dim // x, 16, x)
+    kv_cache_v = packed.view(num_phys16, num_kv_heads, 16 // x, head_dim, x)[
+        pages_per_side:
+    ]
+    assert kv_cache_k.shape == (48, 1, 8, 16, 16)
+    assert kv_cache_v.shape == (40, 1, 1, 128, 16)
+
+    q_out = torch.zeros(
+        num_tokens, num_heads * head_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    index_dtype = fp8_dtype if fp8_index else torch.bfloat16
+    if fp8_index:
+        index_q_out = torch.empty(
+            (num_tokens, num_index_heads * head_dim),
+            dtype=index_dtype,
+            device="cuda",
+        )
+        index_cache = torch.empty(
+            (num_blocks, logical_block_size, head_dim),
+            dtype=index_dtype,
+            device="cuda",
+        )
+        index_q_out.view(torch.uint8).fill_(7)
+        index_cache.view(torch.uint8).fill_(7)
+    else:
+        index_q_out = torch.full(
+            (num_tokens, num_index_heads * head_dim),
+            7,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        index_cache = torch.full(
+            (num_blocks, logical_block_size, head_dim),
+            7,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+    scale = torch.tensor([0.02], dtype=torch.float32, device="cuda")
+
+    kwargs = {}
+    if not skip_index_branch:
+        kwargs = {
+            "index_q_norm_weight": weights[2],
+            "index_k_norm_weight": weights[3],
+            "index_cache": index_cache,
+            "index_q_out": index_q_out,
+            "index_slot_mapping": index_slot_mapping,
+        }
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(
+        qkv,
+        weights[0],
+        weights[1],
+        cos_sin_cache,
+        positions,
+        num_heads,
+        num_kv_heads,
+        rotary_dim,
+        1e-6,
+        slot_mapping,
+        kv_cache_k,
+        kv_cache_v,
+        q_out,
+        "fp8",
+        scale,
+        scale,
+        num_index_heads=num_index_heads,
+        skip_index_branch=skip_index_branch,
+        **kwargs,
+    )
+    torch.accelerator.synchronize()
+
+    assert torch.isfinite(q_out).all()
+    assert torch.count_nonzero(q_out) > 0
+    assert torch.count_nonzero(packed) > 0
+    if fp8_index:
+        index_q_untouched = torch.all(index_q_out.view(torch.uint8) == 7)
+        index_cache_untouched = torch.all(index_cache.view(torch.uint8) == 7)
+        index_cache_t0 = torch.all(index_cache[0, 0].view(torch.uint8) == 7)
+        index_cache_t127 = torch.all(index_cache[0, 127].view(torch.uint8) == 7)
+        index_cache_t128 = torch.all(index_cache[1, 0].view(torch.uint8) == 7)
+    else:
+        index_q_untouched = torch.all(index_q_out == 7)
+        index_cache_untouched = torch.all(index_cache == 7)
+        index_cache_t0 = torch.all(index_cache[0, 0] == 7)
+        index_cache_t127 = torch.all(index_cache[0, 127] == 7)
+        index_cache_t128 = torch.all(index_cache[1, 0] == 7)
+    if skip_index_branch:
+        assert index_q_untouched
+        assert index_cache_untouched
+    else:
+        assert not index_q_untouched
+        assert not index_cache_t0
+        assert not index_cache_t127
+        assert not index_cache_t128
+
+
 def test_indexer_cache_squeezes_to_contiguous_3d():
     """The indexer side cache is standardized 4D with H=1: under both layouts
     the allocator's logical view stays contiguous and squeezes (as
     `MiniMaxM3IndexerCache.bind_kv_cache` does) to the 3-dim
-    [num_blocks, block_size, head_dim] cache the kernels consume.
-    """
+    [num_blocks, block_size, head_dim] cache the kernels consume."""
     nb = 5
     ispec = MLAAttentionSpec(
         block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
@@ -1799,8 +2144,7 @@ def test_indexer_cache_squeezes_to_contiguous_3d():
 
 def test_hnd_allocation_is_packed_head_major():
     """Under HND the backend-visible logical view is the packed head-major
-    physical allocation.
-    """
+    physical allocation."""
     nb, bs, h, d = 4, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
     logical = _main_kv_logical_shape(nb)
     stride_order = KVCacheLayout.LBHNC.layer_view_order
@@ -1828,8 +2172,7 @@ def test_hnd_allocation_is_packed_head_major():
 def test_main_cache_is_block_first_and_unpadded():
     """The allocator's contiguous-view branch (not the padded-strided branch)
     is used for the main GQA cache: its spec is unpadded and the physical
-    layout keeps num_blocks as the first dimension under both layouts.
-    """
+    layout keeps num_blocks as the first dimension under both layouts."""
     spec = _main_spec()
     # Unpadded -> allocator uses kv_tensor.view(...) rather than as_strided().
     assert spec.page_size_padded is None
@@ -1851,8 +2194,7 @@ def _build_decode_inputs(
 ):
     """Shared decode setup: uniform query tokens per request, a non-identity
     block table, and topk indices selecting the current block plus older causal
-    blocks for each query token.
-    """
+    blocks for each query token."""
     active_batch = len(seq_lens_list)
     batch = active_batch + num_padded_reqs
     pages_per_req = [(s + BLOCK_SIZE - 1) // BLOCK_SIZE for s in seq_lens_list]
@@ -2188,8 +2530,7 @@ def test_decode_sparse_attention_correctness(
 ):
     """Decode (split-K) parity under both layouts: this is the only coverage of
     the decode-site cache feed, and the strided HND case fails if the kernel
-    ignores the cache strides.
-    """
+    ignores the cache strides."""
     torch.manual_seed(0)
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
         seq_lens_list, decode_query_len, num_padded_reqs
@@ -2239,8 +2580,7 @@ def test_decode_wrong_layout_breaks_parity():
     already contiguous-NHD (i.e. skipping the allocator's inverse permute)
     reorders the K/V content, so the decode output no longer matches the
     reference computed on the correct logical view. The mislabeled tensor keeps
-    the same shape as the correct view, so the kernel stays in bounds.
-    """
+    the same shape as the correct view, so the kernel stays in bounds."""
     torch.manual_seed(0)
     seq_lens_list = (130, 257)
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(seq_lens_list)
@@ -2275,8 +2615,7 @@ def test_decode_wrong_layout_breaks_parity():
 def test_main_cache_byte_identical_through_production_allocator():
     """AC-2: drive the real allocator (`create_kv_cache_views`) for the M3 main
     `FullAttentionSpec` under HND and assert the backend-visible view has the
-    same shape, stride, and storage offset as the packed-HND allocation.
-    """
+    same shape, stride, and storage offset as the packed-HND allocation."""
     nb = 4
     spec = _main_spec()
     raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
@@ -2291,8 +2630,7 @@ def test_main_cache_byte_identical_through_production_allocator():
 def test_padded_main_cache_is_flagged():
     """AC-2.1 negative: the M3 main cache relies on the allocator's
     contiguous-view branch (`page_size_padded is None`). A spec that sets
-    `page_size_padded` is explicitly flagged rather than silently wrong-strided.
-    """
+    `page_size_padded` is explicitly flagged rather than silently wrong-strided."""
 
     def _require_unpadded_block_first(spec, stride_order):
         inv_order = [stride_order.index(i) for i in range(len(stride_order))]
@@ -2329,8 +2667,7 @@ def test_padded_main_cache_is_flagged():
 def test_reshape_and_cache_flash_write_persists(kv_layout: KVCacheLayout):
     """AC-5 write path: the `reshape_and_cache_flash` write site now consumes
     packed-content K/V split views. Writing through those views must persist
-    into the bound storage under both layouts.
-    """
+    into the bound storage under both layouts."""
     torch.manual_seed(0)
     num_pages = 4
     kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)

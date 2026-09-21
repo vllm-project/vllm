@@ -190,8 +190,7 @@ class AdaptiveVerificationManager:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
         Run these inside StepTimingCollector.collect(), then hand the block's
-        timings to set_initial_cost_curves.
-        """
+        timings to set_initial_cost_curves."""
         max_num_tokens = self.req_states.max_num_batched_tokens
         size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
         # Also profile beyond the capture limit: real steps run there
@@ -261,8 +260,7 @@ class AdaptiveVerificationManager:
         input_batch: "InputBatch",
     ) -> None:
         """Publish this step's raw confidences for the ranking kernel and start
-        copying them to the CPU, where a later step's budget reads them.
-        """
+        copying them to the CPU, where a later step's budget reads them."""
         num_reqs = input_batch.num_reqs
         ready_idx = self._stale_idx ^ 1
         with gpu_sync_allowed():

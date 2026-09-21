@@ -67,6 +67,7 @@ def test_request_finished_producer_emits_params(monkeypatch):
     assert params == {
         "h1": {
             "metadata": {},
+            "item_indices": [0],
             "peer_host": "1.2.3.4",
             "peer_port": 5601,
             "size_bytes": 2 * 32 * 2,
@@ -79,8 +80,7 @@ def test_request_finished_announces_not_ready_entry(monkeypatch):
     """A save whose GPU->mmap copy hasn't been confirmed complete yet is
     still announced: the entry can't be evicted before it's ready, and a read
     arriving too early is NACKed NACK_NOT_READY for the consumer to retry —
-    protecting it is not this method's job.
-    """
+    protecting it is not this method's job."""
     s = _sched_gate_off(monkeypatch)
     s._nixl_enabled = True
     s._peer_host, s._peer_port = "1.2.3.4", 5601
@@ -92,6 +92,7 @@ def test_request_finished_announces_not_ready_entry(monkeypatch):
     assert params == {
         "h1": {
             "metadata": {},
+            "item_indices": [0],
             "peer_host": "1.2.3.4",
             "peer_port": 5601,
             "size_bytes": 2 * 32 * 2,
@@ -111,5 +112,5 @@ def test_request_finished_skips_unallocated_entry(monkeypatch):
     assert delay is False
     # The item's placeholder metadata is still reported even though there's
     # no cache entry to transfer (empty "metadata": no fields, no transfer).
-    assert params == {"h1": {"metadata": {}}}
+    assert params == {"h1": {"metadata": {}, "item_indices": [0]}}
     s.shutdown()

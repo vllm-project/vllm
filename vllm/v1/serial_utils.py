@@ -90,8 +90,7 @@ def _typestr(val: Any) -> tuple[str, str] | None:
 
 def _encode_type_info_recursive(obj: Any) -> Any:
     """Recursively encode type information for nested structures of
-    lists/dicts.
-    """
+    lists/dicts."""
     if obj is None:
         return None
     if type(obj) is list:
@@ -105,8 +104,7 @@ def _decode_type_info_recursive(
     type_info: Any, data: Any, convert_fn: Callable[[Sequence[str], Any], Any]
 ) -> Any:
     """Recursively decode type information for nested structures of
-    lists/dicts.
-    """
+    lists/dicts."""
     if type_info is None:
         return data
     if isinstance(type_info, dict):

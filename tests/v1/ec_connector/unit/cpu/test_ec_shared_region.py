@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.config import ParallelConfig
+from vllm.distributed.ec_transfer.ec_connector.cpu import common
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
     _wait_for_file_size,
@@ -95,11 +97,36 @@ def test_second_instance_opens_existing_file_and_shares_memory():
         r1.cleanup()
 
 
+def test_dense_dp_engines_get_distinct_regions(monkeypatch):
+    """Dense DP engines reset data_parallel_rank to 0 but share instance_id,
+    so the region must be keyed by data_parallel_index."""
+    monkeypatch.setattr(common, "_get_encoder_cache_hidden_dim", lambda cfg: 8)
+    instance_id = str(uuid.uuid4())
+    regions = []
+    try:
+        for dp_index in range(2):
+            parallel_config = ParallelConfig(
+                data_parallel_size=2, data_parallel_rank=dp_index
+            )
+            parallel_config.reconfigure_for_independent_dp_rank()
+            cfg = MagicMock()
+            cfg.instance_id = instance_id
+            cfg.parallel_config = parallel_config
+            cfg.model_config.dtype = torch.float16
+            cfg.ec_transfer_config.ec_connector_extra_config = {"ec_cpu_bytes": 64}
+            regions.append(common.create_ec_shared_region(cfg))
+
+        assert all(r._is_creator for r in regions)
+        assert regions[0]._mmap_path != regions[1]._mmap_path
+    finally:
+        for r in regions:
+            r.cleanup()
+
+
 def test_only_creator_unlinks_file_on_cleanup():
     """Critical contract: if the non-creator unlinks, the creator's mmap path
     becomes a dangling backing file and a third opener would create a new one
-    out from under the creator.
-    """
+    out from under the creator."""
     instance_id = str(uuid.uuid4())
     r1 = ECSharedRegion(
         engine_id=instance_id,
@@ -216,8 +243,7 @@ def test_madvise_einval_selects_fallback_for_whole_region(monkeypatch):
 
 def test_non_creator_does_not_probe_or_populate(monkeypatch):
     """Only the creator pre-faults. A second opener must not probe the advice
-    nor re-touch pages the creator already populated.
-    """
+    nor re-touch pages the creator already populated."""
     from vllm.distributed.ec_transfer.ec_connector.cpu import ec_shared_region as esr
 
     instance_id = str(uuid.uuid4())
@@ -314,8 +340,7 @@ def test_madvise_unexpected_oserror_propagates(monkeypatch):
 
 def test_pin_memory_success_sets_flag(region):
     """When cudaHostRegister returns 0, _is_pinned flips to True
-    and cleanup will correspondingly call cudaHostUnregister.
-    """
+    and cleanup will correspondingly call cudaHostUnregister."""
     fake_cudart = MagicMock()
     success = MagicMock()
     success.value = 0
@@ -335,8 +360,7 @@ def test_pin_memory_success_sets_flag(region):
 
 def test_pin_memory_failure_leaves_flag_false():
     """If cudaHostRegister fails (non-zero), don't pretend it succeeded —
-    cleanup must NOT call cudaHostUnregister on memory we never registered.
-    """
+    cleanup must NOT call cudaHostUnregister on memory we never registered."""
     r = _make_region()
     try:
         fake_cudart = MagicMock()

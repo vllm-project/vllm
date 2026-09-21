@@ -18,6 +18,9 @@ from openai.types.responses import (
     ResponseTextConfig,
     ResponseTextDeltaEvent,
 )
+from openai.types.responses import (
+    ResponseUsage as OpenAIResponseUsage,
+)
 from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
 )
@@ -45,6 +48,7 @@ from vllm.entrypoints.openai.responses.context import (
     SimpleContext,
 )
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseRawMessageAndToken,
     ResponsesRequest,
@@ -68,6 +72,7 @@ from vllm.renderers.online_renderer import (
     _extract_allowed_tools_from_mcp_requests,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.v1.metrics.stats import RequestStateStats
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -792,6 +797,7 @@ class TestInitializeToolSessions:
             pass
 
         assert serving_responses_instance.engine_client.generate.call_count == 2
+        assert context.request_metrics_cover_all_generation_turns is False
         followup_engine_input = (
             serving_responses_instance.engine_client.generate.call_args_list[1].args[0]
         )
@@ -975,6 +981,7 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
         outputs=[completion],
         finished=True,
         num_cached_tokens=0,
+        num_cache_creation_tokens=3,
     )
     context.append_output(req_output)
 
@@ -995,6 +1002,9 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     )
 
     assert response.usage.output_tokens_details.reasoning_tokens == 1
+    assert response.usage.input_tokens_details.cache_write_tokens == 3
+
+    OpenAIResponseUsage.model_validate(response.usage.model_dump(mode="json"))
 
 
 class TestExtractAllowedToolsFromMcpRequests:
@@ -1163,8 +1173,7 @@ class TestHarmonyPreambleStreaming:
 
     def test_preamble_done_emits_text_done_events(self) -> None:
         """Completed preamble should emit text done + content_part done +
-        output_item done, same shape as final channel.
-        """
+        output_item done, same shape as final channel."""
         from vllm.entrypoints.openai.responses.streaming_events import (
             emit_previous_item_done_events,
         )
@@ -1185,8 +1194,7 @@ class TestHarmonyPreambleStreaming:
 
     def test_commentary_with_recipient_no_preamble_done(self) -> None:
         """Commentary + recipient='functions.X' should route to function call
-        done, not preamble done.
-        """
+        done, not preamble done."""
         from vllm.entrypoints.openai.responses.streaming_events import (
             emit_previous_item_done_events,
         )
@@ -1243,9 +1251,19 @@ class TestHarmonyPreambleStreaming:
             assert "response.output_item.done" in type_names
 
 
-def _make_simple_context_with_output(text, token_ids, response_parser=None):
-    """Create a SimpleContext with a RequestOutput containing the given text."""
-    ctx = SimpleContext(response_parser=response_parser)
+_PER_REQUEST_STATS = RequestStateStats(
+    queued_ts=1.0,
+    scheduled_ts=1.5,
+    first_token_ts=2.0,
+    last_token_ts=3.0,
+)
+
+
+def _make_request_output(
+    text,
+    token_ids,
+    metrics: RequestStateStats | None = None,
+):
     completion = CompletionOutput(
         index=0,
         text=text,
@@ -1255,7 +1273,7 @@ def _make_simple_context_with_output(text, token_ids, response_parser=None):
         finish_reason=None,
         stop_reason=None,
     )
-    req_output = RequestOutput(
+    return RequestOutput(
         request_id="req",
         prompt="hi",
         prompt_token_ids=[7, 8],
@@ -1263,13 +1281,29 @@ def _make_simple_context_with_output(text, token_ids, response_parser=None):
         outputs=[completion],
         finished=False,
         num_cached_tokens=0,
+        metrics=metrics,
     )
+
+
+def _make_simple_context_with_output(
+    text,
+    token_ids,
+    response_parser=None,
+    metrics: RequestStateStats | None = None,
+):
+    """Create a SimpleContext with a RequestOutput containing the given text."""
+    ctx = SimpleContext(response_parser=response_parser)
+    req_output = _make_request_output(text, token_ids, metrics)
     ctx.append_output(req_output)
+    ctx.request_metrics = metrics
     return ctx
 
 
-def _make_serving_instance_with_reasoning():
-    """Create an OpenAIServingResponses with a mocked reasoning parser."""
+def _make_serving_instance(
+    *,
+    reasoning_parser: str = "",
+    enable_per_request_metrics: bool = False,
+) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.max_model_len = 100
@@ -1280,18 +1314,112 @@ def _make_serving_instance_with_reasoning():
     engine_client.input_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
-    models = MagicMock()
-
-    serving = OpenAIServingResponses(
+    return OpenAIServingResponses(
         engine_client=engine_client,
-        models=models,
+        models=MagicMock(),
         online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
-        reasoning_parser="qwen3",
+        reasoning_parser=reasoning_parser,
+        enable_per_request_metrics=enable_per_request_metrics,
     )
-    return serving
+
+
+async def _empty_context_generator():
+    if False:
+        yield
+
+
+async def _make_full_metrics_response(
+    enable_per_request_metrics: bool,
+    request_metrics_cover_all_generation_turns: bool = True,
+):
+    serving = _make_serving_instance(
+        enable_per_request_metrics=enable_per_request_metrics
+    )
+    request = ResponsesRequest(input="hi", tools=[], stream=False, store=False)
+    sampling_params = SamplingParams(max_tokens=16)
+    context = SimpleContext()
+    context.request_metrics_cover_all_generation_turns = (
+        request_metrics_cover_all_generation_turns
+    )
+
+    async def generate(*args, **kwargs):
+        yield _make_request_output("hello", [10, 20], _PER_REQUEST_STATS)
+
+    serving.engine_client.generate.side_effect = generate
+    result_generator = serving._generate_with_builtin_tools(
+        request_id=request.request_id,
+        engine_input=tokens_input([7, 8]),
+        sampling_params=sampling_params,
+        context=context,
+    )
+    response = await serving.responses_full_generator(
+        request=request,
+        sampling_params=sampling_params,
+        result_generator=result_generator,
+        context=context,
+        model_name="test-model",
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="req"),
+    )
+    assert isinstance(response, ResponsesResponse)
+    return response
+
+
+@pytest.mark.asyncio
+async def test_responses_per_request_metrics_follow_server_flag():
+    disabled_response = await _make_full_metrics_response(False)
+    assert disabled_response.metrics is None
+    assert "metrics" not in disabled_response.model_dump(mode="json")
+
+    enabled_response = await _make_full_metrics_response(True)
+    assert enabled_response.metrics is not None
+    assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_responses_streaming_metrics_only_on_completed_event():
+    serving = _make_serving_instance(enable_per_request_metrics=True)
+    request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
+    context = _make_simple_context_with_output(
+        "hello", [10, 20], metrics=_PER_REQUEST_STATS
+    )
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=_empty_context_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    for event in events[:-1]:
+        assert "metrics" not in event.response.model_dump(mode="json")
+    assert isinstance(events[-1], ResponseCompletedEvent)
+    assert events[-1].response.metrics is not None
+    assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_responses_metrics_suppressed_for_multiple_generation_turns():
+    response = await _make_full_metrics_response(
+        True, request_metrics_cover_all_generation_turns=False
+    )
+
+    assert response.metrics is None
+    assert "metrics" not in response.model_dump(mode="json")
+
+
+def _make_serving_instance_with_reasoning():
+    """Create an OpenAIServingResponses with a mocked reasoning parser."""
+    return _make_serving_instance(reasoning_parser="qwen3")
 
 
 def _identity_increment(event):
@@ -1332,8 +1460,7 @@ def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
 class TestStreamingReasoningToContentTransition:
     """Tests for _process_simple_streaming_events reasoning-to-content
     transition, specifically the fix for mixed deltas that carry both
-    reasoning and content simultaneously.
-    """
+    reasoning and content simultaneously."""
 
     @pytest.mark.asyncio
     async def test_mixed_delta_reasoning_and_content_emits_reasoning_delta(
@@ -1343,8 +1470,7 @@ class TestStreamingReasoningToContentTransition:
         and content set (e.g. reasoning end and content start in the same
         chunk), the trailing reasoning text must be emitted as a
         ResponseReasoningTextDeltaEvent and included in the
-        ResponseReasoningTextDoneEvent text.
-        """
+        ResponseReasoningTextDoneEvent text."""
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 
@@ -1413,8 +1539,7 @@ class TestStreamingReasoningToContentTransition:
         self, monkeypatch
     ):
         """When the transition from reasoning to content is clean (no mixed
-        delta), no extra reasoning delta event should be emitted.
-        """
+        delta), no extra reasoning delta event should be emitted."""
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 
@@ -1475,8 +1600,7 @@ class TestStreamingReasoningToContentTransition:
     async def test_reasoning_only_stream_no_content(self, monkeypatch):
         """When the stream has only reasoning deltas and no content, the
         reasoning done event should be emitted at finalization with the
-        full accumulated text, and no text delta events should appear.
-        """
+        full accumulated text, and no text delta events should appear."""
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 

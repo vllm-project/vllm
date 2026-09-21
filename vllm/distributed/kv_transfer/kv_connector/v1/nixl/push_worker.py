@@ -315,8 +315,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         executes on the writer; the handshake runs on the background executor
         and the request is re-queued onto ``_reg_send_inbox`` once it
         completes (at which point ``_ensure_handshake`` returns ``None`` and we
-        send directly).
-        """
+        send directly)."""
         remote_pp_size = reg_data.get("remote_pp_size", 1)
         fut = self._ensure_handshake(
             reg_data["remote_engine_id"],
@@ -366,6 +365,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
                 req_id,
             )
+            self.xfer_stats.record_failed_notification()
             self._failed_recv_reqs.put(req_id)
             return
         for rank, agent_name in agents.items():
@@ -378,6 +378,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     error=e,
                     remote_rank=rank,
                 )
+                self.xfer_stats.record_failed_notification()
+                # Earlier registrations may still trigger WRITEs into D's blocks.
+                # Keep the receive pending until those writes are finished.
         logger.debug(
             "Sent PUSH_REG for %s to engine %s (%dB)", req_id, engine_id, len(notif_msg)
         )
@@ -508,8 +511,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         ``BlockIds`` is canonically a tuple of per-group lists, but some
         registration payloads collapse a single-group case to a flat
         list. Re-wrap that case so downstream group-aware helpers see a
-        consistent shape.
-        """
+        consistent shape."""
         if block_ids and not isinstance(block_ids[0], (list, tuple)):
             return (list(block_ids),)
         return block_ids

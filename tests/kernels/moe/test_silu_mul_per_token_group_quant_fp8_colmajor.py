@@ -70,8 +70,7 @@ def reference_with_clamp(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pre-clamp inputs (gate from above, up symmetric) at the input dtype to
     match the C++ compute() template, then run the standard silu_and_mul +
-    quant reference.
-    """
+    quant reference."""
     N_2 = x.size(1) // 2
     dtype = x.dtype
     gate = x[..., :N_2].to(torch.float32).clamp(max=clamp_limit).to(dtype)

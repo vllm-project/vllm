@@ -512,8 +512,7 @@ def _process_weights_flashinfer(
 
 def _pad_w13_shard_cols(x: torch.Tensor, unit: int, padded_unit: int) -> torch.Tensor:
     """Zero-pad each of the two gate/up shards of a ``(E, rows, 2 * unit)``
-    tensor along its last dim, from ``unit`` to ``padded_unit`` columns.
-    """
+    tensor along its last dim, from ``unit`` to ``padded_unit`` columns."""
     if padded_unit == unit:
         return x
     e, rows, _ = x.shape
@@ -1081,8 +1080,7 @@ def _humming_wna16_weight_schema(
     quant_config: QuantizationConfig | QuantizationArgs | None,
 ) -> dict[str, Any]:
     """Humming weight schema for a WNA16 checkpoint, derived from the quant
-    config rather than the running kernel.
-    """
+    config rather than the running kernel."""
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 
@@ -1458,7 +1456,7 @@ def convert_to_wna16_moe_kernel_format(
     """
     if backend == WNA16MoEBackend.HUMMING:
         from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 

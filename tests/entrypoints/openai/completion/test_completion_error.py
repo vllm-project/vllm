@@ -61,9 +61,10 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
@@ -521,8 +522,7 @@ async def test_completion_error_stream():
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
     is not provided, request construction should raise a validation error
-    so the API returns 400 instead of 500.
-    """
+    so the API returns 400 instead of 500."""
     with pytest.raises(Exception, match="json_schema.*must be provided"):
         CompletionRequest(
             model=MODEL_NAME,
@@ -585,8 +585,7 @@ def test_negative_prompt_token_ids_flat():
 def test_logprobs_minus_one_allowed():
     """logprobs=-1 means "return all logprobs". The sampling layer and the chat
     top_logprobs / prompt_logprobs validators all accept -1, so the completion
-    logprobs validator must accept it too instead of rejecting it as negative.
-    """
+    logprobs validator must accept it too instead of rejecting it as negative."""
     request = CompletionRequest(
         model=MODEL_NAME,
         prompt="Test prompt",
@@ -746,8 +745,7 @@ class TestCompletionPromptListLimit:
 @pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
 def test_non_numeric_logprobs_rejected(field_name):
     """A non-numeric logprobs value must be a clean 400 validation error, not a
-    TypeError from the mode='before' comparison (which surfaces as HTTP 500).
-    """
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
     with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
         CompletionRequest(
             model=MODEL_NAME,

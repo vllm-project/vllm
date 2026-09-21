@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
     convert_to_channelwise,
+    cutlass_fp8_supported,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -164,8 +165,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda():
-            return False, "requires CUDA."
+        if not cutlass_fp8_supported():
+            return False, "CUTLASS FP8 kernels not available"
         return True, None
 
     @classmethod
@@ -174,8 +175,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     def input_quant_key(self) -> QuantKey | None:
         """Only static per-tensor activation quantization is supported for external
-        quantization.
-        """
+        quantization."""
         if self.config.activation_quant_key == kFp8StaticTensorSym:
             return kFp8StaticTensorSym
         return None
@@ -185,8 +185,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
     ) -> torch.Tensor:
         """Pad tensor ``x`` along ``dim`` to the next multiple of
-        ``alignment``.
-        """
+        ``alignment``."""
         remainder = x.shape[dim] % alignment
         if remainder == 0:
             return x

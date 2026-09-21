@@ -69,8 +69,7 @@ def input_to_float8(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to float8 values "
-    "with tensor-wise quantization.
-    """
+    "with tensor-wise quantization."""
     dtype = current_platform.fp8_dtype() if dtype is None else dtype
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
@@ -1195,8 +1194,7 @@ def prepare_fp8_moe_layer_for_deepgemm(
 
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
-    can benefit from tensors located far enough from one another in memory
-    """
+    can benefit from tensors located far enough from one another in memory"""
     if (
         envs.VLLM_ROCM_FP8_PADDING
         and current_platform.is_rocm()

@@ -276,8 +276,7 @@ class TestIsReasoningEndTurnBoundaries:
 
     def test_empty_boundary_config_keeps_global_walk(self):
         """Configs without turn_boundary_tokens keep the pre-existing
-        behavior: any </think> in the sequence ends reasoning.
-        """
+        behavior: any </think> in the sequence ends reasoning."""
         cfg = qwen3_config(turn_boundary_tokens=frozenset())
         parser = Qwen3Parser(
             make_mock_tokenizer(_QWEN3_VOCAB), parser_engine_config=cfg
@@ -289,8 +288,7 @@ class TestIsReasoningEndTurnBoundaries:
     def test_boundary_tokens_missing_from_vocab_keep_global_walk(self):
         """Boundary tokens absent from the vocabulary resolve to nothing,
         so subclasses reusing the default on a non-ChatML vocab keep the
-        pre-existing behavior.
-        """
+        pre-existing behavior."""
         vocab = {
             token: token_id
             for token, token_id in _QWEN3_VOCAB.items()
@@ -301,8 +299,7 @@ class TestIsReasoningEndTurnBoundaries:
 
     def test_boundary_with_thinking_disabled_is_end(self, mock_tokenizer):
         """With thinking disabled (initial state CONTENT) a walk that stops at a turn
-        boundary must report reasoning as ended: the model never emits a marker.
-        """
+        boundary must report reasoning as ended: the model never emits a marker."""
         parser = Qwen3Parser(
             mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
         )
@@ -310,8 +307,7 @@ class TestIsReasoningEndTurnBoundaries:
 
     def test_boundary_with_thinking_enabled_not_end(self, parser):
         """With thinking disabled (initial state REASONING) a walk that stops at a turn
-        boundary must keep reasoning open
-        """
+        boundary must keep reasoning open"""
         assert not parser.is_reasoning_end([_IM_START_ID, _TEXT_ID])
 
 
@@ -672,8 +668,7 @@ class TestTrailingWhitespaceStripping:
 
 class TestWhitespaceStrippingDisabled:
     """When strip_trailing_reasoning_whitespace is False,
-    trailing whitespace in reasoning must be preserved.
-    """
+    trailing whitespace in reasoning must be preserved."""
 
     @pytest.fixture
     def parser_no_strip(self):
@@ -731,8 +726,7 @@ class TestThinkingDisabled:
     def test_thinking_disabled_streaming_content_only(self, mock_tokenizer):
         """Plain text with thinking disabled must stream as content, not
         reasoning.  Before the fix, the REASONING initial state caused all
-        output to be emitted as reasoning chunks.
-        """
+        output to be emitted as reasoning chunks."""
         p = Qwen3Parser(
             mock_tokenizer,
             chat_template_kwargs={"enable_thinking": False},

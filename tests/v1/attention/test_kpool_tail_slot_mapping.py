@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import KpoolTailSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.worker.block_table import get_block_table_width
 
 KPOOL = 4
 
@@ -55,11 +56,33 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     assert content_stride == 1
 
 
+def test_tail_spec_opts_out_of_generic_slot_mapping():
+    """The tail row is one block wide (padded to the block-table alignment), so
+    the generic kernel's ``pos // kpool`` column index runs off the end of the
+    allocation for long prompts. The spec must opt out of it entirely."""
+    spec = KpoolTailSpec(
+        block_size=KPOOL,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        sliding_window=KPOOL,
+    )
+    max_len = 1 << 20
+    width = get_block_table_width(
+        spec.max_num_blocks_per_req(None, max_len),
+        spec.block_size,
+        token_alignment=spec.block_table_token_alignment,
+    )
+
+    assert width * KPOOL < max_len
+    assert spec.uses_slot_mapping is False
+
+
 def make_tail_block_table(own_blocks, width=64):
     """Tail-group block table as BlockTables produces it: column 0 holds the
     request's single KpoolTailManager block, the remaining columns are never
-    written and stay zero.
-    """
+    written and stay zero."""
     bt = torch.zeros(len(own_blocks), width, dtype=torch.int32)
     bt[:, 0] = torch.tensor(own_blocks, dtype=torch.int32)
     return bt
@@ -67,8 +90,7 @@ def make_tail_block_table(own_blocks, width=64):
 
 def legacy_generic_tail_slots(block_table, query_start_loc, positions):
     """Reference of the generic ``_compute_slot_mappings_kernel`` arithmetic
-    (block_table.py:305-313) applied to the tail group's table.
-    """
+    (block_table.py:305-313) applied to the tail group's table."""
     slots = []
     for req in range(block_table.shape[0]):
         for i in range(query_start_loc[req], query_start_loc[req + 1]):
@@ -109,8 +131,7 @@ def make_batch(per_req_positions, padded_len=None):
 
 def test_legacy_generic_mapping_collapses_onto_block_zero():
     """The bug: with the manager's 1-column block table, the generic kernel
-    maps every pos >= kpool onto tail block 0, and distinct requests collide.
-    """
+    maps every pos >= kpool onto tail block 0, and distinct requests collide."""
     own_blocks = [5, 9]
     per_req = [list(range(10)), list(range(12))]  # prompts of len 10 and 12
     positions, qsl, _, num_actual, num_reqs = make_batch(per_req)
@@ -140,8 +161,7 @@ def test_legacy_generic_mapping_collapses_onto_block_zero():
 def test_circular_mapping_isolates_requests():
     """The fix: every token lands in its own request's block at pos % kpool,
     and no slot is ever shared by two different requests (slots do recur
-    within a request every kpool positions -- that is the circular design).
-    """
+    within a request every kpool positions -- that is the circular design)."""
     own_blocks = [5, 9]
     per_req = [list(range(10)), list(range(12))]
     positions, qsl, slot_mapping, num_actual, num_reqs = make_batch(per_req)
@@ -169,8 +189,7 @@ def test_circular_mapping_isolates_requests():
 def test_circular_mapping_matches_generic_for_short_requests(prompt_len):
     """For pos < kpool the generic kernel already picks the own block, so the
     two mappings agree while every position fits the request's first block
-    (single-request behavior is unchanged).
-    """
+    (single-request behavior is unchanged)."""
     own_blocks = [7]
     per_req = [list(range(prompt_len))]
     positions, qsl, slot_mapping, num_actual, num_reqs = make_batch(per_req)
@@ -280,8 +299,7 @@ class TailRingMirror:
     """Mirror of _kpool_tail_seed_kernel / _kpool_decode_update_batched_kernel
     addressing: block = tail_slot // kpool, ring offset = pos % kpool; a pool
     completing at pos reads ring slots (pool_start + s) % kpool and uses the
-    current token's own K/score for the last member.
-    """
+    current token's own K/score for the last member."""
 
     def __init__(self, num_blocks, kpool=KPOOL):
         self.kpool = kpool
@@ -324,8 +342,7 @@ def tail_slot_for(mapping, req, pos, own_block):
 
 def run_scenario(mapping, interleave):
     """Requests A (block 5, prompt len 9) and B (block 9, prompt len 11)
-    decode concurrently; returns A's boundary pool [8, 9, 10, 11].
-    """
+    decode concurrently; returns A's boundary pool [8, 9, 10, 11]."""
     ring = TailRingMirror(num_blocks=16)
     blocks = {"A": 5, "B": 9}
     prompts = {"A": 9, "B": 11}
@@ -374,3 +391,66 @@ def test_interleaved_decode_pollution_legacy_vs_circular():
 
     # The circular mapping keeps the rings isolated under interleaving.
     torch.testing.assert_close(circular, ground_truth)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize(
+    "per_req,num_actual,padded_len",
+    [
+        ([list(range(10)), list(range(12))], 22, 22),
+        ([list(range(10)), list(range(12))], 22, 30),
+        ([[3, 4], [0], [7, 8, 9]], 6, 8),
+        ([[5]], 1, 1),
+    ],
+)
+def test_triton_mapping_matches_cpu(per_req, num_actual, padded_len):
+    """The CUDA (Triton) path must match the CPU torch reference, including
+    tokens between the last request boundary and num_actual_tokens (mapped to
+    the last request) and untouched padding beyond num_actual."""
+    positions, qsl, slot_mapping, _, num_reqs = make_batch(
+        per_req, padded_len=padded_len
+    )
+    # Replace the all--1 placeholder slots with sentinel values to check the
+    # padding range is copied through untouched.
+    slot_mapping = torch.arange(padded_len, dtype=torch.int64) + 1000
+    bt = make_tail_block_table(list(range(5, 5 + num_reqs)))
+
+    ref = circular_tail_slots(slot_mapping, bt, qsl, positions, num_actual, num_reqs)
+    got = circular_tail_slots(
+        slot_mapping.cuda(),
+        bt.cuda(),
+        qsl.cuda().to(torch.int32),
+        positions.cuda(),
+        num_actual,
+        num_reqs,
+    )
+    torch.testing.assert_close(got.cpu(), ref)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_triton_mapping_reads_strided_block_table():
+    """The kernel must address the block table through its real stride(0),
+    not a dense assumption (the #57477 class of bug): a tail block table that
+    is a column view of a wider allocation must still read column 0."""
+    per_req = [list(range(10)), list(range(12))]
+    positions, qsl, slot_mapping, num_actual, num_reqs = make_batch(per_req)
+    own_blocks = [11, 22]
+    wide = torch.zeros(num_reqs, 8, dtype=torch.int32)
+    bt = wide[:, 1:4]  # non-contiguous view, stride(0) == 8
+    bt[:, 0] = torch.tensor(own_blocks, dtype=torch.int32)
+
+    ref = circular_tail_slots(
+        slot_mapping, bt.contiguous(), qsl, positions, num_actual, num_reqs
+    )
+    got = circular_tail_slots(
+        slot_mapping.cuda(),
+        bt.cuda(),
+        qsl.cuda().to(torch.int32),
+        positions.cuda(),
+        num_actual,
+        num_reqs,
+    )
+    torch.testing.assert_close(got.cpu(), ref)
+    for req, blk in enumerate(own_blocks):
+        start, end = int(qsl[req]), int(qsl[req + 1])
+        assert (got[start:end] // KPOOL == blk).all()

@@ -354,8 +354,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.vllm_config = Mock()
-    scheduler.vllm_config.model_config.enable_return_routed_experts = False
-    scheduler.enable_return_routed_experts = False
+    scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
@@ -552,8 +551,7 @@ def _create_async_pp_scheduler(
 
 def _assert_ordered_subset(delivered: list[int], emitted: list[int]) -> None:
     """Delivered tokens must be an order-preserving subset of the emitted
-    tokens with no duplicates (tokens are globally unique).
-    """
+    tokens with no duplicates (tokens are globally unique)."""
     it = iter(emitted)
     for token in delivered:
         assert token in it, f"token {token} delivered out of order or twice"
@@ -563,8 +561,7 @@ def _assert_positions_consistent(req, engine: PipelinedEngine) -> None:
     """The i-th delivered output token must be one the runner sampled for
     exactly sequence position prompt_len + i: catches a preempted request's
     stale output landing on a position the resumed request resampled (or
-    vice versa), which token-stream equality alone cannot see.
-    """
+    vice versa), which token-stream equality alone cannot see."""
     for i, token in enumerate(req.output_token_ids):
         expected = req.num_prompt_tokens + i
         actual = engine.emitted_position[token]

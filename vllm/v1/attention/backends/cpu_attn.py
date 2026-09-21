@@ -84,8 +84,7 @@ class CPUAttentionBackend(AttentionBackend):
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder,
-        encoder-only and encoder-decoder attention.
-        """
+        encoder-only and encoder-decoder attention."""
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
@@ -513,11 +512,10 @@ def _get_attn_isa(
         )
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
+    elif supports_arm:
+        return "neon"
     elif block_size % 32 == 0:
-        if supports_arm:
-            # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
-            return "neon"
-        elif supports_riscv and _riscv_supports_rvv():
+        if supports_riscv and _riscv_supports_rvv():
             return "rvv"
         elif supports_vxe:
             return "vxe"

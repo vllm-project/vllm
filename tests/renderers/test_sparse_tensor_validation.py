@@ -157,8 +157,7 @@ class TestPromptEmbedsValidation:
 
     def test_hidden_size_mismatch_rejected(self, model_config):
         """Tensors whose trailing dim doesn't match the model's hidden_size
-        must be rejected at parse time.
-        """
+        must be rejected at parse time."""
         # opt-125m has hidden_size=768, passing 512 triggers the check.
         wrong_hidden = torch.randn(10, 512, dtype=torch.float32)
         encoded = _encode_tensor(wrong_hidden)
@@ -169,8 +168,7 @@ class TestPromptEmbedsValidation:
     def test_float_dtype_mismatch_cast_to_model_dtype(self, model_config):
         """Tensors whose dtype doesn't match the model's dtype but are still
         floating-point are cast, since API clients generally can't know the
-        server's `--dtype` setting ahead of time.
-        """
+        server's `--dtype` setting ahead of time."""
         # Fixture pins model dtype to float32, upload a bfloat16 tensor.
         mismatched_float = torch.randn(10, 768, dtype=torch.bfloat16)
         encoded = _encode_tensor(mismatched_float)
@@ -183,8 +181,7 @@ class TestPromptEmbedsValidation:
     def test_non_float_dtype_rejected(self, model_config):
         """Non-floating-point dtypes cannot be safely cast for embeddings
         (e.g. integer tensors almost certainly indicate caller confusion),
-        so they are rejected at parse time.
-        """
+        so they are rejected at parse time."""
         non_float = torch.randint(0, 100, (10, 768), dtype=torch.int32)
         encoded = _encode_tensor(non_float)
 
@@ -193,8 +190,7 @@ class TestPromptEmbedsValidation:
 
     def test_non_2d_tensor_rejected(self, model_config):
         """Tensors that aren't 2D (even after squeezing a leading dim)
-        must be rejected with a clear error.
-        """
+        must be rejected with a clear error."""
         # A 1D tensor cannot be interpreted as (num_tokens, hidden_size).
         bad = torch.randn(768, dtype=torch.float32)
         encoded = _encode_tensor(bad)
@@ -204,8 +200,7 @@ class TestPromptEmbedsValidation:
 
     def test_non_tensor_payload_rejected(self, model_config):
         """Deserializing to a non-Tensor object must raise a clear error
-        instead of propagating an AssertionError.
-        """
+        instead of propagating an AssertionError."""
         # `torch.save` will serialize a plain dict; `weights_only=True` allows
         # loading built-in containers, so this exercises the isinstance check.
         buffer = io.BytesIO()
@@ -463,8 +458,7 @@ class TestEmbeddingDecodeSizeLimit:
     def test_default_limit_would_reject_the_real_payload(self):
         """The shipped default has to bound the actual attack, not just the
         shrunken shape used above. Checked arithmetically so no test ever asks
-        the allocator for 4 TiB.
-        """
+        the allocator for 4 TiB."""
         dense_bytes = BOMB_SHAPE[0] * BOMB_SHAPE[1] * 4
         assert dense_bytes > envs.VLLM_MAX_EMBED_DECODE_BYTES > 0
 
@@ -522,8 +516,7 @@ class TestEmbeddingDecodeSizeLimit:
     @pytest.mark.parametrize("io_cls,parameter", EMBEDDING_MEDIA_IO)
     def test_media_io_rejects_non_tensor_payload(self, io_cls, parameter):
         """These three had no `isinstance` check, so a non-tensor payload
-        surfaced as an `AttributeError` (500) rather than a 4xx.
-        """
+        surfaced as an `AttributeError` (500) rather than a 4xx."""
         buffer = io.BytesIO()
         torch.save({"not": "a tensor"}, buffer)
         encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")

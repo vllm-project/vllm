@@ -419,8 +419,7 @@ def test_tensor_broadcast():
 
 def _dumps_oob(obj) -> tuple[bytes, list]:
     """Pickle `obj` the same way `MessageQueue.enqueue` does: tensor
-    dispatch table + out-of-band buffers >= 1MiB.
-    """
+    dispatch table + out-of-band buffers >= 1MiB."""
     buffers = []
 
     def callback(buf: pickle.PickleBuffer) -> bool:
@@ -491,8 +490,7 @@ def test_tensor_pickle_roundtrip(case: str):
 @pytest.mark.parametrize("case", ["cuda", "requires_grad", "conj"])
 def test_reduce_tensor_fallback(case: str):
     """Tensors the zero-copy reducer can't safely alias must fall back to
-    torch's default reduction.
-    """
+    torch's default reduction."""
     if case == "cuda":
         if not torch.cuda.is_available():
             pytest.skip("requires CUDA")
@@ -755,8 +753,7 @@ def test_remote_subscribe_addr_unique_concurrent_writers(
     Pre-fix, the writer probed a port with get_open_port() and bound it
     afterwards; pinning the probe to one free port makes every writer
     bind the same port and fail deterministically on that code path,
-    while the late-binding implementation never consults the probe.
-    """
+    while the late-binding implementation never consults the probe."""
     from vllm.distributed.device_communicators import shm_broadcast
 
     colliding_port = get_open_port()

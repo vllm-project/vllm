@@ -32,8 +32,7 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 def old_default_config(M, E, N, K, topk, dtype=None, block_shape=None):
     """The original defaults before https://github.com/vllm-project/vllm/pull/34846,
-    for comparison.
-    """
+    for comparison."""
     if dtype == "fp8_w8a8" and block_shape is not None:
         return {
             "BLOCK_SIZE_M": 64,

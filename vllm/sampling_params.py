@@ -800,8 +800,7 @@ class SamplingParams(
         """Number of sample logprobs to return per output token, or `None` if
         no sample logprobs were requested. Takes `logprob_token_ids` into
         account: when `logprobs` is unset but `logprob_token_ids` is set,
-        returns `len(logprob_token_ids)`.
-        """
+        returns `len(logprob_token_ids)`."""
         if self.logprobs is not None:
             return self.logprobs
         return len(self.logprob_token_ids) if self.logprob_token_ids else None
@@ -824,7 +823,6 @@ class SamplingParams(
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
-        self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
@@ -993,13 +991,6 @@ class SamplingParams(
                 parameter="trace_decode_token_ids",
                 value=invalid_token_ids,
             )
-
-    def _validate_logits_processors(self, model_config: ModelConfig) -> None:
-        from vllm.v1.sample.logits_processor import (
-            validate_logits_processors_parameters,
-        )
-
-        validate_logits_processors_parameters(model_config.logits_processors, self)
 
     def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids

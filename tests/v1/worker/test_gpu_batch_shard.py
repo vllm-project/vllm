@@ -43,8 +43,7 @@ def _make_batch(
     slot_pool: np.ndarray | None = None,
 ) -> InputBatch:
     """Consistent batch with random unique request slots, 1 + k_i logits
-    rows per request at the tail of each query segment.
-    """
+    rows per request at the tail of each query segment."""
     if slot_pool is None:
         slot_pool = np.arange(max_num_reqs)
     slots = rng.choice(slot_pool, size=num_reqs, replace=False)
@@ -142,8 +141,7 @@ def _owned_rows(cu: np.ndarray, owned: np.ndarray) -> np.ndarray:
 def test_local_batch_partition(tp_size: int, seed: int):
     """Local sub-batches partition the batch by owner, preserve batch order
     within an owner, and carry exactly the owned requests' entries of every
-    per-request and per-row array.
-    """
+    per-request and per-row array."""
     rng = np.random.default_rng(seed)
     max_num_reqs = 64
     batch = _make_batch(rng, num_reqs=23, max_num_reqs=max_num_reqs, max_spec=3)
@@ -185,6 +183,12 @@ def test_local_batch_partition(tp_size: int, seed: int):
         ).all()
         assert (_np(local.logits_indices) == _np(batch.logits_indices)[rows]).all()
         assert (_np(local.seq_lens) == _np(batch.seq_lens)[owned]).all()
+        # Indexed by batch position, like seq_lens: a consumer holding local row
+        # indices reads another request's length if this is not localised too.
+        assert (
+            _np(local.seq_lens_cpu_upper_bound)
+            == _np(batch.seq_lens_cpu_upper_bound)[owned]
+        ).all()
         assert batch.num_draft_tokens_per_req is not None
         assert local.num_draft_tokens_per_req is not None
         assert (
@@ -225,8 +229,7 @@ def test_local_batch_partition(tp_size: int, seed: int):
 def test_all_to_all_reassembly_simulated(tp_size: int):
     """Vocab shards computed from owner-sorted hidden states and routed
     through the simulated all-to-all reassemble into exactly the full-vocab
-    logits of each rank's owned rows.
-    """
+    logits of each rank's owned rows."""
     rng = np.random.default_rng(7)
     max_num_reqs = 32
     batch = _make_batch(rng, num_reqs=11, max_num_reqs=max_num_reqs, max_spec=4)
@@ -264,8 +267,7 @@ def test_all_to_all_reassembly_simulated(tp_size: int):
 @requires_cuda
 def test_shard_no_spec():
     """Batches without draft tokens (one logits row per request) degenerate
-    cleanly: rows mirror requests.
-    """
+    cleanly: rows mirror requests."""
     rng = np.random.default_rng(11)
     tp_size = 4
     max_num_reqs = 32
@@ -284,8 +286,7 @@ def test_shard_no_spec():
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_shard_grammar_output(tp_size: int):
     """The grammar filter keeps exactly the owned requests' bitmask rows, in
-    grammar order, and the per-rank pieces partition the global bitmask.
-    """
+    grammar order, and the per-rank pieces partition the global bitmask."""
     rng = np.random.default_rng(5)
     max_num_reqs = 32
     num_reqs = 12
@@ -340,8 +341,7 @@ def test_shard_grammar_output(tp_size: int):
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_gather_src_indices_round_trip(tp_size: int):
     """Padded per-rank result blocks indexed by gathered_src_indices restore
-    batch order, including when some rank owns zero requests.
-    """
+    batch order, including when some rank owns zero requests."""
     rng = np.random.default_rng(3)
     max_num_reqs = 40
     all_slots = np.arange(max_num_reqs)
@@ -376,8 +376,7 @@ def test_gather_src_indices_round_trip(tp_size: int):
 def test_gather_sampler_output_kernels(tp_size: int):
     """The fused pack/unpack kernels round-trip per-rank sampler results
     into batch order: token ids zero-filled past the local width, counts
-    cast back to int32, identical on every rank.
-    """
+    cast back to int32, identical on every rank."""
     from dataclasses import replace as dc_replace
 
     from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -472,8 +471,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
 def test_gather_sampler_output_logprobs_and_nans():
     """num_nans is reduced per request and gathered; LogprobsTensors are
     packed into fixed per-request blocks, width-aligned across ranks (pad
-    and truncate paths), and restored to global row order.
-    """
+    and truncate paths), and restored to global row order."""
     from dataclasses import replace as dc_replace
 
     from vllm.v1.outputs import LogprobsTensors
@@ -606,8 +604,7 @@ def test_gather_sampler_output_logprobs_and_nans():
 def test_finish_requests_frees_slots_in_sorted_order():
     """Request slots must be freed in the same order on every TP rank:
     ownership derives from slot indices, and `finished_req_ids` is a set
-    whose iteration order is per-process hash-randomized.
-    """
+    whose iteration order is per-process hash-randomized."""
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     removed: list[str] = []

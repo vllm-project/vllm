@@ -66,8 +66,7 @@ def _view_flashinfer_nvfp4_scale_out_as_int32(
 
 def _norm_input_weight_dtype_match(match: pm.Match) -> bool:
     """Prevent fusion when the norm input and weight dtypes differ (e.g. a Gemma
-    fp32 weight.float()+1 gamma), covering rms_norm and fused_add_rms_norm.
-    """
+    fp32 weight.float()+1 gamma), covering rms_norm and fused_add_rms_norm."""
     for node in match.nodes:
         if node.target == _IR_RMS_NORM_OP:
             x, weight = node.args[0], node.args[1]

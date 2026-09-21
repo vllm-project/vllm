@@ -51,6 +51,18 @@ def _num_captured_graphs(_worker):
     return compilation_counter.num_cudagraph_captured
 
 
+def _piecewise_compile_state(worker):
+    from vllm.compilation.counter import compilation_counter
+
+    # `cudagraph_mode` is returned by name: the enum does not survive the
+    # collective_rpc round trip, it arrives as its bare value.
+    return (
+        compilation_counter.num_models_seen,
+        compilation_counter.num_cudagraph_captured,
+        worker.vllm_config.compilation_config.cudagraph_mode.name,
+    )
+
+
 @pytest.mark.parametrize(
     "tp,enforce_eager,mtp,dtype,kv_cache_dtype",
     [
@@ -135,3 +147,39 @@ def test_hyv4_dummy_generation(
                 and metric.value > 0
                 for metric in model.llm.get_metrics()
             ), "MTP drafter did not run"
+
+
+def test_hyv4_backbone_reaches_the_compiler(vllm_runner, enable_pickle) -> None:
+    """Guard against the backbone losing `@support_torch_compile`.
+
+    An undecorated backbone is not a hard failure: vLLM downgrades
+    `cudagraph_mode` to NONE and serves the whole model eager, which on TP8
+    gfx942 cost ~4x decode latency.
+    """
+    with vllm_runner(
+        "tencent/Hy4-preview",
+        trust_remote_code=True,
+        skip_tokenizer_init=True,
+        load_format="dummy",
+        dtype="bfloat16",
+        hf_overrides=_small_hyv4_config,
+        max_model_len=256,
+        max_num_batched_tokens=128,
+        max_num_seqs=8,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        kv_cache_memory_bytes=128 * 1024 * 1024,
+        enforce_eager=False,
+        seed=17,
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_capture_sizes=[1, 2, 4],
+        ),
+    ) as model:
+        for models_seen, captured, mode in model.collective_rpc(
+            _piecewise_compile_state
+        ):
+            assert models_seen > 0, "backbone was never handed to the compiler"
+            assert mode == CUDAGraphMode.PIECEWISE.name
+            assert captured > 0

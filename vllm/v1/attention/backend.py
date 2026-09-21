@@ -365,8 +365,7 @@ class AttentionBackend(ABC):
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
         """Layouts this backend's kernels can consume, most preferred first, or
-        None when the kernels consume any layout and express no preference.
-        """
+        None when the kernels consume any layout and express no preference."""
         return None
 
     @classmethod
@@ -558,8 +557,7 @@ M = TypeVar("M")
 class AttentionCGSupport(Enum):
     """Constants for the cudagraph support of the attention backend
     Here we do not consider the cascade attention, as currently
-    it is never cudagraph supported.
-    """
+    it is never cudagraph supported."""
 
     ALWAYS = 3
     """Cudagraph always supported; supports mixed-prefill-decode"""

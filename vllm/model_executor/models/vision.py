@@ -116,8 +116,7 @@ def get_multimodal_config() -> MultiModalConfig | None:
     """Return the current ``MultiModalConfig``, or ``None`` when no engine
     config context is active (e.g., during unit tests) or when the current
     ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
-    stubs used in tests).
-    """
+    stubs used in tests)."""
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None or vllm_config.model_config is None:
         return None
@@ -482,6 +481,7 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
+    embed_dtype = next(vision_model.parameters()).dtype
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
@@ -496,7 +496,7 @@ def run_dp_sharded_mrope_vision_model(
             image_embeds_local = torch.empty(
                 (0, embed_dim_reduction_factor, out_dim),
                 device=pixel_values.device,
-                dtype=pixel_values.dtype,
+                dtype=embed_dtype,
             )
     else:
         if pixel_values_local.shape[0] > 0:
@@ -506,7 +506,7 @@ def run_dp_sharded_mrope_vision_model(
             image_embeds_local = torch.empty(
                 (0, vision_model.out_hidden_size),
                 device=pixel_values.device,
-                dtype=pixel_values.dtype,
+                dtype=embed_dtype,
             )
 
     # Pad the output based on max_len_per_rank

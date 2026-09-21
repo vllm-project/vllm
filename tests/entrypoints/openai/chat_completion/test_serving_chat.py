@@ -556,6 +556,7 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
     enable_prompt_embeds: bool = False
 
@@ -1406,8 +1407,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 @pytest.mark.asyncio
 async def test_serving_chat_data_parallel_rank_extraction():
     """Test that data_parallel_rank is properly extracted from header and
-    passed to engine.
-    """
+    passed to engine."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -1729,8 +1729,7 @@ class TestServingChatWithHarmony:
     @pytest.mark.asyncio
     async def test_system_message_without_tools(self, serving_chat, stream):
         """Leading system message produces a developer message with
-        DeveloperContent (# Instructions header).
-        """
+        DeveloperContent (# Instructions header)."""
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
@@ -1752,8 +1751,7 @@ class TestServingChatWithHarmony:
     @pytest.mark.asyncio
     async def test_system_message_with_tools(self, serving_chat, stream, weather_tools):
         """Leading system message is folded into the developer message
-        alongside tool definitions.
-        """
+        alongside tool definitions."""
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "What's the weather?"},
@@ -2168,8 +2166,7 @@ class TestServingChatWithHarmony:
 @pytest.mark.asyncio
 async def test_tool_choice_validation_without_parser():
     """Test that tool_choice='required' or named tool without tool_parser
-    returns an appropriate error message.
-    """
+    returns an appropriate error message."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()

@@ -78,8 +78,7 @@ def _apply(
 def test_overlay_chunked_prefill_and_decode():
     """Rows within the embeds range come from prompt_embeds at the
     num_computed offset; requests without embeds and requests past their
-    embeds length (decode) keep the base embedding.
-    """
+    embeds length (decode) keep the base embedding."""
     state = _make_state()
     embeds_a = torch.randn(6, HIDDEN, dtype=torch.float32)
     embeds_b = torch.randn(5, HIDDEN, dtype=torch.float32)
@@ -98,8 +97,7 @@ def test_overlay_chunked_prefill_and_decode():
 
 def test_overlay_clamps_to_embeds_length():
     """A window straddling the end of the prompt embeds writes only the
-    in-range rows (e.g. final prefill chunk + sampled token).
-    """
+    in-range rows (e.g. final prefill chunk + sampled token)."""
     state = _make_state()
     embeds = torch.randn(4, HIDDEN, dtype=torch.float32)
     state.add_request(3, _NewReqData("a", embeds))
@@ -114,8 +112,7 @@ def test_overlay_clamps_to_embeds_length():
 
 def test_overlay_respects_is_token_ids_mask():
     """Mixed mode: positions marked as real token ids keep the base
-    embedding; only embed positions are overwritten.
-    """
+    embedding; only embed positions are overwritten."""
     state = _make_state()
     embeds = torch.randn(5, HIDDEN, dtype=torch.float32)
     is_token_ids = [True, False, False, True, False]
@@ -133,8 +130,7 @@ def test_overlay_respects_is_token_ids_mask():
 
 def test_index_reuse_clears_stale_entry():
     """A request added at a previously-used index without embeds must not
-    inherit the prior occupant's pointer-table entry.
-    """
+    inherit the prior occupant's pointer-table entry."""
     state = _make_state()
     state.add_request(0, _NewReqData("a", torch.randn(4, HIDDEN, dtype=torch.float32)))
     # A second live embeds request so the kernel actually launches (the

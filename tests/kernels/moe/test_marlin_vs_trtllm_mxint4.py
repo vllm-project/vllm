@@ -289,8 +289,7 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
 @torch.inference_mode()
 def test_flashinfer_trtllm_mxint4_moe_wrapper(m, n, k, e, topk):
     """Test that the flashinfer_trtllm_mxint4_moe wrapper matches the raw
-    trtllm_mxint4_block_scale_moe kernel call.
-    """
+    trtllm_mxint4_block_scale_moe kernel call."""
     pytest.importorskip("flashinfer")
     from flashinfer import RoutingMethodType
     from flashinfer.fused_moe import trtllm_mxint4_block_scale_moe

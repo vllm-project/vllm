@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ...registry import HF_EXAMPLE_MODELS
@@ -31,8 +32,7 @@ def _build_video_mm_data(
 
     ``total_num_frames`` is set equal to the ndarray frame count so
     that HF's ``sample_frames`` indices stay within bounds of the
-    actual tensor that is passed.
-    """
+    actual tensor that is passed."""
     video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
     metadata = {
         "fps": original_fps,
@@ -238,8 +238,7 @@ def _build_video_embeds_mm_data(
     grid_thw: tuple[int, int, int] = (2, 4, 4),
 ) -> dict[str, Any]:
     """Create an embeds-only video item as an EPD consumer receives it:
-    pre-computed embeddings plus the metadata published by the encoder.
-    """
+    pre-computed embeddings plus the metadata published by the encoder."""
     import torch
 
     t, h, w = grid_thw
@@ -258,8 +257,7 @@ def test_processor_video_embeds_with_timestamps(model_id: str) -> None:
     """Embeds-only video input must size the placeholder range from the
     grid and the real timestamps published by the encoder (EC consumer
     path); synthesized or missing timestamps would change the token count
-    and break embedding merging downstream.
-    """
+    and break embedding merging downstream."""
     # `build_model_context` forces enable_mm_embeds off, so build the
     # config directly; keep the same online-availability skip behavior.
     HF_EXAMPLE_MODELS.find_hf_info(model_id).check_available_online(on_fail="skip")
@@ -304,8 +302,7 @@ def test_processor_video_embeds_with_timestamps(model_id: str) -> None:
 def test_processor_video_embeds_missing_timestamps(model_id: str) -> None:
     """Timestamps are required metadata for video embeds: they size the
     placeholder range, so omitting them must fail loudly at parse time
-    instead of silently producing a wrong prompt.
-    """
+    instead of silently producing a wrong prompt."""
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 0, "video": 1},
@@ -343,7 +340,9 @@ def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> Non
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
     capped = MULTIMODAL_REGISTRY.create_processor(capped_ctx.model_config)
-    capped_dummy = capped.dummy_inputs.get_dummy_mm_data(1024, {"video": 1}, {})
+    capped_dummy = capped.dummy_inputs.get_dummy_mm_data(
+        1024, {"video": 1}, MultiModalDummyOptions()
+    )
     capped_frames = capped_dummy["video"][0][0].shape[0]
     assert capped_frames == 16, (
         f"Expected the dummy to spread the budget over 16 frames, got {capped_frames}"
@@ -355,7 +354,9 @@ def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> Non
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
     uncapped = MULTIMODAL_REGISTRY.create_processor(uncapped_ctx.model_config)
-    uncapped_dummy = uncapped.dummy_inputs.get_dummy_mm_data(1024, {"video": 1}, {})
+    uncapped_dummy = uncapped.dummy_inputs.get_dummy_mm_data(
+        1024, {"video": 1}, MultiModalDummyOptions()
+    )
     uncapped_frames = uncapped_dummy["video"][0][0].shape[0]
     assert uncapped_frames == 2, (
         f"Expected the uncapped dummy to keep 2 frames, got {uncapped_frames}"
