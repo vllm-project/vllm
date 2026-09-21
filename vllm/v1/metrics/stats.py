@@ -297,7 +297,7 @@ class PrefillStats:
         sources: list[tuple[str, int]]
         if external_cached_token_sources is None:
             sources = (
-                [("external", num_external_cached_tokens)]
+                [("external_unspecified", num_external_cached_tokens)]
                 if num_external_cached_tokens
                 else []
             )
@@ -443,7 +443,7 @@ class CachedTokensBySource:
     host: int = 0
     disk: int = 0
     p2p: int = 0
-    external: int = 0
+    external_unspecified: int = 0
 
     def add(self, source: str | CacheHitSource, num_tokens: int) -> None:
         name = CacheHitSource(source).value

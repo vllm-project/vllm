@@ -1137,7 +1137,9 @@ class OffloadingConnectorScheduler:
             active_sources.update(events[segment_start])
             sources = {source for source, count in active_sources.items() if count > 0}
             source = (
-                next(iter(sources)) if len(sources) == 1 else CacheHitSource.EXTERNAL
+                next(iter(sources))
+                if len(sources) == 1
+                else CacheHitSource.EXTERNAL_UNSPECIFIED
             )
             num_tokens = segment_end - segment_start
             if segments and segments[-1][0] == source:

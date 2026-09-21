@@ -850,7 +850,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
         ("host", 0),
         ("disk", 0),
         ("p2p", 1),
-        ("external", 0),
+        ("external_unspecified", 0),
     ] {
         assert!(rendered.contains(&format!(
             "vllm:prompt_tokens_cached_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"{source}\"}} {count}"

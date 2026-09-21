@@ -502,7 +502,8 @@ class TestTieringOffloadingManager:
         assert count_hits(self.manager, chunks) == 3
 
     @pytest.mark.parametrize(
-        "source", [CacheHitSource.EXTERNAL, CacheHitSource.DISK, CacheHitSource.P2P]
+        "source",
+        [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],
     )
     def test_promotion_from_secondary(self, manager_setup, monkeypatch, source):
         """Test promotion of chunks from secondary to primary tier."""
@@ -548,7 +549,8 @@ class TestTieringOffloadingManager:
         )
 
     @pytest.mark.parametrize(
-        "source", [CacheHitSource.EXTERNAL, CacheHitSource.DISK, CacheHitSource.P2P]
+        "source",
+        [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],
     )
     @pytest.mark.parametrize(
         ("successful_indices", "expected_results"),

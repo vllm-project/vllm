@@ -143,7 +143,7 @@ class SecondaryTierManager(ABC):
 
     medium: ClassVar[Medium | None] = None
     # Metric attribution is independent of the functional tier_type name.
-    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.EXTERNAL
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.EXTERNAL_UNSPECIFIED
 
     def __init__(
         self,

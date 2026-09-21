@@ -179,7 +179,9 @@ class KVConnectorWorkerMetadata(ABC):
 class KVConnectorBase_V1(ABC):
     """Base class for KV connectors."""
 
-    _cache_hit_source = CacheHitSource.EXTERNAL
+    # Source label for this connector's external hits. Subclasses must set
+    # HOST/DISK/P2P or override get_external_cache_hit_sources().
+    _cache_hit_source = CacheHitSource.EXTERNAL_UNSPECIFIED
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -525,8 +527,7 @@ class KVConnectorBase_V1(ABC):
         connectors can attribute the accepted hit using the actual load plan
         rather than a speculative lookup result.
 
-        Connectors that cannot provide finer attribution use the conservative
-        ``external`` source supplied by this default implementation.
+        Default: all tokens under ``_cache_hit_source``.
         """
         if num_external_tokens == 0:
             return []

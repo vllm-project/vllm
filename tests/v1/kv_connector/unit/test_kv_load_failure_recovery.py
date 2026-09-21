@@ -143,7 +143,7 @@ def test_async_load_failure(
                 min_invalid_block_idx * scheduler.block_size
             )
             expected_sources = (
-                [("external", min_invalid_block_idx * scheduler.block_size)]
+                [("external_unspecified", min_invalid_block_idx * scheduler.block_size)]
                 if min_invalid_block_idx
                 else []
             )

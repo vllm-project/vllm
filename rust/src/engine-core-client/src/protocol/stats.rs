@@ -84,7 +84,7 @@ pub enum CacheHitSource {
     Host,
     Disk,
     P2p,
-    External,
+    ExternalUnspecified,
 }
 
 impl CacheHitSource {
@@ -93,7 +93,7 @@ impl CacheHitSource {
         Self::Host,
         Self::Disk,
         Self::P2p,
-        Self::External,
+        Self::ExternalUnspecified,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -102,7 +102,7 @@ impl CacheHitSource {
             Self::Host => "host",
             Self::Disk => "disk",
             Self::P2p => "p2p",
-            Self::External => "external",
+            Self::ExternalUnspecified => "external_unspecified",
         }
     }
 }
@@ -351,7 +351,7 @@ mod tests {
             "num_cached_tokens": 56,
             "num_local_cached_tokens": 16,
             "num_external_cached_tokens": 40,
-            "external_cached_token_sources": [["host", 8], ["disk", 12], ["p2p", 16], ["external", 4]]
+            "external_cached_token_sources": [["host", 8], ["disk", 12], ["p2p", 16], ["external_unspecified", 4]]
         });
         let wire = rmp_serde::to_vec_named(&payload).unwrap();
         let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
@@ -376,7 +376,7 @@ mod tests {
                         16,
                     ),
                     (
-                        External,
+                        ExternalUnspecified,
                         4,
                     ),
                 ],

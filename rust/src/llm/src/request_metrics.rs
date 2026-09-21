@@ -217,7 +217,8 @@ impl RequestMetricsTracker {
         cached_by_source[CacheHitSource::Device as usize].inc_by(local_cache_hit);
         if prefill_stats.external_cached_token_sources.is_empty() {
             // Older engines only supply the aggregate external count.
-            cached_by_source[CacheHitSource::External as usize].inc_by(external_kv_transfer);
+            cached_by_source[CacheHitSource::ExternalUnspecified as usize]
+                .inc_by(external_kv_transfer);
         } else {
             for &(source, num_tokens) in &prefill_stats.external_cached_token_sources {
                 cached_by_source[source as usize].inc_by(num_tokens as u64);
@@ -394,7 +395,7 @@ mod tests {
                     (CacheHitSource::Disk, 12),
                     (CacheHitSource::Host, 5),
                     (CacheHitSource::P2p, 16),
-                    (CacheHitSource::External, 4),
+                    (CacheHitSource::ExternalUnspecified, 4),
                     (CacheHitSource::Disk, 0),
                 ],
                 ..Default::default()
