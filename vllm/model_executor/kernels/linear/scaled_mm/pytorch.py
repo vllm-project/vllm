@@ -133,6 +133,11 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
+        from vllm.platforms.rocm import on_rdna4
+
+        if on_rdna4():
+            return False, "not supported on RDNA4."
+
         if not _supports_torch_fp8_scaled_mm():
             return False, "requires platform with torch FP8 scaled-MM support."
 
