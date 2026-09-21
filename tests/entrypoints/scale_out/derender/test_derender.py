@@ -394,6 +394,7 @@ def _make_completion_generate_response(
     request_id: str,
     kv_transfer_params: dict | None = None,
     logprobs: dict | None = None,
+    prompt_logprobs: list | None = None,
 ) -> dict:
     return {
         "request_id": request_id,
@@ -405,7 +406,7 @@ def _make_completion_generate_response(
                 "logprobs": logprobs,
             }
         ],
-        "prompt_logprobs": None,
+        "prompt_logprobs": prompt_logprobs,
         "kv_transfer_params": kv_transfer_params,
     }
 
@@ -529,6 +530,46 @@ async def test_derender_completion_logprobs(client):
     assert isinstance(logprobs["token_logprobs"][0], float)
     assert len(logprobs["text_offset"]) == 1
     assert logprobs["text_offset"][0] == 0
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_prompt_logprobs_passthrough(client):
+    """Each GenerateResponse's prompt_logprobs reaches that prompt's choices.
+
+    Regression test: /v1/completions/derender used to drop the prompt
+    logprobs the engine had already computed and returned, while the direct
+    /v1/completions endpoint attaches them to every choice of the prompt.
+    """
+    gr1 = await _render_completion(client, "Hello")
+    gr2 = await _render_completion(client, "World")
+    plp1 = [
+        None,
+        {str(gr1["token_ids"][0]): {"logprob": -0.5, "rank": 1, "decoded_token": "H"}},
+    ]
+    plp2 = [
+        None,
+        {str(gr2["token_ids"][0]): {"logprob": -0.25, "rank": 2, "decoded_token": "W"}},
+    ]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    gr1["token_ids"][:3], gr1["request_id"], prompt_logprobs=plp1
+                ),
+                _make_completion_generate_response(
+                    gr2["token_ids"][:3], gr2["request_id"], prompt_logprobs=plp2
+                ),
+            ],
+        },
+    )
+    assert response.status_code == 200
+    choices = response.json()["choices"]
+    assert len(choices) == 2
+    assert choices[0]["prompt_logprobs"] == plp1
+    assert choices[1]["prompt_logprobs"] == plp2
 
 
 @pytest.mark.asyncio

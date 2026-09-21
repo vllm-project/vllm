@@ -655,6 +655,7 @@ class OnlineDerenderer:
                         text=decoded_text,
                         finish_reason=choice.finish_reason,
                         logprobs=completion_logprobs,
+                        prompt_logprobs=gen.prompt_logprobs,
                     )
                 )
                 total_completion_tokens += len(choice.token_ids)
