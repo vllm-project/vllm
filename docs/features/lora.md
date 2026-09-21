@@ -431,10 +431,10 @@ See [classification_with_lora_offline.py](../../examples/pooling/classify/classi
 To batch adapters with different `num_labels`, set the maximum number of labels:
 
 ```bash
-vllm serve model --enable-lora --max-lora-num-labels 8
+vllm serve model --enable-lora --max-lora-cls-labels 8
 ```
 
-The equivalent `LLM` argument is `max_lora_num_labels`. It defaults to the base model's `num_labels`, and each request returns its adapter's number of labels.
+The equivalent `LLM` argument is `max_lora_cls_labels`. It defaults to the base model's `num_labels`, and each request returns its adapter's number of labels.
 
 This support has the following limitations:
 

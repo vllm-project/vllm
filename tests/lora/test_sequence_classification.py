@@ -126,7 +126,7 @@ def _test_batched_loras(
         max_loras=2,
         max_cpu_loras=2,
         max_lora_rank=16,
-        max_lora_num_labels=2,
+        max_lora_cls_labels=2,
         enforce_eager=True,
         max_model_len=512,
         gpu_memory_utilization=0.5,

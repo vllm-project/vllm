@@ -84,7 +84,7 @@ class LoRAConfig:
     experts (stored once with expert-dim 1) instead of per-expert. The shared
     factors are broadcast to the expert count at kernel time. Only meaningful for
     MoE models whose adapters use this layout; ignored otherwise."""
-    max_lora_num_labels: int | None = Field(default=None, ge=1)
+    max_lora_cls_labels: int | None = Field(default=None, ge=1)
     """Maximum output size for LoRA classification heads. Defaults to the
     base classification head size."""
 
@@ -107,7 +107,7 @@ class LoRAConfig:
         factors.append(self.enable_tower_connector_lora)
         factors.append(self.enable_mixed_moe_lora_format)
         factors.append(self.enable_moe_shared_loras)
-        factors.append(self.max_lora_num_labels)
+        factors.append(self.max_lora_cls_labels)
         # target_modules affects which modules get LoRA applied
         factors.append(
             tuple(sorted(self.target_modules)) if self.target_modules else None

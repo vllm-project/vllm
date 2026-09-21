@@ -1276,13 +1276,13 @@ class LoRAModelManager:
         if (
             full_module.weight.ndim != 2
             or full_module.weight.size(0) < 1
-            or full_module.weight.size(0) > wrapper.max_lora_num_labels
+            or full_module.weight.size(0) > wrapper.max_lora_cls_labels
             or full_module.weight.size(1) != wrapper.input_size
         ):
             raise ValueError(
                 f"Full module {saved_module_name!r} for {module_name!r} has "
                 "an incompatible weight shape: expected "
-                f"(1..{wrapper.max_lora_num_labels}, {wrapper.input_size}), "
+                f"(1..{wrapper.max_lora_cls_labels}, {wrapper.input_size}), "
                 f"received {received_weight_shape}."
             )
 

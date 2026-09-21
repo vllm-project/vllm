@@ -21,8 +21,8 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
         # Preserve ordinary LoRA A/B support for classification heads.
         super().create_lora_weights(max_loras, lora_config, model_config)
 
-        self.max_lora_num_labels = lora_config.max_lora_num_labels or self.output_size
-        self.padded_num_labels = max(self.output_size, self.max_lora_num_labels)
+        self.max_lora_cls_labels = lora_config.max_lora_cls_labels or self.output_size
+        self.padded_num_labels = max(self.output_size, self.max_lora_cls_labels)
         self.full_weight_stacked = torch.zeros(
             max_loras,
             1,
