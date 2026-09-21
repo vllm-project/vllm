@@ -509,7 +509,11 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
     original = copy.deepcopy(body)
     # Collector indices describe two processed features from one video item.
     video_metadata = collect_ec_item_metadata(
-        [SimpleNamespace(identifier=key, data=None) for key in ("video", "audio")], None
+        [
+            SimpleNamespace(identifier=key, modality=key, data=None)
+            for key in ("video", "audio")
+        ],
+        SimpleNamespace(fields_for=lambda _: set()),
     )
     if transfer == "handle":
         video_metadata["audio"]["transfer_id"] = "reservation"
