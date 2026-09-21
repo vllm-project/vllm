@@ -546,8 +546,8 @@ class DecodeBenchConnectorWorker:
                     )
 
         filled_tensors: set[int] = set()
-        for group_idx, block_ids in unique_blocks_per_group.items():
-            self._fill_blocks(group_idx, sorted(block_ids), filled_tensors)
+        for group_idx, unique_ids in unique_blocks_per_group.items():
+            self._fill_blocks(group_idx, sorted(unique_ids), filled_tensors)
 
         logger.debug(
             "DecodeBenchConnector: Filled %d unique block IDs (%d tokens) "
@@ -571,6 +571,7 @@ class DecodeBenchConnectorWorker:
             block_ids: Unique block IDs to fill in this group.
             filled_tensors: Object identities of tensors already filled in
                 this ``start_fill_kv`` invocation.
+
         """
         if not block_ids:
             return
