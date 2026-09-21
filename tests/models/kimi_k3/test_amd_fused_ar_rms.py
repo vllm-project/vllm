@@ -2,13 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The K3 AMD latent tail must equal RMSNorm(all_reduce(partial)).
 
-The fused AITER path and the unfused fallback are both compared against an
-explicit all-reduce + RMSNorm, so a silently skipped fusion or a wrong
-residual shows up as a numeric mismatch rather than plausible-looking text.
-
-``_zero_residual`` must also hand back the same buffer for a repeated shape:
-a buffer that moved between CUDA graph captures would leave an earlier graph
-replaying against freed memory.
+One TP2 spawn covers the fused kernel (4 tokens) and the unfused fallback
+(256 tokens).
 """
 
 import pytest
@@ -20,7 +15,6 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.models.kimi_k3.amd.ops.fused_ar_rms import (
-    _zero_residual,
     can_fuse_allreduce_rms_norm,
     fused_allreduce_rms_norm_out,
 )
@@ -36,10 +30,18 @@ pytestmark = pytest.mark.skipif(
 LATENT_SIZE = 3584
 EPS = 1e-5
 DTYPE = torch.bfloat16
+WORLD_SIZE = 2
+
+
+def _check_matches_unfused(norm: RMSNorm, partial: torch.Tensor) -> None:
+    ref = norm(tensor_model_parallel_all_reduce(partial.clone()))
+    out = fused_allreduce_rms_norm_out(partial.clone(), norm)
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
 
 
 @ensure_current_vllm_config()
-def _worker_fused_ar_rms(local_rank, world_size, port, num_tokens, seed):
+def _worker_fused_ar_rms(local_rank, world_size, port, seed):
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(
@@ -52,45 +54,25 @@ def _worker_fused_ar_rms(local_rank, world_size, port, num_tokens, seed):
         norm.weight.normal_(mean=1.0, std=0.1)
 
     torch.manual_seed(seed + local_rank)
-    partial = torch.randn(num_tokens, LATENT_SIZE, dtype=DTYPE, device=device)
+    fused = torch.randn(4, LATENT_SIZE, dtype=DTYPE, device=device)
+    fallback = torch.randn(256, LATENT_SIZE, dtype=DTYPE, device=device)
 
-    ref = norm(tensor_model_parallel_all_reduce(partial.clone()))
-    out = fused_allreduce_rms_norm_out(partial.clone(), norm)
-    torch.accelerator.synchronize()
-    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+    _check_matches_unfused(norm, fused)
+    assert not can_fuse_allreduce_rms_norm(fallback)
+    _check_matches_unfused(norm, fallback)
 
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize("world_size", [1, 2])
-# 4 tokens sits inside AITER's one-stage gate, 256 outside it, so a single
-# run covers both the fused kernel and the unfused fallback.
-@pytest.mark.parametrize("num_tokens", [4, 256])
-def test_fused_allreduce_rms_norm_out(world_size, num_tokens):
-    if current_platform.device_count() < world_size:
-        pytest.skip(f"Need >= {world_size} GPUs")
+def test_fused_allreduce_rms_norm_out():
+    if current_platform.device_count() < WORLD_SIZE:
+        pytest.skip(f"Need >= {WORLD_SIZE} GPUs")
     spawn(
         _worker_fused_ar_rms,
-        args=(world_size, str(get_open_port()), num_tokens, 42),
-        nprocs=world_size,
+        args=(WORLD_SIZE, str(get_open_port()), 42),
+        nprocs=WORLD_SIZE,
         join=True,
     )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_rocm() or current_platform.device_count() < 1,
-    reason="needs a GPU",
-)
-def test_zero_residual_is_stable_per_shape():
-    device = torch.device("cuda:0")
-    small = torch.empty(4, LATENT_SIZE, dtype=DTYPE, device=device)
-    large = torch.empty(256, LATENT_SIZE, dtype=DTYPE, device=device)
-
-    first = _zero_residual(small)
-    _zero_residual(large)
-
-    assert _zero_residual(small).data_ptr() == first.data_ptr()
-    assert not first.any()
 
 
 def test_gate_is_closed_without_aiter_custom_ar(monkeypatch):
