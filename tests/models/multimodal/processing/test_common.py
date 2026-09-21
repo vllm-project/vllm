@@ -159,7 +159,6 @@ def get_token_prompt(
     processor: BaseMultiModalProcessor,
     mm_data: MultiModalDataDict,
 ) -> list[int]:
-    dummy_inputs = processor.dummy_inputs
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
 
@@ -174,7 +173,7 @@ def get_token_prompt(
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
 
     if is_mistral_tokenizer(tokenizer):
-        inputs = dummy_inputs.get_dummy_processor_inputs(
+        inputs = processor.get_dummy_inputs(
             model_config.max_model_len,
             mm_counts,
             mm_options=MultiModalDummyOptions(),
@@ -182,7 +181,7 @@ def get_token_prompt(
             mm_data=mm_data,  # type: ignore[call-arg]
         )
     else:
-        inputs = dummy_inputs.get_dummy_processor_inputs(
+        inputs = processor.get_dummy_inputs(
             model_config.max_model_len,
             mm_counts,
             mm_options=MultiModalDummyOptions(),
