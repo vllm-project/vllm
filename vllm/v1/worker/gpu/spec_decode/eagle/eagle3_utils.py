@@ -107,7 +107,9 @@ def get_eagle3_aux_layers_from_config(
     if not layer_ids:
         dflash_config = getattr(hf_config, "dflash_config", None)
         if dflash_config and isinstance(dflash_config, dict):
-            # Add 1 to convert DFlash's aux layer id semantics
+            # TokenSpeed numbers completed decoder layers from zero. EagleModelMixin
+            # numbers hidden-state boundaries: 0 is the embedding and N is the
+            # output of decoder layer N - 1.
             layer_ids = [i + 1 for i in (dflash_config.get("target_layer_ids") or [])]
     if not layer_ids:
         dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)

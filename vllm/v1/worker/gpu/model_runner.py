@@ -92,6 +92,7 @@ from vllm.v1.worker.gpu.async_utils import (
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
+    get_attn_cg_support,
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
@@ -636,6 +637,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
+            )
+        if target_attn_layer_names is not None:
+            attn_cg_support = get_attn_cg_support(
+                self.attn_groups, self.vllm_config, target_attn_layer_names
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)

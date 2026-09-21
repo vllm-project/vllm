@@ -6,6 +6,7 @@ from typing import ClassVar
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -39,7 +40,14 @@ _MIN_WORK_PER_SPLIT = 512
 _SPLIT_OCCUPANCY_MULTIPLIER = 2
 
 
-def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
+def _compute_num_kv_splits(
+    max_seq_len: int,
+    sm_count: int,
+    sliding_window: int | None = None,
+    query_len: int = 1,
+) -> int:
+    if sliding_window is not None:
+        max_seq_len = min(max_seq_len, sliding_window + query_len - 1)
     # Power of 2 to avoid excessive kernel instantiations, capped by an SM-based
     # maximum (occupancy multiplier allows multiple blocks per SM
     # for latency hiding).
@@ -67,8 +75,8 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     def _reserve_attn_logits_workspace(self) -> None:
         """Pre-size the shared workspace for the decode split-KV attn logits.
 
-        Reserving at the worst case (max_model_len -> max num_kv_splits,
-        max_num_seqs decode tokens) before warmup/cudagraph capture means the
+        Reserving at the longest visible context and maximum decode batch
+        before warmup/cudagraph capture means the
         per-call ``get_simultaneous`` in ``forward_mqa`` never has to grow the
         buffer at runtime (which would raise once the workspace is locked).
         """
@@ -76,15 +84,15 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
             return
         # forward_mqa flattens each request's block to query_len decode rows,
         # and query_len is bounded by the reorder threshold.
-        B = (
-            self.vllm_config.scheduler_config.max_num_seqs
-            * self.reorder_batch_threshold
-        )
+        query_len = self.reorder_batch_threshold
+        B = self.vllm_config.scheduler_config.max_num_seqs * query_len
         # DCP all-gathers the query heads before forward_mqa.
         q_num_heads = self.num_heads * self.dcp_world_size
         max_splits = _compute_num_kv_splits(
             self.model_config.max_model_len,
             current_platform.num_compute_units(),
+            sliding_window=getattr(self.kv_cache_spec, "sliding_window", None),
+            query_len=query_len,
         )
         lse_dim = self.mla_dims.kv_lora_rank + 1
         current_workspace_manager().get_simultaneous(
@@ -177,12 +185,19 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             **mla_args,
         )
 
-        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
+        unsupported_features = [alibi_slopes, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "TritonMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, logits_soft_cap"
+                "alibi_slopes, logits_soft_cap"
             )
+        self.sliding_window = sliding_window
+        if sliding_window is not None:
+            spec_config = get_current_vllm_config().speculative_config
+            if spec_config is None or spec_config.method != "dflash":
+                raise NotImplementedError(
+                    "Triton MLA sliding windows currently require DFlash decoding."
+                )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -247,12 +262,21 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         )
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
+        num_decodes = attn_metadata.decode.seq_lens.shape[0]
+        query_len, remainder = divmod(B, num_decodes) if num_decodes else (1, 0)
+        assert remainder == 0, (
+            f"non-uniform decode block: {B} query rows over {num_decodes} requests"
+        )
+
         # For batch invariance, use only 1 split to ensure deterministic reduction
         if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
             num_kv_splits = _compute_num_kv_splits(
-                attn_metadata.max_seq_len, self._sm_count
+                attn_metadata.max_seq_len,
+                self._sm_count,
+                sliding_window=self.sliding_window,
+                query_len=query_len,
             )
 
         # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
@@ -282,11 +306,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # row of q and reads that row's KV extent from seq_lens, so intra-block
         # causality is expressed as per-row extents. Deriving query_len from the
         # tensors the kernel indexes keeps the three row counts in step.
-        num_decodes = seq_lens.shape[0]
-        query_len, remainder = divmod(B, num_decodes) if num_decodes else (1, 0)
-        assert remainder == 0, (
-            f"non-uniform decode block: {B} query rows over {num_decodes} requests"
-        )
         if query_len > 1:
             block_table = block_table.repeat_interleave(query_len, dim=0)
             if attn_metadata.causal:
@@ -306,6 +325,20 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 # Non-causal draft block: every row sees the same prefix.
                 seq_lens = seq_lens.repeat_interleave(query_len)
 
+        seq_starts = None
+        if self.sliding_window is not None:
+            if attn_metadata.causal:
+                raise NotImplementedError(
+                    "Triton MLA sliding windows require non-causal draft attention."
+                )
+            # Each query sees its own trailing window and all later block tokens.
+            query_offsets = torch.arange(B, device=q.device, dtype=seq_lens.dtype)
+            query_offsets = query_offsets % query_len
+            seq_starts = (
+                seq_lens - query_len + query_offsets - self.sliding_window + 1
+            ).clamp_min(0)
+            seq_lens = seq_lens - seq_starts
+
         # Run MQA — always pass layer scales. When KV cache is
         # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
         decode_attention_fwd(
@@ -323,6 +356,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k_scale=layer._k_scale,
             v_scale=layer._k_scale,
             is_mla=True,
+            seq_starts=seq_starts,
         )
 
         return o, lse

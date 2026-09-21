@@ -309,6 +309,15 @@ class ModelArchConfigConvertorBase:
         return quant_cfg
 
     def is_deepseek_mla(self) -> bool:
+        if (
+            "DFlash2DraftModel"
+            in (getattr(self.hf_text_config, "architectures", None) or [])
+            and (getattr(self.hf_text_config, "dflash_config", None) or {}).get(
+                "attention_mode"
+            )
+            == "mla"
+        ):
+            return True
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (

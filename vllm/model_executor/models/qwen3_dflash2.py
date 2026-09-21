@@ -225,25 +225,10 @@ class DFlashGroupedConv(nn.Module):
         return self._convolve(hidden_states, coefficients, 1)
 
 
-class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        *,
-        config,
-        layer_idx: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(
-            vllm_config,
-            config=config,
-            layer_idx=layer_idx,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
+class DFlash2DecoderLayer(nn.Module):
+    """Grouped-convolution forward shared by the GQA and MLA backbones."""
+
+    def _init_convs(self, vllm_config: VllmConfig, config, prefix: str) -> None:
         draft_config = config.dflash_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
@@ -283,6 +268,28 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.mlp_conv.finish(hidden_states, coefficients)
         return hidden_states, residual
+
+
+class DFlash2Qwen3DecoderLayer(DFlash2DecoderLayer, DFlashQwen3DecoderLayer):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        config,
+        layer_idx: int,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(
+            vllm_config,
+            config=config,
+            layer_idx=layer_idx,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+        self._init_convs(vllm_config, config, prefix)
 
 
 def _score_edges(
@@ -391,9 +398,14 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
 
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
-    model_cls = DFlash2Qwen3Model
+    model_cls: type[nn.Module] = DFlash2Qwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        draft_config = vllm_config.speculative_config.draft_model_config.hf_config
+        if draft_config.dflash_config.get("attention_mode") == "mla":
+            from vllm.models.kimi_k3.nvidia.dflash2 import DFlash2K3Model
+
+            self.model_cls = DFlash2K3Model
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         draft_config = self.config.dflash_config
         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)

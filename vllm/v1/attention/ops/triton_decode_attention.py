@@ -96,6 +96,7 @@ def _fwd_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    B_SeqStart=None,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -109,6 +110,9 @@ def _fwd_kernel_stage1(
     mask_dv = offs_dv < Lv
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_req_idx = cur_batch
+    seq_start = 0
+    if B_SeqStart is not None:
+        seq_start = tl.load(B_SeqStart + cur_batch)
 
     off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d
     q = tl.load(Q + off_q, mask=mask_d, other=0.0)
@@ -126,14 +130,15 @@ def _fwd_kernel_stage1(
         vs = tl.load(v_scale)
         for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
+            cache_n = offs_n + seq_start
             kv_page_number = tl.load(
                 Req_to_tokens
                 + stride_req_to_tokens_b * cur_batch_req_idx
-                + offs_n // PAGE_SIZE,
+                + cache_n // PAGE_SIZE,
                 mask=offs_n < split_kv_end,
                 other=0,
             ).to(tl.int64)  # page_number * page stride overflows int32
-            kv_in_page = offs_n % PAGE_SIZE
+            kv_in_page = cache_n % PAGE_SIZE
             offs_buf_k = (
                 (kv_page_number * stride_buf_kpbs + kv_in_page * stride_buf_kbs)[
                     :, None
@@ -219,6 +224,7 @@ def _decode_att_m_fwd(
     logit_cap,
     k_scale,
     v_scale,
+    seq_starts=None,
 ):
     BLOCK = 64 if not is_hip_ else 8
 
@@ -271,6 +277,7 @@ def _decode_att_m_fwd(
         num_stages=2,
         Lk=Lk,
         Lv=Lv,
+        B_SeqStart=seq_starts,
     )
 
 
@@ -310,6 +317,7 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    B_SeqStart=None,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -327,6 +335,9 @@ def _fwd_grouped_kernel_stage1(
     mask_dv = offs_dv < Lv
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_req_idx = cur_batch
+    seq_start = 0
+    if B_SeqStart is not None:
+        seq_start = tl.load(B_SeqStart + cur_batch)
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
     q = tl.load(
@@ -367,16 +378,18 @@ def _fwd_grouped_kernel_stage1(
         vs = tl.load(v_scale)
         for start_n in tl.range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
+            cache_n = offs_n + seq_start
             kv_page_number = tl.load(
                 Req_to_tokens
                 + stride_req_to_tokens_b * cur_batch_req_idx
-                + offs_n // PAGE_SIZE,
+                + cache_n // PAGE_SIZE,
                 mask=offs_n < split_kv_end,
                 other=0,
                 cache_modifier=".ca",
             ).to(tl.int64)  # page_number * page stride overflows int32
             kv_off_k = (
-                kv_page_number * stride_buf_kpbs + (offs_n % PAGE_SIZE) * stride_buf_kbs
+                kv_page_number * stride_buf_kpbs
+                + (cache_n % PAGE_SIZE) * stride_buf_kbs
             )
 
             # explicitly facilitate overlapping load/compute
@@ -414,7 +427,7 @@ def _fwd_grouped_kernel_stage1(
             if not IS_MLA:
                 kv_off_v = (
                     kv_page_number * stride_buf_vpbs
-                    + (offs_n % PAGE_SIZE) * stride_buf_vbs
+                    + (cache_n % PAGE_SIZE) * stride_buf_vbs
                 )
                 offs_buf_v = kv_off_v[:, None] + base_offs_v
                 v = tl.load(
@@ -480,6 +493,7 @@ def _decode_grouped_att_m_fwd(
     k_scale,
     v_scale,
     is_mla=False,
+    seq_starts=None,
 ):
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
@@ -559,6 +573,7 @@ def _decode_grouped_att_m_fwd(
         BLOCK_DV=BLOCK_DV,
         BLOCK_N=BLOCK,
         BLOCK_H=BLOCK_H,
+        B_SeqStart=seq_starts,
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         PAGE_SIZE=page_size,
         logit_cap=logit_cap,
@@ -695,6 +710,7 @@ def decode_attention_fwd_normal(
     logit_cap=0.0,
     k_scale=None,
     v_scale=None,
+    seq_starts=None,
 ):
     _decode_att_m_fwd(
         q,
@@ -709,6 +725,7 @@ def decode_attention_fwd_normal(
         logit_cap,
         k_scale,
         v_scale,
+        seq_starts=seq_starts,
     )
     _decode_softmax_reducev_fwd(
         attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
@@ -731,6 +748,7 @@ def decode_attention_fwd_grouped(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    seq_starts=None,
 ):
     _decode_grouped_att_m_fwd(
         q,
@@ -746,6 +764,7 @@ def decode_attention_fwd_grouped(
         k_scale,
         v_scale,
         is_mla=is_mla,
+        seq_starts=seq_starts,
     )
     _decode_softmax_reducev_fwd(
         attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
@@ -768,7 +787,12 @@ def decode_attention_fwd(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    seq_starts=None,
 ):
+    """Attend to each row's KV span, optionally starting at ``seq_starts``.
+
+    ``b_seq_len`` is the span length; block tables retain absolute positions.
+    """
     assert num_kv_splits == attn_logits.shape[2]
 
     if k_scale is None:
@@ -795,6 +819,7 @@ def decode_attention_fwd(
             logit_cap,
             k_scale,
             v_scale,
+            seq_starts=seq_starts,
         )
     else:
         # GQA/MQA/MLA
@@ -814,4 +839,5 @@ def decode_attention_fwd(
             k_scale,
             v_scale,
             is_mla=is_mla,
+            seq_starts=seq_starts,
         )
