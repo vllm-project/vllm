@@ -184,7 +184,7 @@ class CacheConfig:
       when the token is at position i * block_size. This is the default when prefix
       caching is enabled.
     """
-    enable_mamba_fine_grained_prefix_cache: bool = False
+    enable_mamba_shared_prefix_checkpoint: bool = False
     """Also register a Mamba "align" checkpoint at the shared-prefix junction --
     where an EAGLE/MTP sibling was observed to resume -- instead of only at the
     prompt tail. Off by default; only takes effect with `mamba_cache_mode`
@@ -226,6 +226,11 @@ class CacheConfig:
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
+
+    swa_bounded_replay: bool = True
+    """Keep the sliding-window KV of models that support it (DeepSeek-V4.1)
+    out of prefix caching and rebuild it after a prefix hit by recomputing the
+    hit's last window. Requires model runner V2."""
 
     kv_cache_memory_bytes: int | None = None
     """Size of KV Cache per GPU in bytes. By default, this is set to None
@@ -269,7 +274,7 @@ class CacheConfig:
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
-            "enable_mamba_fine_grained_prefix_cache",
+            "enable_mamba_shared_prefix_checkpoint",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
@@ -281,8 +286,9 @@ class CacheConfig:
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
-            # WIP feature toggle not impacting compiled graph shape
+            # Feature toggles not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            "swa_bounded_replay",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
