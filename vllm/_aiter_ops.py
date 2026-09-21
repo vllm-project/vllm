@@ -2197,13 +2197,7 @@ class rocm_aiter_ops:
             )
         return True
     def has_fused_rope_mla_kv_cache(cls) -> bool:
-        """Check whether AITER exposes the fused RoPE+MLA KV-cache Triton kernel."""
-        try:
-            from aiter import fused_qk_rope_concat_and_cache_mla  # noqa: F401
-
-            return True
-        except (ImportError, AttributeError):
-            return False
+        return True
 
     @classmethod
     @if_aiter_supported
