@@ -3848,7 +3848,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-mi355.txt
 
-- label: ":amd: (MI355) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
+- label: ":amd: (MI355) Qwen3-8-Flash-Next-FP8 Accuracy Eval"
   timeout_in_minutes: 105
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
