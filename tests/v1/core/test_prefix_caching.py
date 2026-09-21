@@ -2269,7 +2269,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         use_eagle_block_drop=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
-        mamba_fine_grained_prefix_cache=False,
+        mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
@@ -5937,3 +5937,29 @@ def test_device_eviction_keeps_host_prefix():
     assert host_block.block_hash is not None, (
         "Device eviction invalidated unrelated host KV"
     )
+
+
+def test_get_unhashed_block_ids_all_groups():
+    """Unhashed, non-null block ids are reported per KV cache group.
+    A group with no unhashed blocks reports an empty list, not a missing entry.
+    """
+
+    def hashed(block_id: int, group_id: int) -> KVCacheBlock:
+        block = KVCacheBlock(block_id=block_id)
+        block.set_block_hash(make_block_hash_with_group_id(BlockHash(b"h"), group_id))
+        return block
+
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=1),  # unhashed
+                hashed(2, group_id=0),  # cached
+                KVCacheBlock(block_id=3, is_null=True),  # null padding
+                KVCacheBlock(block_id=4),  # unhashed
+            ],
+            # No unhashed blocks in this group.
+            [hashed(5, group_id=1), KVCacheBlock(block_id=6, is_null=True)],
+        )
+    )
+
+    assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]

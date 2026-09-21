@@ -1260,7 +1260,7 @@ class VllmConfig:
                 "Disable --enable-dbo and set --ubatch-size to 0."
             )
         if self.engram_config is None:
-            if not current_platform.is_cuda() or not model_has_engram_layers(
+            if not current_platform.is_cuda_alike() or not model_has_engram_layers(
                 model_config
             ):
                 return
@@ -2880,7 +2880,6 @@ class VllmConfig:
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
-        model_config = self.model_config
         speculative_config = self.speculative_config
 
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
@@ -2928,17 +2927,6 @@ class VllmConfig:
 
         if self.parallel_config.enable_elastic_ep:
             unsupported.append("elastic expert parallelism")
-
-        has_logitsproc_plugins = False
-        if model_config is not None:
-            from importlib.metadata import entry_points
-
-            has_logitsproc_plugins = bool(entry_points(group="vllm.logits_processors"))
-
-        if model_config is not None and (
-            model_config.logits_processors or has_logitsproc_plugins
-        ):
-            unsupported.append("custom logits processors")
 
         if self.cache_config.mamba_cache_mode == "all":
             unsupported.append("mamba cache mode 'all'")

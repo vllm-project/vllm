@@ -197,6 +197,11 @@ class DiffusionGemmaForConditionalGeneration(
         text_config.attention_k_eq_v = True
 
         # ---- Vision tower ----
+        # Gemma4's image path, borrowed below, reads this flag.
+        lora_config = vllm_config.lora_config
+        self._enable_mm_lora = bool(
+            lora_config is not None and lora_config.enable_tower_connector_lora
+        )
         vision_config = getattr(config, "vision_config", None)
         self.embed_vision: Gemma4MultimodalEmbedder | None
         if vision_config is not None:
@@ -543,7 +548,7 @@ def _compiled_sample_step(
     if tp_size > 1:
         soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
     soft_embeds = soft_embeds * normalizer
-    sc_embeds[decode_slots] = soft_embeds * sc_keep
+    sc_embeds[decode_slots] = (soft_embeds * sc_keep).to(sc_embeds.dtype)
 
     # Overwrite canvas with argmax for newly converged denoise requests
     newly_converged = (converged & is_denoise).unsqueeze(1)
@@ -1014,7 +1019,7 @@ class DiffusionSampler:
         # on the subsequent commit step when num_sampled=CANVAS_LEN.
         self._pending_logprobs: dict[int, LogprobsTensors] = {}
 
-    def add_request(self, req_idx: int, prompt_len: int, sampling_params: Any) -> None:
+    def add_request(self, req_idx: int, sampling_params: Any) -> None:
         if use_penalty(sampling_params):
             logger.warning_once(
                 "DiffusionGemma does not support repetition/frequency/presence "
