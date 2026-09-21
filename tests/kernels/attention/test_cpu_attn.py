@@ -60,7 +60,7 @@ ZEN_ENCODER_SEQ_LENS = [
     [1, 67, 233, 5],
 ]
 _skip_no_zentorch_sdpa = pytest.mark.skipif(
-    not current_platform.is_zen_cpu() or not has_zentorch_op(["zentorch_sdpa"]),
+    not current_platform.is_zen_cpu() or not has_zentorch_op(["zentorch_sdpa_attn"]),
     reason="zentorch_sdpa requires a Zen CPU with the op registered",
 )
 # should_use_zentorch_sdpa additionally gates each dtype on its ISA.
@@ -835,7 +835,7 @@ def varlen_encoder_zentorch_sdpa(
         key,
         value,
         output,
-        SimpleNamespace(query_start_loc=query_start_loc),
+        SimpleNamespace(query_start_loc=query_start_loc, causal=False),
         scale,
         sliding_window if sliding_window is not None else -1,
         alibi_slopes,

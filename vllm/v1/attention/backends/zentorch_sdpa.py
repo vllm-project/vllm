@@ -76,6 +76,24 @@ def zentorch_sdpa_attn(
         `output`, filled in place.
 
     """
+    # zentorch_sdpa_attn builds the ALiBi mask in query.dtype. A bf16 per-head
+    # mask is wrong when the query head count is not a power of two, so run
+    # that path in fp32 and write bf16 back.
+    if alibi_slopes is not None and query.dtype == torch.bfloat16:
+        out32 = torch.empty_like(query, dtype=torch.float32)
+        zentorch_sdpa_attn(
+            query.float(),
+            key.float(),
+            value.float(),
+            out32,
+            attn_metadata,
+            scale,
+            sliding_window,
+            alibi_slopes,
+        )
+        output.copy_(out32.to(dtype=output.dtype))
+        return output
+
     # The op counts window tokens on each side of the diagonal; vLLM's window
     # includes the diagonal itself.
     window = -1 if sliding_window in (None, -1) else sliding_window - 1
