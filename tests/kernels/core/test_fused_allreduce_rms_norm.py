@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for eager AllReduce + RMSNorm fusion.
+"""Tests for breakable-path AllReduce + RMSNorm fusion.
 
 ``fused_allreduce_rms_norm`` must match ``RMSNorm(all_reduce(partial), residual)``.
 ``fused_allreduce_rms_norm_out`` must match ``RMSNorm(all_reduce(partial))``.

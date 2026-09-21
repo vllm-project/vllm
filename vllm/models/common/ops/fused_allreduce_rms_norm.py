@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused all-reduce + residual-add + RMSNorm for eager model paths.
+"""Fused all-reduce + residual-add + RMSNorm for breakable CUDA graph paths.
 
 This recovers a fusion that vLLM's torch.compile passes would normally do but
-that doesn't fire for models running eager (or under a breakable CUDA graph).
+that cannot fire under a breakable CUDA graph (CompilationMode.NONE).
 """
 
 import torch

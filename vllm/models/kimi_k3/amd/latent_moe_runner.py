@@ -72,10 +72,10 @@ class ROCmLatentMoERunner(MoERunner):
             self._logged_sharded_tail = True
             logger.info_once(
                 "Kimi-K3 latent-MoE tail: up-projecting only this rank's "
-                "hidden shard into the shared output. Eager fused AR+RMSNorm "
-                "is used when the AITER 1-stage custom-AR gate admits the "
-                "tensor; larger tensors fall back to unfused all-reduce + "
-                "RMSNorm.",
+                "hidden shard into the shared output. Breakable fused "
+                "AR+RMSNorm is used when the AITER 1-stage custom-AR gate "
+                "admits the tensor; larger tensors fall back to unfused "
+                "all-reduce + RMSNorm.",
                 scope="global",
             )
 
@@ -83,7 +83,7 @@ class ROCmLatentMoERunner(MoERunner):
         assert transform is not None
 
         if transform.norm is not None:
-            # Eager fused AR+RMSNorm (AITER 1-stage custom AR). Decode-sized
+            # Breakable fused AR+RMSNorm (AITER 1-stage custom AR). Decode-sized
             # tensors hit the fused op; prefill falls back to unfused QR+norm.
             latent = fused_allreduce_rms_norm_out(fused_output, transform.norm)
         else:
