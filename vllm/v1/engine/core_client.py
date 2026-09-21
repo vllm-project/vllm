@@ -268,7 +268,9 @@ class EngineCoreClient(ABC):
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
-    async def get_external_elastic_ep_phase(self) -> str | None:
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
         return None
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -1638,9 +1640,11 @@ class DPAsyncMPClient(AsyncMPClient):
     async def commit_elastic_ep(self) -> None:
         await self._get_external_eep_coordinator().commit()
 
-    async def get_external_elastic_ep_phase(self) -> str | None:
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
         coordinator = self.external_eep_coordinator
-        return None if coordinator is None else coordinator.get_phase()
+        return None if coordinator is None else coordinator.get_status()
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):

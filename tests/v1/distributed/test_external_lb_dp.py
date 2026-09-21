@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
+import msgspec
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -41,6 +42,40 @@ class DictStore:
 
     def get(self, key: str) -> bytes:
         return self.values[key]
+
+    def set(self, key: str, value: bytes) -> None:
+        self.values[key] = value
+
+
+def test_external_elastic_ep_visible_epoch_has_bootstrap_and_phase(monkeypatch):
+    client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_master_port=12345,
+                _data_parallel_master_port_list=[12346, 12347],
+            )
+        )
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+    control_store, reconfig_store = DictStore({}), DictStore({})
+    coordinator.reconfig_store_ref = reconfig_store
+    monkeypatch.setattr(
+        coordinator, "_setup_reconfig_bootstrap", lambda: ("127.0.0.1", 12348)
+    )
+    epoch, bootstrap = coordinator._prepare_reconfig_bootstrap(control_store, 2, 3)
+
+    for store in (control_store, reconfig_store):
+        # DictStore preserves insertion order: metadata must precede the epoch.
+        assert list(store.values)[-1] == coordinator.key("current_epoch")
+        assert store.get(coordinator.key(epoch, "bootstrap")) == msgspec.msgpack.encode(
+            bootstrap
+        )
+        assert store.get(coordinator.key(epoch, "phase")) == b"preparing"
+        assert store.get(coordinator.key("current_epoch")) == epoch.encode()
+        monkeypatch.setattr(
+            coordinator, "_get_reconfig_store", lambda store=store: store
+        )
+        assert coordinator.get_status()["requested_data_parallel_size"] == 3
 
 
 def test_external_elastic_ep_calculates_target_expert_redundancy():
