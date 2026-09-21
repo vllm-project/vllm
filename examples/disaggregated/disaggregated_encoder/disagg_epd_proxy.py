@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""disagg_encoder_proxy.py
+"""OpenAI-compatible proxy for E+PD and E+P+D disaggregation.
 
-Proxy that routes OpenAI-compatible “/v1/chat/completions” requests to two
-clusters:
-  • encode  (multimodal feature extraction)
-  • decode  (language-model inference)
+Use static server URLs, or --dynamic-registration for launcher-managed HTTP
+registration of E, P/PD and D instances. Both modes route OpenAI-compatible
+``/v1/chat/completions`` requests through encoder and inference clusters and
+share encoder fan-out, metadata-only rewriting, prefill, and retry/streaming
+forwarding.
 
 For MM input we:
     1. Extract *every* image/audio/video item.
-    2. Fire N concurrent requests to the encoder cluster
-       (one request per item, with **all text removed**).
+    2. Send concurrent encoder requests with all text removed,
+       grouping images assigned to the same encoder.
     3. Wait for all of them to succeed.
     4. Forward the *original* request to a decode server.
 """
@@ -20,22 +21,27 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import enum
 import hashlib
 import itertools
 import json
 import logging
 import os
 import random
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
 import msgspec
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
 ###############################################################################
 # FastAPI app & global state
@@ -43,6 +49,340 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("proxy")
+
+DEFAULT_PROBE_INTERVAL = 5.0
+DEFAULT_PROBE_TIMEOUT = 2.0
+DEFAULT_FAIL_THRESHOLD = 3
+# Stop probing an instance that has been down this long. 0 probes forever,
+# which is what a cluster that restarts instances in place wants.
+DEFAULT_EVICTED_TTL = 900.0
+
+
+class InstanceRole(str, enum.Enum):
+    ENCODE = "encode"
+    PREFILL = "prefill"
+    DECODE = "decode"
+    PREFILL_DECODE = "prefill_decode"
+
+
+@dataclass
+class InstanceRecord:
+    """One registered instance.
+
+    Attributes:
+        role: Which stage this instance serves.
+        url: Base OpenAI-compatible URL, e.g. ``http://host:8000``.
+        ec_zmq_addrs: Mooncake TP-rank-0 control addresses, one per DP replica,
+            supplied by the launcher from the consumer's fixed port config.
+        dp_size: Data-parallel replicas behind `url`, so the proxy can pick
+            a replica and name the same one to both halves of a request.
+
+    """
+
+    role: InstanceRole
+    url: str
+    ec_zmq_addrs: list[str] = field(default_factory=list)
+    dp_size: int = 1
+
+
+class InstanceRegistry:
+    def __init__(
+        self,
+        probe_interval: float = DEFAULT_PROBE_INTERVAL,
+        probe_timeout: float = DEFAULT_PROBE_TIMEOUT,
+        fail_threshold: int = DEFAULT_FAIL_THRESHOLD,
+        evicted_ttl: float = DEFAULT_EVICTED_TTL,
+    ):
+        self._probe_interval = probe_interval
+        self._probe_timeout = probe_timeout
+        self._fail_threshold = fail_threshold
+        self._evicted_ttl = evicted_ttl
+
+        self._live: dict[str, InstanceRecord] = {}
+        self._evicted: dict[str, InstanceRecord] = {}
+        self._evicted_since: dict[str, float] = {}
+        self._fail_counts: dict[str, int] = {}
+        # One cursor per role, only ever incremented. Rebuilding it whenever
+        # the roster changes -- what an `itertools.cycle` over a mutable list
+        # forces -- restarts every fan-out at the first instance and hot-spots
+        # it after each registration.
+        self._cursors: dict[InstanceRole, int] = {role: 0 for role in InstanceRole}
+        self._replica_cursors: dict[str, int] = {}
+        self._probe_task: asyncio.Task | None = None
+
+    def register(self, record: InstanceRecord) -> bool:
+        """Add or refresh an instance without overriding its health status."""
+        roles = {
+            other.role
+            for other in itertools.chain(self._live.values(), self._evicted.values())
+        }
+        split_roles = {InstanceRole.PREFILL, InstanceRole.DECODE}
+        if (record.role is InstanceRole.PREFILL_DECODE and roles & split_roles) or (
+            record.role in split_roles and InstanceRole.PREFILL_DECODE in roles
+        ):
+            raise ValueError("Cannot mix prefill_decode with standalone prefill/decode")
+        key = record.url
+        previous = self._live.get(key) or self._evicted.get(key)
+        if previous is not None:
+            if previous == record:
+                return False
+            if previous.role is not record.role:
+                raise ValueError("Unregister the instance before changing its role")
+            target = self._live if key in self._live else self._evicted
+            target[key] = record
+            return False
+        self._live[key] = record
+        logger.info("Registered instance %s: %s", record.role.value, record.url)
+        return True
+
+    def unregister(self, url: str) -> bool:
+        """Drop an instance for good, so a probe cannot bring it back."""
+        key = url
+        if key not in self._live and key not in self._evicted:
+            return False
+        self._live.pop(key, None)
+        self._evicted.pop(key, None)
+        self._evicted_since.pop(key, None)
+        self._fail_counts.pop(key, None)
+        self._replica_cursors.pop(key, None)
+        logger.info("Unregistered instance: %s", url)
+        return True
+
+    def instances(self, role: InstanceRole) -> list[InstanceRecord]:
+        return [record for record in self._live.values() if record.role is role]
+
+    def urls(self, role: InstanceRole) -> list[str]:
+        return [record.url for record in self.instances(role)]
+
+    def pick(self, role: InstanceRole) -> InstanceRecord | None:
+        """Take the next instance of `role` in round-robin order."""
+        picked = self.pick_many(role, 1)
+        return picked[0] if picked else None
+
+    def pick_many(self, role: InstanceRole, count: int) -> list[InstanceRecord]:
+        """Take `count` instances, continuing the rotation across calls.
+
+        A multimodal request fans out one encoder request per item, so the
+        assignment has to be contiguous with the previous request's rather
+        than restart at the first instance every time.
+        """
+        alive = self.instances(role)
+        if not alive or count <= 0:
+            return []
+        start = self._cursors[role]
+        self._cursors[role] = start + count
+        return [alive[(start + offset) % len(alive)] for offset in range(count)]
+
+    def next_replica(self, record: InstanceRecord) -> int:
+        """Take the next data-parallel replica of `record`, round-robin.
+
+        The encoder pushes to one replica's receive channel, so the request
+        has to run on that same replica; the caller names the rank to both
+        halves.
+        """
+        if record.dp_size <= 1:
+            return 0
+        cursor = self._replica_cursors.get(record.url, 0)
+        self._replica_cursors[record.url] = cursor + 1
+        return cursor % record.dp_size
+
+    def status(self) -> dict[str, Any]:
+        return {
+            role.value: {
+                "live": [record.url for record in self.instances(role)],
+                "evicted": [
+                    record.url
+                    for record in self._evicted.values()
+                    if record.role is role
+                ],
+            }
+            for role in InstanceRole
+        }
+
+    def start_probing(self) -> None:
+        if self._probe_task is None and self._probe_interval > 0:
+            self._probe_task = asyncio.create_task(self._probe_loop())
+
+    async def stop_probing(self) -> None:
+        if self._probe_task is None:
+            return
+        self._probe_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self._probe_task
+        self._probe_task = None
+
+    async def _probe_loop(self) -> None:
+        timeout = aiohttp.ClientTimeout(total=self._probe_timeout)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            while True:
+                await asyncio.sleep(self._probe_interval)
+                try:
+                    await self._probe_once(session)
+                except Exception:
+                    logger.exception("EPD registry probe round failed")
+
+    async def _probe_once(self, session: aiohttp.ClientSession) -> None:
+        targets = list(self._live.values()) + list(self._evicted.values())
+        if not targets:
+            return
+        results = await asyncio.gather(
+            *(self._probe(session, record.url) for record in targets),
+            return_exceptions=True,
+        )
+        now = time.monotonic()
+        for record, healthy in zip(targets, results):
+            current = self._live.get(record.url) or self._evicted.get(record.url)
+            if current is not record:
+                continue
+            if healthy is True:
+                self._on_probe_success(record)
+            else:
+                self._on_probe_failure(record, now)
+        self._drop_expired(now)
+
+    async def _probe(self, session: aiohttp.ClientSession, url: str) -> bool:
+        async with session.get(f"{url}/health") as resp:
+            return resp.status == 200
+
+    def _on_probe_success(self, record: InstanceRecord) -> None:
+        key = record.url
+        self._fail_counts.pop(key, None)
+        if key in self._evicted:
+            self._evicted.pop(key, None)
+            self._evicted_since.pop(key, None)
+            self._live[key] = record
+            logger.info(
+                "Instance %s (%s) is healthy again; routing resumed",
+                record.url,
+                record.role.value,
+            )
+
+    def _on_probe_failure(self, record: InstanceRecord, now: float) -> None:
+        key = record.url
+        if key not in self._live:
+            # Either already evicted, or unregistered while this probe was in
+            # flight. A round snapshots its targets and then awaits, so a
+            # removal inside that window would otherwise be undone by a result
+            # describing a registry that no longer exists.
+            return
+        failures = self._fail_counts.get(key, 0) + 1
+        self._fail_counts[key] = failures
+        if failures < self._fail_threshold:
+            return
+        self._live.pop(key, None)
+        self._evicted[key] = record
+        self._evicted_since[key] = now
+        logger.warning(
+            "Instance %s (%s) failed %d consecutive probes; stopped routing "
+            "to it. It rejoins on its own once it responds again.",
+            record.url,
+            record.role.value,
+            failures,
+        )
+
+    def _drop_expired(self, now: float) -> None:
+        if self._evicted_ttl <= 0:
+            return
+        for key, since in list(self._evicted_since.items()):
+            if now - since < self._evicted_ttl:
+                continue
+            record = self._evicted.pop(key, None)
+            self._evicted_since.pop(key, None)
+            self._fail_counts.pop(key, None)
+            self._replica_cursors.pop(key, None)
+            if record is not None:
+                logger.warning("Instance %s stayed down; forgetting it", record.url)
+
+
+class InstanceRegistration(BaseModel):
+    role: InstanceRole
+    url: AnyHttpUrl
+    ec_zmq_addrs: list[str] = Field(default_factory=list)
+    dp_size: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_consumer_addresses(self):
+        if self.ec_zmq_addrs and len(self.ec_zmq_addrs) != self.dp_size:
+            raise ValueError("Provide one Mooncake control address per DP replica")
+        return self
+
+
+def require_admin_key(x_api_key: str = Header(default="")) -> None:
+    expected = os.getenv("ADMIN_API_KEY", "")
+    if not expected or not secrets.compare_digest(x_api_key, expected):
+        raise HTTPException(403, "Invalid admin API key")
+
+
+@dataclass
+class EPDProxyConfig:
+    probe_interval: float = 5.0
+    probe_timeout: float = 2.0
+    fail_threshold: int = 3
+    evicted_ttl: float = 900.0
+
+
+@dataclass
+class _Route:
+    """The instances one request was assigned to.
+
+    Attributes:
+        consumer: The stage that receives the embedding, if any stage does.
+        consumer_zmq: The receive address named to the encoders.
+        dp_rank: Which replica of `consumer` was named, so the request can be
+            pinned to it.
+
+    """
+
+    encoder_urls: list[str]
+    prefill: InstanceRecord | None
+    decode: InstanceRecord
+    consumer: InstanceRecord | None = None
+    consumer_zmq: str | None = None
+    dp_rank: int | None = None
+
+
+class EPDProxy:
+    def __init__(self, registry: InstanceRegistry):
+        self.registry = registry
+
+    # ---------------------------------------------------------------- #
+    # Routing                                                          #
+    # ---------------------------------------------------------------- #
+    def route(self, num_items: int) -> _Route:
+        decode = self.registry.pick(InstanceRole.PREFILL_DECODE) or self.registry.pick(
+            InstanceRole.DECODE
+        )
+        if decode is None:
+            raise HTTPException(
+                status_code=503, detail="No decode instance is registered"
+            )
+        prefill = (
+            self.registry.pick(InstanceRole.PREFILL)
+            if decode.role is InstanceRole.DECODE
+            else None
+        )
+        if decode.role is InstanceRole.DECODE and prefill is None:
+            raise HTTPException(
+                status_code=503, detail="No prefill instance is registered"
+            )
+        encoders = self.registry.urls(InstanceRole.ENCODE)
+        if num_items and not encoders:
+            raise HTTPException(
+                status_code=503, detail="No encode instance is registered"
+            )
+        route = _Route(encoder_urls=encoders, prefill=prefill, decode=decode)
+        self._name_consumer(route)
+        return route
+
+    def _name_consumer(self, route: _Route) -> None:
+        """Pin the EC consumer replica and, for push connectors, its endpoint."""
+        candidate = route.prefill or route.decode
+        route.consumer = candidate
+        rank = self.registry.next_replica(candidate)
+        route.dp_rank = rank if candidate.dp_size > 1 else None
+        if candidate.ec_zmq_addrs:
+            route.consumer_zmq = candidate.ec_zmq_addrs[rank]
+
 
 app = FastAPI()
 encode_session: aiohttp.ClientSession | None = None
@@ -99,6 +439,11 @@ def validate_ec_consumer_routing(
 # Diagnostic switch: forward the original request to the decoder so the
 # only difference from the rewrite path is the rewrite itself.
 NO_REWRITE = False
+# Maximum images per encoder subrequest; 0 leaves batches unlimited.
+ENCODER_MAX_BATCH_SIZE = int(os.getenv("ENCODER_MAX_BATCH_SIZE", "0"))
+if ENCODER_MAX_BATCH_SIZE < 0:
+    raise ValueError("ENCODER_MAX_BATCH_SIZE must be non-negative")
+
 # Decode-side retries for a retryable internal error (`finish_reason="error"`,
 # e.g. an encoder embedding the connector could not deliver). Re-issuing runs
 # the encode again, which produces a fresh transfer.
@@ -222,7 +567,7 @@ async def fanout_encoder_primer(
     req_id: str,
     consumer_zmq: str | None = None,
 ) -> tuple[dict[int, dict], dict[str, Any]]:
-    """1. Build one request *per MM item* with all text removed.
+    """1. Group images by encoder, retaining per-item round-robin assignment.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
 
@@ -248,6 +593,7 @@ async def fanout_encoder_primer(
     item_uuids: dict[int, str] = {}
     item_transfer_ids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
+    transfer_items: dict[int, dict[str, str]] = {}
     ec_params: dict[str, Any] = {}
 
     # Round-robin over encode servers to distribute load a bit. The cursor
@@ -259,29 +605,45 @@ async def fanout_encoder_primer(
             e_urls, encoder_rr_idx, len(mm_items)
         )
 
+    groups: list[tuple[str, list[int]]] = []
+    image_groups: dict[str, list[int]] = {}
     for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
+        if item["type"] == "image_url":
+            indices = image_groups.get(target_url)
+            if indices is None or (
+                ENCODER_MAX_BATCH_SIZE and len(indices) >= ENCODER_MAX_BATCH_SIZE
+            ):
+                indices = []
+                image_groups[target_url] = indices
+                groups.append((target_url, indices))
+            indices.append(idx)
+        else:
+            groups.append((target_url, [idx]))
+
+    for target_url, indices in groups:
         # Derive a *child* request id:  <parent>:<index>:<random-short>
-        child_req_id = f"{req_id}:{idx}:{uuid.uuid4().hex[:6]}"
+        child_req_id = f"{req_id}:{indices[0]}:{uuid.uuid4().hex[:6]}"
         headers = {"x-request-id": child_req_id, "Content-Type": "application/json"}
 
         # With --no-rewrite the decoder still receives the raw image and derives
         # the cache key by hashing it, so the encoder must do the same -- passing
         # a uuid here would make the two disagree and silently defeat the EC
         # transfer, leaving the decoder to encode the image itself.
-        item_uuid = None if NO_REWRITE else content_uuid(item)
-        if item_uuid is not None:
-            item_uuids[idx] = item_uuid
-        transfer_id = uuid.uuid4().hex
-        item_transfer_ids[idx] = transfer_id
+        content = []
+        for idx in indices:
+            item = mm_items[idx]
+            item_uuid = None if NO_REWRITE else content_uuid(item)
+            if item_uuid is not None:
+                item_uuids[idx] = item_uuid
+            item_transfer_ids[idx] = uuid.uuid4().hex
+            content.append(item if item_uuid is None else {**item, "uuid": item_uuid})
 
         encoder_req = {
             "model": orig_request.get("model"),
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        item if item_uuid is None else {**item, "uuid": item_uuid}
-                    ],
+                    "content": content,
                 },
             ],
             # No max_tokens cap: the encoder instance never samples, it finishes
@@ -297,17 +659,13 @@ async def fanout_encoder_primer(
             if key in orig_request:
                 encoder_req[key] = orig_request[key]
         if consumer_zmq is not None:
-            # No mm_hash here on purpose. The encoder's own
-            # `mm_features[i].identifier` is derived from the uuid *and* the
-            # engine's media_io_kwargs / mm_processor_kwargs, so this proxy
-            # cannot know it before the encoder runs. Sending the bare uuid
-            # would fail the connector's hash match and make the producer
-            # invent its own transfer id, which the consumer could then never
-            # cancel. Omitting it lets the connector match by position, which
-            # is exact: one encoder request carries exactly one item.
+            # The engine may rehash UUIDs with processing options. Match by
+            # position instead; batches contain only images in input order.
             encoder_req["ec_transfer_params"] = {
                 "consumer_zmq": consumer_zmq,
-                "ec_items": [{"transfer_id": transfer_id}],
+                "ec_items": [
+                    {"transfer_id": item_transfer_ids[idx]} for idx in indices
+                ],
             }
         tasks.append(
             encode_session.post(
@@ -320,7 +678,8 @@ async def fanout_encoder_primer(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Fail fast if any sub-request failed
-    for idx, r in enumerate(results):
+    for (_, indices), r in zip(groups, results):
+        idx = indices[0]
         if isinstance(r, Exception):
             logger.error(
                 "[%s] Encoder request #%d raised exception: %s",
@@ -357,18 +716,45 @@ async def fanout_encoder_primer(
             logger.warning("[%s] Could not read encoder metadata #%d", req_id, idx)
             params = {}
         if params:
-            # One encoder request carries exactly one item, so there is a
-            # single reported entry. Do not key it by this proxy's uuid: when
-            # media_io_kwargs or mm_processor_kwargs are set the engine
-            # re-hashes the uuid together with them, so the encoder's own
-            # `mm_features[i].identifier` is a derived value this proxy cannot
-            # predict. Fall back to the sole entry, and carry the key the
-            # encoder actually used through as `ec_mm_hash`.
-            ec_mm_hash = item_uuids.get(idx)
-            reported = params.get(ec_mm_hash)
-            if reported is None and len(params) == 1:
-                ((ec_mm_hash, reported),) = params.items()
-            if reported:
+            by_index = {}
+            for mm_hash, reported in params.items():
+                if len(indices) == 1:
+                    break
+                for local_index in reported.get("item_indices", []):
+                    if type(local_index) is not int or not 0 <= local_index < len(
+                        indices
+                    ):
+                        raise HTTPException(502, "Invalid encoder item index")
+                    if local_index in by_index:
+                        raise HTTPException(502, "Duplicate encoder item index")
+                    by_index[local_index] = (mm_hash, reported)
+            for local_index, idx in enumerate(indices):
+                matched = by_index.get(local_index)
+                if matched is None:
+                    # Compatibility with encoders without position metadata.
+                    mm_hash = item_uuids.get(idx)
+                    if mm_hash in params:
+                        matched = (mm_hash, params[mm_hash])
+                    elif len(indices) == 1 and len(params) == 1:
+                        matched = next(iter(params.items()))
+                    elif (
+                        mm_items[idx]["type"] == "video_url"
+                        and (orig_request.get("mm_processor_kwargs") or {}).get(
+                            "use_audio_in_video"
+                        )
+                        and len(params) == 2
+                        and consumer_zmq is None
+                        and all(
+                            entry.keys() <= {"metadata", "item_indices"}
+                            for entry in params.values()
+                        )
+                    ):
+                        # Keep raw video for its audio/video features when no transfer
+                        # handles need to be forwarded.
+                        continue
+                    else:
+                        raise HTTPException(502, "Encoder metadata cannot be matched")
+                ec_mm_hash, reported = matched
                 metadata = reported.get("metadata") or {}
                 if metadata:
                     item_meta[idx] = {
@@ -384,12 +770,16 @@ async def fanout_encoder_primer(
                 # looks it up by mm_hash on the request, so carry it through.
                 ec_params[ec_mm_hash] = reported
                 if NO_REWRITE and consumer_zmq is not None:
-                    ec_params.setdefault("ec_items", []).append(
-                        {"mm_hash": ec_mm_hash, "transfer_id": item_transfer_ids[idx]}
-                    )
+                    transfer_items[idx] = {
+                        "mm_hash": ec_mm_hash,
+                        "transfer_id": item_transfer_ids[idx],
+                    }
+
+    if transfer_items:
+        ec_params["ec_items"] = [transfer_items[idx] for idx in sorted(transfer_items)]
 
     logger.info(
-        "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
+        "[%s] All %d encoder requests completed successfully", req_id, len(groups)
     )
     return item_meta, ec_params
 
@@ -398,6 +788,7 @@ async def maybe_prefill(
     req_data: dict,
     p_url: str,
     req_id: str,
+    dp_rank: int | None = None,
 ) -> dict:
     """- Do prefill-only task if p_url exist;
     - Return a new body carrying kv transfer params (for nixl connector)
@@ -409,7 +800,7 @@ async def maybe_prefill(
     if p_url:
         logger.info("[%s] Processing through prefill: %s", req_id, p_url)
 
-        prefill_response = await process_prefill_stage(req_data, p_url, req_id)
+        prefill_response = await process_prefill_stage(req_data, p_url, req_id, dp_rank)
         # for nixl connector to facilitate kv transfer...
         prefill_response_json = msgspec.json.decode(await prefill_response.read())
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
@@ -423,6 +814,7 @@ async def process_prefill_stage(
     req_data: dict,
     p_url: str,
     req_id: str,
+    dp_rank: int | None = None,
 ) -> dict:
     """Process request through Prefill stage and return kv_transfer_params"""
     logger.info("[%s] Sending prefill request to: %s", req_id, p_url)
@@ -444,6 +836,8 @@ async def process_prefill_stage(
         del prefill_request["stream_options"]
 
     headers = {"x-request-id": req_id, "Content-Type": "application/json"}
+    if dp_rank is not None:
+        headers["X-data-parallel-rank"] = str(dp_rank)
     try:
         prefill_response = await prefill_session.post(
             f"{p_url}/v1/chat/completions",
@@ -544,9 +938,7 @@ async def on_startup() -> None:
         ),
     )
     encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-    if app.state.p_urls:
-        # only setup if prefill instance(s) exist
-        prefill_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+    prefill_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     decode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
 
 
@@ -572,6 +964,7 @@ async def prepare_for_decode(
     e_urls: list[str],
     p_url: str,
     consumer_zmq: str | None,
+    prefill_dp_rank: int | None = None,
 ) -> tuple[dict, float, float]:
     """Encode, rewrite and prefill, returning the body to send to decode.
 
@@ -592,7 +985,7 @@ async def prepare_for_decode(
         handles.update(ec_params)
         prepared = {**prepared, "ec_transfer_params": handles}
     _t2 = time.perf_counter()
-    prepared = await maybe_prefill(prepared, p_url, req_id)
+    prepared = await maybe_prefill(prepared, p_url, req_id, prefill_dp_rank)
     return prepared, _t1 - _t0, _t2 - _t1
 
 
@@ -604,12 +997,13 @@ async def forward_non_stream(
     d_url: str,
     consumer_zmq: str | None,
     dp_rank: int | None = None,
+    prefill_dp_rank: int | None = None,
 ) -> Response:
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
             prepared, encode_s, rewrite_s = await prepare_for_decode(
-                req_data, req_id, e_urls, p_url, consumer_zmq
+                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
             )
             _t2 = time.perf_counter()
 
@@ -683,12 +1077,13 @@ async def forward_stream(
     d_url: str,
     consumer_zmq: str | None,
     dp_rank: int | None = None,
+    prefill_dp_rank: int | None = None,
 ) -> AsyncIterator[bytes]:
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
             prepared, encode_s, rewrite_s = await prepare_for_decode(
-                req_data, req_id, e_urls, p_url, consumer_zmq
+                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
             )
             _t2 = time.perf_counter()
 
@@ -926,10 +1321,147 @@ async def stop_profile(request: Request):
     return await _profile_cmd("stop", body, e_url, p_url, d_url)
 
 
+def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
+    config = config or EPDProxyConfig()
+    registry = InstanceRegistry(
+        probe_interval=config.probe_interval,
+        probe_timeout=config.probe_timeout,
+        fail_threshold=config.fail_threshold,
+        evicted_ttl=config.evicted_ttl,
+    )
+    proxy = EPDProxy(registry)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await on_startup()
+        try:
+            registry.start_probing()
+            yield
+        finally:
+            await registry.stop_probing()
+            await on_shutdown()
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.proxy = proxy
+    app.state.registry = registry
+
+    @app.get("/instances")
+    async def list_instances():
+        return registry.status()
+
+    @app.post("/instances", dependencies=[Depends(require_admin_key)])
+    async def register_instance(body: InstanceRegistration):
+        if body.ec_zmq_addrs and body.role not in (
+            InstanceRole.PREFILL,
+            InstanceRole.PREFILL_DECODE,
+        ):
+            raise HTTPException(400, "Only EC consumers accept Mooncake addresses")
+        try:
+            created = registry.register(
+                InstanceRecord(
+                    body.role,
+                    str(body.url).rstrip("/"),
+                    body.ec_zmq_addrs,
+                    body.dp_size,
+                )
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"registered": created}
+
+    @app.delete("/instances", dependencies=[Depends(require_admin_key)])
+    async def unregister_instance(url: AnyHttpUrl):
+        return {"removed": registry.unregister(str(url).rstrip("/"))}
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        req_data = msgspec.json.decode(await request.body())
+        req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        route = proxy.route(len(extract_mm_items(req_data)))
+        args = (
+            req_data,
+            req_id,
+            route.encoder_urls,
+            route.prefill.url if route.prefill else None,
+            route.decode.url,
+            route.consumer_zmq,
+        )
+        ranks = {
+            "dp_rank": route.dp_rank if route.prefill is None else None,
+            "prefill_dp_rank": route.dp_rank if route.prefill is not None else None,
+        }
+        if req_data.get("stream", False):
+            return StreamingResponse(
+                forward_stream(*args, **ranks), media_type="text/event-stream"
+            )
+        return await forward_non_stream(*args, **ranks)
+
+    @app.get("/v1/models")
+    async def list_models():
+        decode = registry.pick(InstanceRole.PREFILL_DECODE) or registry.pick(
+            InstanceRole.DECODE
+        )
+        if decode is None:
+            raise HTTPException(
+                status_code=503, detail="No decode instance is registered"
+            )
+        async with decode_session.get(f"{decode.url}/v1/models") as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
+    @app.get("/health")
+    async def health():
+        status = registry.status()
+        # An empty roster is not unhealthy: the proxy is meant to come up
+        # before anything registers with it.
+        return JSONResponse({"proxy": "healthy", "instances": status})
+
+    @app.post("/start_profile")
+    async def start_profile(request: Request):
+        return await _profile(registry, "start", await request.json())
+
+    @app.post("/stop_profile")
+    async def stop_profile(request: Request):
+        return await _profile(registry, "stop", await request.json())
+
+    return app
+
+
+async def _profile(registry: InstanceRegistry, cmd: str, payload: dict) -> dict:
+    headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"}
+    targets = {role.value: registry.pick(role) for role in InstanceRole}
+    results = await asyncio.gather(
+        *(
+            _post_if_available(
+                decode_session, f"{record.url}/{cmd}_profile", payload, headers
+            )
+            for record in targets.values()
+            if record is not None
+        )
+    )
+    reachable = [result for result in results if result is not None]
+    if not reachable:
+        raise HTTPException(
+            status_code=503,
+            detail="Profiling endpoints are disabled on every instance",
+        )
+    live = [name for name, record in targets.items() if record is not None]
+    return dict(zip(live, results))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--dynamic-registration",
+        action="store_true",
+        help="Enable launcher-managed HTTP registration for E+PD or E+P+D.",
+    )
+    parser.add_argument("--probe-interval", type=float, default=DEFAULT_PROBE_INTERVAL)
+    parser.add_argument("--probe-timeout", type=float, default=DEFAULT_PROBE_TIMEOUT)
+    parser.add_argument("--fail-threshold", type=int, default=DEFAULT_FAIL_THRESHOLD)
+    parser.add_argument("--evicted-ttl", type=float, default=DEFAULT_EVICTED_TTL)
     parser.add_argument(
         "--log-requests",
         action="store_true",
@@ -945,12 +1477,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--encode-servers-urls",
-        required=True,
+        default="",
         help='Comma-separated encode URLs ("http://e1:8001,http://e2:8001")',
     )
     parser.add_argument(
         "--prefill-servers-urls",
-        required=True,
+        default="none",
         help=(
             'Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") '
             'to enable E->P->D, set "disable" or "none" to enable E->PD'
@@ -958,7 +1490,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--decode-servers-urls",
-        required=True,
+        default="",
         help='Comma-separated decode URLs ("http://d1:8005,http://d2:8006")',
     )
     parser.add_argument(
@@ -993,58 +1525,87 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if args.fail_threshold < 1:
+        parser.error("--fail-threshold must be at least 1")
     if args.log_requests:
         logging.getLogger().setLevel(logging.DEBUG)
         app.middleware("http")(log_requests)
     NO_REWRITE = args.no_rewrite
     DECODE_RETRIES = max(0, args.decode_retries)
-    app.state.e_urls = [
-        u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
-    ]
-    app.state.d_urls = [
-        u.strip() for u in args.decode_servers_urls.split(",") if u.strip()
-    ]
-    app.state.d_ec_urls = [
-        u.strip() for u in args.ec_consumer_zmq_addrs.split(",") if u.strip()
-    ]
-    if args.ec_consumer_dp_size < 1:
-        parser.error("--ec-consumer-dp-size must be at least 1")
-    app.state.ec_consumer_dp_size = args.ec_consumer_dp_size
-    app.state.replica_counter = itertools.count()
-    expected = len(app.state.d_urls) * args.ec_consumer_dp_size
-    if app.state.d_ec_urls and len(app.state.d_ec_urls) != expected:
-        parser.error(
-            "--ec-consumer-zmq-addrs must contain one address per consumer "
-            f"replica: expected {expected} "
-            f"({len(app.state.d_urls)} servers x {args.ec_consumer_dp_size} replicas), "
-            f"got {len(app.state.d_ec_urls)}"
+    if args.dynamic_registration:
+        if not os.getenv("ADMIN_API_KEY"):
+            parser.error("--dynamic-registration requires ADMIN_API_KEY")
+        if (
+            args.encode_servers_urls
+            or args.prefill_servers_urls.lower() not in ("disable", "none", "")
+            or args.decode_servers_urls
+            or args.ec_consumer_zmq_addrs
+        ):
+            parser.error(
+                "With --dynamic-registration, instances register through /instances"
+            )
+        app = build_app(
+            EPDProxyConfig(
+                probe_interval=args.probe_interval,
+                probe_timeout=args.probe_timeout,
+                fail_threshold=args.fail_threshold,
+                evicted_ttl=args.evicted_ttl,
+            )
         )
-    # handle prefill instances
-    if args.prefill_servers_urls.lower() in ("disable", "none", ""):
-        app.state.p_urls = []
-        logger.info(
-            "Disaggregated prefill phase explicitly disabled by user. Running E + PD..."
-        )
+        if args.log_requests:
+            app.middleware("http")(log_requests)
     else:
-        app.state.p_urls = [
-            u.strip() for u in args.prefill_servers_urls.split(",") if u.strip()
+        if not args.encode_servers_urls or not args.decode_servers_urls:
+            parser.error(
+                "Static routing requires --encode-servers-urls "
+                "and --decode-servers-urls"
+            )
+        app.state.e_urls = [
+            u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
         ]
-        logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
-    try:
-        validate_ec_consumer_routing(app.state.p_urls, app.state.d_ec_urls)
-    except ValueError as exc:
-        parser.error(str(exc))
+        app.state.d_urls = [
+            u.strip() for u in args.decode_servers_urls.split(",") if u.strip()
+        ]
+        app.state.d_ec_urls = [
+            u.strip() for u in args.ec_consumer_zmq_addrs.split(",") if u.strip()
+        ]
+        if args.ec_consumer_dp_size < 1:
+            parser.error("--ec-consumer-dp-size must be at least 1")
+        app.state.ec_consumer_dp_size = args.ec_consumer_dp_size
+        app.state.replica_counter = itertools.count()
+        expected = len(app.state.d_urls) * args.ec_consumer_dp_size
+        if app.state.d_ec_urls and len(app.state.d_ec_urls) != expected:
+            parser.error(
+                "--ec-consumer-zmq-addrs must contain one address per consumer "
+                f"replica: expected {expected} "
+                f"({len(app.state.d_urls)} servers x "
+                f"{args.ec_consumer_dp_size} replicas), "
+                f"got {len(app.state.d_ec_urls)}"
+            )
+        # handle prefill instances
+        if args.prefill_servers_urls.lower() in ("disable", "none", ""):
+            app.state.p_urls = []
+            logger.info("Disaggregated prefill disabled. Running E + PD...")
+        else:
+            app.state.p_urls = [
+                u.strip() for u in args.prefill_servers_urls.split(",") if u.strip()
+            ]
+            logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
+        try:
+            validate_ec_consumer_routing(app.state.p_urls, app.state.d_ec_urls)
+        except ValueError as exc:
+            parser.error(str(exc))
 
-    logger.info("Proxy listening on %s:%s", args.host, args.port)
-    logger.info("Encode servers: %s", app.state.e_urls)
-    logger.info("Prefill instances %s", app.state.p_urls)
-    logger.info("Decode servers: %s", app.state.d_urls)
-    if app.state.ec_consumer_dp_size > 1:
-        logger.info(
-            "EC consumer replicas per server: %d (control addresses: %s)",
-            app.state.ec_consumer_dp_size,
-            app.state.d_ec_urls,
-        )
+        logger.info("Proxy listening on %s:%s", args.host, args.port)
+        logger.info("Encode servers: %s", app.state.e_urls)
+        logger.info("Prefill instances %s", app.state.p_urls)
+        logger.info("Decode servers: %s", app.state.d_urls)
+        if app.state.ec_consumer_dp_size > 1:
+            logger.info(
+                "EC consumer replicas per server: %d (control addresses: %s)",
+                app.state.ec_consumer_dp_size,
+                app.state.d_ec_urls,
+            )
 
     uvicorn.run(
         app,
