@@ -6,6 +6,7 @@ mod cache;
 mod collective_rpc;
 mod health;
 mod inference;
+mod kv_event_sources;
 mod load;
 mod lora;
 mod metrics;
@@ -91,6 +92,7 @@ fn build_router_with_options(
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
+        .route("/kv_event_sources", get(kv_event_sources::kv_event_sources))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
