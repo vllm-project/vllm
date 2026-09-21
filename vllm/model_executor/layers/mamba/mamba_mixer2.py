@@ -233,13 +233,14 @@ def mamba_v2_sharded_weight_loader(
             # - the ignore is for a mundane mypy error as it does not
             #   seem to handle slices well.
             # https://github.com/python/mypy/issues/2410
+            target_slice = param.data[boundary : (boundary + take), ...]
             param.data[
                 boundary : (boundary + take), ...  # type: ignore[misc]
             ] = loaded_weight[
                 loaded_start_idx : (
                     loaded_start_idx + take
                 )  # type: ignore[misc]
-            ]  # type: ignore[misc]
+            ].view_as(target_slice)
 
             # move indexing boundaries
             boundary += shard_size
@@ -441,17 +442,18 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 tp_rank,
             )
 
-            # Apply the custom weight loader to in_proj.weight
+            # Apply the custom weight loader to in_proj.weight and its scales.
             # Works for both non-quantized (Parameter) and quantized
             # (ModelWeightParameter which extends BasevLLMParameter)
-            if isinstance(self.in_proj.weight, BasevLLMParameter):
-                # For BasevLLMParameter subclasses (quantized layers like FP8)
-                # These have a weight_loader property that can be directly set
-                self.in_proj.weight.weight_loader = mamba_loader
-            else:
-                # For standard Parameter (non-quantized layers)
-                delattr(self.in_proj.weight, "weight_loader")
-                set_weight_attrs(self.in_proj.weight, {"weight_loader": mamba_loader})
+            for attr_name in ("weight", "weight_scale", "input_scale"):
+                param = getattr(self.in_proj, attr_name, None)
+                if param is not None:
+                    if isinstance(param, BasevLLMParameter):
+                        param.weight_loader = mamba_loader
+                    else:
+                        if hasattr(param, "weight_loader"):
+                            delattr(param, "weight_loader")
+                        set_weight_attrs(param, {"weight_loader": mamba_loader})
 
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
