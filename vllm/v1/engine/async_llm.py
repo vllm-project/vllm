@@ -208,9 +208,11 @@ class AsyncLLM(EngineClient):
             pass
 
         self.profiler = profiler
+        configured_activities = vllm_config.profiler_config.torch_profiler_activities
         if (
             vllm_config.profiler_config.profiler == "torch"
             and not vllm_config.profiler_config.ignore_frontend
+            and (configured_activities is None or "CPU" in configured_activities)
         ):
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
