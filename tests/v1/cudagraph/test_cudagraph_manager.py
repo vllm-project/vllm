@@ -399,3 +399,59 @@ def test_divisor_query_len_dispatch_is_unchanged(
         assert desc.cg_mode == CUDAGraphMode.FULL, num_tokens
         assert desc.num_tokens == expected, num_tokens
         assert desc.num_reqs == expected // decode_query_len, num_tokens
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("breakable", [False, True])
+def test_model_capture_warms_runtime_kernel_path(monkeypatch, mode, breakable):
+    """Breakable capture must not first initialize a graph-specific kernel."""
+    from vllm.forward_context import get_forward_context
+
+    manager = gpu_cudagraph_utils.ModelCudaGraphManager.__new__(
+        gpu_cudagraph_utils.ModelCudaGraphManager
+    )
+    manager.vllm_config = VllmConfig()
+    manager.use_breakable_cg = breakable
+    manager.cudagraph_mode = mode
+    manager.max_num_reqs = 1
+    manager.dp_size = 1
+    manager.is_first_pp_rank = manager.is_last_pp_rank = True
+    manager.hidden_states = None
+    manager.init_breakable_cg_runner = lambda model: None
+    manager.run_pw_graph = lambda model, inputs: model(**inputs)
+    monkeypatch.setattr(gpu_cudagraph_utils, "has_compiled_submodule", lambda _: True)
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "prepare_inputs_to_capture", lambda *a, **kw: ({}, {})
+    )
+    captured = False
+    warmed_modes = set()
+
+    def model(**kwargs):
+        runtime_mode = get_forward_context().cudagraph_runtime_mode
+        if captured:
+            assert runtime_mode == mode
+            if breakable:
+                assert runtime_mode in warmed_modes
+        else:
+            warmed_modes.add(runtime_mode)
+        return torch.zeros(1, 4)
+
+    def capture(self, create_forward_fn, progress_bar_desc):
+        nonlocal captured
+        desc = BatchExecutionDescriptor(mode, num_tokens=1, num_reqs=1)
+        create_forward_fn(desc, warmup=True)(CUDAGraphMode.NONE)
+        captured = True
+        create_forward_fn(desc, warmup=False)(mode)
+
+    monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
+    model_state = SimpleNamespace(prepare_dummy_inputs=lambda *args: {})
+    manager.capture(
+        model,
+        model_state,
+        InputBuffers(1, 1, torch.device("cpu")),
+        None,
+        MagicMock(),
+        [],
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+    assert warmed_modes == {mode if breakable else CUDAGraphMode.NONE}
