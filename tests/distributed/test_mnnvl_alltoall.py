@@ -241,6 +241,36 @@ def test_one_sided_combine_into_compatibility(supports_output):
     torch.testing.assert_close(output, payload + 2)
 
 
+@pytest.mark.parametrize("low_precision_combine", [False, True])
+def test_one_sided_combine_into_low_precision(low_precision_combine):
+    """The fp8 combine opt-in reaches the kernel, and stays off the call
+    signature entirely when disabled so older FlashInfer keeps working.
+    """
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+
+    seen_kwargs = {}
+
+    class FakeMoeAlltoAll:
+        def combine(self, payload, runtime_max_tokens_per_rank, output, **kwargs):
+            seen_kwargs.update(kwargs)
+            output.copy_(payload + runtime_max_tokens_per_rank)
+
+    manager = FlashInferNVLinkOneSidedManager.__new__(FlashInferNVLinkOneSidedManager)
+    manager.moe_alltoall = FakeMoeAlltoAll()
+    manager._combine_supports_output = True
+    manager.low_precision_combine = low_precision_combine
+    payload = torch.arange(4, dtype=torch.float32)
+    output = torch.empty_like(payload)
+
+    manager.combine_into(payload, runtime_max_tokens_per_rank=2, output=output)
+
+    expected = {"use_low_precision": True} if low_precision_combine else {}
+    assert seen_kwargs == expected
+    torch.testing.assert_close(output, payload + 2)
+
+
 # ---------------------------------------------------------------------------
 # Test 1: Two-sided manager lifecycle (init, cleanup, reinit, ensure_init)
 # ---------------------------------------------------------------------------
