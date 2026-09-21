@@ -9,6 +9,11 @@ reloading from disk.
 
 Launch one daemon per TP rank with a single command:
 
+    vllm weight-cache-daemon \\
+        --model /path/to/model --tensor-parallel-size 4
+
+The module path remains supported for compatibility:
+
     python -m vllm.model_executor.model_loader.weight_cache.daemon \\
         --model /path/to/model --tensor-parallel-size 4
 
@@ -43,6 +48,7 @@ assignment, so each engine worker maps its shard from the daemon on its own
 node.
 """
 
+import argparse
 import contextlib
 import fcntl
 import multiprocessing
@@ -349,10 +355,8 @@ def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
             )
 
 
-def main() -> None:
-    parser = FlexibleArgumentParser(
-        description="Launch weight cache daemons (one per TP rank)."
-    )
+def add_cli_args(parser: FlexibleArgumentParser) -> None:
+    """Add weight cache daemon arguments to an existing CLI parser."""
     EngineArgs.add_cli_args(parser)
     parser.add_argument(
         "--weight-cache-socket-dir",
@@ -369,7 +373,10 @@ def main() -> None:
         "serving) and match across nodes. Required when --nnodes > 1; defaults "
         "to a free port for single-node.",
     )
-    args = parser.parse_args()
+
+
+def run(args: argparse.Namespace) -> None:
+    """Launch weight cache daemons from parsed command-line arguments."""
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
     if vllm_config.load_config.load_format == "ipc_cache":
@@ -460,6 +467,14 @@ def main() -> None:
     for proc in procs:
         proc.join()
     sys.exit(max(proc.exitcode or 0 for proc in procs))
+
+
+def main() -> None:
+    parser = FlexibleArgumentParser(
+        description="Launch weight cache daemons (one per TP rank)."
+    )
+    add_cli_args(parser)
+    run(parser.parse_args())
 
 
 if __name__ == "__main__":
