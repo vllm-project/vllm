@@ -33,12 +33,14 @@ class ECCPUConnectorMetadata(ECConnectorMetadata):
     saves: dict[str, list[int]] = field(default_factory=dict)
 
     # Consumer role: mm_hashes whose bytes are available in the local mmap,
-    # mapped to (transfer_id, block_ids); the worker's start_load_caches
+    # mapped to (transfer_id, block_ids, shape); the worker's start_load_caches
     # copies mmap[block_ids] → GPU encoder_cache and reports the transfer_id
     # once its copy lands. The id is minted per dispatch, so two loads of the
     # same mm_hash in different steps are distinct and a late report from the
     # earlier one cannot release the later one's pin.
-    loads: dict[str, tuple[int, list[int]]] = field(default_factory=dict)
+    loads: dict[str, tuple[int, list[int], tuple[int, int]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -66,23 +68,13 @@ class ECCPUWorkerMetadata(ECConnectorWorkerMetadata):
         return self
 
 
-def _get_encoder_cache_hidden_dim(vllm_config: "VllmConfig") -> int:
-    """Return the per-token hidden dimension for encoder cache entries.
-
-    For most models this equals the LLM's hidden size.  Qwen3-VL (and any
-    future model with deepstack visual encoding) is an exception: the ViT
-    concatenates its own output with features from N decoder layers before
-    storing in encoder_cache, producing a tensor of width
-    ``out_hidden_size * (1 + N)`` per visual token.  Using the plain LLM
-    hidden size would under-allocate EC blocks and silently truncate the
-    transferred data, leading to a shape mismatch on the consumer.
-    """
+def _get_encoder_cache_hidden_dim(vllm_config: "VllmConfig", modality: str) -> int:
+    """Return the encoder output width, including visual DeepStack features."""
     model_config = vllm_config.model_config
-    hf_config = getattr(model_config, "hf_config", None)
-    vision_config = (
-        getattr(hf_config, "vision_config", None) if hf_config is not None else None
-    )
-    if vision_config is not None:
+    if modality in ("image", "video"):
+        hf_config = model_config.hf_config
+        hf_config = getattr(hf_config, "thinker_config", hf_config)
+        vision_config = getattr(hf_config, "vision_config", None)
         out_hidden_size = getattr(vision_config, "out_hidden_size", None)
         deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
         if out_hidden_size is not None and deepstack_indexes:
@@ -103,7 +95,7 @@ def create_ec_shared_region(vllm_config: "VllmConfig") -> ECSharedRegion:
     engine_id = f"{vllm_config.instance_id}_dp{dp_index}"
 
     dtype = vllm_config.model_config.dtype
-    hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)
+    hidden_dim = vllm_config.model_config.get_inputs_embeds_size()
     element_size = torch.empty(0, dtype=dtype).element_size()
     block_size_bytes = hidden_dim * element_size
 

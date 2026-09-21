@@ -3,6 +3,7 @@
 """Shared config builders for EC connector unit tests."""
 
 import uuid
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import torch
@@ -31,10 +32,8 @@ def create_ec_vllm_config(
     role derivation and the rank arithmetic the connector depends on behave as
     they do in production.
 
-    `model_config` is a stub because nothing under test needs a real one: the
-    connector reads only `dtype` here, and the paths that inspect the model
-    itself are not exercised. Building a real `ModelConfig` would resolve an HF
-    model and inspect its architecture.
+    `model_config` supplies a dtype and embedding width without resolving an
+    HF model or inspecting its architecture.
 
     Args:
         ec_role: EC role this instance plays. `is_ec_producer` and
@@ -62,6 +61,8 @@ def create_ec_vllm_config(
 
     model_config = Mock(spec=ModelConfig)
     model_config.dtype = dtype
+    model_config.hf_config = SimpleNamespace()
+    model_config.get_inputs_embeds_size.return_value = 32
 
     vllm_config = Mock(spec=VllmConfig)
     vllm_config.ec_transfer_config = ec_transfer_config

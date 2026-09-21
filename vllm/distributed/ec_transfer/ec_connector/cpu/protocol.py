@@ -14,9 +14,9 @@ import json
 
 import msgspec
 
-# Bump when the on-wire shape (XferReq/XferAck) changes in a
+# Bump when the wire format or tensor/block layout changes in a
 # backward-incompatible way. Peers reject mismatched versions.
-EC_CONNECTOR_VERSION: int = 1
+EC_CONNECTOR_VERSION: int = 2
 
 
 class XferStatus(enum.IntEnum):

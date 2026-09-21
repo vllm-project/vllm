@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
+from types import SimpleNamespace
+
+import torch
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
 from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
@@ -12,6 +15,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 
 _N = 16
 _BS = 64
@@ -22,12 +26,16 @@ class _Pos:
         self.offset = offset
         self.length = length
 
+    def get_num_embeds(self):
+        return self.length
+
 
 class _Feature:
     def __init__(self, mm_hash, length=1, identifier=None):
         self.mm_hash = mm_hash
         self.identifier = identifier if identifier is not None else mm_hash
         self.mm_position = _Pos(0, length)
+        self.modality = "image"
 
 
 class _Request:
@@ -80,7 +88,7 @@ def _make_scheduler(
 
 def _load_ids(meta) -> list[int]:
     """Transfer ids the scheduler dispatched in this step's metadata."""
-    return [transfer_id for transfer_id, _ in meta.loads.values()]
+    return [transfer_id for transfer_id, _, _ in meta.loads.values()]
 
 
 def _load_blocks(meta, mm_hash: str) -> list[int]:
@@ -121,6 +129,62 @@ def test_offload_reuse_cycle(monkeypatch):
     assert _load_blocks(meta_c, "h1") == meta_a.saves["h1"]
 
     s.shutdown()
+
+
+def test_omni_allocates_and_reloads_each_modality_shape():
+    """Visual DeepStack needs more blocks, not a wider audio reload."""
+    cfg = create_ec_vllm_config()
+    cfg.ec_transfer_config.ec_connector_extra_config["ec_cpu_bytes"] = 4096
+    cfg.model_config.get_inputs_embeds_size.return_value = 32
+    cfg.model_config.hf_config = SimpleNamespace(
+        thinker_config=SimpleNamespace(
+            vision_config=SimpleNamespace(
+                out_hidden_size=32, deepstack_visual_indexes=[8, 16, 24]
+            )
+        )
+    )
+    s = ECCPUScheduler(cfg)
+    req = _Request(
+        [
+            MultiModalFeatureSpec(
+                identifier="image",
+                modality="image",
+                data=None,
+                mm_position=PlaceholderRange(offset=0, length=2),
+            ),
+            MultiModalFeatureSpec(
+                identifier="audio",
+                modality="audio",
+                data=None,
+                mm_position=PlaceholderRange(
+                    offset=2,
+                    length=4,
+                    is_embed=torch.tensor([True, False, True, False]),
+                ),
+            ),
+        ]
+    )
+    try:
+        for index in range(2):
+            s.update_state_after_alloc(req, index)
+        saved = s.build_connector_meta(None)
+        assert len(saved.saves["image"]) == 8
+        assert len(saved.saves["audio"]) == 2
+        s.update_connector_output(_WorkerOutput(saves=["image", "audio"]))
+        for index in range(2):
+            s.update_state_after_alloc(req, index)
+        loaded = s.build_connector_meta(None)
+        assert loaded.loads["image"][2] == (2, 128)
+        assert loaded.loads["audio"][2] == (2, 32)
+
+        s._nixl_enabled = True
+        s._peer_host, s._peer_port = "producer", 1234
+        s._metadata_resolver._cache = {"image": set(), "audio": set()}
+        _, params = s.request_finished(req)
+        assert params["image"]["size_bytes"] == 2 * 128 * 2
+        assert params["audio"]["size_bytes"] == 2 * 32 * 2
+    finally:
+        s.shutdown()
 
 
 def test_has_cache_item_false_when_not_consumer(monkeypatch):
