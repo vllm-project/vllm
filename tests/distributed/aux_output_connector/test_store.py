@@ -182,8 +182,7 @@ def _make_worker(
     worker._requests = {}
     worker._generation = 0
     worker._step_metadata = None
-    worker._pendings = []
-    worker._outstanding = {}
+    worker._pending_outputs = []
     worker._lock = threading.Lock()
     worker._max_concurrent_batches = max_concurrent_batches
     return worker
@@ -276,11 +275,11 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
         pending_aux_output=pending,
     )
     event.record.assert_called_once()
-    assert worker._pendings == [pending]
+    assert worker._pending_outputs == [pending]
 
     worker.begin_step(_metadata(0, [], {}).metadata)
     process_output.assert_not_called()
-    assert worker._pendings == [pending]
+    assert worker._pending_outputs == [pending]
 
     result = output.get_output()
 
@@ -289,32 +288,38 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
         result.aux_output_connector_output["request"].rows, rows.numpy()
     )
     process_output.assert_called_once()
-    assert worker._pendings == []
+    assert worker._pending_outputs == []
     worker.close()
 
 
-def test_finished_request_teardown_waits_for_pending_output():
-    """A request finished while its step output is unconsumed still commits."""
+@pytest.mark.parametrize("num_pending", [1, 2])
+def test_finished_request_teardown_waits_for_pending_output(num_pending):
+    """Terminal cleanup waits for every outstanding output, not just the first."""
     worker = _make_worker(1)
-    worker.begin_step(
-        _metadata(0, [_request_metadata("request", 0, 4, 0, [b"aaaa"])], {}).metadata
-    )
     rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, *_SHAPE)
     worker._capturer = Mock()
     worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
-    pending = worker.prepare_output(
-        _input_batch(["request"], np.array([0]), np.array([0, 4]))
-    )
-    assert pending is not None
-    pending.enqueue_cpu_copy(np.array([1]), np.array([0]))
+    pending_outputs = []
+    for i in range(num_pending):
+        request = _request_metadata("request", 4 * i, 4, 4 * i, [bytes([i]) * 4])
+        worker.begin_step(_metadata(0, [request], {}).metadata)
+        pending = worker.prepare_output(
+            _input_batch(["request"], np.array([4 * i]), np.array([0, 4]))
+        )
+        assert pending is not None
+        pending.enqueue_cpu_copy(np.array([1]), np.array([0]))
+        pending_outputs.append(pending)
 
     # The next step finishes the request while its output is unconsumed.
     worker.begin_step(_metadata(0, [], {"request": []}).metadata)
     assert "request" in worker._requests
 
-    output = worker.process_output(pending)
-
-    np.testing.assert_array_equal(output["request"].rows, rows)
+    for i, pending in enumerate(pending_outputs):
+        output = worker.process_output(pending)
+        np.testing.assert_array_equal(output["request"].rows, rows)
+        if i + 1 < num_pending:
+            assert "request" in worker._requests
+            assert worker._store._references
     assert "request" not in worker._requests
     # The finished request's store keys must be released after commit.
     assert not worker._store._references
@@ -357,7 +362,7 @@ def test_worker_rejects_invalid_rejected_token_count():
             token_starts=(0,),
             num_tokens=(1,),
         )
-    assert worker._pendings == []
+    assert worker._pending_outputs == []
 
     worker.close()
 

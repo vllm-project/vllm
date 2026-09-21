@@ -46,6 +46,7 @@ class _WorkerRequestState:
     capture_cursor: int | None = None
     scheduled_cursor: int = 0
     emit_cursor: int = 0
+    pending_outputs: int = 0
     # Terminal event received; teardown waits for in-flight step outputs.
     finished: bool = False
 
@@ -103,8 +104,7 @@ class AuxOutputWorkerConnector:
         # Steps whose asynchronous copy has not been consumed yet. The engine
         # consumes step outputs in order, so at most max_concurrent_batches
         # are outstanding; guarded by _lock against the output thread.
-        self._pendings: list[PendingAuxOutput] = []
-        self._outstanding: dict[str, int] = {}
+        self._pending_outputs: list[PendingAuxOutput] = []
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
         # Every TP rank participates in capture collectives, but only the
@@ -152,13 +152,12 @@ class AuxOutputWorkerConnector:
             routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
         )
         with self._lock:
-            assert len(self._pendings) < self._max_concurrent_batches, (
+            assert len(self._pending_outputs) < self._max_concurrent_batches, (
                 "auxiliary output step outputs are not consumed in order"
             )
-            self._pendings.append(pending_output)
+            self._pending_outputs.append(pending_output)
             for request_id in pending_output.request_ids:
-                count = self._outstanding.get(request_id, 0)
-                self._outstanding[request_id] = count + 1
+                self._requests[request_id].pending_outputs += 1
         return pending_output
 
     def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
@@ -168,24 +167,24 @@ class AuxOutputWorkerConnector:
         in-flight step covers the request.
         """
         with self._lock:
+            teardown = []
             try:
                 outputs = self._commit_output(pending)
             finally:
-                self._pendings.remove(pending)
+                self._pending_outputs.remove(pending)
                 for request_id in pending.request_ids:
-                    remaining = self._outstanding[request_id] - 1
-                    if remaining:
-                        self._outstanding[request_id] = remaining
-                    else:
-                        del self._outstanding[request_id]
-            teardown = [
-                request_id
-                for request_id in pending.request_ids
-                if request_id not in self._outstanding
-                and (state := self._requests.get(request_id)) is not None
-                and state.finished
-            ]
+                    state = self._requests[request_id]
+                    state.pending_outputs -= 1
+                    if state.pending_outputs == 0 and state.finished:
+                        teardown.append(request_id)
             if teardown:
+                release_keys = [
+                    key
+                    for request_id in teardown
+                    for key in reversed(self._requests[request_id].aux_output_keys)
+                ]
+                if release_keys:
+                    self._publish_blocks([], release_keys=release_keys)
                 self._teardown(teardown)
             return outputs
 
@@ -327,16 +326,9 @@ class AuxOutputWorkerConnector:
                 buffer.release_block(rows)
 
     def _teardown(self, request_ids: Iterable[str]) -> None:
-        """Drop finished requests' temporary state and release store keys."""
+        """Drop finished requests' temporary state after publishing key releases."""
         buffer = self._buffer
         assert buffer is not None
-        release_keys = [
-            key
-            for request_id in request_ids
-            for key in reversed(self._requests[request_id].aux_output_keys)
-        ]
-        if release_keys:
-            self._publish_blocks([], release_keys=release_keys)
         for request_id in request_ids:
             state = self._requests.pop(request_id)
             for _, rows in state.pending_blocks:
@@ -363,7 +355,7 @@ class AuxOutputWorkerConnector:
             if metadata.generation > self._generation:
                 # A generation change follows a prefix-cache reset, which the
                 # scheduler only performs once all model output is consumed.
-                assert not self._pendings, (
+                assert not self._pending_outputs, (
                     "auxiliary output generation changed with output in flight"
                 )
                 release_keys.extend(
@@ -378,7 +370,7 @@ class AuxOutputWorkerConnector:
                 state = self._requests.setdefault(
                     request_id, _WorkerRequestState(emit_cursor=emit_start)
                 )
-                if request_id not in self._outstanding:
+                if state.pending_outputs == 0:
                     # In-flight steps leave the worker cursor behind the
                     # scheduler's optimistic view; only check settled requests.
                     assert emit_start <= state.emit_cursor, (
@@ -398,21 +390,16 @@ class AuxOutputWorkerConnector:
             for request_id in metadata.finished_requests:
                 state = self._requests[request_id]
                 state.finished = True
-                if request_id in self._outstanding:
+                if state.pending_outputs:
                     continue
                 finished_now.append(request_id)
                 release_keys.extend(reversed(state.aux_output_keys))
             self._publish_blocks(block_batches, retained_keys, release_keys)
-            for request_id in finished_now:
-                state = self._requests.pop(request_id)
-                for _, rows in state.pending_blocks:
-                    self._buffer.release_block(rows)
-                self._buffer.discard(request_id)
+            self._teardown(finished_now)
 
     def close(self) -> None:
         with self._lock:
-            self._pendings.clear()
-            self._outstanding.clear()
+            self._pending_outputs.clear()
             if self._store is not None:
                 try:
                     self._store.close()
