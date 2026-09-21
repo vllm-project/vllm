@@ -4,7 +4,9 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
 from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
@@ -12,6 +14,7 @@ from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_mod
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
+    resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.structured_outputs import _build_grammar_mapping
 
@@ -33,6 +36,26 @@ def make_manager(
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
     return manager
+
+
+@pytest.mark.parametrize(
+    ("mode", "piecewise_capture_available", "expected"),
+    [
+        ("FULL_DECODE_ONLY", True, "FULL_DECODE_ONLY"),
+        ("FULL_DECODE_ONLY", False, "FULL_DECODE_ONLY"),
+        ("FULL", True, "FULL_AND_PIECEWISE"),
+        ("FULL", False, "FULL_DECODE_ONLY"),
+        ("FULL_AND_PIECEWISE", True, "FULL_AND_PIECEWISE"),
+        ("FULL_AND_PIECEWISE", False, "FULL_DECODE_ONLY"),
+    ],
+)
+def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expected):
+    assert (
+        resolve_adaptive_cudagraph_mode(
+            CUDAGraphMode[mode], piecewise_capture_available=piecewise_capture_available
+        )
+        == CUDAGraphMode[expected]
+    )
 
 
 def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatch):
