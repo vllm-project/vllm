@@ -19,6 +19,8 @@ pub enum Error {
     ChatTemplate(String),
     #[error("{0}")]
     InvalidReasoningEffort(String),
+    #[error("{message}")]
+    InvalidReasoningControl { message: String },
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
@@ -101,6 +103,7 @@ impl Error {
         match self {
             Self::PromptTooLong { .. }
             | Self::InvalidReasoningEffort(_)
+            | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. } => true,

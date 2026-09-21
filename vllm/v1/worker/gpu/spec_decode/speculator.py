@@ -17,6 +17,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.watermarking import create_watermarker
+from vllm.v1.watermarking.spec_decode import (
+    DraftWatermarker,
+    create_speculative_draft_watermarker,
+)
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     init_attn_backend,
@@ -28,6 +33,9 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    OnlineAcceptanceEstimator,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -153,6 +161,15 @@ class DraftModelSpeculator(BaseSpeculator):
         self.arange_np = np.arange(self.max_num_reqs + 1, dtype=np.int32)
         self.draft_is_prefilling = torch.zeros(self.max_num_reqs, dtype=torch.bool)
 
+        self.draft_token_confidence_probs = torch.empty_like(
+            self.draft_tokens, dtype=torch.float32
+        )
+        self.enable_adaptive_verification = (
+            self.speculative_config.enable_adaptive_verification
+        )
+        self.use_acceptance_estimator = self.enable_adaptive_verification
+        self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
+
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
             # Pre-temperature logits, cached from the previous decode step.
@@ -166,6 +183,17 @@ class DraftModelSpeculator(BaseSpeculator):
                 fill,
                 dtype=dtype,
                 device=device,
+            )
+
+        self.draft_watermarker: DraftWatermarker | None = None
+        watermark_config = getattr(vllm_config, "watermark_config", None)
+        if watermark_config is not None:
+            watermarker = create_watermarker(watermark_config)
+            self.draft_watermarker = create_speculative_draft_watermarker(
+                watermarker,
+                self.max_num_reqs,
+                device,
+                watermark_config.allow_target_only_watermarking,
             )
 
         self.supports_mm_inputs = False
@@ -209,6 +237,20 @@ class DraftModelSpeculator(BaseSpeculator):
                 "Embeddings from the target model will not be passed to the "
                 "drafter; using text-only draft inputs instead.",
                 type(self.model).__name__,
+            )
+
+        if self.use_acceptance_estimator:
+            if self.use_local_argmax_reduction:
+                raise ValueError(
+                    "Adaptive verification without a confidence head estimates "
+                    "per-position acceptance from the draft logits, which "
+                    "use_local_argmax_reduction never materializes. Disable one "
+                    "of them."
+                )
+            self.acceptance_estimator = OnlineAcceptanceEstimator(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.device,
             )
 
     def set_eplb_state(self, eplb_state: EplbState) -> None:
@@ -355,12 +397,6 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
-    def _greedy_sample_draft(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.use_local_argmax_reduction:
-            return self.model.get_top_tokens(hidden_states)
-        logits = self.model.compute_logits(hidden_states)
-        return logits.argmax(dim=-1)
-
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
@@ -373,7 +409,7 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            return gumbel_sample(
+            sampled = gumbel_sample(
                 logits,
                 idx_mapping,
                 temperature,
@@ -385,7 +421,56 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-        return self._greedy_sample_draft(hidden_states)
+            if self.draft_watermarker is not None:
+                sampled = self.draft_watermarker.sample(
+                    logits,
+                    sampled,
+                    idx_mapping,
+                    temperature,
+                )
+        elif self.use_local_argmax_reduction:
+            return self.model.get_top_tokens(hidden_states)
+        else:
+            logits = self.model.compute_logits(hidden_states)
+            sampled = logits.argmax(dim=-1)
+        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
+        return sampled
+
+    def _maybe_predict_acceptance(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        draft_step: torch.Tensor,
+    ) -> None:
+        if self.acceptance_estimator is not None:
+            self.acceptance_estimator.predict(
+                logits,
+                idx_mapping,
+                draft_step,
+                self.draft_token_confidence_probs,
+                self.temperature,
+            )
+
+    def observe_verification(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+    ) -> None:
+        """Fold the target's verdict on the last drafts into the estimator.
+
+        Must run before the next `propose`, which overwrites the per-slot
+        features the verdict grades.
+        """
+        if self.acceptance_estimator is not None:
+            self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
+
+    def prepare_watermarking(
+        self, contexts: torch.Tensor, watermarking: torch.Tensor
+    ) -> None:
+        if self.draft_watermarker is None:
+            return
+        self.draft_watermarker.prepare(contexts, watermarking)
 
     def _copy_request_inputs(
         self,
@@ -396,6 +481,7 @@ class DraftModelSpeculator(BaseSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        dummy_run: bool = False,
     ) -> None:
         # Copy temperature, seeds, and idx mapping to the pre-allocated buffers.
         # NOTE(woosuk): For draft sampling, we only consider the temperature
@@ -405,10 +491,15 @@ class DraftModelSpeculator(BaseSpeculator):
         # affect the output distribution after rejection sampling.
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
-        self.idx_mapping[:num_reqs].copy_(idx_mapping)
-        # idx_mapping for CG padded requests points to -1, which is ignored
-        # during sampling to prevent writing stale values to draft logits.
-        self.idx_mapping[num_reqs:].fill_(-1)
+        # idx_mapping == -1 marks a row the drafter must not act on: sampling
+        # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows
+        # always get it; a dummy batch gets it for every row, since its arange
+        # idx_mapping names request-state slots with stale block tables.
+        if dummy_run:
+            self.idx_mapping.fill_(-1)
+        else:
+            self.idx_mapping[:num_reqs].copy_(idx_mapping)
+            self.idx_mapping[num_reqs:].fill_(-1)
 
     def _build_uniform_batch_dp_sync(
         self,

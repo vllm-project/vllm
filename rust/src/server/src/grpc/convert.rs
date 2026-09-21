@@ -4,6 +4,7 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::StopReason;
@@ -64,6 +65,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
+    sampling_params.watermarking = req.watermarking.unwrap_or(true);
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -192,7 +194,7 @@ fn build_sampling_params(
     if let Some(r) = response {
         if r.output_logprobs {
             let (count, token_ids) = candidate_logprob_spec(r.output_candidates.as_ref());
-            params.logprobs = Some(count);
+            params.logprobs = count;
             params.logprob_token_ids = token_ids;
         }
         if r.prompt_logprobs {
@@ -209,7 +211,7 @@ fn build_sampling_params(
                 ));
             }
             let (count, _) = candidate_logprob_spec(r.prompt_candidates.as_ref());
-            params.prompt_logprobs = Some(count);
+            params.prompt_logprobs = count;
         }
     }
 
@@ -219,18 +221,22 @@ fn build_sampling_params(
 /// Map the proto `CandidateTokens` selector to a `(logprobs_count,
 /// logprob_token_ids)` pair.
 ///
-/// - `top_n(k)` → `(k, None)` — return top-k candidates by probability
-/// - `all` → `(-1, None)` — return the full vocabulary
-/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for specific tokens (the
-///   count `n` is stored in the proto as the number of token IDs that follow, but the actual IDs
-///   are carried via `logprob_token_ids` on `SamplingParams`)
-/// - absent → `(1, None)` — just the sampled/scored token
-fn candidate_logprob_spec(candidates: Option<&pb::CandidateTokens>) -> (i32, Option<Vec<u32>>) {
+/// - `top_n(k)` → `(Some(k), None)` — return top-k candidates by probability
+/// - `all` → `(Some(-1), None)` — return the full vocabulary
+/// - nonempty `token_ids` → `(None, Some(ids))` — let the engine derive the count
+/// - absent or empty `token_ids` → `(Some(0), None)` — return only the sampled/scored token
+fn candidate_logprob_spec(
+    candidates: Option<&pb::CandidateTokens>,
+) -> (Option<i32>, Option<Vec<u32>>) {
     match candidates.and_then(|c| c.select.as_ref()) {
-        Some(pb::candidate_tokens::Select::TopN(n)) => (*n as i32, None),
-        Some(pb::candidate_tokens::Select::All(true)) => (-1, None),
-        Some(pb::candidate_tokens::Select::TokenIds(ids)) => (1, Some(ids.ids.clone())),
-        _ => (1, None),
+        Some(pb::candidate_tokens::Select::TopN(n)) => (Some(*n as i32), None),
+        Some(pb::candidate_tokens::Select::All(true)) => (Some(-1), None),
+        Some(pb::candidate_tokens::Select::TokenIds(ids)) if !ids.ids.is_empty() => {
+            // Match Python HTTP: selected IDs have their own limit, independent
+            // of the numeric top-logprobs count and its max_logprobs cap.
+            (None, Some(ids.ids.clone()))
+        }
+        _ => (Some(0), None),
     }
 }
 
@@ -259,6 +265,9 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
+    params
+        .validate()
+        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -307,6 +316,11 @@ pub fn to_sequence_output(
         _ => (vec![], vec![], vec![]),
     };
 
+    let sampling_mask = finished
+        .and_then(|finished| finished.sampling_mask.as_ref())
+        .map(|mask| mask.rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
+        .unwrap_or_default();
+
     Ok(pb::SequenceOutput {
         index: 0, // TODO: multi-sequence (n > 1) not supported
         text: if opts.output_text {
@@ -324,6 +338,7 @@ pub fn to_sequence_output(
         ranks: rank_values,
         candidate_tokens: candidates,
         finish_info,
+        sampling_mask,
     })
 }
 
@@ -513,8 +528,13 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
     use vllm_engine_core_client::protocol::output::StopReason;
-    use vllm_text::{FinishReason, Finished, Prompt};
+    use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_text::{
+        FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
+    };
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
@@ -525,6 +545,26 @@ mod tests {
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn watermarking_defaults_and_opt_out_survive_protobuf_conversion() {
+        for watermarking in [None, Some(true), Some(false)] {
+            let request = pb::GenerateRequest {
+                watermarking,
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(decoded, stream, &["test-model".to_string()])
+                    .expect("convert request");
+                assert_eq!(
+                    text.sampling_params.watermarking,
+                    watermarking.unwrap_or(true)
+                );
+            }
         }
     }
 
@@ -544,6 +584,20 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn grpc_rejects_empty_grammar_before_engine() {
+        use super::pb::decoding_parameters::StructuredOutput;
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
+        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
@@ -570,6 +624,69 @@ mod tests {
         };
         let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
         assert_eq!(text.sampling_params.seed, Some(0));
+    }
+
+    #[test]
+    fn output_logprob_selectors_survive_request_lowering() {
+        use pb::candidate_tokens::Select;
+
+        let selected_ids: Vec<u32> = (100..121).collect();
+        let cases = [
+            (
+                Some(Select::TokenIds(pb::TokenIds {
+                    ids: selected_ids.clone(),
+                })),
+                None,
+                Some(selected_ids),
+            ),
+            (
+                Some(Select::TokenIds(pb::TokenIds {
+                    ids: vec![198, 198],
+                })),
+                None,
+                Some(vec![198, 198]),
+            ),
+            (
+                Some(Select::TokenIds(pb::TokenIds { ids: vec![] })),
+                Some(0),
+                None,
+            ),
+            (None, Some(0), None),
+            (Some(Select::TopN(0)), Some(0), None),
+            (Some(Select::TopN(2)), Some(2), None),
+        ];
+        for (select, expected_count, expected_ids) in cases {
+            let req = pb::GenerateRequest {
+                response: Some(pb::ResponseOptions {
+                    output_logprobs: true,
+                    output_candidates: select.map(|select| pb::CandidateTokens {
+                        select: Some(select),
+                    }),
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let text =
+                to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+            let params = lower_sampling_params(
+                text.sampling_params,
+                SamplingHints::default(),
+                SamplingLimits {
+                    max_model_len: 32,
+                    max_logprobs: 20,
+                    model_vocab_size: 512,
+                    tokenizer_vocab_size: 512,
+                },
+                1,
+                &TestTokenizer::new(),
+            )
+            .expect("logprob selector should lower to an engine request");
+
+            assert_eq!(
+                (params.logprobs, params.logprob_token_ids),
+                (expected_count, expected_ids)
+            );
+        }
     }
 
     #[test]
@@ -610,6 +727,7 @@ mod tests {
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            sampling_mask: None,
         }
     }
 
@@ -693,5 +811,41 @@ mod tests {
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(finish.stop_reason, Some(PbStopReason::EosTokenId(30)));
+    }
+
+    #[test]
+    fn sequence_output_only_carries_sampling_mask_on_terminal_output() {
+        let mut fin = finished(FinishReason::Length);
+        fin.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![1, 10], vec![2, 20]],
+        });
+
+        let terminal =
+            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())
+                .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+            .expect("intermediate output");
+
+        assert_eq!(
+            terminal.sampling_mask,
+            vec![
+                pb::TokenIds { ids: vec![1, 10] },
+                pb::TokenIds { ids: vec![2, 20] }
+            ]
+        );
+        assert!(intermediate.sampling_mask.is_empty());
+    }
+
+    #[test]
+    fn sampling_mask_uses_additive_proto_tag_ten() {
+        let response = pb::SequenceOutput {
+            sampling_mask: vec![pb::TokenIds { ids: vec![7, 8] }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            response.encode_to_vec(),
+            vec![0x52, 0x04, 0x0a, 0x02, 0x07, 0x08]
+        );
     }
 }
