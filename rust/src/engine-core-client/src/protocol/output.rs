@@ -133,6 +133,9 @@ pub struct EngineCoreOutput {
     /// output when `--per-request-spec-decode-metrics` is enabled.
     #[serde(default)]
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    /// Scores for `SamplingParams.prompt_logprob_token_ids`; not yet surfaced.
+    #[serde(default)]
+    pub prompt_token_id_logprobs: Option<OpaqueValue>,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -531,6 +534,7 @@ mod tests {
                             mm_cache_miss_hashes: None,
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
+                            prompt_token_id_logprobs: None,
                         },
                     ],
                     scheduler_stats: None,

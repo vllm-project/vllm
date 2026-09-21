@@ -117,6 +117,10 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
+        prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids, shaped
+            [prompt_len - 1 - prompt_logprob_start, num_ids]; row i holds the
+            logprobs of its own IDs as predictions of prompt token
+            prompt_logprob_start + i + 1, with -inf in padded columns.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -148,6 +152,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
         *,
+        prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -162,6 +167,7 @@ class RequestOutput:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_logprobs = prompt_logprobs
+        self.prompt_token_id_logprobs = prompt_token_id_logprobs
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -211,6 +217,7 @@ class RequestOutput:
             f"encoder_prompt={self.encoder_prompt!r}, "
             f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"prompt_token_id_logprobs={self.prompt_token_id_logprobs}, "
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
