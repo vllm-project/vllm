@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Ray Dependency Compatibility Check"
   key: ray-dependency-compatibility-check
-  # Informational only — does not block the pipeline.
+  # Informational only on NVIDIA; the AMD mirror fails the pipeline.
   # If this fails, it means the PR introduces a dependency that
   # conflicts with Ray's dependency constraints.
   # See https://github.com/vllm-project/vllm/issues/33599
@@ -21,6 +21,7 @@ steps:
       label: ":amd: (MI355) Ray Dependency Compatibility Check"
       dind: false
       device: mi355_1
+      soft_fail: false
       timeout_in_minutes: 25
       working_dir: "/"
       depends_on:
