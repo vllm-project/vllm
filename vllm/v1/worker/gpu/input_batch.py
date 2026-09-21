@@ -131,6 +131,9 @@ class InputBatch:
     # adaptive verification with batch-sharded sampling, when the budget binds.
     num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
 
+    # [num_reqs] CPU lower bound on seq_lens (see CommonAttentionMetadata).
+    seq_lens_cpu_lower_bound: torch.Tensor | None = None
+
     @classmethod
     def make_dummy(
         cls,
