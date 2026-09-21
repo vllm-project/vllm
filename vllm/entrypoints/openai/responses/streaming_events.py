@@ -1221,12 +1221,26 @@ class SimpleStreamingEventProcessor:
             and self.state.tool_call_index != tool_call.index
         )
 
-    def close_current(self) -> list[StreamingResponsesResponse]:
+    def close_current(
+        self, incomplete: bool = False
+    ) -> list[StreamingResponsesResponse]:
         """Close the current state and emit its 'done' event sequence."""
         handlers = self._STATE_HANDLERS.get(self.state.current_state)
         if handlers is None:
             return []
-        return handlers.done_fn(self.state)
+        events = handlers.done_fn(self.state)
+        if incomplete:
+            for event in events:
+                if isinstance(event, ResponseOutputItemDoneEvent) and isinstance(
+                    event.item,
+                    (
+                        ResponseOutputMessage,
+                        ResponseReasoningItem,
+                        ResponseFunctionToolCall,
+                    ),
+                ):
+                    event.item.status = "incomplete"
+        return events
 
     def open(
         self, target_state: _StateType, tool_call: Any = None
