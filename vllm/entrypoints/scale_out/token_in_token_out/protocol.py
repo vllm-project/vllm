@@ -333,7 +333,7 @@ class GenerateResponseChoice(BaseModel):
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
     # Ordered keys of published raw R3 objects, returned on the terminal response.
-    artifact_keys: list[str] | None = None
+    aux_output_keys: list[str] | None = None
     sampling_mask: list[list[int]] | None = None
 
     @field_validator("token_ids")
@@ -350,7 +350,7 @@ class GenerateResponseStreamChoice(BaseModel):
     finish_reason: str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
-    artifact_keys: list[str] | None = None
+    aux_output_keys: list[str] | None = None
     sampling_mask: list[list[int]] | None = None
 
 

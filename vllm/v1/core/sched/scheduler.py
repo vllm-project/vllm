@@ -2152,7 +2152,7 @@ class Scheduler(SchedulerInterface):
                             if not isinstance(routed_experts, list)
                             else None
                         ),
-                        artifact_keys=(
+                        aux_output_keys=(
                             routed_experts if isinstance(routed_experts, list) else None
                         ),
                         num_nans_in_logits=request.num_nans_in_logits,

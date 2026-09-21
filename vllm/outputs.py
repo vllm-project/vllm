@@ -67,7 +67,7 @@ class CompletionOutput:
     lora_request: LoRARequest | None = None
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
-    artifact_keys: list[str] | None = None
+    aux_output_keys: list[str] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -199,8 +199,8 @@ class RequestOutput:
                         # aggregation with earlier chunks that have no R3.
                         if next_completion.routed_experts is not None:
                             completion.routed_experts = next_completion.routed_experts
-                        if next_completion.artifact_keys is not None:
-                            completion.artifact_keys = next_completion.artifact_keys
+                        if next_completion.aux_output_keys is not None:
+                            completion.aux_output_keys = next_completion.aux_output_keys
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:

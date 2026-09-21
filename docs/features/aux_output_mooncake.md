@@ -4,6 +4,12 @@ With the `mooncake` auxiliary-output backend, configure storage through
 `MOONCAKE_CONFIG_PATH`. `aux_output_config.max_bytes` applies only to SHM;
 Mooncake capacity is not automatically derived from the GPU KV cache.
 
+The terminal TITO response returns ordered `aux_output_keys`, not inline
+`routed_experts`. Fetch the keys and concatenate their bytes in order to
+reconstruct the output. Full blocks are published by the Worker; EngineCore
+publishes accepted boundary/tail rows after stop and length handling, using
+its own client. Scheduler shutdown closes that client, not the stored objects.
+
 - `global_segment_size` is the memory each embedded Store client contributes
   to the shared pool. Count every client, including Worker clients and the
   EngineCore publisher; this is not a single limit for the whole deployment.

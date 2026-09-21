@@ -209,7 +209,7 @@ def test_placeholder_ranges_from_engine_input():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_serve_tokens_returns_terminal_artifact_keys_without_inline_r3(stream):
+async def test_serve_tokens_returns_terminal_aux_output_keys_without_inline_r3(stream):
     engine = _mock_engine()
     keys = ["prefix-block", "request-tail"]
 
@@ -217,7 +217,7 @@ async def test_serve_tokens_returns_terminal_artifact_keys_without_inline_r3(str
         output = _make_request_output(
             "req-1", token_ids=[10], finish_reason="length", finished=True
         )
-        output.outputs[0].artifact_keys = keys
+        output.outputs[0].aux_output_keys = keys
         yield output
 
     engine.generate = MagicMock(side_effect=generate)
@@ -241,7 +241,8 @@ async def test_serve_tokens_returns_terminal_artifact_keys_without_inline_r3(str
     else:
         assert isinstance(response, GenerateResponse)
         choice = response.choices[0].model_dump()
-    assert choice["artifact_keys"] == keys
+    assert choice["aux_output_keys"] == keys
+    assert "artifact_keys" not in choice
     assert choice["routed_experts"] is None
 
 

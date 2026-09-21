@@ -39,18 +39,18 @@ from vllm.v1.outputs import SamplingMaskLists
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
-def test_artifact_keys_preserve_existing_output_wire_positions():
+def test_aux_output_keys_preserve_existing_output_wire_positions():
     mask = SamplingMaskLists(np.array([3, 7], dtype=np.int32))
-    # Pre-artifact array layout: sampling mask is field 15, spec metrics field 16.
+    # Existing wire positions: sampling mask is field 15, spec metrics field 16.
     legacy_output = ["request", [3], *([None] * 11), 0, None, mask, None]
     decoded = MsgpackDecoder(EngineCoreOutput).decode(
         MsgpackEncoder().encode(legacy_output)
     )
     np.testing.assert_array_equal(decoded.new_sampling_mask.token_ids, mask.token_ids)
-    assert decoded.artifact_keys is None
+    assert decoded.aux_output_keys is None
 
 
-def test_terminal_artifact_keys_survive_ipc_and_output_processing():
+def test_terminal_aux_output_keys_survive_ipc_and_output_processing():
     processor = OutputProcessor(None, log_stats=False)
     request = EngineCoreRequest(
         request_id="request",
@@ -70,14 +70,14 @@ def test_terminal_artifact_keys_survive_ipc_and_output_processing():
         request_id="request",
         new_token_ids=[3],
         finish_reason=FinishReason.LENGTH,
-        artifact_keys=keys,
+        aux_output_keys=keys,
     )
     decoded = MsgpackDecoder(EngineCoreOutput).decode(
         MsgpackEncoder().encode(wire_output)
     )
     result = processor.process_outputs([decoded]).request_outputs[0]
     assert result.finished
-    assert result.outputs[0].artifact_keys == keys
+    assert result.outputs[0].aux_output_keys == keys
     assert result.outputs[0].routed_experts is None
 
 
@@ -1354,7 +1354,7 @@ async def test_request_output_collector(keys_only):
     NUM_REQS = 3
     TEXT = "a"
     routed_experts = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
-    artifact_keys = ["prefix-block", "request-tail"] if keys_only else None
+    aux_output_keys = ["prefix-block", "request-tail"] if keys_only else None
 
     def make_outputs() -> list[RequestOutput]:
         return [
@@ -1375,7 +1375,9 @@ async def test_request_output_collector(keys_only):
                             if idx == NUM_REQS - 1 and not keys_only
                             else None
                         ),
-                        artifact_keys=artifact_keys if idx == NUM_REQS - 1 else None,
+                        aux_output_keys=aux_output_keys
+                        if idx == NUM_REQS - 1
+                        else None,
                         finish_reason="length" if (idx == NUM_REQS - 1) else None,
                     )
                 ],
@@ -1428,7 +1430,7 @@ async def test_request_output_collector(keys_only):
 
     assert output.finished
     assert output.outputs[0].finish_reason == "length"
-    assert output.outputs[0].artifact_keys == artifact_keys
+    assert output.outputs[0].aux_output_keys == aux_output_keys
     if keys_only:
         assert output.outputs[0].routed_experts is None
     else:
