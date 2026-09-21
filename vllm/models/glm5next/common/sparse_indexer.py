@@ -13,7 +13,6 @@ MXFP4_BLOCK_SIZE = 32
 
 
 def _kpool_flat_page_view(kv_cache: torch.Tensor) -> torch.Tensor:
-    """View packed indexer blocks as the kernel's flat page sequence."""
     if kv_cache.ndim != 3:
         return kv_cache
     num_blocks, num_states, row = kv_cache.shape

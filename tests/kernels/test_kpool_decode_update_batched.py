@@ -294,7 +294,6 @@ def _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos):
 
 @pytest.mark.parametrize("pool_size", [4, 16])
 def test_decode_writer_matches_prefill_writer_with_expanded_ring(pool_size):
-    """Decode and prefill writers agree when the tail holds speculative rows."""
     ring = 2 * pool_size
     n_pools, page, nblk = 8, 64, 4
     n_tok = n_pools * pool_size
@@ -353,7 +352,6 @@ def test_decode_writer_matches_prefill_writer_with_expanded_ring(pool_size):
 
 
 def test_rejected_draft_redo_with_expanded_ring():
-    """Rejected rows behind a completing draft must not corrupt its redo."""
     pool, page, nblk = 4, 64, 2
     ring = 2 * pool
     dev = "cuda"

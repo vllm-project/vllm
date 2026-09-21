@@ -238,8 +238,6 @@ def kpool_page_geometry(
 
 
 class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
-    """kpool indexer: re-pages the manager block itself (kpool_page_geometry)."""
-
     @staticmethod
     def get_name() -> str:
         return "GLM5_NEXT_INDEXER"

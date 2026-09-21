@@ -447,7 +447,6 @@ def allocate_kv_cache(
 def group_block_stride_bytes(
     kv_cache_config: KVCacheConfig, kv_cache_group_id: int
 ) -> int | None:
-    """Byte stride between consecutive blocks of a group's cache tensors."""
     layer_names = set(kv_cache_config.kv_cache_groups[kv_cache_group_id].layer_names)
     for tensor in kv_cache_config.kv_cache_tensors:
         if layer_names.intersection(tensor.layers):

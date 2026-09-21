@@ -864,7 +864,6 @@ def test_flashinfer_sparse_mla_packed_stride(
     dist_init,
     workspace_init,
 ):
-    """Packed blocks must use their physical stride for writes and top-k."""
     _run_sparse_backend_decode_correctness(
         FlashInferMLASparseTRTLLMBackend,
         BatchSpec(seq_lens=[300], query_lens=[1]),
