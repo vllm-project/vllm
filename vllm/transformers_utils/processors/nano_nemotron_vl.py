@@ -63,6 +63,7 @@ def _bicubic_resize_and_normalize(
     size: tuple[int, int] | None = None,
     norm_mean: torch.Tensor | None = None,
     norm_std: torch.Tensor | None = None,
+    do_cpu_normalize: bool = True,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Permute NHWC→NCHW, optional bicubic resize, rescale + normalize.
@@ -70,17 +71,24 @@ def _bicubic_resize_and_normalize(
     Input must be a raw 4-D **NHWC** tensor.
 
     *size*: target ``(H, W)``; skips interpolation when ``None``.
-    *norm_mean* / *norm_std*: when both provided, fused
-    ``(x/255 - mean) / std`` + dtype cast; otherwise ``x/255`` + cast.
+    *norm_mean* / *norm_std*: when both provided, apply normalization.
+    When *do_cpu_normalize* is false, return the resized ``uint8`` tensor
+    unchanged so rescaling and normalization can run on the model device.
     """
-    tensor = tensor.permute(0, 3, 1, 2).to(dtype=torch.float32)
+    tensor = tensor.permute(0, 3, 1, 2)
     if size is not None:
         tensor = torch.nn.functional.interpolate(
             tensor, size=size, mode="bicubic", align_corners=False, antialias=True
         )
+
+    if not do_cpu_normalize:
+        return tensor.contiguous()
+
+    tensor = tensor.to(dtype=torch.float32)
+    tensor = tensor / 255.0
     if norm_mean is not None and norm_std is not None:
-        return ((tensor / 255.0 - norm_mean) / norm_std).to(dtype=dtype).contiguous()
-    return (tensor / 255.0).to(dtype=dtype).contiguous()
+        tensor = (tensor - norm_mean) / norm_std
+    return tensor.to(dtype=dtype).contiguous()
 
 
 def _pil_to_nhwc_tensor(image: Image.Image) -> torch.Tensor:
@@ -99,6 +107,7 @@ def dynamic_preprocess(
     use_thumbnail: bool = True,
     norm_mean: torch.Tensor | None = None,
     norm_std: torch.Tensor | None = None,
+    do_cpu_normalize: bool = True,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     orig_width, orig_height = image.size
@@ -120,6 +129,7 @@ def dynamic_preprocess(
         size=(target_height, target_width),
         norm_mean=norm_mean,
         norm_std=norm_std,
+        do_cpu_normalize=do_cpu_normalize,
         dtype=dtype,
     )
     B, C, H, W = resized_img.shape
@@ -136,6 +146,7 @@ def dynamic_preprocess(
             size=(image_size, image_size),
             norm_mean=norm_mean,
             norm_std=norm_std,
+            do_cpu_normalize=do_cpu_normalize,
             dtype=dtype,
         )
         patches = torch.cat([patches, thumb], dim=0)
@@ -225,6 +236,7 @@ def video_to_pixel_values(
     downsample_ratio: float = 0.5,
     norm_mean: torch.Tensor | None = None,
     norm_std: torch.Tensor | None = None,
+    do_cpu_normalize: bool = True,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Convert video ndarray (T, H, W, C) to normalized pixel tensor (T, C, H, W)."""
@@ -246,7 +258,14 @@ def video_to_pixel_values(
         size = (input_size, input_size)
 
     tensor = torch.from_numpy(video)
-    return _bicubic_resize_and_normalize(tensor, size, norm_mean, norm_std, dtype)
+    return _bicubic_resize_and_normalize(
+        tensor,
+        size=size,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        do_cpu_normalize=do_cpu_normalize,
+        dtype=dtype,
+    )
 
 
 class DynamicResolutionImageTiler:
@@ -264,6 +283,7 @@ class DynamicResolutionImageTiler:
         downsample_ratio: int,
         norm_mean: Sequence[float],
         norm_std: Sequence[float],
+        do_cpu_normalize: bool = True,
         factor_max: float = 1.0,
         use_thumbnail: bool = False,
     ) -> None:
@@ -275,6 +295,7 @@ class DynamicResolutionImageTiler:
         self._factor_max = factor_max
         self.norm_mean = torch.tensor(norm_mean).reshape(3, 1, 1)
         self.norm_std = torch.tensor(norm_std).reshape(3, 1, 1)
+        self.do_cpu_normalize = do_cpu_normalize
         assert downsample_ratio < 1
         reduction_factor = 1 / downsample_ratio
         assert reduction_factor == 2.0
@@ -370,6 +391,7 @@ class DynamicResolutionImageTiler:
             size=target_size,
             norm_mean=self.norm_mean,
             norm_std=self.norm_std,
+            do_cpu_normalize=self.do_cpu_normalize,
             dtype=dtype,
         )
         return list(resized_img)
@@ -589,6 +611,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         *args,
         max_model_len: int,
         max_num_tiles: int | None = None,
+        do_cpu_normalize: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -606,6 +629,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         )
         self.image_size = image_size
         self.use_thumbnail: bool = config.use_thumbnail
+        self.do_cpu_normalize = do_cpu_normalize
         self.norm_mean = torch.Tensor(config.norm_mean).reshape(1, 3, 1, 1)
         self.norm_std = torch.Tensor(config.norm_std).reshape(1, 3, 1, 1)
 
@@ -619,6 +643,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 max_num_patches=config.vision_config.args["max_num_patches"],
                 norm_mean=config.norm_mean,
                 norm_std=config.norm_std,
+                do_cpu_normalize=do_cpu_normalize,
             )
         self.dtype: torch.dtype = getattr(config, "dtype", torch.float32)
 
@@ -671,6 +696,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 use_thumbnail=self.use_thumbnail,
                 norm_mean=self.norm_mean,
                 norm_std=self.norm_std,
+                do_cpu_normalize=self.do_cpu_normalize,
                 dtype=self.dtype,
             )
             for image in images
@@ -779,12 +805,20 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
         use_audio_in_video: bool = False,
+        do_rescale: bool = True,
+        do_normalize: bool = True,
     ) -> None:
+        if do_rescale != do_normalize:
+            raise ValueError(
+                "NanoNemotronVLProcessor requires do_rescale and "
+                "do_normalize to have the same value"
+            )
         super().__init__(
             config=config,
             tokenizer=tokenizer,
             max_model_len=max_model_len,
             max_num_tiles=max_num_tiles,
+            do_cpu_normalize=do_normalize,
         )
         # add extra video token for video processing
         self.video_token = video_token
@@ -883,6 +917,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 downsample_ratio=self.config.downsample_ratio,
                 norm_mean=self.norm_mean,
                 norm_std=self.norm_std,
+                do_cpu_normalize=self.do_cpu_normalize,
                 dtype=dtype,
             )
             for video in videos
