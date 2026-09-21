@@ -19,13 +19,12 @@ from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItem,
@@ -228,20 +227,16 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -411,21 +406,17 @@ def _build_llava_or_pixtral_hf_info(
 def _build_llava_or_pixtral_hf_processor(
     info: _I,
     dummy_inputs: BaseDummyInputsBuilder[_I],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, PixtralHFProcessingInfo):
         return PixtralHFMultiModalProcessor(
             info,
             dummy_inputs,  # type: ignore
-            cache=cache,
         )
 
     if isinstance(info, LlavaProcessingInfo):
         return LlavaMultiModalProcessor(
             info,
             dummy_inputs,  # type: ignore
-            cache=cache,
         )
 
     raise NotImplementedError(type(info))

@@ -2056,6 +2056,56 @@ async fn version_returns_engine_vllm_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn kv_event_sources_reports_each_ready_engine() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        data_parallel_rank: 1,
+        kv_events_config: Some(
+            vllm_engine_core_client::protocol::handshake::KvEventsConfig {
+                enable_kv_cache_events: true,
+                publisher: "zmq".to_string(),
+                endpoint: "tcp://10.0.0.2:41233".to_string(),
+                replay_endpoint: None,
+                buffer_steps: 10_000,
+                hwm: 100_000,
+                max_queue_size: 100_000,
+                topic: "kv".to_string(),
+            },
+        ),
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/kv_event_sources")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json,
+        json!({
+            "1": {
+                "enable_kv_cache_events": true,
+                "publisher": "zmq",
+                "endpoint": "tcp://10.0.0.2:41233",
+                "replay_endpoint": null,
+                "buffer_steps": 10000,
+                "hwm": 100000,
+                "max_queue_size": 100000,
+                "topic": "kv",
+            }
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn server_info_endpoint_is_dev_mode_only() {
     let mut app = test_app().await;
     let response = app

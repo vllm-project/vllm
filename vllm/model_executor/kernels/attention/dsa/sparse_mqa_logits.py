@@ -73,7 +73,7 @@ def check_deep_select_layout(num_sparse_cols: int, topk_tokens: int) -> None:
 _INT32_BIG = tl.constexpr(2**31 - 1)
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["end_ptr"])
 def _expand_candidates_kernel(
     cand_ptr,
     cand_stride,

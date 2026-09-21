@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
     MoRIIOTransferAck,
     RemoteAllocInfo,
+    TransferBatchState,
     TransferError,
     TransferId,
     WriteTask,
@@ -57,7 +58,6 @@ try:
     logger.info("MoRIIO is available")
 except ImportError:
     logger.error("MoRIIO is not available")
-
 
 """Write task execution logic for MoRIIO connector."""
 
@@ -395,9 +395,9 @@ class MoRIIOWriter:
             )
             request_info.transfer_offsets[key] = offsets
 
-        # Get session index
-        layer_names = list(self.worker.layer_name_to_local_kv_cache_metadata.keys())
-        sess_idx = layer_names.index(task.layer_name)
+        # One session per registered region; attention layers map to a single
+        # index (see MoRIIOConnectorWorker._region_session_indices).
+        sess_idx = self.worker._region_session_indices(task.layer_name)[0]
 
         local_off, remote_off, sizes = offsets
 
@@ -662,6 +662,25 @@ class MoRIIOWrapper:
         )
         return transfer_status
 
+    def poll_transfer_batch(self, transfer_statuses: list[Any]) -> TransferBatchState:
+        """Non-blocking verdict over every status of one request.
+
+        Judging a request by its newest status alone calls it done while an
+        earlier layer is unfinished or already failed; failures do land on
+        layers other than the last, because _post_read_with_backoff returns a
+        failed status when the send queue never drains.
+
+        This stays a Python scan so it does not drive the backend's progress
+        callback from the engine thread alongside MoRIIO's own poller.
+        """
+        state = TransferBatchState.DONE
+        for status in transfer_statuses:
+            if status.Failed():
+                return TransferBatchState.FAILED
+            if not status.Succeeded():
+                state = TransferBatchState.PENDING
+        return state
+
     def waiting_for_transfer_complete(self, transfer_statuses: list[Any] | None = None):
         if transfer_statuses is None:
             with self.lock:
@@ -673,6 +692,15 @@ class MoRIIOWrapper:
         if not transfers_to_wait:
             return
 
+        self._poll_transfers_until_done(transfers_to_wait)
+
+    def _poll_transfers_until_done(self, transfers_to_wait: list[Any]) -> None:
+        """Fallback for mori builds without the batched wait.
+
+        Gives failure precedence over pending: once any status has failed the
+        request is lost, so waiting out the remaining ones would only delay the
+        barrier by up to transfer_timeout.
+        """
         timeout = self._transfer_timeout
         deadline = time.monotonic() + timeout
         remaining = list(transfers_to_wait)
@@ -698,6 +726,8 @@ class MoRIIOWrapper:
                     )
                 else:
                     still_waiting.append(status)
+            if errors:
+                break
             remaining = still_waiting
             if remaining:
                 time.sleep(0.001)

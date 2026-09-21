@@ -29,10 +29,11 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
-  # Pinned to the tip of the fork's dev branch: upstream 2.8.0 plus the SM120
+  # Pinned to the fork's dev branch: upstream 2.8.0 plus the SM120
   # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
-  # alpha/beta, and SiTU for FP8/FP4 Mega MoE.
-  set(_DEEPGEMM_UPSTREAM_TAG "a6bbb8000161c0dc3a85a0300a905f76898a7913")
+  # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
+  # layout header fix from vllm-project/DeepGEMM#12.
+  set(_DEEPGEMM_UPSTREAM_TAG "e1f418c2a4f20818221f6b0e578b4c2f634d4c3f")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)

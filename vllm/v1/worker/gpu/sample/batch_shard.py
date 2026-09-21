@@ -200,6 +200,9 @@ class BatchSharder:
             num_logits_per_req_np[local_req_indices_np], out=local_cu_num_logits_np[1:]
         )
         max_num_logits_per_req = int(num_logits_per_req_np.max()) if num_reqs else 1
+        local_seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound[
+            torch.from_numpy(local_req_indices_np)
+        ]
 
         # Shard the input batch GPU tensors.
         sorted_logits_indices = torch.empty(
@@ -269,6 +272,7 @@ class BatchSharder:
             expanded_idx_mapping=local_expanded_idx_mapping,
             expanded_local_pos=local_expanded_local_pos,
             seq_lens=local_seq_lens,
+            seq_lens_cpu_upper_bound=local_seq_lens_cpu_upper_bound,
             logits_indices=local_logits_indices,
             cu_num_logits=local_cu_num_logits,
             cu_num_logits_np=local_cu_num_logits_np,
@@ -613,8 +617,6 @@ def gather_sampler_output(
         device=device,
     )
     if local_output is not None:
-        assert local_output.num_sampled is not None
-        assert local_output.num_rejected is not None
         assert not gather_num_nans or local_output.num_nans is not None
         num_src_cols = min(
             local_output.sampled_token_ids.shape[1], max_num_logits_per_req

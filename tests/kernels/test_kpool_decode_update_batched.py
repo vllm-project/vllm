@@ -384,9 +384,16 @@ def test_leading_invalid_tail_slot():
     _assert_eq(r_ref, r_kern)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_amd_prefill_seed_honors_padded_tail_block_stride():
-    """The tail shares a padded indexer allocation in production."""
+def test_prefill_seed_honors_padded_tail_block_stride():
+    """The tail shares a padded indexer allocation in production.
+
+    ``get_kv_cache_config_from_groups`` aliases each tail tensor onto its
+    indexer tensor with the indexer's block stride (38016 B for GLM-5.3-Flash
+    vs a dense 2048 B tail block), so a seed kernel that addresses blocks
+    densely writes into an unrelated indexer block and leaves the request's
+    tail block untouched. Runs on every platform; the NVIDIA kernel had this
+    bug while the AMD kernel did not.
+    """
     kpool = 4
     num_blocks = 6
     logical_block_elems = 2 * kpool * HEAD_DIM

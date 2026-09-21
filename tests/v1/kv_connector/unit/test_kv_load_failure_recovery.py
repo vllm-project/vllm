@@ -35,6 +35,39 @@ def scheduler():
     return create_scheduler(vllm_config)
 
 
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+def test_failed_receive_completion_honors_failure_policy(policy):
+    """Failed receives still need completion to free blocks or resume computation."""
+    scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
+    request = create_request(num_tokens=3 * scheduler.block_size)
+    scheduler.add_request(request)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = [
+        (2 * scheduler.block_size, True),
+        (0, False),
+    ]
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+    block_pool = scheduler.kv_cache_manager.block_pool
+    free_blocks_before = block_pool.get_num_free_blocks()
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    output = create_model_runner_output([], finished_recving={request.request_id})
+    assert output.kv_connector_output is not None
+    output.kv_connector_output.failed_recving = {request.request_id}
+    scheduler.update_from_output(scheduler_output, output)
+
+    if policy == "fail":
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert request.request_id not in scheduler.requests
+        assert block_pool.get_num_free_blocks() == free_blocks_before
+    else:
+        assert request.num_computed_tokens == 0
+        next_output = scheduler.schedule()
+        assert request.request_id in next_output.num_scheduled_tokens
+
+
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [

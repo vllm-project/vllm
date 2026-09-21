@@ -823,7 +823,6 @@ class SamplingParams(
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
-        self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
@@ -992,13 +991,6 @@ class SamplingParams(
                 parameter="trace_decode_token_ids",
                 value=invalid_token_ids,
             )
-
-    def _validate_logits_processors(self, model_config: ModelConfig) -> None:
-        from vllm.v1.sample.logits_processor import (
-            validate_logits_processors_parameters,
-        )
-
-        validate_logits_processors_parameters(model_config.logits_processors, self)
 
     def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids

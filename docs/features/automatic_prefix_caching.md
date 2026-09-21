@@ -15,7 +15,7 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 ## Hybrid Mamba models
 
-Under `--mamba-cache-mode align`, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-fine-grained-prefix-cache` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
+Under `--mamba-cache-mode align`, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
 
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
@@ -28,7 +28,7 @@ This helps when many requests share a long system prompt and then diverge. It is
 vllm serve <hybrid-model> \
     --mamba-cache-mode align \
     --prefix-match-unit 64 \
-    --enable-mamba-fine-grained-prefix-cache
+    --enable-mamba-shared-prefix-checkpoint
 ```
 
 `--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. Under `align` that is the block size itself, so no sub-block boundary exists and the flag has no effect.

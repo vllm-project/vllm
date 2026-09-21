@@ -4,18 +4,23 @@
 
 The decode path hands the kernel column slices of the merged ``q|k|v`` conv
 output and of the fused ``qkvbfg_a`` projection (beta), so q/k/v/beta are
-token-strided rather than contiguous. The kernel must read them in place,
-match a pure-PyTorch recurrence, and reject layouts it cannot address.
+token-strided rather than contiguous. Both backends must match a pure-PyTorch
+recurrence. CUDA reads these slices in place and rejects unsupported layouts;
+the ROCm wrapper makes contiguous copies before launching its kernel.
 """
 
 import pytest
 import torch
 
-from vllm.models.glm5next.nvidia.ops.third_party.kda import fused_recurrent_kda
 from vllm.platforms import current_platform
 
+if current_platform.is_rocm():
+    from vllm.models.glm5next.amd.ops.third_party.kda import fused_recurrent_kda
+else:
+    from vllm.models.glm5next.nvidia.ops.third_party.kda import fused_recurrent_kda
+
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="CUDA-only Triton kernel"
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
 )
 
 H, D = 16, 128
@@ -160,6 +165,10 @@ def test_fused_recurrent_kda_strided_inputs_bit_identical_to_contiguous(
     torch.testing.assert_close(state, state_ref, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Only the CUDA implementation requires zero-copy token-strided layouts",
+)
 @torch.inference_mode()
 def test_fused_recurrent_kda_rejects_unaddressable_layouts():
     """Layouts the token-stride addressing cannot express must fail loudly

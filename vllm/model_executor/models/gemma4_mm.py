@@ -36,20 +36,13 @@ from transformers.models.gemma4.configuration_gemma4 import (
 
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
-from vllm.config.multimodal import (
-    AudioDummyOptions,
-    BaseDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
-from vllm.model_executor.models.gemma4 import (
-    _GEMMA4_EXPERT_PARENT_MAPPER,
-    Gemma4ForCausalLM,
-)
+from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -276,10 +269,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         num_frames = _VIDEO_MAX_FRAMES
         mm_config = self.ctx.model_config.get_multimodal_config()
         video_opts = mm_config.limit_per_prompt.get("video")
-        if (
-            isinstance(video_opts, VideoDummyOptions)
-            and video_opts.num_frames is not None
-        ):
+        if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
@@ -505,9 +495,8 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
@@ -520,18 +509,12 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         img_width = size.get("width", 224)
         img_height = size.get("height", 224)
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        audio_overrides = mm_options.get("audio") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
         data: dict[str, Any] = {
             "image": self._get_dummy_images(
                 width=img_width,
                 height=img_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image") if mm_options else None,
             ),
         }
 
@@ -540,7 +523,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
-                overrides=audio_overrides,
+                overrides=mm_options.get("audio") if mm_options else None,
             )
 
         if num_videos > 0:
@@ -549,7 +532,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
                 height=img_height,
                 num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
-                overrides=video_overrides,
+                overrides=mm_options.get("video") if mm_options else None,
             )
 
         return data
@@ -1060,7 +1043,7 @@ class Gemma4ForConditionalGeneration(
     }
 
     # Maps checkpoint prefixes to vLLM module paths.
-    hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # vision tower
             "model.vision_tower": "vision_tower",

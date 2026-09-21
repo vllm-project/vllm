@@ -2482,9 +2482,16 @@ class ModelOptLinearMethod(LinearMethodBase):
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        # TODO(Isotr0py): support fp8/mxfp8 ModelOpt kernels transpose/repack.
+        # TODO(Isotr0py): support fp8 ModelOpt kernels transpose/repack.
         w = self.spec.weight
-        return isinstance(w, QuantKey) and w.dtype == FP4_DTYPE
+        return isinstance(w, QuantKey) and (
+            w.dtype == FP4_DTYPE
+            or (
+                w == kMxfp8Static
+                and self.kernel is not None
+                and self.kernel.supports_pre_processed_weights
+            )
+        )
 
     def create_weights(
         self,
@@ -2524,7 +2531,13 @@ class ModelOptLinearMethod(LinearMethodBase):
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
+        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
+            self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
         if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    f"{type(self.kernel).__name__} cannot use pre-processed weights"
+                )
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
@@ -2556,8 +2569,6 @@ class ModelOptLinearMethod(LinearMethodBase):
                 persistent=False,
             )
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
-        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
-            self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):

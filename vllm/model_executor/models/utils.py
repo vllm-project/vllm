@@ -41,6 +41,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 ShardId: TypeAlias = str | int | tuple[int, ...]
+"""One shard of a stacked parameter. A tuple is a single contiguous span."""
+ShardIds: TypeAlias = ShardId | list[ShardId]
+"""One shard, or a list of shards the same weight is loaded into in turn."""
 
 
 @dataclass
@@ -52,7 +55,9 @@ class WeightsMapper:
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
-    orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
+    orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
+        default_factory=dict
+    )
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
@@ -78,11 +83,12 @@ class WeightsMapper:
         result = self._map_name_with_shard(key)
         return result[0] if result is not None else None
 
-    def _map_name_with_shard(self, key: str) -> tuple[str, ShardId | None] | None:
+    def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
         """Map a weight name and extract any shard_id metadata.
 
         Returns:
-            (mapped_name, shard_id) if the name should be kept.
+            (mapped_name, shard_id) if the name should be kept. A list of shard
+            ids means the weight is loaded into each of those shards in turn.
             None if the name should be dropped.
 
         """
@@ -113,7 +119,7 @@ class WeightsMapper:
 
                 key = key.replace(substr, new_key, 1)
 
-        shard_id: ShardId | None = None
+        shard_id: ShardIds | None = None
         for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
             if substr in key:
                 key = key.replace(substr, new_key, 1)
@@ -143,9 +149,16 @@ class WeightsMapper:
             if result is None:
                 continue
             out_name, shard_id = result
-            if shard_id is not None:
-                data.shard_id = shard_id
-            yield out_name, data
+            if shard_id is None:
+                yield out_name, data
+                continue
+            shard_ids = shard_id if isinstance(shard_id, list) else [shard_id]
+            for i, one_shard_id in enumerate(shard_ids):
+                # Each shard carries its own id, so extra shards need their own
+                # tensor object; `detach` aliases the storage instead of copying.
+                shard_data = data if i == 0 else data.detach()
+                shard_data.shard_id = one_shard_id
+                yield out_name, shard_data
 
     def apply_list(self, values: list[str]) -> list[str]:
         return [

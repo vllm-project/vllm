@@ -1228,18 +1228,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
     ) -> HFMultiModalInputs:
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        if mm_items.get_count("audio", strict=False):
-            # TODO(Isotr0py): Remove this patch after upstream fix PR
-            # released and Transformers version update:
-            # https://github.com/huggingface/transformers/pull/41473
-            hf_inputs = hf_inputs._replace(
-                hf_kwargs={
-                    **hf_inputs.hf_kwargs,
-                    "audio_kwargs": dict(hf_inputs.hf_kwargs.get("audio_kwargs") or {}),
-                    "text_kwargs": dict(hf_inputs.hf_kwargs.get("text_kwargs") or {}),
-                }
-            )
-
         audios = hf_inputs.hf_data.get("audio")
         if audios:
             feature_extractor = self.info.get_feature_extractor()

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import IntEnum
+from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -2271,7 +2272,21 @@ def moe_align_block_size(
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
     expert_map: torch.Tensor | None = None,
+    scatter_idx: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        if scatter_idx is not None:
+            raise NotImplementedError("scatter_idx is not supported on XPU")
+        torch.ops._moe_C.moe_align_block_size(
+            topk_ids,
+            num_experts,
+            block_size,
+            sorted_token_ids,
+            experts_ids,
+            num_tokens_post_pad,
+            expert_map,
+        )
+        return
     torch.ops._moe_C.moe_align_block_size(
         topk_ids,
         num_experts,
@@ -2280,6 +2295,7 @@ def moe_align_block_size(
         experts_ids,
         num_tokens_post_pad,
         expert_map,
+        scatter_idx,
     )
 
 
@@ -3384,6 +3400,7 @@ class CPUQuantMethod(IntEnum):
     FP8_W8A16 = 2
     INT4_W4A8 = 3
     MXFP4 = 4
+    FP8_W8A8 = 5
 
 
 if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
@@ -3422,6 +3439,7 @@ def fused_experts_cpu(
     alpha: float | None = None,
     limit: float | None = None,
     is_vnni: bool = True,
+    a1_scale: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3435,6 +3453,7 @@ def fused_experts_cpu(
         w2_scale,
         w1_zero,
         w2_zero,
+        a1_scale,
         block_size,
         w1_bias,
         w2_bias,
@@ -3561,6 +3580,46 @@ def fp8_scaled_mm_cpu(
 ) -> torch.Tensor:
     return torch.ops._C.fp8_scaled_mm_cpu(
         mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
+
+
+# FP8 W8A8 CPU kernels
+@cache
+def cpu_has_amx_fp8() -> bool:
+    """Whether this CPU has native AMX-FP8 MMA support."""
+    if not hasattr(torch.ops._C, "cpu_has_amx_fp8"):
+        return False
+    return bool(torch.ops._C.cpu_has_amx_fp8())
+
+
+if hasattr(torch.ops._C, "fp8_scaled_mm_with_quant"):
+
+    @register_fake("_C::fp8_scaled_mm_with_quant")
+    def fp8_scaled_mm_with_quant_fake(
+        act: torch.Tensor,
+        act_scales: torch.Tensor | None,
+        channelwise: bool,
+        weight: torch.Tensor,
+        weight_scales: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        M = act.reshape(-1, act.size(-1)).size(0)
+        N = weight.size(0) * weight.size(-1)
+        return torch.empty((M, N), dtype=output_dtype, device=act.device)
+
+
+def fp8_scaled_mm_with_quant(
+    act: torch.Tensor,
+    act_scales: torch.Tensor | None,
+    channelwise: bool,
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    bias: torch.Tensor | None,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_with_quant(
+        act, act_scales, channelwise, weight, weight_scales, bias, output_dtype
     )
 
 

@@ -969,6 +969,9 @@ def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == (
         [1] if expect_declined else []
     )
+    # KV expiry must not pollute the transport failure counters.
+    assert worker.xfer_stats.data["num_failed_transfers"] == []
+    assert worker.xfer_stats.data["num_failed_handshakes"] == []
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert "req" in done_recving
 

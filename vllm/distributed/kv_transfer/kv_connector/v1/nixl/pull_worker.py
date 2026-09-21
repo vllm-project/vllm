@@ -64,8 +64,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 len(meta.local_physical_block_ids),
                 len(meta.remote.block_ids),
             )
-            # always store metadata for failure recovery
-            self._recving_metadata[req_id] = meta
+            # Full local hits and aborted cleanup only notify P; no recv is awaited.
+            # On a full local hit:
+            # - Notification failure must not fail the request: its KV is local.
+            # - Receive completion must not be reported: num_external_tokens == 0,
+            #   so the scheduler never entered WAITING_FOR_REMOTE_KVS to begin with.
+            # Aborted cleanup requests have already been removed from the scheduler.
+            if meta.awaiting_kvs or any(meta.local_block_ids):
+                self._recving_metadata[req_id] = meta
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
@@ -149,7 +155,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
             )
             self.xfer_stats.record_kv_expired_req()
-            self._handle_failed_transfer(req_id, None, self._recv_failures)
+            # KV expiry is reported separately from transport failures, so only
+            # the state cleanup side of _handle_failed_transfer runs here.
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
             return
 
         if any(len(group) > 0 for group in meta.local_block_ids):
@@ -364,7 +374,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
                 if rank_to_notify != (0, read_specs[0].remote_rank):
-                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                    try:
+                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                    except Exception as e:
+                        self._log_failure(
+                            failure_type="notification_failed",
+                            msg="Remote rank will not update request state. "
+                            "This may indicate network issues.",
+                            req_id=req_id,
+                            error=e,
+                            dst_engine_id=meta.remote.engine_id,
+                            remote_rank=rank_to_notify[1],
+                            remote_agent_name=agent,
+                        )
+                        self.xfer_stats.record_failed_notification()
 
     def _read_blocks(
         self,

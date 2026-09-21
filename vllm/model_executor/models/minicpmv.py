@@ -45,9 +45,8 @@ from typing_extensions import TypedDict, TypeVar
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import (
-    BaseDummyOptions,
     ImageDummyOptions,
-    VideoDummyOptions,
+    MultiModalDummyOptions,
 )
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -848,9 +847,8 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
         image_width, image_height = self.info.get_image_size_with_most_features()
@@ -859,14 +857,12 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image")
         video_overrides = mm_options.get("video")
-        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         # Convert video overrides to image overrides for per-frame image generation,
         # and apply num_frames override to num_video_frames.
         video_frame_overrides: ImageDummyOptions | None = None
-        if isinstance(video_overrides, VideoDummyOptions):
+        if video_overrides is not None:
             if video_overrides.num_frames:
                 num_video_frames = min(num_video_frames, video_overrides.num_frames)
             if video_overrides.width or video_overrides.height:
@@ -880,8 +876,8 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             "image": self._get_dummy_images(
                 width=image_width,
                 height=image_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": [
                 self._get_dummy_images(

@@ -54,7 +54,7 @@ from vllm.compilation.decorators import (
     support_torch_compile,
 )
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import ModalityData, MultiModalDataDict
@@ -1471,7 +1471,7 @@ class LlavaOnevision2DummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
     ) -> MultiModalDataDict:
         n_img = mm_counts.get("image", 0)
         n_vid = mm_counts.get("video", 0)

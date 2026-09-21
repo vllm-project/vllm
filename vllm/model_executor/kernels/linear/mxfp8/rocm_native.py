@@ -212,6 +212,8 @@ _DOT_SCALED_K_ALIGN = 128
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
     """Native CDNA4 (gfx950) MXFP8 linear via Triton ``tl.dot_scaled``."""
 
+    supports_pre_processed_weights = True
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None

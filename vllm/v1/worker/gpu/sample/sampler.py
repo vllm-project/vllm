@@ -1,23 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+
 import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
-from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
     flashinfer_sampler_supported,
+    xpu_sample,
+    xpu_sampler_supported,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
+from vllm.v1.worker.gpu.sample.logits_processor.interface import (
+    LogitsContext,
+    LogitsProcessor,
+    LogitsProcRequestState,
+)
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
@@ -33,6 +42,7 @@ from vllm.v1.worker.gpu.states import RequestState
 class Sampler:
     def __init__(
         self,
+        vllm_config: VllmConfig,
         max_num_reqs: int,
         vocab_size: int,
         device: torch.device,
@@ -41,8 +51,8 @@ class Sampler:
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
         enable_trace_replay: bool = False,
-        reasoning_config: ReasoningConfig | None = None,
         return_sampling_mask: bool = False,
+        custom_logits_processors: Sequence[LogitsProcessor] = (),
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
@@ -50,11 +60,25 @@ class Sampler:
 
         self.req_states = req_states
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
-        self.penalties_state = PenaltiesState(req_states)
-        self.logit_bias_state = LogitBiasState(max_num_reqs, device)
-        self.bad_words_state = BadWordsState(req_states)
+
+        lp_req_state = LogitsProcRequestState.from_request_state(req_states)
+        self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
+        logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
+        bad_words_state = BadWordsState(vllm_config, lp_req_state)
+
+        # List order is pipeline order: bias adds, penalties scale, so the
+        # two do not commute.
+        self.logits_processors: list[LogitsProcessor] = [
+            logit_bias_state,
+            self.penalties_state,
+            bad_words_state,
+            *custom_logits_processors,
+        ]
+
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
-        self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
+        self.thinking_budget_state = ThinkingBudgetState(
+            req_states, vllm_config.reasoning_config
+        )
         self.trace_replay_state = (
             TraceReplayState(req_states) if enable_trace_replay else None
         )
@@ -64,42 +88,30 @@ class Sampler:
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
         )
+        # The XPU kernel draws fp32 exponential noise, so it can't honor fp64.
+        self.use_xpu_sampler = (
+            not return_sampling_mask and not use_fp64_gumbel and xpu_sampler_supported()
+        )
 
-    def add_request(
-        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
-    ) -> None:
-        self.sampling_states.add_request(req_idx, sampling_params)
-        self.penalties_state.add_request(req_idx, sampling_params)
-        self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
-        self.bad_words_state.add_request(req_idx, sampling_params)
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+        needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
+        needs_processing |= self.thinking_budget_state.add_request(
+            req_idx, sampling_params
+        )
+        for processor in self.logits_processors:
+            needs_processing |= processor.add_request(req_idx, sampling_params)
+        self.needs_logits_processing[req_idx] = needs_processing
+
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
-        self.thinking_budget_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
             self.trace_replay_state.add_request(req_idx, sampling_params)
 
-        states = self.sampling_states
-        temperature = states.temperature.np[req_idx]
-        self.needs_logits_processing[req_idx] = (
-            self.logit_bias_state.use_logit_bias[req_idx]
-            or self.penalties_state.use_penalty[req_idx]
-            or self.bad_words_state.num_bad_words.np[req_idx] > 0
-            or (
-                self.thinking_budget_state.enabled
-                and self.thinking_budget_state.use_thinking_budget[req_idx]
-            )
-            or (temperature != 0.0 and temperature != 1.0)
-            or states.min_p.np[req_idx] != 0.0
-            or states.top_k.np[req_idx] != states.vocab_size
-            or states.top_p.np[req_idx] != 1.0
-        )
-
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
-        self.penalties_state.apply_staged_writes()
-        self.logit_bias_state.apply_staged_writes()
-        self.bad_words_state.apply_staged_writes()
-        self.logprob_token_ids_state.apply_staged_writes()
+        for processor in self.logits_processors:
+            processor.apply_staged_writes()
         self.thinking_budget_state.apply_staged_writes()
+        self.logprob_token_ids_state.apply_staged_writes()
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
 
@@ -131,6 +143,7 @@ class Sampler:
         expanded_local_pos = input_batch.expanded_local_pos
         pos = input_batch.positions[input_batch.logits_indices]
         input_ids = input_batch.input_ids[input_batch.logits_indices]
+        seq_lens_upper_bound_np = input_batch.seq_lens_cpu_upper_bound.numpy()
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -146,6 +159,7 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            seq_lens_upper_bound_np,
             return_logprobs=logprobs_dims is not None,
         )
 
@@ -215,6 +229,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        seq_lens_upper_bound_np: np.ndarray,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
@@ -223,39 +238,23 @@ class Sampler:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
-        # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
-        self.logit_bias_state.apply_logit_bias(
-            logits, expanded_idx_mapping, idx_mapping_np, pos
+        ctx = LogitsContext(
+            expanded_idx_mapping=expanded_idx_mapping,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=idx_mapping_np,
+            expanded_local_pos=expanded_local_pos,
+            input_ids=input_ids,
+            pos=pos,
+            seq_lens_upper_bound_np=seq_lens_upper_bound_np,
         )
 
-        # Apply penalties in place.
-        self.penalties_state.apply_penalties(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            expanded_local_pos,
-        )
+        # Apply logits processors (native + any custom).
+        for processor in self.logits_processors:
+            logits = processor.apply(logits, ctx)
 
-        # Apply bad words masking in place.
-        self.bad_words_state.apply_bad_words(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            expanded_local_pos,
-        )
-
-        # Force the reasoning end marker once a request's thinking budget is
-        # reached; applied before temperature so the forced token is always kept.
-        self.thinking_budget_state.apply(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            expanded_local_pos,
-        )
+        # Forcing runs last so no stage can overwrite the forced end marker
+        # or weaken it by scaling.
+        self.thinking_budget_state.apply(logits, ctx)
 
         # Apply temperature in place.
         self.sampling_states.apply_temperature(
@@ -282,6 +281,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        seq_lens_upper_bound_np: np.ndarray,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
@@ -292,20 +292,24 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            seq_lens_upper_bound_np,
             skip_top_k_top_p=True,
         )
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np
         )
-        use_flashinfer = self.use_flashinfer and not (
-            # Don't use FI sampler if no requests use top_k/top_p, if there are
-            # any greedy requests or per-request seeds, or if post-processed
-            # logprobs need to be returned for any requests.
+        # Don't use a fused sampler if no requests use top_k/top_p, if there are
+        # any greedy requests or per-request seeds, or if post-processed
+        # logprobs need to be returned for any requests.
+        fused_sampler_eligible = not (
             (top_k is None and top_p is None)
             or (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES)
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
+        use_fused_sampler = (
+            self.use_flashinfer or self.use_xpu_sampler
+        ) and fused_sampler_eligible
 
         return self._sample_random(
             processed_logits,
@@ -314,7 +318,7 @@ class Sampler:
             pos,
             top_k,
             top_p,
-            use_flashinfer,
+            use_fused_sampler,
         )
 
     def _sample_random(
@@ -325,10 +329,15 @@ class Sampler:
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
-        use_flashinfer: bool,
+        use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if use_flashinfer:
-            sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
+        if use_fused_sampler:
+            if self.use_flashinfer:
+                sampled = flashinfer_sample(processed_logits, top_k, top_p).to(
+                    torch.int64
+                )
+            else:  # Use XPU sampler
+                sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
             processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
             sampled = gumbel_sample(

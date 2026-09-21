@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 import torch.nn as nn
 
@@ -127,6 +126,69 @@ def flashinfer_sampler_supported() -> bool:
     return False
 
 
+def xpu_sampler_supported() -> bool:
+    """Decide whether the fused XPU top-k/top-p sampler kernel can be used.
+
+    Returns False (with appropriate logging) when the platform isn't XPU, when
+    ``VLLM_XPU_USE_SAMPLER_KERNEL`` is 0.
+
+    Note: callers must additionally ensure no request needs a per-request seed
+    or greedy sampling, since the kernel draws from the device's default
+    generator and always samples randomly.
+    """
+    if not current_platform.is_xpu():
+        return False
+    if not envs.VLLM_XPU_USE_SAMPLER_KERNEL:
+        logger.info_once(
+            "Fused XPU top-p/top-k sampling disabled via VLLM_XPU_USE_SAMPLER_KERNEL=0."
+        )
+        return False
+
+    logger.info_once("Using the fused XPU kernel for top-p & top-k sampling.")
+    return True
+
+
+def xpu_sample(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    logprobs_mode: LogprobsMode = "raw_logprobs",
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Sample from the logits using the fused XPU top-k/top-p kernel.
+
+    Statistically equivalent to `random_sample`, but avoids sorting the vocab
+    and never materializes the probability tensor. The noise comes from the
+    device's default generator, so per-request generators aren't supported.
+
+    Returns the sampled token ids and, for processed logprobs modes, the
+    post-top-k/top-p logits (or logprobs); otherwise None.
+    """
+    logits = logits.to(dtype=torch.float32).contiguous()
+    sampled = torch.empty(logits.shape[0], dtype=torch.int64, device=logits.device)
+    logits_to_return = (
+        torch.empty_like(logits) if logprobs_mode in PROCESSED_LOGPROBS_MODES else None
+    )
+
+    generator = torch.xpu.default_generators[logits.device.index]
+    state = generator.get_state()
+    seed, offset = state.view(torch.int64).tolist()
+    seeds = torch.tensor([seed, offset], dtype=torch.int64, device="cpu")
+    # The XPU kernel expects k as int64 (Long), but the input batch
+    # stores top_k as int32. Cast here to avoid dtype mismatch.
+    if k is not None:
+        k = k.to(torch.int64)
+    torch.ops.vllm.xpu_topk_topp_sampler(
+        sampled, logits_to_return, logits, k, p, logprobs_mode, seeds
+    )
+    # The custom XPU sampler kernel consumes RNG values internally, so advance
+    # the default generator's offset to keep future draws deterministic.
+    # pytorch: offset must be multiple of 4
+    offset = (offset + logits.numel() + 3) // 4 * 4
+    state.view(torch.int64)[1] = offset
+    generator.set_state(state)
+    return sampled, logits_to_return
+
+
 class TopKTopPSampler(nn.Module):
     """Module that performs optional top-k and top-p filtering followed by
     weighted random sampling of logits.
@@ -162,7 +224,7 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_cpu
         elif current_platform.is_xpu():
-            if envs.VLLM_XPU_USE_SAMPLER_KERNEL:
+            if xpu_sampler_supported():
                 self.forward = self.forward_xpu
             else:
                 self.forward = self.forward_native
@@ -356,37 +418,7 @@ class TopKTopPSampler(nn.Module):
                 "PyTorch-native implementation."
             )
             return self.forward_native(logits, generators, k, p)
-        random_sampled = torch.empty(
-            logits.shape[0], dtype=torch.int64, device=logits.device
-        )
-        logits_to_return = None
-        if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
-            logits_to_return = torch.empty_like(logits)
-
-        assert len(generators) != logits.shape[0], (
-            "xpu kernel topk_topp_sampler does not support batch-wise generators."
-        )
-        generator = torch.xpu.default_generators[logits.device.index]
-
-        state = generator.get_state()
-        seed, offset = state.view(torch.int64)
-        seeds = torch.tensor(
-            [seed, offset], dtype=torch.int64, device=torch.device("cpu")
-        )
-        # The XPU kernel expects k as int64 (Long), but the input batch
-        # stores top_k as int32. Cast here to avoid dtype mismatch.
-        if k is not None:
-            k = k.to(torch.int64)
-        torch.ops.vllm.xpu_topk_topp_sampler(
-            random_sampled, logits_to_return, logits, k, p, self.logprobs_mode, seeds
-        )
-        # The custom XPU sampler kernel consumes RNG values internally, so advance
-        # the default generator's offset to keep future draws deterministic.
-        # pytorch: offset must be multiple of 4
-        offset = (offset + logits.numel() + 3) // 4 * 4
-        state.view(torch.int64)[1] = offset
-        generator.set_state(state)
-        return random_sampled, logits_to_return
+        return xpu_sample(logits, k, p, self.logprobs_mode)
 
 
 # Note: this is a workaround for

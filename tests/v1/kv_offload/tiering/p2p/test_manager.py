@@ -180,6 +180,40 @@ class TestInitHashSeed:
         assert mgr._get_hash_seed() == "random-seed-abc"
 
 
+class TestBackpressureRejected:
+    def _patch_transports(self, monkeypatch) -> None:
+        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
+        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        monkeypatch.setattr(
+            manager_module.FileMapper,
+            "from_offloading_spec",
+            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+        )
+
+    def test_explicit_backpressure_detector_rejected(self, monkeypatch):
+        """An explicitly configured detector must fail fast for P2P.
+
+        The generic store-latency detector cannot fail fast in PD mode and
+        rendezvous time makes store latency an unreliable pressure signal,
+        so P2P rejects it rather than degrading silently.
+        """
+        self._patch_transports(monkeypatch)
+        with pytest.raises(ValueError, match="not supported for the P2P"):
+            P2PSecondaryTierManager(
+                offloading_spec=_init_offloading_spec(),
+                primary_kv_view=memoryview(bytearray(16)),
+                backpressure_detector=object(),
+            )
+
+    def test_no_detector_constructs_normally(self, monkeypatch):
+        self._patch_transports(monkeypatch)
+        mgr = P2PSecondaryTierManager(
+            offloading_spec=_init_offloading_spec(),
+            primary_kv_view=memoryview(bytearray(16)),
+        )
+        assert mgr.bp_detector is None
+
+
 # ---------------------------------------------------------------------------
 # Tests for _peer_id_from_params
 # ---------------------------------------------------------------------------
