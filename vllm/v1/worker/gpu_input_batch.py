@@ -106,6 +106,7 @@ class InputBatch:
         reasoning_config: ReasoningConfig | None = None,
         use_replayssm: bool = False,
         slot_mapping_modes: list[SlotMappingMode] | None = None,
+        dcp_world_sizes: list[int | None] | None = None,
     ):
         self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
             reasoning_config,
@@ -191,6 +192,7 @@ class InputBatch:
             max_num_blocks=max_num_blocks_per_req,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
             slot_mapping_modes=slot_mapping_modes,
+            dcp_world_sizes=dcp_world_sizes,
         )
 
         # Sampling-related.
