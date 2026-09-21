@@ -46,6 +46,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
     PromptType,
@@ -126,6 +127,7 @@ class OnlineRenderer:
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
+        tool_strict_level: str = "auto",
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -140,6 +142,7 @@ class OnlineRenderer:
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
         )
@@ -412,7 +415,7 @@ class OnlineRenderer:
                         messages.append(new_message)
                     if isinstance(response_message, ResponseFunctionToolCall):
                         previous_outputs.append(response_message)
-        except ValueError as exc:
+        except (ValueError, VLLMValidationError) as exc:
             return self.create_error_response(
                 str(exc),
                 err_type="invalid_request_error",
@@ -511,7 +514,10 @@ class OnlineRenderer:
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
         if (reasoning_effort := request.reasoning_effort) == "none":
-            raise ValueError(f"Harmony does not support {reasoning_effort=}")
+            raise VLLMValidationError(
+                f"Harmony does not support {reasoning_effort=}",
+                parameter="reasoning_effort",
+            )
         tools = request.tools if should_include_tools else None
         messages.extend(
             build_harmony_preamble(

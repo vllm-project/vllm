@@ -21,12 +21,10 @@ class HummingLinearKernel(MPLinearKernel):
             return False, "Humming is only supported on CUDA"
         if not has_humming():
             return False, "Humming is not installed"
-        if c.has_g_idx:
-            return False, "Humming does not support act-order (g_idx)"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_linear_layer_to_humming_standard,
             get_humming_linear_compute_config,
             prepare_humming_linear_layer_config,
@@ -59,13 +57,14 @@ class HummingLinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             apply_humming_linear,
         )
 
         return apply_humming_linear(
             layer,
             x,
+            skip_bias_add=bias is None,
             layer_config=self.layer_config,
             compute_config=self.compute_config,
             locks=self.locks,

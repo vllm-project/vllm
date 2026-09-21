@@ -259,13 +259,13 @@ class FakeParent:
     ) -> TransferJob:
         keys_list = list(keys)
         self.calls.append(("create_store_job", tuple(keys_list), ctx.req_id))
-        block_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
+        chunk_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
         job_id = self._next_job_id
         self._next_job_id += 1
         return TransferJob(
             job_id=job_id,
             keys=keys_list,
-            block_ids=block_ids,
+            chunk_ids=chunk_ids,
             is_promotion=False,
             req_context=ctx,
         )
@@ -827,7 +827,7 @@ class TestLookupFlow:
         assert fresh[0][LookupMsg.KEYS] == [b"hA"]
 
     def test_flush_uses_work_list_not_full_scan(self):
-        """flush drains a work-list rather than scanning every live request.
+        """Flush drains a work-list rather than scanning every live request.
 
         A request with no newly-registered keys is not revisited: after a
         flush the work-list is empty, an idle re-flush sends nothing, and a
