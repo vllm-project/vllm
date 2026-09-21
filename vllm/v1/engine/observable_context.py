@@ -31,14 +31,14 @@ class Event:
 @dataclass
 class ObservableContext:
     token_related_events: deque[Event]
-    engine_core_events: list[EngineCoreEvent]
+    engine_core_events: deque[EngineCoreEvent]
     not_empty: bool = False
 
     @classmethod
     def from_new_request(cls):
         return cls(
             token_related_events=deque(maxlen=_get_max_events()),
-            engine_core_events=[],
+            engine_core_events=deque(maxlen=_get_max_events()),
         )
 
     def _update_iter_stats(
