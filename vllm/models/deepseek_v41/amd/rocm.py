@@ -890,18 +890,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             assert self.topk_indices_buffer is not None
             if use_direct_topk:
                 topk_indices = self.topk_indices_buffer[:num_decode_tokens]
-                assert swa_metadata.is_valid_token is not None
-                topk_lens = torch.empty(
-                    num_decode_tokens, dtype=torch.int32, device=topk_indices.device
-                )
-                _compute_topk_lens_kernel[(num_decode_tokens,)](
-                    topk_lens,
-                    topk_indices,
-                    topk_indices.stride(0),
-                    topk_indices.shape[1],
-                    swa_metadata.is_valid_token[:num_decode_tokens],
-                    TRITON_BLOCK_SIZE=1024,
-                )
             else:
                 (
                     topk_ragged_indices,
@@ -935,6 +923,16 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 if use_direct_topk and attn_metadata is not None
                 else None
             ),
+            topk_seq_lens=swa_metadata.seq_lens if use_direct_topk else None,
+            topk_query_start_loc=(
+                swa_metadata.query_start_loc if use_direct_topk else None
+            ),
+            topk_is_valid_token=(
+                swa_metadata.is_valid_token[:num_decode_tokens]
+                if use_direct_topk and swa_metadata.is_valid_token is not None
+                else None
+            ),
+            topk_compress_ratio=self.compress_ratio if use_direct_topk else 0,
             attn_sink=self.attn_sink,
             scale=self.scale,
             head_dim=self.head_dim,

@@ -1161,6 +1161,152 @@ def test_sparse_attn_decode_gfx950_direct_dense_topk(monkeypatch) -> None:
 
 @requires_gfx950
 @torch.inference_mode()
+def test_sparse_attn_decode_gfx950_derives_exact_direct_lengths(monkeypatch) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(42)
+    block_size = 4
+    num_queries, num_heads, width = 4, 3, 8
+    q = (
+        torch.randn(
+            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        * 0.125
+    )
+    main_cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
+    main_indices = torch.empty(0, dtype=torch.int32, device=device)
+    main_indptr = torch.zeros(num_queries + 1, dtype=torch.int32, device=device)
+    extra_kv = torch.randn(32, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
+    logical = torch.tensor(
+        [
+            [0, 3, -1, -1, -1, -1, -1, -1],
+            [1, 7, 2, -1, -1, -1, -1, -1],
+            [6, 0, 5, 3, -1, -1, -1, -1],
+            [-1, -1, -1, -1, -1, -1, -1, -1],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    token_to_req = torch.tensor([0, 1, 1, 2], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([4, 8, 0], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 1, 3, 4], dtype=torch.int32, device=device)
+    valid_token = torch.tensor([True, True, True, False], device=device)
+    block_table = torch.tensor(
+        [[0, 1], [2, 3], [4, 5]], dtype=torch.int32, device=device
+    )
+    lengths = torch.tensor([2, 3, 4, 0], dtype=torch.int32, device=device)
+    rows = [[0, 3], [9, 15, 10], [14, 8, 13, 11], []]
+    ragged, indptr = _ragged_from_rows(rows, device)
+
+    monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *args: 4)
+    expected = mod._rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices,
+        main_indptr=main_indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=ragged,
+        extra_indptr=indptr,
+    )
+    explicit = mod._rocm_sparse_attn_decode_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices.reshape(num_queries, 0),
+        main_lengths=torch.zeros(num_queries, dtype=torch.int32, device=device),
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=logical,
+        extra_lengths=lengths,
+        extra_token_to_req=token_to_req,
+        extra_block_table=block_table,
+    )
+    derived = mod._rocm_sparse_attn_decode_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices.reshape(num_queries, 0),
+        main_lengths=torch.zeros(num_queries, dtype=torch.int32, device=device),
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=logical,
+        extra_token_to_req=token_to_req,
+        extra_seq_lens=seq_lens,
+        extra_query_start_loc=query_start_loc,
+        extra_is_valid_token=valid_token,
+        extra_compress_ratio=2,
+        extra_block_table=block_table,
+    )
+
+    torch.testing.assert_close(explicit, expected, atol=0, rtol=0)
+    torch.testing.assert_close(derived, expected, atol=0, rtol=0)
+
+    replay_out = torch.empty_like(q)
+
+    def run_derived() -> torch.Tensor:
+        return mod._rocm_sparse_attn_decode_triton(
+            q=q,
+            main_cache=main_cache,
+            main_indices=main_indices.reshape(num_queries, 0),
+            main_lengths=torch.zeros(
+                num_queries, dtype=torch.int32, device=device
+            ),
+            scale=HEAD_DIM**-0.5,
+            attn_sink=None,
+            nope_head_dim=NOPE_HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            extra_cache=extra_cache,
+            extra_indices=logical,
+            extra_token_to_req=token_to_req,
+            extra_seq_lens=seq_lens,
+            extra_query_start_loc=query_start_loc,
+            extra_is_valid_token=valid_token,
+            extra_compress_ratio=2,
+            extra_block_table=block_table,
+            out=replay_out,
+        )
+
+    run_derived()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_out = run_derived()
+
+    seq_lens.copy_(torch.tensor([2, 4, 0], dtype=torch.int32, device=device))
+    replay_lengths = torch.tensor([1, 1, 2, 0], dtype=torch.int32, device=device)
+    graph.replay()
+    torch.accelerator.synchronize()
+    expected_replay = mod._rocm_sparse_attn_decode_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices.reshape(num_queries, 0),
+        main_lengths=torch.zeros(num_queries, dtype=torch.int32, device=device),
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=logical,
+        extra_lengths=replay_lengths,
+        extra_token_to_req=token_to_req,
+        extra_block_table=block_table,
+    )
+    assert captured_out.data_ptr() == replay_out.data_ptr()
+    torch.testing.assert_close(replay_out, expected_replay, atol=0, rtol=0)
+
+
+@requires_gfx950
+@torch.inference_mode()
 def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> None:
     device = torch.device("cuda")
     part_m = torch.full(
