@@ -49,50 +49,42 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
 
 
 @pytest.mark.parametrize(
-    "parallel_mode", [None, "ep", "moe_sp", "compiler_sp", "moe_compiler_sp"]
+    "tp_size,pp_size,hc_sp,moe_sp,expected,error",
+    [
+        (1, 1, False, False, False, None),
+        (2, 1, False, False, False, None),
+        (2, 1, True, False, True, None),
+        (2, 1, False, True, True, None),
+        (2, 1, True, True, True, None),
+        (1, 1, True, False, None, "requires TP>1"),
+        (2, 2, True, False, None, "requires PP=1"),
+        (2, 2, False, True, None, "requires PP=1"),
+    ],
 )
-@pytest.mark.parametrize("pp_size", [1, 2])
-@pytest.mark.parametrize("explicit_sp", [False, True])
-def test_sp_parallel_modes(parallel_mode, pp_size, explicit_sp) -> None:
-    """Keep native SP independent of compiler SP and validate PP support."""
+def test_sp_parallel_modes(tp_size, pp_size, hc_sp, moe_sp, expected, error) -> None:
+    """Validate HC opt-in, automatic MoE SP, and unsupported topologies."""
     from vllm.models.qwen4_exp.nvidia.model import is_hc_sequence_parallel_enabled
 
-    moe_sp = parallel_mode in ("moe_sp", "moe_compiler_sp")
-    compiler_sp = parallel_mode in ("compiler_sp", "moe_compiler_sp")
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
-            tensor_parallel_size=2,
-            data_parallel_size=2 if moe_sp else 1,
+            tensor_parallel_size=tp_size,
             pipeline_parallel_size=pp_size,
-            enable_expert_parallel=parallel_mode == "ep" or moe_sp,
             use_sequence_parallel_moe=moe_sp,
-            enable_hc_sp=explicit_sp,
-        ),
-        compilation_config=SimpleNamespace(
-            pass_config=SimpleNamespace(enable_sp=compiler_sp)
+            enable_hc_sp=hc_sp,
         ),
     )
-    if pp_size > 1 and (moe_sp or explicit_sp):
-        with pytest.raises(ValueError, match="requires PP=1"):
-            is_hc_sequence_parallel_enabled(config)
-    elif pp_size > 1:
-        assert not is_hc_sequence_parallel_enabled(config)
-    else:
-        assert is_hc_sequence_parallel_enabled(config) == (explicit_sp or moe_sp)
-    config.parallel_config.tensor_parallel_size = 1
-    if explicit_sp:
-        with pytest.raises(ValueError, match="requires TP>1"):
+    if error:
+        with pytest.raises(ValueError, match=error):
             is_hc_sequence_parallel_enabled(config)
     else:
-        assert not is_hc_sequence_parallel_enabled(config)
+        assert is_hc_sequence_parallel_enabled(config) is expected
 
 
 @pytest.mark.parametrize(
     "dense_config", [{"num_experts": 0}, {"num_experts": 4, "mlp_only_layers": [0]}]
 )
-@pytest.mark.parametrize("use_moe_sp", [False, True])
-def test_sp_rejects_dense_layers(monkeypatch, dense_config, use_moe_sp) -> None:
-    """Reject dense layers under either native SP mode."""
+def test_sp_rejects_dense_layers(monkeypatch, dense_config) -> None:
+    """Reject both dense models and dense layers in an MoE model under HC SP."""
     from vllm.models.qwen4_exp.nvidia import model as qwen4_model
 
     config = SimpleNamespace(
@@ -104,8 +96,8 @@ def test_sp_rejects_dense_layers(monkeypatch, dense_config, use_moe_sp) -> None:
         parallel_config=SimpleNamespace(
             tensor_parallel_size=2,
             pipeline_parallel_size=1,
-            use_sequence_parallel_moe=use_moe_sp,
-            enable_hc_sp=not use_moe_sp,
+            use_sequence_parallel_moe=False,
+            enable_hc_sp=True,
         ),
         compilation_config=SimpleNamespace(
             pass_config=SimpleNamespace(enable_sp=False)

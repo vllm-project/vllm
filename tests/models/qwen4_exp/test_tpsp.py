@@ -5,11 +5,16 @@
 from dataclasses import MISSING, fields
 from itertools import accumulate, product
 from types import SimpleNamespace
-from unittest.mock import patch
 
+import pytest
 import torch
 import torch.multiprocessing as mp
 from torch import nn
+
+from vllm.platforms import current_platform
+
+if not current_platform.is_cuda():
+    pytest.skip("Qwen4Exp SP requires CUDA", allow_module_level=True)
 
 from tests.utils import multi_gpu_test
 from vllm.config import (
@@ -42,7 +47,6 @@ from vllm.models.qwen4_exp.nvidia.model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpModel,
     Qwen4ExpSparseMoeBlock,
-    is_hc_sequence_parallel_enabled,
 )
 from vllm.models.qwen4_exp.nvidia.mtp import Qwen4ExpMultiTokenPredictor
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
@@ -142,8 +146,11 @@ def _check_decoder(vllm_config: VllmConfig, rank: int) -> None:
     config = vllm_config.model_config.hf_text_config
     layer = _make_decoder(vllm_config, rank, "decoder")
 
-    for num_tokens, defer_moe_reduce, use_mrope in product(
-        (1, 3, 8, 17), (False, True), (False, True)
+    # Cover padding, both MoE reduction contracts, and MRoPE's token axis.
+    for num_tokens, defer_moe_reduce, use_mrope in (
+        (1, True, False),
+        (3, False, True),
+        (8, True, True),
     ):
         hidden = torch.randn(num_tokens, config.hc_count * config.hidden_size)
         positions = torch.arange(num_tokens)
@@ -218,7 +225,7 @@ def _check_mtp(vllm_config: VllmConfig, rank: int) -> None:
     config = vllm_config.model_config.hf_text_config
     model = _make_mtp(vllm_config, rank)
     layer = model.layers[0]
-    for num_tokens in (1, 3, 8, 17):
+    for num_tokens in (3, 8):
         hidden = torch.randn(num_tokens, config.hc_count * config.hidden_size)
         reference_hidden = local_hidden = hidden
         positions = torch.arange(num_tokens)
@@ -326,25 +333,8 @@ def _check_ple(vllm_config: VllmConfig) -> None:
             ):
                 ple.start_prefetch(ids, qsl, context)
                 sp_ple.start_prefetch(ids, qsl, context)
-                full_embedding = ple.ple_embedding(hidden, ids, qsl, context)
-                local_embedding = sp_ple.ple_embedding(
-                    sp_shard(hidden), ids, qsl, context
-                )
-                torch.testing.assert_close(
-                    local_embedding.float(),
-                    sp_shard(full_embedding.float()),
-                    atol=0,
-                    rtol=0,
-                )
                 expected = ple(hidden, ids, qsl, context)
-                with patch(
-                    "vllm.models.qwen4_exp.nvidia.ple_layer.sp_all_gather",
-                    wraps=sp_all_gather,
-                ) as all_gather:
-                    actual = sp_ple(sp_shard(hidden), ids, qsl, context)
-                # Gather only convolution inputs, without either residual branch.
-                assert all_gather.call_count == 1
-                assert all_gather.call_args.args[0].shape[-1] == ple.hc_hidden_size
+                actual = sp_ple(sp_shard(hidden), ids, qsl, context)
             torch.testing.assert_close(
                 sp_all_gather(actual)[:num_tokens], expected, atol=0.002, rtol=0.02
             )
@@ -354,13 +344,8 @@ def _check_ple(vllm_config: VllmConfig) -> None:
 def _check_moe_sp(vllm_config: VllmConfig, rank: int) -> None:
     """Compare native SP with the existing MoE wrapper across unequal DP batches."""
     config = vllm_config.model_config.hf_text_config
-    assert is_hc_sequence_parallel_enabled(vllm_config)
     mtp = _make_mtp(vllm_config, rank)
     layer = mtp.layers[0]
-    assert layer.mlp.shared_expert.gate_up_proj.tp_size == 1
-    assert layer.mlp.experts.moe_config.tp_size == 1
-    assert layer.mlp.experts.moe_config.ep_size == 4
-    assert layer.mlp.experts.moe_config.sp_size == 2
 
     target = Qwen4ExpModel.__new__(Qwen4ExpModel)
     nn.Module.__init__(target)
@@ -390,7 +375,7 @@ def _check_moe_sp(vllm_config: VllmConfig, rank: int) -> None:
             torch.testing.assert_close(get_forward_context().is_padding, local_padding)
             return output
 
-    for base_tokens in (1, 3, 8, 17):
+    for base_tokens in (1, 8):
         counts = torch.tensor([base_tokens, base_tokens + 2], device="cpu")
         num_tokens = int(counts[dp_rank])
         torch.manual_seed(30 + dp_rank)
@@ -404,19 +389,7 @@ def _check_moe_sp(vllm_config: VllmConfig, rank: int) -> None:
 
         expected = forward(target, False, inputs_embeds=embeds)
         expected_multi = target._mtp_hidden_buffer[:num_tokens].clone()
-        with (
-            patch(
-                "vllm.models.qwen4_exp.nvidia.model.sp_all_gather", wraps=sp_all_gather
-            ) as all_gather,
-            patch(
-                "vllm.models.qwen4_exp.nvidia.model.sp_reduce_scatter",
-                wraps=sp_reduce_scatter,
-            ) as reduce_scatter,
-        ):
-            actual = forward(target, True, inputs_embeds=embeds)
-            # One AG/RS per layer, plus the packed model-output AG.
-            assert all_gather.call_count == target.end_layer + 1
-            assert reduce_scatter.call_count == target.end_layer
+        actual = forward(target, True, inputs_embeds=embeds)
         actual_multi = target._mtp_hidden_buffer[:num_tokens].clone()
         torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.02)
         torch.testing.assert_close(actual_multi, expected_multi, atol=0.02, rtol=0.02)

@@ -455,15 +455,14 @@ def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
-@pytest.mark.parametrize("total_tokens", [2, 3])
 @pytest.mark.parametrize("reduce_results", [False, True])
 def test_pinned_embedding_finalize_prefetch_optionally_reduces_output(
     monkeypatch: pytest.MonkeyPatch,
     dtype: torch.dtype,
-    total_tokens: int,
     reduce_results: bool,
 ) -> None:
     """Deferring reduction must preserve full token rows and wait for the lookup."""
+    total_tokens = 3
     embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
     values = torch.arange(1, 13).reshape(4, 3)
