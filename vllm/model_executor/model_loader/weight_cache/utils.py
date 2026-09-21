@@ -39,11 +39,6 @@ def caches_draft_model(
     )
 
 
-def normalize_draft_model_idx(draft_model_idx: int | None) -> int:
-    """Encode a daemon group as a cache key field; -1 is the target model."""
-    return -1 if draft_model_idx is None else draft_model_idx
-
-
 def format_daemon_role(draft_model_idx: int | None) -> str:
     """Name of a daemon group: the target model, or a draft by index."""
     return "target" if draft_model_idx is None else f"draft{draft_model_idx}"

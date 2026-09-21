@@ -31,7 +31,6 @@ from vllm.config import ModelConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
     format_socket_role_suffix,
-    normalize_draft_model_idx,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
@@ -288,8 +287,8 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
-    draft_model_idx: int = -1
-    """Daemon group the weights come from; -1 is the target model."""
+    draft_model_idx: int | None = None
+    """Daemon group the weights come from; None is the target model."""
 
     @classmethod
     def from_model_config(
@@ -325,7 +324,7 @@ class WeightCacheKey:
             quant_config_hash=_hash_quant_config(quant_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
-            draft_model_idx=normalize_draft_model_idx(draft_model_idx),
+            draft_model_idx=draft_model_idx,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
