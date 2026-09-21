@@ -296,8 +296,27 @@ class Worker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS and level != 1:
+            raise ValueError("Graph-discard sleep supports level 1 only")
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
+
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+            runner = cast("GPUModelRunnerV2", self.model_runner)
+            assert runner.cudagraph_manager is not None
+            runner.cudagraph_manager.discard_full_graphs()
+            gc.collect()
+            torch._C._cuda_clearCublasWorkspaces()
+            torch.accelerator.empty_cache()
+            after_graphs = torch.accelerator.get_memory_info()[0]
+            logger.info(
+                "Sleep graph destruction freed %d bytes before allocator sleep",
+                after_graphs - free_bytes_before_sleep,
+            )
+            if envs.VLLM_SLEEP_RECLAIM_GRAPH_MEMORY:
+                from vllm.v1.worker.gpu.sleep_graphs import reclaim_graph_memory
+
+                reclaim_graph_memory()
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -362,6 +381,22 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
+
+    def recapture_sleep_graph(self) -> int:
+        """Run only at an idle EngineCore boundary with all allocations awake."""
+        runner = cast("GPUModelRunnerV2", self.model_runner)
+        assert runner.cudagraph_manager is not None
+        try:
+            return runner.capture_one_sleep_graph()
+        except torch.OutOfMemoryError:
+            # A successful sync distinguishes a recoverable allocation failure
+            # from a poisoned CUDA context. Unknown CUDA failures propagate.
+            self.synchronize_device()
+            runner.cudagraph_manager.discard_full_graphs()
+            gc.collect()
+            torch.accelerator.empty_cache()
+            logger.warning("Sleep graph recapture ran out of memory; staying eager")
+            return 0
 
     def discard(self, tags: tuple[str, ...]) -> None:
         if has_kv_transfer_group() and "kv_cache" in tags:
