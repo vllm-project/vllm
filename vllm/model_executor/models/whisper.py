@@ -767,6 +767,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
             hf_kwargs=dict(
                 hf_inputs.hf_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
+                truncation=True,
             )
         )
 
