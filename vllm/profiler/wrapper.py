@@ -222,6 +222,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         torch_profiler_trace_dir = profiler_config.torch_profiler_dir
         self._torch_profiler_trace_dir = torch_profiler_trace_dir
         self._torch_profiler_use_gzip = profiler_config.torch_profiler_use_gzip
+        self._worker_name = worker_name
         self._custom_trace_handler = on_trace_ready is not None
         if local_rank in (None, 0):
             logger.info_once(
@@ -299,6 +300,7 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def set_output_name(self, worker_name: str) -> None:
+        self._worker_name = worker_name
         if self._custom_trace_handler:
             return
         self._profiler_kwargs["on_trace_ready"] = (
@@ -326,13 +328,15 @@ class TorchProfilerWrapper(WorkerProfiler):
             row_limit=row_limit,
         )
 
-    def _write_profiler_table(self, rank: int, table: str) -> None:
+    def _write_profiler_table(self, table: str) -> None:
         profiler_dir = self.profiler_config.torch_profiler_dir
 
         # Skip file write for URI paths (gs://, s3://, etc.)
         # as standard file I/O doesn't work with URI schemes
         if not _is_uri_path(profiler_dir):
-            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+            profiler_out_file = os.path.join(
+                profiler_dir, f"{self._worker_name}.profiler_out.txt"
+            )
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
@@ -377,7 +381,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         rank = self.local_rank
         if self.dump_device_time_total:
             table = self._build_profiler_table(sort_key="self_device_time_total")
-            self._write_profiler_table(rank, table)
+            self._write_profiler_table(table)
 
             # only print profiler results on rank 0
             if rank == 0:
@@ -387,7 +391,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             table = self._build_profiler_table(
                 sort_key="self_cpu_time_total", row_limit=50
             )
-            self._write_profiler_table(rank, table)
+            self._write_profiler_table(table)
 
             # only print profiler results on rank 0
             if rank == 0:
