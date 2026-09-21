@@ -81,7 +81,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
 def _get_fp8_dtype(spec: KVCacheSpec, cache_dtype: str) -> torch.dtype | None:
     """The fp8 dtype of a KV cache that stores plain fp8 values as uint8.
 
@@ -102,7 +101,6 @@ def _get_fp8_dtype(spec: KVCacheSpec, cache_dtype: str) -> torch.dtype | None:
         return torch.float8_e5m2
     return None
 
-
 def _get_startup_fill_group_ids(kv_cache_config: "KVCacheConfig") -> set[int]:
     """KV cache groups that startup fill covers.
 
@@ -120,7 +118,6 @@ def _get_startup_fill_group_ids(kv_cache_config: "KVCacheConfig") -> set[int]:
         group_ids.add(group_idx)
     return group_ids
 
-
 @dataclass
 class DecodeBenchConnectorMetadata(KVConnectorMetadata):
     """Metadata for DecodeBenchConnector.
@@ -134,7 +131,6 @@ class DecodeBenchConnectorMetadata(KVConnectorMetadata):
     # One group: ([1, 2, 3],)
     # Multiple groups: ([1, 2], [5, 6])
     reqs_to_fill: dict[str, tuple[tuple[list[int], ...], int]]
-
 
 class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     """A KV Connector for decode instance performance testing.
@@ -242,7 +238,6 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.request_finished(request)
         return False, None
-
 
 class DecodeBenchConnectorScheduler:
     """Scheduler-side implementation for DecodeBenchConnector."""
@@ -416,7 +411,6 @@ class DecodeBenchConnectorScheduler:
         """Called when a request has finished. Clean up any state."""
         self._filled_requests.discard(request.request_id)
 
-
 class DecodeBenchConnectorWorker:
     """Worker-side implementation for DecodeBenchConnector."""
 
@@ -530,36 +524,53 @@ class DecodeBenchConnectorWorker:
         allowing decode performance testing with larger context sizes.
 
         Supports both single- and multi-group KV cache configurations.
+
+        Block IDs are merged and deduplicated per KV cache group, and
+        shared state tensors are filled once by object identity, so hybrid
+        layouts that reuse the same tensor across requests or layers are
+        not rewritten repeatedly at large batch sizes.
         """
         if not metadata.reqs_to_fill:
             return
 
         assert self.kv_caches is not None, "KV caches must be registered before filling"
 
-        for req_id, (block_ids_per_group, num_tokens) in metadata.reqs_to_fill.items():
-            # Fill blocks for each KV cache group
+        unique_blocks_per_group: dict[int, set[int]] = {}
+        total_tokens = 0
+        for _, (block_ids_per_group, num_tokens) in metadata.reqs_to_fill.items():
+            total_tokens += num_tokens
             for group_idx, block_ids in enumerate(block_ids_per_group):
-                self._fill_blocks(group_idx, block_ids, num_tokens)
+                if block_ids:
+                    unique_blocks_per_group.setdefault(group_idx, set()).update(
+                        block_ids
+                    )
 
-            block_counts = tuple(len(group) for group in block_ids_per_group)
-            logger.debug(
-                "DecodeBenchConnector: Filled %d total blocks (%d tokens) across "
-                "%d groups for request %s (per-group counts: %s)",
-                sum(block_counts),
-                num_tokens,
-                len(block_ids_per_group),
-                req_id,
-                ", ".join(map(str, block_counts)),
-            )
+        filled_tensors: set[int] = set()
+        for group_idx, block_ids in unique_blocks_per_group.items():
+            self._fill_blocks(group_idx, sorted(block_ids), filled_tensors)
 
-    def _fill_blocks(self, group_idx: int, block_ids: list[int], num_tokens: int):
+        logger.debug(
+            "DecodeBenchConnector: Filled %d unique block IDs (%d tokens) "
+            "across %d groups from %d requests",
+            sum(len(ids) for ids in unique_blocks_per_group.values()),
+            total_tokens,
+            len(unique_blocks_per_group),
+            len(metadata.reqs_to_fill),
+        )
+
+    def _fill_blocks(
+        self,
+        group_idx: int,
+        block_ids: list[int],
+        filled_tensors: set[int],
+    ):
         """Fill specified blocks with dummy values for a specific KV cache group.
 
         Args:
-            group_idx: The KV cache group index to fill
-            block_ids: List of block IDs to fill in this group
-            num_tokens: Total number of tokens to fill across these blocks
-
+            group_idx: The KV cache group index to fill.
+            block_ids: Unique block IDs to fill in this group.
+            filled_tensors: Object identities of tensors already filled in
+                this ``start_fill_kv`` invocation.
         """
         if not block_ids:
             return
@@ -595,6 +606,8 @@ class DecodeBenchConnectorWorker:
             # dimension — so fill each tensor in its entirety with the same
             # dummy values.
             if isinstance(kv_cache, torch.Tensor):
+                if self._already_filled(kv_cache, filled_tensors):
+                    continue
                 fill_dtype = self._fp8_dtypes.get(layer_name, kv_cache.dtype)
                 self._fill_block_tensor(
                     kv_cache, block_ids, fill_mean, fill_std, fill_dtype
@@ -603,6 +616,8 @@ class DecodeBenchConnectorWorker:
                 isinstance(t, torch.Tensor) for t in kv_cache
             ):
                 for state_tensor in kv_cache:
+                    if self._already_filled(state_tensor, filled_tensors):
+                        continue
                     self._fill_tensor(
                         state_tensor, fill_mean, fill_std, state_tensor.dtype
                     )
@@ -624,6 +639,15 @@ class DecodeBenchConnectorWorker:
             fill_mean,
             fill_std,
         )
+
+    @staticmethod
+    def _already_filled(tensor: torch.Tensor, filled_tensors: set[int]) -> bool:
+        """Return True if this tensor object was already filled this invocation."""
+        tensor_id = id(tensor)
+        if tensor_id in filled_tensors:
+            return True
+        filled_tensors.add(tensor_id)
+        return False
 
     def _fill_block_tensor(
         self,

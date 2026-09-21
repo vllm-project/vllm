@@ -1103,6 +1103,165 @@ def test_decode_bench_connector_startup_fill_keeps_circular_buffer_zero_fill():
     expected_ring[4] = 0
     assert torch.equal(ring_cache, expected_ring)
 
+def _make_decode_bench_worker(
+    layer_names: list[str],
+    kv_cache_spec: FullAttentionSpec,
+    num_gpu_blocks: int = 8,
+) -> DecodeBenchConnector:
+    vllm_config = create_vllm_config(
+        block_size=kv_cache_spec.block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    return DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        KVCacheConfig(
+            num_blocks=num_gpu_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names, kv_cache_spec)],
+        ),
+    )
+
+
+def _bind_and_fill(
+    connector: DecodeBenchConnector,
+    reqs_to_fill: dict[str, tuple[tuple[list[int], ...], int]],
+) -> None:
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill=reqs_to_fill)
+    )
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+
+@pytest.mark.parametrize(
+    ("reqs_blocks", "expected_blocks"),
+    [
+        ({"r0": [1, 2, 3], "r1": [3, 4]}, [1, 2, 3, 4]),
+        ({"r0": [1, 5], "r1": [5, 7]}, [1, 5, 7]),
+        ({"r0": [2], "r1": [2], "r2": [2]}, [2]),
+    ],
+)
+def test_decode_bench_connector_fills_unique_blocks_once(reqs_blocks, expected_blocks):
+    """Overlapping block IDs across requests are merged and filled once."""
+    num_gpu_blocks = 8
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    connector = _make_decode_bench_worker(["layer"], spec, num_gpu_blocks)
+    kv_cache = torch.zeros(num_gpu_blocks, 2)
+    connector.register_kv_caches({"layer": kv_cache})
+
+    block_fill_calls: list[tuple[int, tuple[int, ...]]] = []
+    worker = connector.connector_worker
+    assert worker is not None
+    orig_fill = worker._fill_block_tensor
+
+    def _counting_fill(cache, block_ids, fill_mean, fill_std, fill_dtype):
+        block_fill_calls.append((id(cache), tuple(block_ids)))
+        return orig_fill(cache, block_ids, fill_mean, fill_std, fill_dtype)
+
+    worker._fill_block_tensor = _counting_fill  # type: ignore[method-assign]
+    _bind_and_fill(
+        connector,
+        {
+            req_id: ((block_ids,), 16 * len(block_ids))
+            for req_id, block_ids in reqs_blocks.items()
+        },
+    )
+
+    assert block_fill_calls == [(id(kv_cache), tuple(expected_blocks))]
+    expected = set(expected_blocks)
+    for block_id in range(num_gpu_blocks):
+        if block_id in expected:
+            assert torch.allclose(kv_cache[block_id], torch.tensor(0.015))
+        else:
+            assert torch.count_nonzero(kv_cache[block_id]) == 0
+
+
+def test_decode_bench_connector_fills_shared_layer_tensor_once():
+    """Layers that alias the same KV tensor are filled once per invocation."""
+    num_gpu_blocks = 8
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    connector = _make_decode_bench_worker(["layer_a", "layer_b"], spec, num_gpu_blocks)
+    shared = torch.zeros(num_gpu_blocks, 2)
+    connector.register_kv_caches({"layer_a": shared, "layer_b": shared})
+
+    block_fill_calls: list[int] = []
+    worker = connector.connector_worker
+    assert worker is not None
+    orig_fill = worker._fill_block_tensor
+
+    def _counting_fill(cache, block_ids, fill_mean, fill_std, fill_dtype):
+        block_fill_calls.append(id(cache))
+        return orig_fill(cache, block_ids, fill_mean, fill_std, fill_dtype)
+
+    worker._fill_block_tensor = _counting_fill  # type: ignore[method-assign]
+    _bind_and_fill(
+        connector,
+        {
+            "r0": (([1, 2],), 32),
+            "r1": (([2, 3],), 32),
+        },
+    )
+
+    assert block_fill_calls == [id(shared)]
+    assert torch.allclose(shared[1], torch.tensor(0.015))
+    assert torch.allclose(shared[2], torch.tensor(0.015))
+    assert torch.allclose(shared[3], torch.tensor(0.015))
+    assert torch.count_nonzero(shared[0]) == 0
+
+
+def test_decode_bench_connector_fills_shared_state_tensors_once():
+    """Shared hybrid state tensors are filled once per unique tensor object."""
+    num_gpu_blocks = 8
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    connector = _make_decode_bench_worker(
+        ["linear_a", "linear_b"], spec, num_gpu_blocks
+    )
+    state_conv = torch.zeros(4, 5)
+    state_ssm = torch.zeros(2, 3)
+    shared_states = [state_conv, state_ssm]
+    connector.register_kv_caches({"linear_a": shared_states, "linear_b": shared_states})
+
+    state_fill_ids: list[int] = []
+    worker = connector.connector_worker
+    assert worker is not None
+    # Upstream renamed _fill_state_tensor -> _fill_tensor (fp8-aware).
+    orig_fill = worker._fill_tensor
+
+    def _counting_fill(cache, fill_mean, fill_std, fill_dtype):
+        state_fill_ids.append(id(cache))
+        return orig_fill(cache, fill_mean, fill_std, fill_dtype)
+
+    worker._fill_tensor = _counting_fill  # type: ignore[method-assign]
+    _bind_and_fill(
+        connector,
+        {
+            "r0": (([0, 1],), 32),
+            "r1": (([1, 2],), 32),
+        },
+    )
+
+    assert state_fill_ids == [id(state_conv), id(state_ssm)]
+    assert torch.allclose(state_conv, torch.tensor(0.015))
+    assert torch.allclose(state_ssm, torch.tensor(0.015))
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
