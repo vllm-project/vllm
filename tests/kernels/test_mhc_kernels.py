@@ -746,7 +746,7 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
 )
 @pytest.mark.parametrize("num_tokens", [0, 1, 8, 16, 17, 128, 1024])
 @pytest.mark.parametrize("hidden_size", [5120, 7168])
-def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
+def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size, monkeypatch):
     set_random_seed(0)
     hc_mult = 4
     if not is_mega_mhc_supported(hidden_size, 4):
@@ -826,7 +826,23 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             if num_tokens <= 16:
-                # Warm overlap on a fresh stream, then capture the Mega mHC path.
+                from vllm.models.deepseek_v41.nvidia.model_state import (
+                    DeepseekV41ModelState,
+                )
+                from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import warmup_mega_mhc
+                from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+                monkeypatch.setattr(
+                    DefaultModelState, "prepare_dummy_inputs", lambda *a: {}
+                )
+                state = DeepseekV41ModelState.__new__(DeepseekV41ModelState)
+                state.model_config = SimpleNamespace(
+                    hf_config=SimpleNamespace(hidden_size=hidden_size, hc_mult=hc_mult)
+                )
+                state.lookback_token_ids = None
+                # Prepare capture on a fresh stream; runtime overlap must not warm.
+                state.prepare_dummy_inputs(num_tokens, num_tokens)
+                warmed = warmup_mega_mhc.cache_info()
                 side = torch.cuda.Stream()
                 mhc_shifted_post_pre(
                     x,
@@ -847,6 +863,7 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
                     stream=side,
                 )
                 stream.wait_stream(side)
+                assert warmup_mega_mhc.cache_info() == warmed
             else:
                 mhc_shifted_post_pre_deep_gemm(*args)
             graph = torch.cuda.CUDAGraph()

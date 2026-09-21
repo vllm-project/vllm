@@ -19,7 +19,6 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from .mega_mhc import (
     can_use_mega_mhc,
     mhc_shifted_post_pre_deep_gemm,
-    warmup_mega_mhc,
 )
 
 if TYPE_CHECKING:
@@ -178,7 +177,6 @@ def mhc_shifted_post_pre(
 
     When stream is supplied, join it before consuming the returned coefficients.
     """
-    use_mega_mhc = can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux)
     layer_input = None
     if reduce_results:
         tp = get_tp_group()
@@ -207,11 +205,6 @@ def mhc_shifted_post_pre(
         else:
             x = tp.all_reduce(x)
     if stream is not None:
-        if use_mega_mhc and not torch.cuda.is_current_stream_capturing():
-            # Eager warmup selects overlap; piecewise capture selects Mega mHC.
-            warmup_mega_mhc(
-                torch.cuda.current_stream(), x.shape[0], x.shape[1], residual.shape[1]
-            )
         if layer_input is None:
             residual = mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
         aux = residual.mean(dim=1) if capture_aux else x.new_empty(0, x.shape[1])
@@ -233,7 +226,7 @@ def mhc_shifted_post_pre(
         )
         return residual, *pre_outputs, aux
 
-    if use_mega_mhc:
+    if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
         assert pre_mix is not None and norm_weight is not None
         outputs = mhc_shifted_post_pre_deep_gemm(
             x,

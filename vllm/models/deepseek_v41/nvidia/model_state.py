@@ -20,6 +20,9 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
+from .ops.mega_mhc import is_mega_mhc_supported, warmup_mega_mhc
+from .ops.mhc import MHC_OVERLAP_MAX_TOKENS
+
 
 @triton.jit
 def _gather_lookback_kernel(
@@ -167,6 +170,15 @@ class DeepseekV41ModelState(DefaultModelState):
         return model_inputs
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
+        # Called on the capture stream before capture, never by runtime forwards.
+        config = self.model_config.hf_config
+        if num_tokens > 0 and is_mega_mhc_supported(config.hidden_size, config.hc_mult):
+            warmup_mega_mhc(
+                torch.cuda.current_stream(),
+                min(num_tokens, MHC_OVERLAP_MAX_TOKENS),
+                config.hidden_size,
+                config.hc_mult,
+            )
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
         if self.lookback_token_ids is not None:
             # The captured graph reads this buffer; replays refill it in place.
