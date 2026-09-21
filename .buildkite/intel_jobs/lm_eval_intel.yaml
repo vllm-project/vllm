@@ -52,6 +52,7 @@ steps:
       pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-xpu-fp8.txt --tp-size=2'
 
 - label: GSM8K DeepSeek-V2-Lite-Instruct-FP8
+  key: gsm8k-deepseek-v2-lite-instruct-fp8
   timeout_in_minutes: 90
   device: intel_gpu
   agent_tags:
