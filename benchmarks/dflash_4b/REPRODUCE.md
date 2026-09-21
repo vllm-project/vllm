@@ -86,10 +86,9 @@ Setup pins the main packages and the precompiled vLLM wheel commit; it is not a 
 
 ### Model revisions
 
-These hashes identify the checkpoints downloaded for the original runs; they were not chosen for a particular fix or performance property.
-The pins preserve the same weights and model configuration across reruns.
-You can omit `--revision` in `download_model()` to use each repository’s current default revision, but later checkpoint changes may affect results.
-The hashes are only useful when reproducing or comparing against the original measurements.
+These revisions were pinned as routine bookkeeping when packaging the benchmark, with no issue-specific reason for choosing them.
+We have no evidence that these particular revisions explain the observed performance gap or are required to observe it.
+The hashes below simply record what was used.
 
 | Checkpoint | Revision |
 | --- | --- |
