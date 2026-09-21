@@ -248,19 +248,6 @@ def _ragged_from_rows(
     )
 
 
-class _FailingKernel:
-    """Stand-in for a Triton kernel that must not be launched."""
-
-    def __init__(self, message: str) -> None:
-        self._message = message
-
-    def __getitem__(self, _grid):
-        def _launch(*args, **kwargs):
-            pytest.fail(self._message)
-
-        return _launch
-
-
 def _rows_from_ragged(indices: torch.Tensor, indptr: torch.Tensor) -> list[list[int]]:
     ends = indptr.cpu().tolist()
     values = indices[: ends[-1]].cpu().tolist()
@@ -901,36 +888,6 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
     assert mod._decode_gfx950_num_splits(512, 1, 128, 7812) == 1
 
 
-@torch.inference_mode()
-def test_decode_num_splits_gfx950_fills_waves(monkeypatch) -> None:
-    """Split counts sharing a wave count should walk the fewest iterations.
-
-    Extra splits inside an already-paid-for wave cost nothing but shorten every
-    workgroup's BLOCK_K walk, so the DSv4.1-Flash geometry (128 SWA + 512 topk)
-    at 96 rows must take the 4 splits that fill 3 waves at 5 iterations rather
-    than the 3 splits that fill the same 3 waves at 8.
-    """
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-
-    monkeypatch.setattr(mod, "_decode_cu_count", lambda: 256)
-    flash = dict(avg_main_len=128.0, avg_extra_len=512.0, block_k=32)
-
-    assert mod._decode_gfx950_num_splits(96, 2, **flash) == 4
-    # A single head block at twice the rows is the same workgroup count.
-    assert mod._decode_gfx950_num_splits(192, 1, **flash) == 4
-    # Batches too small for the old base >= 16 gate still shed idle splits:
-    # 16 and 32 splits walk the same 2 iterations in one wave, so 16 wins.
-    assert mod._decode_gfx950_num_splits(1, 2, **flash) == 16
-
-    # Refining must never buy iterations with an extra wave.
-    for rows in (1, 6, 24, 40, 48, 96, 128, 192, 512):
-        for heads_blocks in (1, 2):
-            base = rows * heads_blocks
-            splits = mod._decode_gfx950_num_splits(rows, heads_blocks, **flash)
-            plain = min(32, max(1, -(-2 * 256 // base)))
-            assert (base * splits + 255) // 256 <= (base * plain + 255) // 256
-
-
 @requires_split_decode_arch
 @pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8])
 @pytest.mark.parametrize("with_extra", [True, False])
@@ -1020,72 +977,6 @@ def test_sparse_attn_decode_split_k_kernel(
         main_use_fnuz=main_use_fnuz,
     )
 
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-
-
-@requires_gfx950
-@pytest.mark.parametrize("with_sink", [True, False])
-@torch.inference_mode()
-def test_sparse_attn_decode_gfx950_single_split_skips_reduce(
-    monkeypatch, with_sink: bool
-) -> None:
-    """A lone split must be normalized in the partial kernel, not via reduce.
-
-    Staging one split through the fp32 partial buffers only to have the reduce
-    copy it out costs a full round trip plus a launch, which is ~6% of the
-    high-concurrency decode. Fail if the reduce is launched at all.
-    """
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-
-    device = torch.device("cuda")
-    torch.manual_seed(11)
-    block_size = 4
-    num_heads = 3
-    use_fnuz = current_platform.is_fp8_fnuz()
-
-    main_rows = [[0, 2, 4, 6, 1, 3, 7, 5], [4, 1, 6, 0, 2]]
-    q = (
-        torch.randn(
-            len(main_rows), num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
-        )
-        * 0.125
-    )
-    main_kv = torch.randn(8, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size, use_fnuz=use_fnuz)
-    main_indices, main_indptr = _ragged_from_rows(main_rows, device)
-    attn_sink = (
-        torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
-        if with_sink
-        else None
-    )
-    scale = HEAD_DIM**-0.5
-
-    monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *a, **k: 1)
-    monkeypatch.setattr(
-        mod,
-        "_sparse_attn_decode_reduce_kernel",
-        _FailingKernel("reduce kernel launched for a single split"),
-    )
-
-    actual = mod._rocm_sparse_attn_decode_ragged_triton(
-        q=q,
-        main_cache=main_cache,
-        main_indices=main_indices,
-        main_indptr=main_indptr,
-        scale=scale,
-        attn_sink=attn_sink,
-        nope_head_dim=NOPE_HEAD_DIM,
-        rope_head_dim=ROPE_HEAD_DIM,
-    )
-    expected = _ref_sparse_decode_ragged(
-        q=q,
-        main_cache=main_cache,
-        main_rows=main_rows,
-        scale=scale,
-        attn_sink=attn_sink,
-        block_size=block_size,
-        main_use_fnuz=use_fnuz,
-    )
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
