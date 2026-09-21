@@ -1777,22 +1777,6 @@ steps:
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
-- label: ":amd: (MI300) DeepSeek V4 Fused Kernels"
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  num_gpus: 1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
-  - vllm/models/deepseek_v4/common/ops/
-  - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-
 - label: ":amd: (MI300) Attention Kernels Shard %N" # TBD
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -4109,6 +4093,22 @@ steps:
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+
+- label: ":amd: (MI355) DeepSeek V4 Fused Kernels"
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - vllm/models/deepseek_v4/common/ops/
+  - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
 
 - label: ":amd: (MI355) Attention Kernels Shard %N" # TBD
   timeout_in_minutes: 90

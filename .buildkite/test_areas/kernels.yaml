@@ -113,9 +113,9 @@ steps:
     - pytest -v -s kernels/test_top_k_per_row.py
   mirror:
     amd:
-      label: ":amd: (MI300) DeepSeek V4 Fused Kernels"
+      label: ":amd: (MI355) DeepSeek V4 Fused Kernels"
       dind: false
-      device: mi300_1
+      device: mi355_1
       num_devices: 1
       timeout_in_minutes: 60
       working_dir: /vllm-workspace/tests
