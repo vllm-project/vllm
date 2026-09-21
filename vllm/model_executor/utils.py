@@ -33,6 +33,46 @@ def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
 
 
+def register_derived_buffer(layer: torch.nn.Module, name: str) -> None:
+    """Declare a non-persistent buffer whose value is derived from weights.
+
+    The placeholder records the module schema before the first weight load. The
+    first call to :func:`set_derived_buffer` installs storage; subsequent calls
+    update that storage in place so CUDA graph references remain valid.
+    """
+    if name in layer._buffers:
+        raise KeyError(f"Buffer {name!r} is already registered")
+    layer.register_buffer(name, None, persistent=False)
+
+
+def set_derived_buffer(
+    layer: torch.nn.Module, name: str, value: torch.Tensor
+) -> torch.Tensor:
+    """Set a derived buffer while preserving compatible existing storage."""
+    if name not in layer._buffers:
+        raise KeyError(f"Derived buffer {name!r} is not registered")
+
+    existing = layer._buffers[name]
+    if existing is None:
+        layer._buffers[name] = value
+        return value
+
+    if (
+        existing.shape != value.shape
+        or existing.dtype != value.dtype
+        or existing.device != value.device
+    ):
+        raise RuntimeError(
+            f"Cannot update derived buffer {name!r}: "
+            f"existing={existing.shape}/{existing.dtype}/{existing.device}, "
+            f"new={value.shape}/{value.dtype}/{value.device}. "
+            "CUDA graph recapture or a full model reload is required."
+        )
+
+    existing.copy_(value)
+    return existing
+
+
 def set_weight_attrs(
     weight: torch.Tensor,
     weight_attrs: dict[str, Any] | None,

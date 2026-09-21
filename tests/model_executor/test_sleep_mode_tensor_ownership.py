@@ -4,13 +4,17 @@
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
 from transformers import Gemma3nTextConfig
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
+from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
 from vllm.platforms import current_platform
 
 from ..models.utils import dummy_hf_overrides
@@ -337,3 +341,59 @@ def test_static_model_tensors_survive_level2_restore(
     assert after_generation[1] == pytest.approx(
         before_generation[1], rel=1e-5, abs=1e-5
     ), case.name
+
+
+def test_derived_buffer_reuses_captured_storage() -> None:
+    layer = nn.Module()
+    register_derived_buffer(layer, "derived")
+    original = torch.tensor([1.0, 2.0])
+
+    registered = set_derived_buffer(layer, "derived", original)
+    pointer = registered.data_ptr()
+    replacement = set_derived_buffer(layer, "derived", torch.tensor([3.0, 4.0]))
+
+    assert replacement.data_ptr() == pointer
+    assert torch.equal(replacement, torch.tensor([3.0, 4.0]))
+    assert "derived" not in layer.state_dict()
+
+
+def test_helper_buffer_is_owned_by_module_and_rebound() -> None:
+    layer = nn.Module()
+    helper = SimpleNamespace()
+    original = torch.tensor([1.0, 2.0])
+
+    helper.scale = FusedMoEExperts._publish_helper_buffer(
+        helper, layer, "scale", original, derived=True
+    )
+    assert helper.scale is layer._buffers["_moe_scale"]
+
+    restored = torch.tensor([5.0, 6.0])
+    layer._buffers["_moe_scale"] = restored
+    FusedMoEExperts.rebind_runtime_buffers(helper, layer)
+    assert helper.scale is restored
+
+
+def test_static_helper_buffer_keeps_owner_storage() -> None:
+    layer = nn.Module()
+    helper = SimpleNamespace()
+    original = torch.tensor([1, 2])
+
+    first = FusedMoEExperts._publish_helper_buffer(
+        helper, layer, "stride", original
+    )
+    second = FusedMoEExperts._publish_helper_buffer(
+        helper, layer, "stride", torch.tensor([3, 4])
+    )
+
+    assert first is second is layer._buffers["_moe_stride"]
+    assert torch.equal(second, original)
+    assert "_moe_stride" not in layer.state_dict()
+
+
+def test_derived_buffer_rejects_layout_change() -> None:
+    layer = nn.Module()
+    register_derived_buffer(layer, "derived")
+    set_derived_buffer(layer, "derived", torch.ones(2))
+
+    with pytest.raises(RuntimeError, match="CUDA graph recapture"):
+        set_derived_buffer(layer, "derived", torch.ones(3))

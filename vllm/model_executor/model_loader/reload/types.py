@@ -5,16 +5,20 @@ from inspect import BoundArguments
 
 import torch
 
-__all__ = ["LayerTensors", "LayerReloadingInfo"]
+__all__ = ["LayerMetadata", "LayerTensors", "LayerReloadingInfo"]
 
-# encodes both parameters and buffers separately
+# Encodes parameters and buffers separately.
 LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+# Buffer metadata can contain a ``None`` placeholder registered before a
+# derived value is first materialized.
+LayerMetadata = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | None]]
 
 
 @dataclass
 class LayerReloadingInfo:
     # model format metadata, recorded by `record_metadata_for_reloading`
-    restore_metadata: LayerTensors
+    restore_metadata: LayerMetadata
 
     # device to materialize layers with, recorded by `record_metadata_for_reloading`
     restore_device: torch.device
