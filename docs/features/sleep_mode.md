@@ -76,10 +76,11 @@ llm.wake_up(tags=["kv_cache"])
 
 #### Retaining frozen weights during RLHF updates
 
-Set `weight_transfer_config.frozen_weight_modules` to runtime module-name glob
-patterns for submodules whose parameters never change during training. These
-are vLLM module names, not checkpoint keys; do not infer them from
+Set `weight_transfer_config.frozen_weight_names` to runtime parameter-name glob
+patterns, such as `*.engram.*`, for weights that never change during training.
+These match `model.named_parameters()`, not checkpoint keys; do not infer them from
 `requires_grad=False`, which is also used for ordinary inference weights.
+Each pattern must match at least one parameter, including CPU-resident parameters.
 
 With level 2 sleep, their GPU parameters are copied to pageable CPU memory.
 `wake_up(tags=["weights"])` restores them in place and releases the CPU copies.

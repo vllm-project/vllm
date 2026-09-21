@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
-from fnmatch import fnmatchcase
+from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -253,22 +253,19 @@ class Worker(WorkerBase):
         if level == 2:
             model = self.model_runner.model
             transfer_config = self.vllm_config.weight_transfer_config
-            patterns = transfer_config.frozen_weight_modules if transfer_config else []
-            modules = dict(model.named_modules())
-            retained = {}
+            patterns = transfer_config.frozen_weight_names if transfer_config else []
+            parameters = dict(model.named_parameters())
+            retained_names: set[str] = set()
             for pattern in patterns:
-                matches = [name for name in modules if fnmatchcase(name, pattern)]
+                matches = fnmatch_filter(parameters, pattern)
                 if not matches:
-                    raise ValueError(f"No module matches sleep retention: {pattern}")
-                for name in matches:
-                    for key, param in modules[name].named_parameters():
-                        if param.device.type != "cpu":
-                            retained[f"{name}.{key}" if name else key] = param
-            for name, param in retained.items():
-                if name not in self._sleep_saved_parameters:
-                    self._sleep_saved_parameters[name] = param.detach().to(
-                        device="cpu", copy=True
-                    )
+                    raise ValueError(f"No parameter matches sleep retention: {pattern}")
+                retained_names.update(matches)
+            self._sleep_saved_parameters = {
+                name: param.detach().to("cpu")
+                for name, param in parameters.items()
+                if name in retained_names and not param.is_cpu
+            }
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
