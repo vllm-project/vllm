@@ -292,6 +292,15 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Deferred: %d reqs")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
 
+        if self.last_scheduler_stats.num_kv_pinned_reqs > 0:
+            log_parts.append("KV transfer pinned: %d reqs, %d tokens")
+            log_args.extend(
+                [
+                    self.last_scheduler_stats.num_kv_pinned_reqs,
+                    self.last_scheduler_stats.num_kv_pinned_tokens,
+                ]
+            )
+
         if self.num_preemptions > 0:
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
@@ -395,6 +404,12 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             )
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
+            )
+            self.last_scheduler_stats.num_kv_pinned_reqs += (
+                last_scheduler_stats.num_kv_pinned_reqs
+            )
+            self.last_scheduler_stats.num_kv_pinned_tokens += (
+                last_scheduler_stats.num_kv_pinned_tokens
             )
         self.last_scheduler_stats.kv_cache_usage /= len(self.last_scheduler_stats_dict)
 
@@ -581,6 +596,34 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_kv_cache_usage = create_metric_per_engine(
             gauge_kv_cache_usage, per_engine_labelvalues
+        )
+
+        gauge_kv_pinned_reqs = self._gauge_cls(
+            name="vllm:num_kv_pinned_requests",
+            documentation=(
+                "Number of finished requests whose KV blocks are held until "
+                "an async KV transfer completes (e.g. prefill blocks awaiting "
+                "a remote decode in P/D disaggregation)."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_pinned_reqs = create_metric_per_engine(
+            gauge_kv_pinned_reqs, per_engine_labelvalues
+        )
+
+        gauge_kv_pinned_tokens = self._gauge_cls(
+            name="vllm:num_kv_pinned_tokens",
+            documentation=(
+                "Number of KV cache tokens held by finished requests until "
+                "an async KV transfer completes. Tokens in prefix-cache "
+                "blocks shared across requests are counted once per request."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_pinned_tokens = create_metric_per_engine(
+            gauge_kv_pinned_tokens, per_engine_labelvalues
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1048,6 +1091,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.gauge_kv_pinned_reqs[engine_idx].set(
+                scheduler_stats.num_kv_pinned_reqs
+            )
+            self.gauge_kv_pinned_tokens[engine_idx].set(
+                scheduler_stats.num_kv_pinned_tokens
+            )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

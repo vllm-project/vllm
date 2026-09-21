@@ -227,6 +227,10 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # KV Connector: finished requests whose blocks are held until an async
+        # KV transfer completes (e.g. P blocks awaiting a remote decode's pull).
+        # req_id -> number of pinned tokens.
+        self.kv_pinned_req_tokens: dict[str, int] = {}
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -2582,6 +2586,8 @@ class Scheduler(SchedulerInterface):
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
+        else:
+            self.kv_pinned_req_tokens[request_id] = request.num_computed_tokens
 
         return kv_xfer_params, ec_xfer_params
 
@@ -2589,6 +2595,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         self._free_request_blocks(request)
         del self.requests[request.request_id]
+        self.kv_pinned_req_tokens.pop(request.request_id, None)
 
     @property
     def pause_state(self) -> PauseState:
@@ -2801,6 +2808,8 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            num_kv_pinned_reqs=len(self.kv_pinned_req_tokens),
+            num_kv_pinned_tokens=sum(self.kv_pinned_req_tokens.values()),
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,

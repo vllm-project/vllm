@@ -196,6 +196,12 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+
+    # Finished requests (and their tokens) whose KV blocks are held until an
+    # async KV transfer completes, e.g. P/D prefill blocks awaiting a decode.
+    num_kv_pinned_reqs: int = 0
+    num_kv_pinned_tokens: int = 0
+
     iteration_details: SchedulerIterationDetails | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
