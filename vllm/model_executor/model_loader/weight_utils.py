@@ -12,6 +12,7 @@ import os
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,7 +34,11 @@ from vllm.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     LoadConfig,
 )
-from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tp_group,
+    get_world_group,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
@@ -1150,6 +1155,301 @@ def multi_thread_safetensors_weights_iterator(
             del future
             for key in list(state_dict):
                 yield key, state_dict.pop(key)
+
+
+# safetensors' CUDA prefetch loader (safetensors >= 0.9.0rc1, Linux).
+# ``safe_open(path).prefetch(device=...)`` returns a loader reading the shard in
+# the background straight into device allocations; iterating it yields tensors
+# as they land, ``take(name)`` waits for one. An open loader commits its full
+# size in device memory until its tensors are consumed, so both readers below
+# bound how many shards, and how many bytes, are open at once.
+ST_PREFETCH_MAX_OPEN_FILES = 4
+ST_PREFETCH_MAX_OPEN_BYTES = 16 << 30
+# Redistribution granularity of the sharded reader: tensors are packed
+# contiguously into one buffer per batch so a 5 GB shard costs ~40 collectives
+# instead of thousands.
+ST_SHARDED_BATCH_BYTES = 128 << 20
+# Broadcasts in flight per rank: transfer of batch k+1 overlaps carving batch k
+# (receivers) and packing the next batch (owner).
+ST_SHARDED_INFLIGHT = 4
+
+
+def _st_open(path: str, device: str):
+    """Start loading ``path`` onto ``device`` with a prefetch loader."""
+    return safe_open(path, framework="pt").prefetch(device=device)
+
+
+def _st_close(loader, done: torch.cuda.Event | None = None) -> None:
+    """Close a prefetch loader. Closing frees the shard's device memory; vLLM
+    consumes tensors on a dedicated (non-default) stream, so wait for the last
+    kernels that read those tensors (``done``, else the whole stream) or the
+    free can race them."""
+    if done is not None:
+        done.synchronize()
+    else:
+        torch.cuda.current_stream().synchronize()
+    loader.close()
+
+
+def _st_open_byte_budget() -> int:
+    """Bytes of shards to keep open ahead: a quarter of the device memory free
+    at load time, capped at ``ST_PREFETCH_MAX_OPEN_BYTES``. The parameters are
+    already allocated when weights load, so this is real headroom."""
+    free, _ = torch.accelerator.get_memory_info()
+    return min(ST_PREFETCH_MAX_OPEN_BYTES, free // 4)
+
+
+def _st_can_open(
+    open_files: int, open_bytes: int, next_bytes: int, budget: int
+) -> bool:
+    """Whether one more shard fits the open-ahead window (always at least one)."""
+    if open_files == 0:
+        return True
+    return open_files < ST_PREFETCH_MAX_OPEN_FILES and open_bytes + next_bytes <= budget
+
+
+def st_prefetch_safetensors_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Stream whole shards to the current GPU via safetensors' CUDA prefetch.
+
+    Every rank reads every file; the start offset is staggered per rank so
+    cold-cache disk reads are disjoint across ranks instead of all ranks
+    faulting the same pages in lockstep. Shards load ahead of the one being
+    consumed within the open-ahead window (``ST_PREFETCH_MAX_OPEN_FILES``,
+    ``_st_open_byte_budget``). vLLM's weight loaders drop each yielded tensor
+    after copying its slice out, which releases its share of the shard.
+    """
+    device_str = f"cuda:{current_platform.current_device()}"
+    sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        world_size = torch.distributed.get_world_size()
+        if world_size > 1 and len(sorted_files) > 1:
+            start = torch.distributed.get_rank() * len(sorted_files) // world_size
+            sorted_files = sorted_files[start:] + sorted_files[:start]
+
+    budget = _st_open_byte_budget()
+    pending = deque(sorted_files)
+    window: deque[tuple[Any, int]] = deque()  # (loader, file size), oldest first
+    open_bytes = 0
+
+    def _open_ahead() -> None:
+        nonlocal open_bytes
+        while pending and _st_can_open(
+            len(window), open_bytes, os.path.getsize(pending[0]), budget
+        ):
+            path = pending.popleft()
+            size = os.path.getsize(path)
+            window.append((_st_open(path, device_str), size))
+            open_bytes += size
+
+    pbar = tqdm(
+        total=len(sorted_files),
+        desc="Loading safetensors (CUDA prefetch)",
+        disable=not enable_tqdm(use_tqdm_on_load),
+        bar_format=_BAR_FORMAT,
+    )
+    try:
+        _open_ahead()
+        while window:
+            loader, size = window[0]
+            try:
+                yield from loader
+            finally:
+                _st_close(loader)
+                window.popleft()
+                open_bytes -= size
+            _open_ahead()
+            pbar.update(1)
+    finally:
+        pbar.close()
+        for loader, _ in window:
+            _st_close(loader)
+
+
+_ST_EXTRA_DTYPES = {
+    "F4": getattr(torch, "float4_e2m1fn_x2", None),
+    "F8_E8M0": getattr(torch, "float8_e8m0fnu", None),
+}
+
+
+def _st_torch_dtype(dtype_str: str) -> torch.dtype:
+    from safetensors.torch import _TYPES
+
+    dtype = _TYPES.get(dtype_str) or _ST_EXTRA_DTYPES.get(dtype_str)
+    if dtype is None:
+        raise ValueError(f"unsupported safetensors dtype {dtype_str!r}")
+    return dtype
+
+
+def _st_header(path: str) -> list[tuple[str, torch.dtype, list[int], int]]:
+    """(name, dtype, storage shape, nbytes) per tensor, in data-offset order."""
+    entries = []
+    with safe_open(path, framework="pt") as handle:
+        for name in handle.offset_keys():
+            meta = handle.get_tensor_meta(name)
+            start, end = meta.data_offsets
+            shape = list(meta.shape)
+            if meta.dtype == "F4" and shape:
+                shape[-1] //= 2  # torch's float4_e2m1fn_x2 packs two per element
+            entries.append((name, _st_torch_dtype(meta.dtype), shape, end - start))
+    return entries
+
+
+def _st_carve(
+    buf: torch.Tensor, offset: int, dtype: torch.dtype, shape: list[int], nbytes: int
+) -> torch.Tensor:
+    if nbytes == 0:
+        return torch.empty(shape, dtype=dtype, device=buf.device)
+    piece = buf[offset : offset + nbytes]
+    if offset % torch.empty((), dtype=dtype).element_size():
+        piece = piece.clone()  # packed layout can misalign the element type
+    return piece.view(dtype).view(shape)
+
+
+def _st_broadcast(buf: torch.Tensor, src: int, group: Any) -> torch.cuda.Event:
+    """Enqueue a broadcast of ``buf`` on the current stream and return an event
+    marking its completion. Uses the group's pynccl communicator, which vLLM
+    connects and warms up at startup: a first collective on a torch process
+    group pays NCCL's lazy transport setup (3-6 s on 8 GPUs) inside the load."""
+    comm = getattr(group.device_communicator, "pynccl_comm", None)
+    if comm is not None and not comm.disabled:
+        comm.broadcast(buf, src)
+    else:
+        torch.distributed.broadcast(buf, src=group.ranks[src], group=group.device_group)
+    done = torch.cuda.Event()
+    done.record()
+    return done
+
+
+def _st_issue(
+    loader: Any, owner: int, batch: list[tuple], device: torch.device, group: Any
+) -> tuple[tuple, torch.cuda.Event | None]:
+    """Start broadcasting one batch: the owner packs its tensors into one buffer,
+    every rank receives into a fresh one. Returns ``((done, buf, batch), packed)``:
+    ``packed`` fires once the owner's pack kernels no longer read engine memory."""
+    packed = None
+    if loader is not None:
+        views = [loader.take(name).flatten().view(torch.uint8) for name, *_ in batch]
+        buf = torch.cat(views)
+        packed = torch.cuda.Event()
+        packed.record()
+    else:
+        buf = torch.empty(sum(e[3] for e in batch), dtype=torch.uint8, device=device)
+    done = _st_broadcast(buf, owner, group)
+    return (done, buf, batch), packed
+
+
+def _st_finish(
+    inflight: tuple,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Wait for one issued batch and carve the same tensor views on every rank.
+
+    The host wait is what bounds how many receive buffers are alive at once."""
+    done, buf, batch = inflight
+    done.synchronize()
+    offset = 0
+    for name, dtype, shape, nbytes in batch:
+        yield name, _st_carve(buf, offset, dtype, shape, nbytes)
+        offset += nbytes
+
+
+def st_prefetch_sharded_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Read every shard once per node and redistribute over NVLink.
+
+    Shard ``i`` is owned by rank ``i % world_size``. Owners load their shards
+    with prefetch loaders, ahead within the same open-ahead window as
+    ``st_prefetch_safetensors_weights_iterator`` so every rank keeps its disk
+    busy, while all ranks walk the shards in the same order. Tensors are packed
+    into contiguous ~``ST_SHARDED_BATCH_BYTES`` uint8 buffers on the owner and
+    broadcast to the group; every rank carves the same tensor views out of its
+    copy. Batch boundaries come from the headers every rank parses itself, so
+    the collectives need no coordination. Non-owners hold one batch of device
+    memory at a time; owners hold their open shards. Without a tensor-parallel
+    group this degrades to the non-sharded reader.
+    """
+    try:
+        group = get_tp_group()
+    except AssertionError:  # no parallel state: nothing to redistribute
+        yield from st_prefetch_safetensors_weights_iterator(
+            hf_weights_files, use_tqdm_on_load
+        )
+        return
+    rank, world_size = group.rank_in_group, group.world_size
+    device = torch.device(f"cuda:{current_platform.current_device()}")
+    files = sorted(hf_weights_files, key=_natural_sort_key)
+
+    budget = _st_open_byte_budget()
+    owned = deque(range(rank, len(files), world_size))
+    loaders: dict[int, tuple[Any, int]] = {}  # shard index -> (loader, file size)
+    open_bytes = 0
+
+    def _open_ahead() -> None:
+        nonlocal open_bytes
+        while owned and _st_can_open(
+            len(loaders), open_bytes, os.path.getsize(files[owned[0]]), budget
+        ):
+            i = owned.popleft()
+            size = os.path.getsize(files[i])
+            loaders[i] = (_st_open(files[i], str(device)), size)
+            open_bytes += size
+
+    _open_ahead()
+    inflight: deque[tuple] = deque()
+    pbar = tqdm(
+        total=len(files),
+        desc="Loading safetensors (CUDA prefetch, sharded)",
+        disable=not enable_tqdm(use_tqdm_on_load),
+        bar_format=_BAR_FORMAT,
+    )
+    try:
+        for i, path in enumerate(files):
+            owner = i % world_size
+            entries = _st_header(path)
+            loader, size = loaders.pop(i) if owner == rank else (None, 0)
+            packed = None
+            try:
+                batch: list[tuple] = []
+                batch_bytes = 0
+                for entry in entries:
+                    nbytes = entry[3]
+                    if nbytes == 0:
+                        yield (
+                            entry[0],
+                            torch.empty(entry[2], dtype=entry[1], device=device),
+                        )
+                        continue
+                    if batch and batch_bytes + nbytes > ST_SHARDED_BATCH_BYTES:
+                        issued, packed = _st_issue(loader, owner, batch, device, group)
+                        inflight.append(issued)
+                        batch, batch_bytes = [], 0
+                        if len(inflight) >= ST_SHARDED_INFLIGHT:
+                            yield from _st_finish(inflight.popleft())
+                    batch.append(entry)
+                    batch_bytes += nbytes
+                if batch:
+                    issued, packed = _st_issue(loader, owner, batch, device, group)
+                    inflight.append(issued)
+                    while len(inflight) >= ST_SHARDED_INFLIGHT:
+                        yield from _st_finish(inflight.popleft())
+            finally:
+                if loader is not None:
+                    # the packed buffers are torch-owned: the shard can close as
+                    # soon as its pack kernels are done, broadcasts still in flight
+                    _st_close(loader, packed)
+                    open_bytes -= size
+                    _open_ahead()
+            pbar.update(1)
+        while inflight:
+            yield from _st_finish(inflight.popleft())
+    finally:
+        pbar.close()
+        for loader, _ in loaders.values():
+            _st_close(loader)
 
 
 def runai_safetensors_weights_iterator(

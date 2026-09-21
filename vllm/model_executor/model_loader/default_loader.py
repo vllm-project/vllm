@@ -10,6 +10,7 @@ from collections.abc import Generator, Iterable
 from typing import TYPE_CHECKING, cast
 
 import torch
+from safetensors import safe_open
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -37,7 +38,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     resolve_mm_encoder_only_lm_prefixes,
     safetensors_weights_iterator,
+    st_prefetch_sharded_weights_iterator,
 )
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
@@ -251,6 +254,20 @@ class DefaultModelLoader(BaseModelLoader):
 
         return hf_folder, hf_weights_files, use_safetensors, index_file
 
+    def _use_safetensors_prefetch(self) -> bool:
+        """Whether safetensors' CUDA prefetch loader replaces the memory-mapped
+        reader: CUDA, safetensors >= 0.9.0rc1, the default (auto) load strategy,
+        no multi-thread loader and no per-rank expert filtering. An explicit
+        ``safetensors_load_strategy="lazy"`` keeps the memory-mapped reader."""
+        extra_config = self.load_config.model_loader_extra_config
+        return (
+            current_platform.is_cuda()
+            and hasattr(safe_open, "prefetch")
+            and self.load_config.safetensors_load_strategy is None
+            and not extra_config.get("enable_multithread_load")
+            and self.local_expert_ids is None
+        )
+
     def _get_weights_iterator(
         self, source: Source
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
@@ -301,6 +318,11 @@ class DefaultModelLoader(BaseModelLoader):
                 )
             elif self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(
+                    hf_weights_files,
+                    self.load_config.use_tqdm_on_load,
+                )
+            elif self._use_safetensors_prefetch():
+                weights_iterator = st_prefetch_sharded_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                 )

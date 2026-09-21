@@ -24,6 +24,7 @@ nvtx==0.2.15
 # Required for faster safetensors model loading
 fastsafetensors >= 0.3.3
 instanttensor >= 0.1.9
+safetensors >= 0.9.0rc1  # CUDA prefetch loader
 
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
 nvidia-cutlass-dsl[cu13]==4.7.1
