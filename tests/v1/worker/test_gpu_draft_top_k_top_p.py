@@ -19,8 +19,9 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.draft_support import (
-    apply_draft_top_k_top_p,
-    draft_support_num_blocks,
+    draft_support_max_top_k,
+    draft_top_k_top_p_threshold,
+    mask_below_threshold,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -44,7 +45,24 @@ def _speculator(top_k=None, top_p=None) -> SimpleNamespace:
     speculator._maybe_predict_acceptance = partial(
         DraftModelSpeculator._maybe_predict_acceptance, speculator
     )
+    speculator._draft_support_threshold = partial(
+        DraftModelSpeculator._draft_support_threshold, speculator
+    )
     return speculator
+
+
+def _apply_support(
+    logits: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    top_k: torch.Tensor,
+    top_p: torch.Tensor,
+    temperature: torch.Tensor,
+) -> torch.Tensor:
+    """The logits with tokens outside the top-k / top-p support at -inf."""
+    threshold = draft_top_k_top_p_threshold(
+        logits, idx_mapping, top_k, top_p, temperature
+    )
+    return mask_below_threshold(logits, threshold)
 
 
 def _no_top_p(n: int) -> torch.Tensor:
@@ -92,7 +110,7 @@ def test_mask_matches_top_k_top_p_support(dtype: torch.dtype):
     for req, k, p, t in rows:
         top_k[req], top_p[req], temperature[req] = k, p, t
 
-    out = apply_draft_top_k_top_p(logits, idx_mapping, top_k, top_p, temperature)
+    out = _apply_support(logits, idx_mapping, top_k, top_p, temperature)
 
     assert out.dtype == dtype and out.shape == logits.shape
     for i, (_, k, p, t) in enumerate(rows):
@@ -118,7 +136,7 @@ def test_top_p_is_taken_after_temperature():
     top_k = torch.tensor([k, k], dtype=torch.int32, device=DEVICE)
     top_p = torch.tensor([0.9, 0.9], dtype=torch.float32, device=DEVICE)
     temperature = torch.tensor([0.5, 2.0], dtype=torch.float32, device=DEVICE)
-    out = apply_draft_top_k_top_p(
+    out = _apply_support(
         torch.cat([logits[:1], logits[:1]]), idx_mapping, top_k, top_p, temperature
     )
     cold, hot = (~out.isneginf()).sum(dim=-1).tolist()
@@ -135,26 +153,31 @@ def test_padding_rows_are_left_alone():
     idx_mapping = torch.tensor([0, -1, 1], dtype=torch.int32, device=DEVICE)
     top_k = torch.tensor([5, 5], dtype=torch.int32, device=DEVICE)
     temperature = torch.ones(2, dtype=torch.float32, device=DEVICE)
-    out = apply_draft_top_k_top_p(logits, idx_mapping, top_k, _no_top_p(2), temperature)
+    out = _apply_support(logits, idx_mapping, top_k, _no_top_p(2), temperature)
     assert (~out[0].isneginf()).sum() == 5
     assert torch.equal(out[1], logits[1])
     assert (~out[2].isneginf()).sum() == 5
 
 
-def test_top_k_beyond_the_block_count_is_left_unmasked():
+@pytest.mark.parametrize("vocab", [16_384, 151_936])
+def test_top_k_above_the_limit_is_left_unmasked(vocab: int):
+    """Top-k up to 1024 is masked whatever the vocabulary; a wider top-k is
+    left alone, like no top-k."""
     torch.manual_seed(5)
-    vocab = 16_384
-    num_blocks = draft_support_num_blocks(vocab)
-    assert num_blocks < vocab
-    logits = torch.randn(2, vocab, device=DEVICE)
-    idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=DEVICE)
-    top_k = torch.tensor([10, num_blocks + 1], dtype=torch.int32, device=DEVICE)
-    temperature = torch.ones(2, dtype=torch.float32, device=DEVICE)
-    out = apply_draft_top_k_top_p(logits, idx_mapping, top_k, _no_top_p(2), temperature)
-    kept = ~out[0].isneginf()
-    assert kept[_reference_support(logits[0], 10, 1.0, 1.0)].all()
-    assert 10 <= kept.sum() < 64
-    assert torch.equal(out[1], logits[1])
+    max_top_k = draft_support_max_top_k(vocab)
+    assert max_top_k == 1024
+    logits = torch.randn(3, vocab, device=DEVICE)
+    idx_mapping = torch.tensor([0, 1, 2], dtype=torch.int32, device=DEVICE)
+    top_k = torch.tensor(
+        [10, max_top_k, max_top_k + 1], dtype=torch.int32, device=DEVICE
+    )
+    temperature = torch.ones(3, dtype=torch.float32, device=DEVICE)
+    out = _apply_support(logits, idx_mapping, top_k, _no_top_p(3), temperature)
+    for row, k in enumerate((10, max_top_k)):
+        kept = ~out[row].isneginf()
+        assert kept[_reference_support(logits[row], k, 1.0, 1.0)].all()
+        assert k <= kept.sum() < vocab // 2, int(kept.sum())
+    assert torch.equal(out[2], logits[2])
 
 
 def test_top_p_without_top_k_is_left_unmasked():
@@ -162,7 +185,6 @@ def test_top_p_without_top_k_is_left_unmasked():
     over a small vocabulary, even when top-k is as wide as the vocabulary - 1."""
     torch.manual_seed(6)
     vocab = 1024
-    assert draft_support_num_blocks(vocab) == vocab
     # A peaked row with top-k and top-p, a flat row with top-p only, and a
     # geometric row with top-k = vocab - 1 and top-p.
     logits = torch.randn(3, vocab, device=DEVICE)
@@ -172,7 +194,7 @@ def test_top_p_without_top_k_is_left_unmasked():
     top_k = torch.tensor([vocab, vocab - 1, 30], dtype=torch.int32, device=DEVICE)
     top_p = torch.tensor([0.9, 0.9, 0.8], dtype=torch.float32, device=DEVICE)
     temperature = torch.tensor([1.0, 0.7, 1.3], dtype=torch.float32, device=DEVICE)
-    out = apply_draft_top_k_top_p(logits, idx_mapping, top_k, top_p, temperature)
+    out = _apply_support(logits, idx_mapping, top_k, top_p, temperature)
     kept = ~out.isneginf()
     assert torch.equal(kept[0], _reference_support(logits[0], 30, 0.8, 1.3))
     assert torch.equal(out[1], logits[1])
@@ -188,16 +210,16 @@ def test_reduced_draft_vocab_with_neg_inf_logits():
     draft_ids = torch.randperm(vocab, device=DEVICE)[:draft_vocab]
     logits[:, draft_ids] = torch.randn(2, draft_vocab, device=DEVICE) * 3
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=DEVICE)
-    top_k = torch.tensor([20, 3000], dtype=torch.int32, device=DEVICE)
+    top_k = torch.tensor([20, 1000], dtype=torch.int32, device=DEVICE)
     top_p = torch.tensor([0.9, 0.9], dtype=torch.float32, device=DEVICE)
     temperature = torch.ones(2, dtype=torch.float32, device=DEVICE)
-    out = apply_draft_top_k_top_p(logits, idx_mapping, top_k, top_p, temperature)
+    out = _apply_support(logits, idx_mapping, top_k, top_p, temperature)
     kept = ~out[0].isneginf()
     assert kept[_reference_support(logits[0], 20, 0.9, 1.0)].all()
     assert kept.sum() < 200, int(kept.sum())
     # A wide top-k: the top-p cut still applies.
     kept = ~out[1].isneginf()
-    assert kept[_reference_support(logits[1], 3000, 0.9, 1.0)].all()
+    assert kept[_reference_support(logits[1], 1000, 0.9, 1.0)].all()
     assert kept.sum() < draft_vocab, int(kept.sum())
 
 
@@ -330,7 +352,8 @@ def test_rows_without_top_k_are_left_alone():
     idx_mapping = torch.tensor([0, 1, 2], dtype=torch.int32, device=DEVICE)
     top_k = torch.tensor([vocab, 7, vocab], dtype=torch.int32, device=DEVICE)
     top_p = torch.tensor([1.0, 1.0, 0.5], dtype=torch.float32, device=DEVICE)
-    out = apply_draft_top_k_top_p(logits, idx_mapping, top_k, top_p, _no_top_p(3))
+    temperature = torch.ones(3, dtype=torch.float32, device=DEVICE)
+    out = _apply_support(logits, idx_mapping, top_k, top_p, temperature)
     assert torch.equal(out[0], logits[0])
     assert (~out[1].isneginf()).sum() == 7
     assert torch.equal(out[2], logits[2])
@@ -427,7 +450,7 @@ def test_large_vocab_keeps_at_least_the_support(top_k: int, top_p: float):
     top_k_t = torch.full((num_rows,), top_k, dtype=torch.int32, device=DEVICE)
     top_p_t = torch.full((num_rows,), top_p, dtype=torch.float32, device=DEVICE)
     temperature = torch.full((num_rows,), 0.8, dtype=torch.float32, device=DEVICE)
-    out = apply_draft_top_k_top_p(logits, idx_mapping, top_k_t, top_p_t, temperature)
+    out = _apply_support(logits, idx_mapping, top_k_t, top_p_t, temperature)
     for i in range(num_rows):
         expected = _reference_support(logits[i], min(top_k, vocab), top_p, 0.8)
         kept = ~out[i].isneginf()
@@ -435,3 +458,90 @@ def test_large_vocab_keeps_at_least_the_support(top_k: int, top_p: float):
         assert torch.equal(out[i][kept], logits[i][kept])
         # Masking still happens: few tokens survive.
         assert kept.sum() < vocab // 100, int(kept.sum())
+
+
+class _Recorder:
+    """Stands in for the draft watermarker and the acceptance estimator and
+    keeps the logits it was given."""
+
+    def __init__(self) -> None:
+        self.logits: torch.Tensor | None = None
+
+    def sample(self, logits, sampled, idx_mapping, temperature):
+        self.logits = logits.clone()
+        return sampled
+
+    def predict(self, logits, *args):
+        self.logits = logits.clone()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_watermarker_gets_the_masked_logits_and_the_estimator_the_raw_ones(
+    dtype: torch.dtype,
+):
+    """The watermarker resamples from the logits it is handed, so they carry the
+    same support as the sampled and cached drafts. The acceptance estimator
+    sees the logits before the mask, with or without a watermarker."""
+    torch.manual_seed(11)
+    vocab, num_reqs, k = 256, 16, 4
+    hidden = (torch.randn(num_reqs, vocab, device=DEVICE) * 3).to(dtype)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    top_k = torch.full((num_reqs,), k, dtype=torch.int32, device=DEVICE)
+    temperature = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE)
+    cache = torch.zeros(num_reqs, 1, vocab, dtype=torch.float32, device=DEVICE)
+    spec = _speculator(top_k, _no_top_p(num_reqs))
+    spec.draft_watermarker = _Recorder()
+    spec.acceptance_estimator = _Recorder()
+    spec.draft_token_confidence_probs = None
+    spec.temperature = temperature
+
+    DraftModelSpeculator.sample_draft(
+        spec,
+        hidden,
+        torch.arange(num_reqs, dtype=torch.int64, device=DEVICE),
+        idx_mapping,
+        temperature,
+        torch.arange(num_reqs, dtype=torch.int64, device=DEVICE),
+        torch.zeros((), dtype=torch.int64, device=DEVICE),
+        cache,
+    )
+
+    masked = spec.draft_watermarker.logits
+    kept = ~masked.isneginf()
+    assert torch.equal(kept, ~cache[:, 0].isneginf())
+    assert torch.equal(masked[kept], hidden[kept])
+    assert (kept.sum(dim=-1) >= k).all()
+    if dtype == torch.float32:
+        assert (kept.sum(dim=-1) == k).all()
+    assert torch.equal(spec.acceptance_estimator.logits, hidden)
+
+
+def test_dspark_samples_and_caches_inside_support():
+    """DSpark samples in its own _sample_logits, not in sample_draft."""
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    torch.manual_seed(12)
+    vocab, num_reqs, k, num_steps = 256, 512, 4, 2
+    base = torch.randn(vocab, device=DEVICE)
+    logits = base.expand(num_reqs, vocab).contiguous()
+    idx_map = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    top_k = torch.full((num_reqs,), k, dtype=torch.int32, device=DEVICE)
+    spec = _speculator(top_k, _no_top_p(num_reqs))
+    spec.draft_logits = torch.zeros(
+        num_reqs, num_steps, vocab, dtype=torch.float32, device=DEVICE
+    )
+    spec._d2t_scatter_index = None
+    spec._draft_scatter_buf = None
+    spec.temperature = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE)
+    spec.seeds = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+    spec._step_cols = torch.arange(num_steps, dtype=torch.int64, device=DEVICE)
+    sample_pos = torch.full((num_reqs,), 100, dtype=torch.int64, device=DEVICE)
+
+    sampled = DSparkSpeculator._sample_logits(spec, logits, idx_map, sample_pos, 1)
+
+    support = torch.zeros(vocab, dtype=torch.bool, device=DEVICE)
+    support[torch.topk(base, k).indices] = True
+    assert support[sampled].all(), "a draft token was sampled outside top-k"
+    assert set(sampled.unique().tolist()) == set(support.nonzero().flatten().tolist())
+    assert (spec.draft_logits[:, 1, ~support] == float("-inf")).all()
+    assert torch.equal(spec.draft_logits[:, 1, support], logits[:, support])

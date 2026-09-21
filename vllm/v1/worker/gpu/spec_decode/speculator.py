@@ -38,8 +38,8 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_support import (
-    apply_draft_top_k_top_p,
     draft_top_k_top_p_threshold,
+    mask_below_threshold,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -122,6 +122,15 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    # Per-request top-k / top-p for probabilistic drafting: drafter-owned
+    # [max_num_reqs] tensors, refreshed from the sampler on every step like
+    # the temperature. None until set_draft_sampling_params and for greedy
+    # drafting.
+    draft_top_k: torch.Tensor | None = None
+    draft_top_p: torch.Tensor | None = None
+    _draft_top_k_src: UvaBackedTensor | None = None
+    _draft_top_p_src: UvaBackedTensor | None = None
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
@@ -194,15 +203,6 @@ class DraftModelSpeculator(BaseSpeculator):
         )
         self.use_acceptance_estimator = self.enable_adaptive_verification
         self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
-
-        # Per-request top-k / top-p for probabilistic drafting: drafter-owned
-        # [max_num_reqs] tensors, refreshed from the sampler on every step like
-        # the temperature. None until the model runner sets the sources and for
-        # greedy drafting.
-        self.draft_top_k: torch.Tensor | None = None
-        self.draft_top_p: torch.Tensor | None = None
-        self._draft_top_k_src: UvaBackedTensor | None = None
-        self._draft_top_p_src: UvaBackedTensor | None = None
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -458,36 +458,20 @@ class DraftModelSpeculator(BaseSpeculator):
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None:
-            threshold = None
-            if self.draft_top_k is not None and self.draft_top_p is not None:
-                # Runs for every batch, with or without top-k / top-p, so that
-                # a captured CUDA graph applies it too; rows without top-k are
-                # skipped on the GPU.
-                if self.draft_watermarker is None:
-                    # The sampling kernel applies the threshold in its vocab pass.
-                    threshold = draft_top_k_top_p_threshold(
-                        logits,
-                        idx_mapping,
-                        self.draft_top_k,
-                        self.draft_top_p,
-                        temperature,
-                    )
-                else:
-                    # The watermarker samples from the logits, so mask them.
-                    logits = apply_draft_top_k_top_p(
-                        logits,
-                        idx_mapping,
-                        self.draft_top_k,
-                        self.draft_top_p,
-                        temperature,
-                    )
-            sampler = (
-                partial(gumbel_sample, logits_threshold=threshold)
-                if self.draft_watermarker is None
-                else self.draft_watermarker.sample
-            )
+            threshold = self._draft_support_threshold(logits, idx_mapping, temperature)
+            if self.draft_watermarker is None:
+                sampler = partial(gumbel_sample, logits_threshold=threshold)
+                sample_logits = logits
+            else:
+                # The watermarker samples from and caches the logits it is given.
+                sampler = self.draft_watermarker.sample
+                sample_logits = (
+                    logits
+                    if threshold is None
+                    else mask_below_threshold(logits, threshold)
+                )
             sampled = sampler(
-                logits,
+                sample_logits,
                 idx_mapping,
                 temperature,
                 seeds,
@@ -502,6 +486,28 @@ class DraftModelSpeculator(BaseSpeculator):
             sampled = logits.argmax(dim=-1)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
+
+    def _draft_support_threshold(
+        self,
+        # [num_tokens, vocab_size]
+        logits: torch.Tensor,
+        # [num_tokens]
+        idx_mapping: torch.Tensor,
+        # [max_num_reqs]
+        temperature: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Per-row threshold below which a draft logit is outside the request's
+        top-k / top-p, or None without the requests' top-k / top-p.
+
+        Runs for every batch, with or without top-k / top-p, so that a captured
+        CUDA graph applies it too; rows without top-k are skipped on the GPU.
+        The sampling kernel drops the logits below it in its vocab pass.
+        """
+        if self.draft_top_k is None or self.draft_top_p is None:
+            return None
+        return draft_top_k_top_p_threshold(
+            logits, idx_mapping, self.draft_top_k, self.draft_top_p, temperature
+        )
 
     def _maybe_predict_acceptance(
         self, logits: torch.Tensor, idx_mapping: torch.Tensor, draft_step: torch.Tensor
