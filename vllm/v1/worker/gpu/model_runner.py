@@ -258,9 +258,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            self.model_config
-        )
+        self.supports_mm_inputs = self.model_config.supports_multimodal_inputs
         self.uses_inputs_embeds = (
             self.supports_mm_inputs or self.model_config.enable_prompt_embeds
         )
