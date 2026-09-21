@@ -124,7 +124,6 @@ pub fn lower_sampling_params(
         prompt_logprobs,
         logprob_token_ids.as_deref(),
         prompt_logprob_token_ids.as_deref(),
-        prompt_logprob_start,
         sampling_limits,
     )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
@@ -1137,49 +1136,33 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_validates_prompt_logprob_token_ids() {
-        let lower = |prompt_logprob_token_ids, prompt_logprob_start| {
+        let lower = |ids: Vec<u32>| {
             lower_sampling_params_with_limits(
                 SamplingParams {
-                    prompt_logprob_token_ids,
-                    prompt_logprob_start,
+                    prompt_logprob_token_ids: Some(ids),
                     ..Default::default()
                 },
                 sample_sampling_limits(),
             )
         };
 
-        let params = lower(Some(vec![1, 2]), Some(3)).unwrap();
-        assert_eq!(params.prompt_logprob_token_ids, Some(vec![1, 2]));
-        assert_eq!(params.prompt_logprob_start, Some(3));
+        assert_eq!(
+            lower(vec![1, 2]).unwrap().prompt_logprob_token_ids,
+            Some(vec![1, 2])
+        );
         assert!(matches!(
-            lower(Some(vec![]), None),
-            Err(Error::Logprobs(LogprobsError::EmptyPromptLogprobTokenIds))
-        ));
-        assert!(matches!(
-            lower(Some((0..21).collect()), None),
+            lower((0..21).collect()),
             Err(Error::Logprobs(LogprobsError::TooManyCount {
                 parameter: "prompt_logprob_token_ids",
                 ..
             }))
         ));
         assert!(matches!(
-            lower(Some(vec![1, 1]), None),
-            Err(Error::Logprobs(
-                LogprobsError::DuplicatePromptLogprobTokenIds
-            ))
-        ));
-        assert!(matches!(
-            lower(Some(vec![1000]), None),
+            lower(vec![1000]),
             Err(Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "prompt_logprob_token_ids",
                 ..
             }))
-        ));
-        assert!(matches!(
-            lower(None, Some(0)),
-            Err(Error::Logprobs(
-                LogprobsError::PromptLogprobStartWithoutTokenIds
-            ))
         ));
     }
 
