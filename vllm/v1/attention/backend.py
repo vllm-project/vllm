@@ -927,8 +927,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         return False
 
     def set_interleaved_v_cache(self):
-        """
-        Opt this implementation into the interleaved V-cache layout for all of
+        """Opt this implementation into the interleaved V-cache layout for all of
         its cache writers and readers. QkNormRopeKvCacheFusionPass calls this
         for every eligible layer when it is constructed, i.e. before any KV
         cache is written, so fused and unfused paths stay consistent whether or
