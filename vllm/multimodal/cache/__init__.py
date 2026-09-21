@@ -13,9 +13,9 @@ from .factories import (
     processor_only_cache_from_config,
     worker_receiver_cache_from_config,
 )
-from .ipc import (
-    MultiModalProcessorSenderCache,
-    MultiModalReceiverCache,
+from .lru import (
+    LruKeyReplicatedReceiverCache,
+    LruKeyReplicatedSenderCache,
 )
 from .shm import (
     ShmObjectStoreReceiverCache,
@@ -27,8 +27,8 @@ __all__ = [
     "BaseMultiModalProcessorCache",
     "BaseMultiModalReceiverCache",
     "MultiModalProcessorOnlyCache",
-    "MultiModalProcessorSenderCache",
-    "MultiModalReceiverCache",
+    "LruKeyReplicatedSenderCache",
+    "LruKeyReplicatedReceiverCache",
     "ShmObjectStoreReceiverCache",
     "ShmObjectStoreSenderCache",
     "processor_cache_from_config",

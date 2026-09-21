@@ -10,9 +10,9 @@ from .base import (
     BaseMultiModalReceiverCache,
     MultiModalProcessorOnlyCache,
 )
-from .ipc import (
-    MultiModalProcessorSenderCache,
-    MultiModalReceiverCache,
+from .lru import (
+    LruKeyReplicatedReceiverCache,
+    LruKeyReplicatedSenderCache,
 )
 from .shm import (
     ShmObjectStoreReceiverCache,
@@ -56,7 +56,7 @@ def processor_cache_from_config(
     elif cache_type == "processor_only":
         return MultiModalProcessorOnlyCache(vllm_config.model_config)
     elif cache_type == "lru":
-        return MultiModalProcessorSenderCache(vllm_config.model_config)
+        return LruKeyReplicatedSenderCache(vllm_config.model_config)
     elif cache_type == "shm":
         return ShmObjectStoreSenderCache(vllm_config)
     else:
@@ -82,7 +82,7 @@ def engine_receiver_cache_from_config(
     if cache_type in (None, "processor_only", "shm"):
         return None
     elif cache_type == "lru":
-        return MultiModalReceiverCache(vllm_config.model_config)
+        return LruKeyReplicatedReceiverCache(vllm_config.model_config)
     else:
         raise ValueError(f"Unknown cache type: {cache_type!r}")
 

@@ -18,8 +18,8 @@ from .base import (
 )
 
 
-class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
-    """The cache which is used on P0 when IPC caching is enabled.
+class LruKeyReplicatedSenderCache(BaseMultiModalProcessorCache):
+    """The cache which is used on P0 when LRU caching is enabled.
 
     How to update each item:
 
@@ -82,8 +82,8 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         self._cache.pop(mm_hash, None)
 
 
-class MultiModalReceiverCache(BaseMultiModalReceiverCache):
-    """The cache which is used on P1 when IPC caching is enabled.
+class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
+    """The cache which is used on P1 when LRU caching is enabled.
 
     How to update each item:
 

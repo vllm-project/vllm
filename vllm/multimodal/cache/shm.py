@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 
 
 class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
-    """The cache which is used on P0 when IPC caching is enabled.
+    """The cache which is used on P0 when SHM caching is enabled.
 
     How to update each item:
 
@@ -183,7 +183,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
 
 class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
-    """The cache which is used on P1 Worker Process when IPC caching is enabled.
+    """The cache which is used on P1 Worker Process when SHM caching is enabled.
 
     How to update each item:
 

@@ -13,10 +13,10 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.multimodal.cache import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
+    LruKeyReplicatedReceiverCache,
+    LruKeyReplicatedSenderCache,
     MultiModalCacheMissError,
     MultiModalProcessorOnlyCache,
-    MultiModalProcessorSenderCache,
-    MultiModalReceiverCache,
     ShmObjectStoreReceiverCache,
     ShmObjectStoreSenderCache,
     engine_receiver_cache_from_config,
@@ -278,8 +278,8 @@ def test_oversized_item_is_served_uncached():
     assert p0_only.get_and_update_item((small, []), "small")[0] is small
     assert p0_only.is_cached_item("small")
 
-    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
-    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    p0 = LruKeyReplicatedSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
     assert p0.get_and_update_item((item, []), "big")[0] is item
     assert not p0.is_cached_item("big")
     assert p1.get_and_update_item(item, "big") is item
@@ -299,8 +299,8 @@ def test_mm_cache_miss_raises_and_recovers():
     model or network.
     """
     model_config = _StubModelConfig(mm_processor_cache_gb=1)
-    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
-    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    p0 = LruKeyReplicatedSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
 
     mm_hash = "image_A"
     item = MultiModalKwargsItem.dummy(nbytes=64)
@@ -342,7 +342,7 @@ def test_mm_cache_miss_batches_all_drifted_hashes():
     non-drifted items in the same request are still ingested.
     """
     model_config = _StubModelConfig(mm_processor_cache_gb=1)
-    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
     item = MultiModalKwargsItem.dummy(nbytes=64)
 
     def _feature(
@@ -540,8 +540,8 @@ def test_cache_eviction_lru_cache():
         model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
         mm_processor_cache_gb=6 / GiB_bytes,
     )
-    sender_cache = MultiModalProcessorSenderCache(model_config)
-    receiver_cache = MultiModalReceiverCache(model_config)
+    sender_cache = LruKeyReplicatedSenderCache(model_config)
+    receiver_cache = LruKeyReplicatedReceiverCache(model_config)
 
     _run_test_cache_eviction_lru(sender_cache, receiver_cache, base_item_size=1)
 
@@ -733,7 +733,7 @@ def test_processor_cache_shared_across_loras():
         model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
         mm_processor_cache_gb=1,
     )
-    receiver_cache = MultiModalReceiverCache(model_config)
+    receiver_cache = LruKeyReplicatedReceiverCache(model_config)
 
     base_mm_hash = "image_hash_abc123"
     lora_a_identifier = f"12345:{base_mm_hash}"
@@ -785,8 +785,8 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     )
     model_config = ctx.model_config
 
-    sender = MultiModalProcessorSenderCache(model_config)
-    receiver = MultiModalReceiverCache(model_config)
+    sender = LruKeyReplicatedSenderCache(model_config)
+    receiver = LruKeyReplicatedReceiverCache(model_config)
     item = _dummy_item({"pixel_values": 16})
     mm_hash = "image_A"
     payload, _ = sender.get_and_update_item((item, []), mm_hash)
