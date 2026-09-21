@@ -120,33 +120,6 @@ llama4_scout_fp4 = ModelFusionInfo(
     ),
 )
 
-# Qwen2 FP8 - dense model with manual act+quant fusion
-qwen2_fp8 = ModelFusionInfo(
-    model_name="nm-testing/Qwen2-1.5B-Instruct-FP8W8",
-    matches=lambda n_layers: Matches(
-        rms_quant_fusion=n_layers * 2,
-        act_quant_fusion=n_layers,
-        attn_quant_fusion=n_layers,
-        ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
-    ),
-)
-
-# Mistral-3 FP8 - multimodal model, text component uses MistralMLP with manual fusion
-mistral3_fp8 = ModelFusionInfo(
-    model_name="nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic",
-    hf_overrides=lambda n_layers: {"text_config": {"num_hidden_layers": n_layers}},
-    matches=lambda n_layers: Matches(
-        rms_quant_fusion=n_layers * 2,
-        act_quant_fusion=n_layers,
-        attn_quant_fusion=n_layers,
-        ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
-    ),
-)
-
 qwen3_a3b = ModelFusionInfo(
     model_name="Qwen/Qwen3-30B-A3B",
     matches=lambda n_layers: Matches(
