@@ -74,6 +74,8 @@ def _pow2_ceil(n: int) -> int:
 DECODE_SCORE_TARGET_GRID = 1 << 14
 DECODE_SCORE_MIN_BLOCKS = 3
 DECODE_TOPK_NUM_WARPS = 8
+DECODE_TOPK_TILE = 512
+
 
 # Query rows one prefill score program owns, and the workgroups per compute
 # unit its block-axis split aims for. The query tile decides how many rows
@@ -419,6 +421,11 @@ def _local_topk(
     Scores,
     Keys,
     Lengths,
+    Indices,
+    Table,
+    SparseBt,
+    SparseCtx,
+    RowReq,
     TOKENS: tl.constexpr,
     HEADS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
@@ -431,6 +438,12 @@ def _local_topk(
     LOCAL_KEEP: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
+    EMIT: tl.constexpr,
+    RAGGED: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    SBT_STRIDE: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    PAGES_PER_BLOCK: tl.constexpr,
 ):
     """Pack this shard's [heads, tokens, local] scores to its own top-k keys.
 
@@ -443,26 +456,35 @@ def _local_topk(
     evicts could not have placed globally anyway -- that block lost to k-1
     other candidates on this rank plus the forced one, and the global top-k is
     k wide.
+
+    ``EMIT`` finishes the selection here instead of packing keys for a merge.
+    One shard IS the global top-k, so with CP off the merge has nothing to
+    combine -- it would read back the k keys this kernel just wrote and rank
+    them against nothing. The pin does not have to be repeated either: what
+    makes the merge re-pin is the score round trip, which is exactly what this
+    skips. Prefill always takes this path, having no shards to begin with.
     """
     row = tl.program_id(0)
     head = tl.program_id(1)
     request = row // QUERY_LEN
     token = row % QUERY_LEN
     length = tl.load(Lengths + request)
-    causal_blocks = (length - QUERY_LEN + token + 128) // 128
+    causal_len = length - QUERY_LEN + token + 1
+    causal_blocks = (causal_len + 127) // 128
     local_start = tl.maximum(0, causal_blocks - LOCAL_KEEP)
     s_row = Scores + (head * TOKENS + row) * LOCAL_BLOCKS
 
+    scan = tl.minimum(LOCAL_BLOCKS, tl.cdiv(tl.maximum(causal_blocks - RANK, 0), WORLD))
     off = tl.arange(0, BLOCK_SIZE_K)
-    local_valid = off < LOCAL_BLOCKS
+    local_valid = off < scan
     block = off * WORLD + RANK
     valid = local_valid & (block < GLOBAL_BLOCKS) & (block < causal_blocks)
     score = tl.load(s_row + off, mask=local_valid, other=-1e30).to(tl.float32)
     score = _force(score, block, valid, local_start, INIT_BLOCKS)
     winners = tl.topk(_pack_score_key(score, block + 1, valid), BLOCK_SIZE_T)
-    for start in tl.range(BLOCK_SIZE_K, LOCAL_BLOCKS, BLOCK_SIZE_K):
+    for start in tl.range(BLOCK_SIZE_K, scan, BLOCK_SIZE_K):
         off = start + tl.arange(0, BLOCK_SIZE_K)
-        local_valid = off < LOCAL_BLOCKS
+        local_valid = off < scan
         block = off * WORLD + RANK
         valid = local_valid & (block < GLOBAL_BLOCKS) & (block < causal_blocks)
         score = tl.load(s_row + off, mask=local_valid, other=-1e30).to(tl.float32)
@@ -470,7 +492,32 @@ def _local_topk(
         tile = tl.topk(_pack_score_key(score, block + 1, valid), BLOCK_SIZE_T)
         winners = tl.topk(tl.cat(winners, tile, can_reorder=True), BLOCK_SIZE_T)
     off_t = tl.arange(0, BLOCK_SIZE_T)
-    tl.store(Keys + (head * TOKENS + row) * TOPK + off_t, winners, mask=off_t < TOPK)
+    if EMIT:
+        # Ragged rows name their request explicitly; the block table is still
+        # per request, so it is the only thing the row index cannot supply.
+        table_req = tl.load(RowReq + row) if RAGGED else request
+        topk_idx = (winners & 0xFFFF).to(tl.int32) - 1
+        topk_idx = tl.where(off_t < tl.minimum(TOPK, causal_blocks), topk_idx, -1)
+        tl.store(
+            Indices + (head * TOKENS + row) * TOPK + off_t, topk_idx, mask=off_t < TOPK
+        )
+        _emit_sparse_block_table_row(
+            topk_idx,
+            Table + table_req * TABLE_STRIDE,
+            SparseBt + (row * NUM_KV_HEADS + head) * SBT_STRIDE,
+            SparseCtx + row * NUM_KV_HEADS + head,
+            causal_len,
+            TOPK,
+            head,
+            128,
+            PAGES_PER_BLOCK,
+            NUM_KV_HEADS,
+            BLOCK_SIZE_T,
+        )
+    else:
+        tl.store(
+            Keys + (head * TOKENS + row) * TOPK + off_t, winners, mask=off_t < TOPK
+        )
 
 
 @triton.jit
@@ -698,14 +745,117 @@ def candidate_keys(
     keys = torch.empty((heads, tokens, topk), dtype=torch.int64, device=scores.device)
     if tokens == 0:
         return keys
-    # The tile must be at least as wide as the top-k it selects: the kernel's
-    # first tl.topk runs before any tl.cat, so BLOCK_SIZE_K < BLOCK_SIZE_T
-    # cannot compile.
-    width = min(1024, max(16, _pow2_ceil(local), _pow2_ceil(topk)))
+    _launch_local_topk(
+        scores,
+        keys,
+        lengths,
+        topk=topk,
+        rank=rank,
+        world=world,
+        query_len=query_len,
+        global_blocks=global_blocks,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+    )
+    return keys
+
+
+def select_and_emit(
+    scores: torch.Tensor,  # [heads, tokens, blocks]
+    topk_idx: torch.Tensor,  # [heads, tokens, topk] int32, written in place
+    lengths: torch.Tensor,
+    block_table: torch.Tensor,  # page-16 rebase of the ATTEND's table
+    sparse_bt: torch.Tensor,
+    sparse_ctx: torch.Tensor,
+    *,
+    topk: int,
+    query_len: int,
+    global_blocks: int,
+    num_kv_heads: int,
+    pages_per_block: int,
+    init_blocks: int,
+    local_blocks: int,
+    row_req_id: torch.Tensor | None = None,
+) -> None:
+    """Top-k and the attend's page table in one launch, for the unsharded case.
+
+    The same selection ``candidate_keys`` does, finished rather than packed for
+    a merge. Every caller that is not CP wants this one: prefill, which has no
+    shards, and decode with the indexer's context parallelism off, where the
+    single shard already IS the global top-k.
+
+    ``row_req_id`` switches prefill's ragged reading, exactly as it does in
+    ``merge_and_emit``: with it, ``lengths`` is a causal length per row and the
+    map names each row's request.
+    """
+    heads, tokens, blocks = scores.shape
+    _require_packable(global_blocks)
+    assert topk_idx.shape == (heads, tokens, topk)
+    if tokens == 0:
+        return
+    _launch_local_topk(
+        scores,
+        None,
+        lengths,
+        topk=topk,
+        rank=0,
+        world=1,
+        query_len=query_len,
+        global_blocks=global_blocks,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        indices=topk_idx,
+        block_table=block_table,
+        sparse_bt=sparse_bt,
+        sparse_ctx=sparse_ctx,
+        row_req_id=row_req_id,
+        num_kv_heads=num_kv_heads,
+        pages_per_block=pages_per_block,
+    )
+
+
+def _launch_local_topk(
+    scores,
+    keys,
+    lengths,
+    *,
+    topk,
+    rank,
+    world,
+    query_len,
+    global_blocks,
+    init_blocks,
+    local_blocks,
+    indices=None,
+    block_table=None,
+    sparse_bt=None,
+    sparse_ctx=None,
+    row_req_id=None,
+    num_kv_heads=1,
+    pages_per_block=1,
+):
+    """The one selection launch, packing keys for a merge or emitting outright.
+
+    Which of the two it does follows from what the caller has to write to:
+    ``keys`` for a merge, ``indices`` and the page table for an emit. The
+    outputs of the other are left None, which Triton binds as a constexpr and
+    the dead ``EMIT`` branch never dereferences.
+    """
+    emit = indices is not None
+    assert (keys is None) == emit, "the selection writes keys or it emits, not both"
+    heads, tokens, local = scores.shape
+    # The tile has to be at least as wide as the top-k it selects, since the
+    # first one runs before any cat, and no wider than the row it walks.
+    width = min(DECODE_TOPK_TILE, max(_pow2_ceil(local), _pow2_ceil(topk)))
     _local_topk[(tokens, heads)](
         scores,
         keys,
         lengths,
+        indices,
+        block_table,
+        sparse_bt,
+        sparse_ctx,
+        row_req_id,
         TOKENS=tokens,
         HEADS=heads,
         QUERY_LEN=query_len,
@@ -718,9 +868,14 @@ def candidate_keys(
         LOCAL_KEEP=local_blocks,
         BLOCK_SIZE_K=width,
         BLOCK_SIZE_T=_pow2_ceil(topk),
+        EMIT=emit,
+        RAGGED=row_req_id is not None,
+        TABLE_STRIDE=block_table.stride(0) if emit else 0,
+        SBT_STRIDE=sparse_bt.stride(0) if emit else 0,
+        NUM_KV_HEADS=num_kv_heads,
+        PAGES_PER_BLOCK=pages_per_block,
         num_warps=DECODE_TOPK_NUM_WARPS,
     )
-    return keys
 
 
 def merge_and_emit(
@@ -1118,6 +1273,26 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             query_len=d.decode_query_len,
             scale=self.scale,
         )
+        if not self.indexer_cp:
+            # One shard is the global top-k already, so this finishes in the
+            # selection kernel rather than packing keys for a merge that would
+            # rank them against nothing.
+            select_and_emit(
+                scores,
+                decode_topk,
+                d.seq_lens,
+                decode_page16_block_table,
+                sparse_bt,
+                sparse_ctx,
+                topk=self.topk_blocks,
+                query_len=d.decode_query_len,
+                global_blocks=cdiv(d.max_seq_len, self.block_size),
+                num_kv_heads=self.num_kv_heads,
+                pages_per_block=self.pages_per_block,
+                init_blocks=self.init_blocks,
+                local_blocks=self.local_blocks,
+            )
+            return
         keys = candidate_keys(
             scores,
             d.seq_lens,
@@ -1129,13 +1304,11 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             init_blocks=self.init_blocks,
             local_blocks=self.local_blocks,
         )
-        # Under CP the exchange returns [world, owned heads, tokens, topk] --
-        # this rank scored every head over its shard and keeps back only the
-        # heads it owns. Without it there is one shard, and the head axis
-        # carries this rank's kv heads instead.
-        gathered = exchange_candidates(keys) if self.indexer_cp else keys.unsqueeze(0)
+        # The exchange returns [world, owned heads, tokens, topk] -- this rank
+        # scored every head over its shard and keeps back only the heads it
+        # owns, so the merge runs on the shard axis and emits one head's rows.
         merge_and_emit(
-            gathered,
+            exchange_candidates(keys),
             decode_topk,
             d.seq_lens,
             decode_page16_block_table,
@@ -1240,29 +1413,21 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 max_seq_len=p.max_seq_len,
                 scale=self.scale,
             )
-            # Ragged rows carry their causal length and request explicitly: the
-            # block count alone cannot place the tail block the table ends on.
-            keys = candidate_keys(
-                scores,
-                md.prefill_kv_lens,
-                topk=self.topk_blocks,
-                rank=0,
-                world=1,
-                query_len=1,
-                global_blocks=cdiv(p.max_seq_len, self.block_size),
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
-            )
             prefill_topk = buf[:, nd:num_tokens, :]
             sparse_bt, sparse_ctx = self._table_rows(nd, num_tokens)
-            merge_and_emit(
-                keys.unsqueeze(0),
+            # Prefill has no shards, so the selection emits outright. Ragged
+            # rows carry their causal length and request explicitly: the block
+            # count alone cannot place the tail block the table ends on.
+            select_and_emit(
+                scores,
                 prefill_topk,
                 md.prefill_kv_lens,
                 prefill_page16_block_table,
                 sparse_bt,
                 sparse_ctx,
+                topk=self.topk_blocks,
                 query_len=1,
+                global_blocks=cdiv(p.max_seq_len, self.block_size),
                 num_kv_heads=self.num_kv_heads,
                 pages_per_block=self.pages_per_block,
                 init_blocks=self.init_blocks,
