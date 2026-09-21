@@ -290,7 +290,9 @@ class WorkDispatcher:
         else:
             # Assume remote disk(s)
             self._n_read_batch_threads = n_read_threads or _rw_threads
-            self._n_write_batch_threads = n_write_threads or _rw_threads
+            self._n_write_batch_threads = (
+                n_write_threads + n_write_excl_threads
+            ) or _rw_threads
 
         # Running mean of store job sizes — used as the steal quanta.
         self._avg_store_tasks: float = 0.0
@@ -328,7 +330,7 @@ class WorkDispatcher:
             self._avg_store_tasks += (
                 n_tasks - self._avg_store_tasks
             ) / self._n_store_jobs
-            # Any awoken up thread can do this store
+            # Any woken up thread can do this store
             n_wake_threads = self._n_write_batch_threads
 
         return n_wake_threads
