@@ -239,11 +239,8 @@ class M2NWeightTransferEngine(
                 self._src_mesh, codes, f"parameter '{name}' source placements"
             )
             validate_layout(src_mesh, src_placements, shape, "source")
-            dst_mesh, dst_placements = resolve_layout(self._dst_mesh, REPLICATED)
-            validate_layout(dst_mesh, dst_placements, shape, "destination")
-            check_plan_limits(
-                (src_mesh, src_placements), (dst_mesh, dst_placements), name
-            )
+            # Destination checks are deferred until loader-aware resolution;
+            # assuming replication here can reject a valid sharded plan.
             self._metas.append(M2NParamMeta(name, dtype, tuple(shape), codes))
 
         parallel_config = self.parallel_config
@@ -268,15 +265,26 @@ class M2NWeightTransferEngine(
             shard_axis_size=shard_axis_size,
             allow_direct=allow_direct,
         )
-        # Reject an inferred destination that M2N cannot represent before any
-        # rank enters the transfer collectives.
+        # Check the resolved layout rather than a provisional replicated one.
+        # For example, 32 source shards feeding 4 destination shards may need
+        # only 8 sources per destination, while a replicated plan needs all 32.
         for meta, destination in zip(self._metas, self._parameter_destinations):
-            mesh, resolved_dst_placements = resolve_layout(
+            src_mesh, src_placements = resolve_layout(
+                self._src_mesh,
+                meta.placements,
+                f"parameter '{meta.name}' source placements",
+            )
+            dst_mesh, dst_placements = resolve_layout(
                 self._dst_mesh,
                 destination.placements,
                 f"parameter '{meta.name}' destination placements",
             )
-            validate_layout(mesh, resolved_dst_placements, meta.shape, "destination")
+            validate_layout(dst_mesh, dst_placements, meta.shape, "destination")
+            check_plan_limits(
+                (src_mesh, src_placements),
+                (dst_mesh, dst_placements),
+                meta.name,
+            )
 
         # Update requests carry names only, so cache their plan indices. Track
         # whether any fallback entry requires the `load_weights` lifecycle.

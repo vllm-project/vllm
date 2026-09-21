@@ -38,6 +38,7 @@ from vllm.distributed.weight_transfer.m2n_engine import (
     M2NWeightTransferUpdateInfo,
 )
 from vllm.distributed.weight_transfer.m2n_layout import (
+    M2NDestination,
     resolve_parameter_destinations,
 )
 from vllm.distributed.weight_transfer.m2n_source import (
@@ -187,6 +188,53 @@ class TestWireTypes:
 
         with pytest.raises(ValueError, match=r"parameter 'w'.*dtype"):
             engine.init_transfer_engine(self._init_info(dtype_names=[dtype_name]))
+
+    def _init_32_to_4_plan(self, monkeypatch, destination):
+        m2n = Mock()
+        m2n.Handle.create.return_value = object()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.import_m2n", lambda: m2n
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine."
+            "resolve_parameter_destinations",
+            lambda *args, **kwargs: [destination],
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.worker_init_process_group",
+            lambda *args, **kwargs: object(),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine."
+            "publish_destination_placements",
+            lambda *args: args[2],
+        )
+
+        engine = object.__new__(M2NWeightTransferEngine)
+        engine.parallel_config = Mock(pipeline_parallel_size=1)
+        engine.model_config = Mock(quantization=None)
+        engine.model = torch.nn.Module()
+        engine.init_transfer_engine(
+            self._init_info(
+                rank_offset=32,
+                world_size=36,
+                src_mesh_dims=[1, 32],
+                dst_mesh_dims=[1, 4],
+                shapes=[[32, 8]],
+                src_placements=[[REPLICATE, 0]],
+            )
+        )
+
+    def test_limits_use_resolved_sharded_destination(self, monkeypatch):
+        destination = M2NDestination("w", (REPLICATE, 0), torch.empty(8, 8))
+
+        self._init_32_to_4_plan(monkeypatch, destination)
+
+    def test_limits_still_reject_replicated_destination(self, monkeypatch):
+        destination = M2NDestination("w", REPLICATED, None)
+
+        with pytest.raises(ValueError, match=r"32 source shards.*MAX_SOURCES=16"):
+            self._init_32_to_4_plan(monkeypatch, destination)
 
     def test_update_preflights_all_names_before_reshard(self):
         engine = object.__new__(M2NWeightTransferEngine)
