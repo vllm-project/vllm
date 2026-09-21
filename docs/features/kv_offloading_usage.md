@@ -162,8 +162,17 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
+| `checksum_blocks` | no | `false` | Record a CRC32C per block and verify it on load (see [Block Checksums](#block-checksums)). Requires user extended attribute support at `root_dir`. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
+
+#### Block Checksums
+
+With `checksum_blocks: true`, the tier records each block's CRC32C in the user extended attribute `user.vllm.kv_crc32c` on store and verifies it on load, catching a block whose bytes changed while its size did not (e.g. bit rot). A mismatching block is removed, its load fails, and `vllm:kv_offload_tiering_checksum_failures` is incremented. If `root_dir` does not support user extended attributes, the tier fails at startup.
+
+A block with no recorded checksum still loads unverified, so the option can be enabled on an existing cache. Tools that copy files without extended attributes (`cp` without `-a`, `rsync` without `-X`) produce such blocks.
+
+Checksumming adds a CRC32C pass over every block on store and load. The pure-Python I/O fallback, used where the native extension is not built (e.g. Python 3.10), computes it far more slowly.
 
 #### On-Disk Layout
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import errno
 import logging
 import mmap
 import os
@@ -24,6 +25,33 @@ logger = logging.getLogger(__name__)
 
 # O_DIRECT is Linux-specific and not available on macOS
 O_DIRECT = getattr(os, "O_DIRECT", 0)
+
+# Extended attribute holding a block's CRC32C as four big-endian bytes. Must
+# match kChecksumXattr in csrc/fs_io.cpp.
+_CHECKSUM_XATTR = "user.vllm.kv_crc32c"
+
+
+def _make_crc32c_table() -> tuple[int, ...]:
+    table = []
+    for i in range(256):
+        crc = i
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0x82F63B78 if crc & 1 else crc >> 1
+        table.append(crc)
+    return tuple(table)
+
+
+_CRC32C_TABLE = _make_crc32c_table()
+
+
+def crc32c(data: memoryview | bytes) -> int:
+    """CRC32C (Castagnoli) of *data*; must match crc32c in csrc/fs_io.cpp."""
+    crc = 0xFFFFFFFF
+    table = _CRC32C_TABLE
+    for byte in memoryview(data).cast("B"):
+        crc = table[(crc ^ byte) & 0xFF] ^ (crc >> 8)
+    return crc ^ 0xFFFFFFFF
+
 
 # Thread-local storage for unique temporary file suffixes
 _thread_local = threading.local()
@@ -66,6 +94,26 @@ def probe_o_direct(directory: str) -> bool:
             os.remove(path)
 
 
+def probe_xattr(directory: str) -> bool:
+    """Return whether user extended attributes work in *directory*."""
+    if not hasattr(os, "setxattr"):
+        return False
+    path = os.path.join(directory, f".xattr_probe{_get_tmp_suffix()}")
+    value = bytes(4)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+        try:
+            os.setxattr(fd, _CHECKSUM_XATTR, value)
+            return os.getxattr(fd, _CHECKSUM_XATTR) == value
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
 def _ensure_dirs(path: str) -> None:
     """Create parent directories of *path* if they don't exist."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -93,6 +141,7 @@ def _store_block(
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
+    checksum: bool = False,
 ) -> None:
     """Store callback: write to a temp file then atomically replace the target."""
     # Check if block already exists to avoid redundant writes
@@ -119,6 +168,9 @@ def _store_block(
                 raise OSError(
                     f"Short write: expected {len(view_slice)} bytes, wrote {written}"
                 )
+            if checksum:
+                # Before the rename, so a published block never lacks it.
+                os.setxattr(fd, _CHECKSUM_XATTR, crc32c(view_slice).to_bytes(4, "big"))
         finally:
             os.close(fd)
         os.replace(tmp_path, dest_path)
@@ -136,6 +188,7 @@ def _load_block(
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
+    checksum: bool = False,
 ) -> None:
     """Read one KV block from disk; remove the file only on a provable short
     read (a too-short file is genuine corruption) and leave it untouched on any
@@ -158,9 +211,29 @@ def _load_block(
                     cleanup_exc,
                 )
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
+        if checksum:
+            _verify_checksum(fd, source_path, view_slice)
     finally:
         if fd is not None:
             os.close(fd)
+
+
+def _verify_checksum(fd: int, path: str, data: memoryview) -> None:
+    """Check a loaded block against its recorded CRC32C: a block with none still
+    loads, and a mismatch removes the file and raises ``EBADMSG``."""
+    try:
+        expected = os.getxattr(fd, _CHECKSUM_XATTR)
+    except OSError as exc:
+        if exc.errno == errno.ENODATA:
+            return
+        raise
+    if len(expected) == 4 and int.from_bytes(expected, "big") == crc32c(data):
+        return
+    try:
+        os.remove(path)
+    except OSError as cleanup_exc:
+        logger.warning("Failed to remove corrupt file %s: %s", path, cleanup_exc)
+    raise OSError(errno.EBADMSG, "Block checksum mismatch", path)
 
 
 def batch_store_block(
@@ -169,6 +242,7 @@ def batch_store_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
+    checksum: bool = False,
 ) -> None:
     """Store a batch of KV blocks from a shared buffer to disk in one call.
 
@@ -181,10 +255,12 @@ def batch_store_block(
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
         tmp_paths = [p + _get_tmp_suffix() for p in paths]
-        return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
+        return batch_store_block_C(
+            tmp_paths, paths, view_slices, use_o_direct, checksum
+        )
     else:
         for path, offset in zip(paths, offsets):
-            _store_block(path, view, offset, block_size, use_o_direct)
+            _store_block(path, view, offset, block_size, use_o_direct, checksum)
 
 
 def batch_load_block(
@@ -193,6 +269,7 @@ def batch_load_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
+    checksum: bool = False,
 ) -> None:
     """Load a batch of KV blocks from disk into a shared buffer in one call.
 
@@ -200,17 +277,18 @@ def batch_load_block(
     Raises on first error (see _load_block for the delete-on-short-read policy).
     On failure the raised OSError carries ``num_succeeded`` = the number of
     blocks loaded before the failing one, so the tier can keep them.
+    With *checksum*, a block failing verification raises with errno ``EBADMSG``.
     """
     _validate_offsets(view, offsets, block_size)
 
     if _HAS_FSIO_C:
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
-        return batch_load_block_C(paths, view_slices, use_o_direct)
+        return batch_load_block_C(paths, view_slices, use_o_direct, checksum)
     else:
         for i, (path, offset) in enumerate(zip(paths, offsets)):
             try:
-                _load_block(path, view, offset, block_size, use_o_direct)
+                _load_block(path, view, offset, block_size, use_o_direct, checksum)
             except OSError as exc:
                 # Blocks 0..i-1 loaded fine; record the count for partial keep.
                 # The C path sets the same attribute via PyObject_SetAttrString.
