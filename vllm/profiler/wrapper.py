@@ -60,11 +60,6 @@ class WorkerProfiler(ABC):
         return self._running
 
     @property
-    def is_active(self) -> bool:
-        """Whether a profiling session has been requested."""
-        return self._active
-
-    @property
     def should_annotate(self) -> bool:
         """Whether worker iterations should receive profiler annotations."""
         return self._running
