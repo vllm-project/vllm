@@ -78,11 +78,13 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
         adaptive_verification=manager,
         rejection_sampler=rejection_sampler,
         speculative_config=SimpleNamespace(),
+        emit_seq_lens_cpu_lower_bound=True,
     )
 
     def run_steps(model_runner, execute, sample, greedy=False):
         assert model_runner.adaptive_verification is None
         assert not model_runner.rejection_sampler.enable_adaptive_verification
+        assert not model_runner.emit_seq_lens_cpu_lower_bound
         if fail_warmup:
             raise RuntimeError("warmup failed")
 
@@ -95,6 +97,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
     assert rejection_sampler.enable_adaptive_verification
+    assert runner.emit_seq_lens_cpu_lower_bound
 
 
 @pytest.mark.parametrize("speculative", [False, True])
@@ -110,6 +113,7 @@ def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculati
         rounds.clear()
         runner = SimpleNamespace(
             adaptive_verification=None,
+            emit_seq_lens_cpu_lower_bound=False,
             speculative_config=SimpleNamespace() if speculative else None,
             rejection_sampler=(
                 SimpleNamespace(enable_adaptive_verification=False)
