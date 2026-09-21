@@ -1024,6 +1024,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
         self._num_sms: int | None = None
         self._gin_checked = False
+        self._allow_hybrid_mode = envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
 
     def _make_all2all_kwargs(
         self,
@@ -1040,7 +1041,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             hidden=hidden,
             num_topk=num_topk,
             use_fp8_dispatch=use_fp8_dispatch,
-            allow_hybrid_mode=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE,
+            allow_hybrid_mode=self._allow_hybrid_mode,
             prefer_overlap_with_compute=envs.VLLM_DEEPEP_V2_PREFER_OVERLAP,
             allow_multiple_reduction=(envs.VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION),
             explicitly_destroy=True,
@@ -1054,11 +1055,21 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         # missing GIN support.
         probe = torch.zeros(1, device="cuda")
         torch.distributed.all_reduce(probe, group=group)
+        if self._allow_hybrid_mode is None:
+            from deep_ep.utils.envs import get_physical_domain_size
+
+            num_rdma_ranks, _ = get_physical_domain_size(group)
+            self._allow_hybrid_mode = num_rdma_ranks > 1
+            logger.info(
+                "DeepEP v2 auto-selected allow_hybrid_mode=%s (%d NVLink domains)",
+                self._allow_hybrid_mode,
+                num_rdma_ranks,
+            )
         # DeepEPv2 respects EP_DISABLE_GIN, so skip the GIN requirement check.
         if os.environ.get("EP_DISABLE_GIN", "0") != "0":
             return
 
-        gin_type = query_nccl_gin_type(group)
+        gin_type = query_nccl_gin_type(group, railed=self._allow_hybrid_mode)
         if gin_type is None:
             raise RuntimeError(
                 "DeepEPv2 communicator properties query failed; "
@@ -1076,10 +1087,13 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         import deep_ep  # type: ignore[import-not-found]
 
         num_experts = kwargs.pop("num_experts", 256)
-        buffer_kwargs = self._make_all2all_kwargs(**kwargs)
         if not self._gin_checked:
-            self._check_gin_support(buffer_kwargs["group"])
+            group = (
+                self._device_group if self._device_group is not None else self.cpu_group
+            )
+            self._check_gin_support(group)
             self._gin_checked = True
+        buffer_kwargs = self._make_all2all_kwargs(**kwargs)
         logger.debug("DeepEP v2 all2all args %s", buffer_kwargs)
         handle: deep_ep.ElasticBuffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.ElasticBuffer
