@@ -66,6 +66,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v3_1",
         "qwen_3_5",
         "qwen_3_coder",
+        "mimo",
         "qwen_3",
         "deepseek_v3_2",
         "glm_4_7",
