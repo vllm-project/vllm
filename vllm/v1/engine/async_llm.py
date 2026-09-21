@@ -212,13 +212,12 @@ class AsyncLLM(EngineClient):
 
         self.profiler = profiler
         self._frontend_profiler_injected = profiler is not None
-        self._frontend_profiler_enabled = (
-            self._frontend_profiler_injected
-            or vllm_config.profiler_config.profile_frontend is True
-        )
         self._frontend_profiler_running = False
         self._profile_session_active = False
-        if self._frontend_profiler_enabled and not self._frontend_profiler_injected:
+        if (
+            not self._frontend_profiler_injected
+            and vllm_config.profiler_config.should_profile_frontend
+        ):
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501

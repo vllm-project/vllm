@@ -404,7 +404,10 @@ class InprocClient(EngineCoreClient):
         max_iterations: int | None = None,
     ) -> None:
         self.engine_core.profile(
-            is_start, profile_prefix, delay_iterations, max_iterations
+            is_start,
+            profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
         )
 
     def reset_mm_cache(self) -> None:

@@ -183,7 +183,9 @@ def test_torch_profiler_activities_require_torch_profiler():
         ("cuda", None, False, False),
     ],
 )
-def test_profile_frontend(profiler, activities, ignore_frontend, expected, tmp_path):
+def test_should_profile_frontend(
+    profiler, activities, ignore_frontend, expected, tmp_path
+):
     config = ProfilerConfig(
         profiler=profiler,
         torch_profiler_dir=str(tmp_path) if profiler == "torch" else "",
@@ -191,7 +193,7 @@ def test_profile_frontend(profiler, activities, ignore_frontend, expected, tmp_p
         ignore_frontend=ignore_frontend,
     )
 
-    assert config.profile_frontend is expected
+    assert config.should_profile_frontend is expected
 
 
 @pytest.mark.parametrize(

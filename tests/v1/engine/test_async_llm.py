@@ -94,7 +94,7 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
     vllm_config.scheduler_config.stream_interval = 1
     vllm_config.profiler_config.profiler = "cuda"
     vllm_config.profiler_config.ignore_frontend = False
-    vllm_config.profiler_config.profile_frontend = False
+    vllm_config.profiler_config.should_profile_frontend = False
     engine_core = _mock_async_llm_dependencies(monkeypatch)
 
     engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
@@ -120,7 +120,7 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     vllm_config.profiler_config.profiler = "torch"
     vllm_config.profiler_config.ignore_frontend = False
     vllm_config.profiler_config.torch_profiler_activities = ["CUDA"]
-    vllm_config.profiler_config.profile_frontend = False
+    vllm_config.profiler_config.should_profile_frontend = False
     _mock_async_llm_dependencies(monkeypatch)
     profiler = MagicMock()
     monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
@@ -137,7 +137,7 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
     vllm_config = MagicMock()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
-    vllm_config.profiler_config.profile_frontend = False
+    vllm_config.profiler_config.should_profile_frontend = False
     engine_core = _mock_async_llm_dependencies(monkeypatch)
 
     engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
