@@ -331,6 +331,7 @@ uv pip install \
     pathspec \
     packaging \
     distro \
+    setuptools_scm \
     cmake \
     ninja \
     pybind11 \
