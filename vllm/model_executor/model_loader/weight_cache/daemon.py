@@ -66,7 +66,6 @@ from vllm.config import (
     ModelConfig,
     ParallelConfig,
     VllmConfig,
-    replace,
     set_current_vllm_config,
 )
 from vllm.distributed import (
@@ -158,8 +157,7 @@ def get_daemon_model(
     always fails the check, so load_model's finalize step for it is
     unnecessary here.
     """
-    if model_config is None:
-        model_config = vllm_config.model_config
+    model_config = model_config or vllm_config.model_config
     load_config = vllm_config.load_config
     loader = get_model_loader(load_config)
     device_config = vllm_config.device_config
@@ -399,29 +397,10 @@ def get_draft_daemon_config(
     speculative_config = vllm_config.speculative_config
     if not caches_draft_model(speculative_config):
         return None
-    if speculative_config.moe_backend is not None:
-        vllm_config = replace(
-            vllm_config,
-            kernel_config=replace(
-                vllm_config.kernel_config, moe_backend=speculative_config.moe_backend
-            ),
-        )
-    if speculative_config.attention_backend is not None:
-        vllm_config = replace(
-            vllm_config,
-            attention_config=replace(
-                vllm_config.attention_config,
-                backend=speculative_config.attention_backend,
-            ),
-        )
-    if speculative_config.kv_cache_dtype is not None:
-        vllm_config = replace(
-            vllm_config,
-            cache_config=replace(
-                vllm_config.cache_config, cache_dtype=speculative_config.kv_cache_dtype
-            ),
-        )
-    return vllm_config, speculative_config.draft_model_config
+    return (
+        speculative_config.apply_draft_overrides(vllm_config),
+        speculative_config.draft_model_config,
+    )
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:

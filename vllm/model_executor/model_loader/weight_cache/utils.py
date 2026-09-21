@@ -10,6 +10,7 @@ wire format.
 from typing import Any, TypeGuard
 
 from vllm.config import SpeculativeConfig
+from vllm.model_executor.models.interfaces import SupportsEagleBase
 
 # Speculative methods whose draft model the daemon caches in its own group.
 # Other drafts keep loading from disk in the engine.
@@ -17,7 +18,7 @@ WEIGHT_CACHE_DRAFT_METHODS = frozenset({"mtp", "eagle", "eagle3"})
 
 # Python-side flags that weight loading sets on EAGLE-style drafts; the engine
 # never runs load_weights for cached models, so the daemon ships them.
-EXPORTED_MODEL_ATTRS = ("has_own_embed_tokens", "has_own_lm_head")
+EXPORTED_MODEL_ATTRS = tuple(SupportsEagleBase.__annotations__)
 
 
 def export_model_attrs(model: Any) -> dict[str, bool]:

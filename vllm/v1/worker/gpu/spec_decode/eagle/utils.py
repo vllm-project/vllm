@@ -76,34 +76,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
-    if speculative_config.moe_backend is not None:
-        # Otherwise the draft inherits the target's --moe-backend, which
-        # fails when the draft is unquantized and that backend is not.
-        vllm_config = replace(
-            vllm_config,
-            kernel_config=replace(
-                vllm_config.kernel_config,
-                moe_backend=speculative_config.moe_backend,
-            ),
-        )
-    if speculative_config.kv_cache_dtype is not None:
-        vllm_config = replace(
-            vllm_config,
-            cache_config=replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            ),
-        )
-    if speculative_config.attention_backend is not None:
-        # Before get_model(): the backend is read off the constructed layers.
-        # Only when set, so the draft keeps a KV cache layout the target shares.
-        vllm_config = replace(
-            vllm_config,
-            attention_config=replace(
-                vllm_config.attention_config,
-                backend=speculative_config.attention_backend,
-            ),
-        )
+    vllm_config = speculative_config.apply_draft_overrides(vllm_config)
     draft_load_config = get_pp_safe_draft_load_config(
         get_draft_load_config(vllm_config)
     )

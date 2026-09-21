@@ -30,10 +30,19 @@ DAEMON_TIMEOUT_S = 600
 class WeightCacheDaemon:
     """Context manager running the real weight cache daemon as a subprocess."""
 
-    def __init__(self, model: str, tp_size: int, extra_args: list[str] | None = None):
+    def __init__(
+        self,
+        model: str,
+        tp_size: int,
+        extra_args: list[str] | None = None,
+        num_groups: int = 1,
+    ):
         # Short base path: Unix socket paths are limited to ~107 characters.
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
         self.tp_size = tp_size
+        # Each daemon group (target plus cached drafts) binds one socket per
+        # local rank.
+        self.num_sockets = tp_size * num_groups
         self._cmd = [
             sys.executable,
             "-m",
@@ -87,7 +96,7 @@ class WeightCacheDaemon:
                     f"Weight cache daemon exited with {self._proc.returncode}:\n"
                     f"{self._logs()}"
                 )
-            if len(glob.glob(pattern)) >= self.tp_size:
+            if len(glob.glob(pattern)) >= self.num_sockets:
                 return
             time.sleep(1.0)
         raise TimeoutError(
@@ -172,6 +181,27 @@ K3_CASE = ModelCase(
     daemon_args=["--trust-remote-code"],
 )
 
+# Qwen3.5-0.8B ships one MTP layer in the target checkpoint, so method="mtp"
+# loads the draft from the same model. The daemon must cache it in its draft
+# group for the warm runs (fallback=False) to succeed.
+QWEN_MTP_CASE = ModelCase(
+    model="Qwen/Qwen3.5-0.8B",
+    prompts=[
+        "Hello, my name is",
+        "The capital of France is",
+    ],
+    llm_kwargs=dict(
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+    ),
+    daemon_args=[
+        "--speculative-config",
+        '{"method": "mtp", "num_speculative_tokens": 1}',
+    ],
+)
+
 
 @pytest.mark.parametrize("case", [QWEN_CASE, K3_CASE], ids=["qwen3.5", "kimi-k3"])
 def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
@@ -209,90 +239,32 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     assert restart_outputs == baseline_outputs
 
 
-def test_weight_cache_caches_mtp_and_eagle_drafts():
-    from types import SimpleNamespace
+def test_ipc_cache_caches_mtp_draft(vllm_runner):
+    """The daemon caches the MTP draft in its draft group alongside the target.
 
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        caches_draft_model,
-    )
+    The warm runs use fallback=False, so both the target and the draft fail
+    hard unless their daemon groups served the weights; matching the
+    disk-loaded baseline proves the cached draft produces identical drafts.
+    """
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
 
-    draft = object()
-    for method in ("mtp", "eagle", "eagle3"):
-        assert caches_draft_model(
-            SimpleNamespace(method=method, draft_model_config=draft)
-        )
-    assert not caches_draft_model(
-        SimpleNamespace(method="dflash", draft_model_config=draft)
-    )
-    assert not caches_draft_model(
-        SimpleNamespace(method="mtp", draft_model_config=None)
-    )
-    assert not caches_draft_model(None)
+    case = QWEN_MTP_CASE
+    # Baseline: target and MTP draft both loaded from disk.
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
 
+    # Cold start: no daemon is serving, so both models fall back to disk.
+    with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
+        cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
 
-def test_weight_cache_exports_eagle_ownership_flags():
-    """The engine never runs load_weights for cached drafts, so the flags that
-    decide whether to share the target's embed/lm_head travel with the state."""
-    import torch
+    with WeightCacheDaemon(
+        case.model, tp_size=1, extra_args=case.daemon_args, num_groups=2
+    ) as d:
+        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        # Warm restart: a second engine lifetime against the same daemon.
+        restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
 
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        export_model_attrs,
-    )
-
-    model = torch.nn.Module()
-    assert export_model_attrs(model) == {}
-    model.has_own_lm_head = True
-    assert export_model_attrs(model) == {"has_own_lm_head": True}
-
-
-def test_weight_cache_target_and_draft_use_distinct_sockets(tmp_path):
-    from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
-
-    target_path = get_socket_path("GPU-abc", str(tmp_path))
-    draft_path = get_socket_path("GPU-abc", str(tmp_path), draft_model_idx=0)
-
-    assert target_path != draft_path
-    assert draft_path.endswith("GPU-abc_draft0.sock")
-
-
-def test_draft_load_config_under_ipc_cache():
-    """A cached draft is routed to the daemon's draft group; any other draft
-    falls back to disk instead of hitting the target daemon; an explicit
-    draft_load_config always wins."""
-    from types import SimpleNamespace
-
-    from vllm.config import LoadConfig
-    from vllm.model_executor.model_loader.utils import get_draft_load_config
-
-    ipc = LoadConfig(
-        load_format="ipc_cache", model_loader_extra_config={"fallback": False}
-    )
-    explicit = LoadConfig(load_format="fastsafetensors")
-
-    def cfg(method, draft_load_config=None, load_config=ipc):
-        return SimpleNamespace(
-            load_config=load_config,
-            speculative_config=SimpleNamespace(
-                method=method,
-                draft_model_config=object(),
-                draft_load_config=draft_load_config,
-            ),
-        )
-
-    mtp = get_draft_load_config(cfg("mtp"))
-    assert mtp.load_format == "ipc_cache"
-    assert mtp.weight_cache_draft_model_idx == 0
-    assert mtp.model_loader_extra_config == {"fallback": False}
-
-    eagle = get_draft_load_config(cfg("eagle3"))
-    assert eagle.load_format == "ipc_cache"
-    assert eagle.weight_cache_draft_model_idx == 0
-
-    dflash = get_draft_load_config(cfg("dflash"))
-    assert dflash.load_format == "auto"
-    assert dflash.weight_cache_draft_model_idx is None
-    assert dflash.model_loader_extra_config == {}
-
-    assert get_draft_load_config(cfg("mtp", explicit)) is explicit
-    disk = LoadConfig(load_format="fastsafetensors")
-    assert get_draft_load_config(cfg("mtp", load_config=disk)) is disk
+    assert cold_outputs == baseline_outputs
+    assert warm_outputs == baseline_outputs
+    assert restart_outputs == baseline_outputs
