@@ -485,20 +485,30 @@ def update_scheduler_for_invalid_drafts(
 
     """
     req_data = scheduler_output.scheduled_cached_reqs
+    scheduled_spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+    if not scheduled_spec_decode_tokens:
+        # Nothing was speculated this step, so every request below would be
+        # skipped and there is nothing to wait for the D2H copy for.
+        return
+
     num_valid_draft_tokens_event.synchronize()
 
+    # One numpy view of the whole buffer instead of a 0-d tensor allocation per
+    # request: this loop runs on the host critical path of every decode step.
+    valid_counts = num_valid_draft_tokens_cpu.numpy()
+
     for req_id in req_data.req_ids:
+        spec_token_ids = scheduled_spec_decode_tokens.get(req_id)
+        if spec_token_ids is None:
+            continue
+
         req_index = req_id_to_index.get(req_id)
         if req_index is None:
             continue
 
-        spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
-        if spec_token_ids is None:
-            continue
-
         scheduled_k = len(spec_token_ids)
 
-        valid_k = int(num_valid_draft_tokens_cpu[req_index].item())
+        valid_k = int(valid_counts[req_index])
         valid_k = max(0, min(valid_k, scheduled_k))
 
         tokens_to_trim = scheduled_k - valid_k
@@ -506,11 +516,9 @@ def update_scheduler_for_invalid_drafts(
         scheduler_output.num_scheduled_tokens[req_id] -= tokens_to_trim
 
         if valid_k == 0:
-            scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
+            scheduled_spec_decode_tokens.pop(req_id, None)
         else:
-            scheduler_output.scheduled_spec_decode_tokens[req_id] = spec_token_ids[
-                :valid_k
-            ]
+            scheduled_spec_decode_tokens[req_id] = spec_token_ids[:valid_k]
 
 
 def update_ngram_gpu_tensors_incremental(
