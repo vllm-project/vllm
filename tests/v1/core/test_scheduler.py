@@ -756,6 +756,38 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output2.num_scheduled_tokens[requests[2].request_id] == 800 - 224 - 224
 
 
+def test_long_prefill_threshold_fills_idle_budget():
+    """A lone long prefill is not capped by the threshold when nothing else
+    needs the token budget."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+    )
+    request = create_requests(num_requests=1, num_tokens=2000)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 1024
+
+
+def test_long_prefill_threshold_shares_surplus_budget():
+    """The first long prefill takes only the budget the others don't need at
+    the threshold; the later ones stay capped."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=100,
+    )
+    long_reqs = create_requests(num_requests=2, num_tokens=2000)
+    short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
+    for request in [*long_reqs, short_req]:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_reqs[0].request_id] == 1024 - 100 - 10
+    assert output.num_scheduled_tokens[long_reqs[1].request_id] == 100
+    assert output.num_scheduled_tokens[short_req.request_id] == 10
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()
