@@ -4,6 +4,7 @@ ARG TORCH_VERSION=2.12.0+rocm10.0.0
 ARG TORCHVISION_VERSION=0.27.0+rocm10.0.0
 ARG TORCHAUDIO_VERSION=2.11.0+rocm10.0.0
 ARG TRITON_BRANCH="c0a142ffcbb42f9a67a56bf791cad472be1d6425" # release/internal/3.8.x as of 9/21/2026
+ARG TRITON_VERSION=3.8.0+gitc0a142ff
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
@@ -350,6 +351,7 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 FROM base AS final
+ARG TRITON_VERSION
 
 # torch 2.12 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
 # teardown, so disable it. TODO: drop once ROCm's stock rocprofiler carries the fix.
@@ -416,6 +418,7 @@ ARG MORI_BRANCH
 ARG MORI_REPO
 ARG ROCM_SYSTEMS_REPO
 ARG ROCM_RUNTIME_COMMIT
+ARG TRITON_VERSION
 # Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
