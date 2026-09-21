@@ -248,6 +248,9 @@ class MultiprocExecutor(Executor):
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
 
+            if self.is_failed:
+                raise RuntimeError("Executor failed during initialization.")
+
             self.futures_queue = deque[FutureWrapper]()
 
             self._post_init_executor()

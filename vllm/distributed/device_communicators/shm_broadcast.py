@@ -618,14 +618,26 @@ class MessageQueue:
     def wait_until_ready(self):
         """This is a collective operation. All processes (including the
         readers and the writer) should call this function.
+
+        Raises RuntimeError if the queue shuts down during the handshake.
         """
+
+        def recv_ready(socket: zmq.Socket) -> bytes:
+            # A peer can exit before completing the handshake.
+            while not self.shutting_down:
+                if socket.poll(timeout=100):
+                    if self.shutting_down:
+                        break
+                    return socket.recv()
+            raise RuntimeError("cancelled")
+
         if self._is_writer:
             # wait for all readers to connect
 
             # local readers
             for i in range(self.n_local_reader):
                 # wait for subscription messages from all local readers
-                self.local_socket.recv()
+                recv_ready(self.local_socket)
             if self.n_local_reader > 0:
                 # send a message to all local readers
                 # to make sure the publish channel is working
@@ -634,23 +646,22 @@ class MessageQueue:
             # remote readers
             for i in range(self.n_remote_reader):
                 # wait for subscription messages from all remote readers
-                self.remote_socket.recv()
+                recv_ready(self.remote_socket)
             if self.n_remote_reader > 0:
                 # send a message to all remote readers
                 # to make sure the publish channel is working
                 self.remote_socket.send(b"READY")
         elif self._is_local_reader:
             # wait for the writer to send a message
-            recv = self.local_socket.recv()
+            recv = recv_ready(self.local_socket)
             assert recv == b"READY"
         elif self._is_remote_reader:
             # wait for the writer to send a message
-            recv = self.remote_socket.recv()
+            recv = recv_ready(self.remote_socket)
             assert recv == b"READY"
 
     def shutdown(self):
-        """If this is an idle reader, wakes it up so it can clean up and shut
-        down"""
+        """Cancel startup waits and wake idle shared-memory readers."""
         self.shutting_down = True
         if self._spin_condition is not None:
             self._spin_condition.cancel()
