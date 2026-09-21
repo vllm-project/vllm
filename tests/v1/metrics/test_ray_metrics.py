@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 import ray
 
+from tests.utils import wait_for_memory_to_settle
 from vllm.config.model import ModelDType
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -58,19 +59,28 @@ def test_engine_log_metrics_ray(
                 engine_args, stat_loggers=[RayPrometheusStatLogger]
             )
 
-            for i, prompt in enumerate(example_prompts):
-                results = engine.generate(
-                    request_id=f"request-id-{i}",
-                    prompt=prompt,
-                    sampling_params=SamplingParams(max_tokens=max_tokens),
+            try:
+                for i, prompt in enumerate(example_prompts):
+                    results = engine.generate(
+                        request_id=f"request-id-{i}",
+                        prompt=prompt,
+                        sampling_params=SamplingParams(max_tokens=max_tokens),
+                    )
+
+                    async for _ in results:
+                        pass
+            finally:
+                engine.shutdown()
+                wait_for_memory_to_settle(
+                    threshold_ratio=1.0 - engine_args.gpu_memory_utilization
                 )
 
-                async for _ in results:
-                    pass
-
     # Create the actor and call the async method
-    actor = EngineTestActor.remote()  # type: ignore[attr-defined]
-    ray.get(actor.run.remote())
+    try:
+        actor = EngineTestActor.remote()  # type: ignore[attr-defined]
+        ray.get(actor.run.remote())
+    finally:
+        ray.shutdown()
 
 
 def test_sanitized_opentelemetry_name():
