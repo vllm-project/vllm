@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
@@ -24,6 +25,14 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 QWEN4_EXP_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
+    # Replicated MoE router, including TP=4.
+    (512, 2560): {
+        1: SkinnyGemmConfig(1, 64, 4, k_unroll=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 128, 1, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 64, 2, vector_width=4, static_k=2560),
+        16: SkinnyGemmConfig(16, 128, 2, vector_width=4, static_k=2560),
+    },
     # GDN fused QKVZ projection, TP=4.
     (4096, 2560): {
         1: SkinnyGemmConfig(1, 64, 4, k_unroll=4),
@@ -229,6 +238,9 @@ def enable_qwen4_exp_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
 ) -> None:
+    config = get_current_vllm_config_or_none()
+    if config is not None and config.kernel_config.linear_backend != "auto":
+        return
     plans = _gemm_plans()
     if dtype != torch.bfloat16 or not plans:
         return
