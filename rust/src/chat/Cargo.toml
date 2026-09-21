@@ -34,6 +34,7 @@ vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 vllm-parser.workspace = true
 vllm-text.workspace = true
+vllm-tracing.workspace = true
 vllm-tokenizer.workspace = true
 xgrammar-structural-tag.workspace = true
 

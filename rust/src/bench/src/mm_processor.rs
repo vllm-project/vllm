@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 
 use vllm_chat::{
     ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRequest, LoadModelBackendsOptions,
-    load_model_backends,
+    MultiModalTimingStats, load_model_backends,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::Llm;
@@ -133,7 +133,7 @@ pub struct MmProcessorArgs {
 }
 
 /// Entry point for `vllm-bench mm-processor`.
-pub async fn run_mm_processor(args: MmProcessorArgs) -> Result<()> {
+pub async fn run_mm_processor(args: MmProcessorArgs, timing: MultiModalTimingStats) -> Result<()> {
     if args.engine.data_parallel_size_local == Some(0) {
         anyhow::bail!(
             "`--data-parallel-size-local 0` is not supported; the benchmark requires \
@@ -166,7 +166,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs) -> Result<()> {
         .await
         .context("failed to start managed Python headless engine")?;
 
-    let result = run_mm_processor_with_engine(args, handshake_port).await;
+    let result = run_mm_processor_with_engine(args, handshake_port, &timing).await;
     let shutdown_result = engine
         .shutdown(ENGINE_SHUTDOWN_TIMEOUT)
         .await
@@ -176,7 +176,11 @@ pub async fn run_mm_processor(args: MmProcessorArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run_mm_processor_with_engine(args: MmProcessorArgs, handshake_port: u16) -> Result<()> {
+async fn run_mm_processor_with_engine(
+    args: MmProcessorArgs,
+    handshake_port: u16,
+    timing: &MultiModalTimingStats,
+) -> Result<()> {
     let range_ratio =
         RangeRatio::parse(&args.random_range_ratio).context("invalid --random-range-ratio")?;
     let limit: MmLimitPerPrompt = parse_limit_mm_per_prompt(&args.random_mm_limit_mm_per_prompt)
@@ -232,8 +236,7 @@ async fn run_mm_processor_with_engine(args: MmProcessorArgs, handshake_port: u16
     let chat = ChatLlm::new(
         TextLlm::new(Llm::new(client), backends.text_backend),
         backends.chat_backend,
-    )
-    .with_mm_processor_stats(true);
+    );
 
     let semaphore = Arc::new(Semaphore::new(args.max_concurrency));
 
@@ -251,7 +254,7 @@ async fn run_mm_processor_with_engine(args: MmProcessorArgs, handshake_port: u16
         )?;
         eprintln!("Processing {} warmup requests...", warmup.len());
         run_batch(&chat, &warmup, &semaphore).await;
-        let _ = chat.mm_timing_stats();
+        let _ = timing.stat();
     }
 
     let samples = generate_dataset(
@@ -275,7 +278,7 @@ async fn run_mm_processor_with_engine(args: MmProcessorArgs, handshake_port: u16
         .filter_map(|outcome| outcome.as_ref().ok().map(|elapsed| elapsed.as_secs_f64()))
         .collect();
 
-    let per_request = chat.mm_timing_stats();
+    let per_request = timing.stat();
     let stats = aggregate_stats(per_request, &percentiles);
 
     eprintln!(
@@ -530,14 +533,15 @@ fn print_e2el_summary(
 
 /// JSON result schema mirroring `vllm bench mm-processor`.
 #[derive(Serialize)]
-struct BenchmarkResultJson<'a> {
+struct BenchmarkResultJson {
     completed: usize,
     failed: usize,
     mean_e2el_ms: f64,
     median_e2el_ms: f64,
     std_e2el_ms: f64,
     percentiles_e2el_ms: Vec<(f64, f64)>,
-    mm_processor_stats: &'a BTreeMap<String, BTreeMap<String, f64>>,
+    /// `{stage_ms: {statistic: ms}}`, keyed by stage like the Python schema.
+    mm_processor_stats: BTreeMap<String, BTreeMap<String, f64>>,
 }
 
 fn write_result_json(
@@ -550,6 +554,17 @@ fn write_result_json(
 ) -> Result<()> {
     let e2el_ms: Vec<f64> = e2el_times_secs.iter().map(|secs| secs * SEC_TO_MS).collect();
     let sorted = sort_clone(&e2el_ms);
+    // Transpose the internal `{statistic: {stage: ms}}` aggregation into the
+    // Python schema's `{stage: {statistic: ms}}` orientation.
+    let mut mm_processor_stats: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for (statistic, stage_map) in stats {
+        for (stage, value) in stage_map {
+            mm_processor_stats
+                .entry(stage.clone())
+                .or_default()
+                .insert(statistic.clone(), *value);
+        }
+    }
     let result = BenchmarkResultJson {
         completed,
         failed,
@@ -560,7 +575,7 @@ fn write_result_json(
             .iter()
             .map(|p| (*p, percentile_sorted(&sorted, *p)))
             .collect(),
-        mm_processor_stats: stats,
+        mm_processor_stats,
     };
     let json = serde_json::to_string_pretty(&result).context("failed to serialize result")?;
     std::fs::write(path, format!("{json}\n")).with_context(|| format!("failed to write {path}"))?;

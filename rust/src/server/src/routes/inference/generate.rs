@@ -53,7 +53,8 @@ pub async fn generate(
     let mm_features = if let Some(parts) = body.content_parts.take() {
         match state
             .chat
-            .prepare_media(parts, &mut body.token_ids, &request_context.request_id)
+            .prepare_media(parts, &mut body.token_ids)
+            .instrument(vllm_chat::mm_request_span(&request_context.request_id))
             .await
         {
             Ok(features) => features,

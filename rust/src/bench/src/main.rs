@@ -30,8 +30,6 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
-    vllm_tracing::init_tracing("Bench");
-
     let cli = Cli::parse();
     vllm_bench::prepare_process();
 
@@ -41,7 +39,14 @@ fn main() -> anyhow::Result<()> {
         .context("Failed to build tokio runtime")?;
 
     match cli.command {
-        Some(Command::MmProcessor(args)) => runtime.block_on(vllm_bench::run_mm_processor(args)),
-        None => runtime.block_on(vllm_bench::run(cli.args)),
+        Some(Command::MmProcessor(args)) => {
+            let (timing_layer, timing_stats) = vllm_chat::mm_timing_layer();
+            vllm_tracing::init_tracing_with("Bench", timing_layer);
+            runtime.block_on(vllm_bench::run_mm_processor(args, timing_stats))
+        }
+        None => {
+            vllm_tracing::init_tracing("Bench");
+            runtime.block_on(vllm_bench::run(cli.args))
+        }
     }
 }

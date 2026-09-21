@@ -3,8 +3,8 @@
 This document tracks the design and implementation for a `vllm bench mm-processor`-style
 CLI command for the Rust frontend.
 
-See: https://github.com/vllm-project/vllm/issues/47601 and
-https://github.com/vllm-project/vllm/issues/44280
+See: <https://github.com/vllm-project/vllm/issues/47601> and
+<https://github.com/vllm-project/vllm/issues/44280>
 
 ## Motivation
 
@@ -20,7 +20,7 @@ https://github.com/vllm-project/vllm/issues/44280
 ### Initial benchmark numbers (Qwen/Qwen3-VL-8B-Instruct, CPU)
 
 | Resolution | HF mean | Rust mean |
-|---|---|---|
+| --- | --- | --- |
 | 224x224, batch=1 | 0.961 ms | 0.451 ms |
 | 640x480, batch=1 | 1.254 ms | 1.399 ms |
 | 1024x768, batch=1 | 3.612 ms | 4.586 ms |
@@ -33,13 +33,20 @@ Rust results are from a small smoke run; full benchmark pending. Note the model'
 
 ### Phase 1 — Timing hooks in `vllm-chat`
 
-- Request-id-keyed timing registry mirroring Python's `MultiModalTimingRegistry`
-  (`vllm/multimodal/registry.py`): `TimingContext` + `MultiModalTimingRegistry` in
-  `rust/src/chat/src/multimodal/timing.rs`.
-- Instruments the preprocessing stages in `MultimodalModelInfo::prepare_multimodal`
-  (`rust/src/chat/src/multimodal.rs`): `media_fetch`, `preprocess_image`,
-  `preprocess_video`, `preprocess_audio`, `prompt_expansion`, and `preprocessor_total`.
-- Gated behind `with_mm_processor_stats(enabled)`; `stat()` drains; disabled is a no-op.
+- `tracing`-span-based timing mirroring Python's `MultiModalTimingRegistry` +
+  `TimingContext.record` semantics (`vllm/multimodal/registry.py`,
+  `vllm/multimodal/processing/context.py`): the preprocessing stages in
+  `MultimodalModelInfo::prepare_multimodal` (`rust/src/chat/src/multimodal.rs`)
+  emit spans (`media_fetch`, `preprocess_image`, `preprocess_video`,
+  `preprocess_audio`, `prompt_expansion`, `preprocessor_total`); no timing
+  state is threaded through the pipeline.
+- `RequestTimingLayer` (`rust/src/tracing/src/timing.rs`) is a generic
+  subscriber layer that attributes each stage span to the nearest ancestor
+  span carrying a `request_id` field; `vllm_chat::mm_timing_layer()` builds it
+  for the mm stage target (the chat path instruments via `mm_request_span`;
+  gRPC/HTTP reuse their existing per-request spans).
+  `RequestTimingStats::stat()` drains; without the layer installed the
+  spans are inert.
 
 ### Phase 2 — `vllm-bench mm-processor` subcommand (Rust)
 
@@ -52,7 +59,8 @@ connects over the same handshake transport the serving frontend uses, then submi
 `random-mm` prompts (reusing the dataset generation in
 `rust/src/bench/src/datasets/random_mm.rs`) through the full chat pipeline
 (render -> markers -> media fetch -> processor -> engine encode/decode). Per-stage
-timing is drained from the Phase 1 registry; results are reported as
+timing is drained from the Phase 1 layer handle (installed via
+`vllm_tracing::init_tracing_with` in `main.rs`); results are reported as
 mean/median/std/P-s plus `--output-json`.
 
 Note (deviation from the original design): this is a full end-to-end path (a live
