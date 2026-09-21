@@ -923,9 +923,13 @@ class ModelConfig:
         if mm_config is None:
             mm_cache_key = None
         else:
+            limits_per_prompt = {
+                modality: mm_config.get_limit_per_prompt(modality)
+                for modality in mm_config.limit_per_prompt
+            }
             mm_cache_key = (
                 mm_config.language_model_only,
-                tuple(mm_config.limit_per_prompt.items()),
+                tuple(limits_per_prompt.items()),
                 mm_config.enable_mm_embeds,
             )
 
