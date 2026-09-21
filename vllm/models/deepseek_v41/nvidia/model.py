@@ -17,7 +17,6 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import (
@@ -90,15 +89,15 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, gather_engram_hashes
-from .ops.mega_mhc import mhc_shifted_post_pre
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     mhc_pre_delayed_overlap,
+    mhc_shifted_post_pre,
+    supports_mhc_all_reduce,
     supports_mhc_overlap,
 )
 
 if typing.TYPE_CHECKING:
-    from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 logger = init_logger(__name__)
@@ -192,20 +191,6 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         and parallel_config.tensor_parallel_size > 1
         and (use_mega_moe or parallel_config.data_parallel_size > 1)
     )
-
-
-def _use_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
-    parallel = vllm_config.parallel_config
-    config = vllm_config.model_config.hf_config
-    if (
-        parallel.tensor_parallel_size != 4
-        or parallel.enable_expert_parallel
-        or config.hidden_size != 5120
-        or config.hc_mult != 4
-    ):
-        return False
-    comm = typing.cast("CudaCommunicator", get_tp_group().device_communicator).ca_comm
-    return comm is not None and bool(comm.mnnvl_lamport_ag_multicast_ptr)
 
 
 class DeepseekV4DecoderLayer(nn.Module):
@@ -566,7 +551,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
         # Keep mHC independent of the streams used inside attention.
         mhc_stream = torch.cuda.Stream() if supports_mhc_overlap(vllm_config) else None
-        self.fuse_mhc_all_reduce = mhc_stream is not None and _use_mhc_all_reduce(
+        self.fuse_mhc_all_reduce = mhc_stream is not None and supports_mhc_all_reduce(
             vllm_config
         )
 

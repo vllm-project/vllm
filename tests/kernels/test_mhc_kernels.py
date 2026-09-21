@@ -65,7 +65,7 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
     monkeypatch, tp, ep, hidden, hc, multicast, expected
 ):
     """Eligibility depends on kernel inputs, not serving or attention settings."""
-    from vllm.models.deepseek_v41.nvidia import model
+    from vllm.models.deepseek_v41.nvidia.ops import mhc
 
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
@@ -80,8 +80,8 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
             ca_comm=SimpleNamespace(mnnvl_lamport_ag_multicast_ptr=multicast)
         )
     )
-    monkeypatch.setattr(model, "get_tp_group", lambda: group)
-    assert model._use_mhc_all_reduce(config) is expected
+    monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    assert mhc.supports_mhc_all_reduce(config) is expected
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
