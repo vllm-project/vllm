@@ -12,6 +12,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -207,9 +208,11 @@ class AsyncLLM(EngineClient):
             pass
 
         self.profiler = profiler
+        configured_activities = vllm_config.profiler_config.torch_profiler_activities
         if (
             vllm_config.profiler_config.profiler == "torch"
             and not vllm_config.profiler_config.ignore_frontend
+            and (configured_activities is None or "CPU" in configured_activities)
         ):
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
@@ -1282,3 +1285,6 @@ class AsyncLLM(EngineClient):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return await self.engine_core.get_weight_version_async()
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        return self.engine_core.get_kv_event_sources()
