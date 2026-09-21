@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Run single-GPU, concurrency-one Qwen3.5 comparisons (4B by default)."""
+"""Run single-GPU Qwen3.5 comparisons (4B and concurrency one by default)."""
 
 import argparse
 import importlib.metadata
@@ -28,10 +28,13 @@ def main():
     parser.add_argument("--port", type=int, default=8100)
     parser.add_argument("--request-count", type=int, default=200)
     parser.add_argument("--warmup-request-count", type=int, default=20)
+    parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--attn-group-size", type=int)
     parser.add_argument("--output", type=Path, default=HERE / "results")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.concurrency <= 0:
+        parser.error("--concurrency must be a positive integer")
     target_model, draft_model = (
         (TARGET_27B, DRAFT_27B) if args.model_size == "27B" else (TARGET, DRAFT)
     )
@@ -63,7 +66,7 @@ def main():
         "versions": versions(args.engine),
         "server_command": command,
         "vllm_runner": "V2" if args.engine == "vllm" else None,
-        "concurrency": 1,
+        "concurrency": args.concurrency,
         "warmup_requests": args.warmup_request_count,
         "measured_requests": args.request_count,
         "requested_output_tokens": 256,
@@ -99,7 +102,7 @@ def main():
                 "--extra-inputs",
                 "max_completion_tokens:256",
                 "--concurrency",
-                "1",
+                str(args.concurrency),
                 "--endpoint-type",
                 "chat",
                 "--streaming",
