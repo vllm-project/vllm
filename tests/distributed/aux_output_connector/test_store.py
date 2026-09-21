@@ -329,8 +329,8 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
 def test_pending_outputs_bounded_by_max_concurrent_batches():
     worker = _make_worker(1, max_concurrent_batches=2)
     worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.side_effect = lambda num_rows: (
-        torch.zeros((num_rows, *_SHAPE), dtype=torch.uint8)
+    worker._capturer.snapshot_routing_data.side_effect = lambda num_rows: torch.zeros(
+        (num_rows, *_SHAPE), dtype=torch.uint8
     )
     metadata = _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
     batch = _input_batch(["request"], np.array([0]), np.array([0, 1]))
@@ -1706,7 +1706,7 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
         connector.take_output(request, output)
 
 
-def test_scheduler_rejects_empty_aux_output_when_request_is_finished():
+def test_scheduler_rejects_aux_output_past_finished_request():
     connector = _make_connector()
     request = _scheduler_request("request", [], num_tokens=1)
     request.finished = True
@@ -1716,7 +1716,7 @@ def test_scheduler_rejects_empty_aux_output_when_request_is_finished():
     )
     output = {
         "request": AuxRequestOutput(
-            0,
+            1,
             np.empty((0, *_SHAPE), dtype=_DTYPE),
         )
     }
@@ -1725,6 +1725,63 @@ def test_scheduler_rejects_empty_aux_output_when_request_is_finished():
         AssertionError, match="finished auxiliary output output has no accepted"
     ):
         connector.take_output(request, output)
+
+
+@pytest.mark.parametrize("chunk_size", [2, 4])
+@pytest.mark.parametrize("max_tokens", [1, 2])
+def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
+    """Omit prompt R3 without losing the empty first output or later decode rows."""
+    connector = _make_connector()
+    worker = _make_worker(1)
+    request = _scheduler_request(
+        "request", [b"a" * 32], num_tokens=4, num_output_tokens=0, prompt_start=4
+    )
+    rows = np.arange(5 * 3 * 2, dtype=_DTYPE).reshape(5, *_SHAPE)
+    try:
+        for start in range(0, 4, chunk_size):
+            metadata = connector.build_connector_meta(
+                _step_output([request.request_id], [start], [chunk_size]),
+                {request.request_id: request},
+            )
+            output = _process_output(
+                worker,
+                metadata,
+                rows[start : start + chunk_size],
+                [request.request_id],
+                np.array([0]),
+                num_sampled=np.array([int(start + chunk_size == 4)]),
+                token_starts=(start,),
+                num_tokens=(chunk_size,),
+            )
+            if start + chunk_size < 4:
+                assert output == {}
+        request.num_tokens = 5
+        request.num_output_tokens = 1
+        request.finished = max_tokens == 1
+        result = connector.take_output(request, output)
+        np.testing.assert_array_equal(result, rows[:0])
+
+        if max_tokens == 2:
+            metadata = connector.build_connector_meta(
+                _step_output([request.request_id], [4], [1]),
+                {request.request_id: request},
+            )
+            output = _process_output(
+                worker,
+                metadata,
+                rows[4:],
+                [request.request_id],
+                np.array([0]),
+                token_starts=(4,),
+                num_tokens=(1,),
+            )
+            request.num_tokens = 6
+            request.finished = True
+            np.testing.assert_array_equal(
+                connector.take_output(request, output), rows[4:]
+            )
+    finally:
+        worker.close()
 
 
 def test_scheduler_connector_sends_each_block_hash_once():

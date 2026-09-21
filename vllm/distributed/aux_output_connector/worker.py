@@ -250,7 +250,7 @@ class AuxOutputWorkerConnector:
             state.scheduled_cursor = token_start + request_num_tokens
             block_batches.append((state, completed))
 
-            if sampled > 0 and emit_start < token_end:
+            if sampled > 0 and emit_start <= token_end:
                 if emit_start >= capture_start:
                     outputs[request_id] = AuxRequestOutput(
                         emit_start, rows[emit_start - capture_start :]
