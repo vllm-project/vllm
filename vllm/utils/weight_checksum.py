@@ -93,7 +93,11 @@ def compute_weight_checksums(
     prefix = _rank_prefix(vllm_config, dp_rank)
     checksums: dict[str, str] = {}
     for name, tensor in _iter_checksum_targets(model):
-        cpu_uint8 = tensor.data.contiguous().cpu().view(torch.uint8).numpy()
+        # Reshape first: view(dtype) rejects a 0-dim tensor outright, and a few
+        # models keep scalar buffers such as per-layer k_scale/v_scale. A
+        # reshape also drops the separate .contiguous() call.
+        flat = tensor.data.cpu().reshape(-1)
+        cpu_uint8 = flat.view(torch.uint8).numpy()
         # Hash the array in place; .tobytes() would copy it a second time.
         raw = memoryview(cpu_uint8)
         checksums[f"{prefix}{name}"] = hashlib.sha256(raw).hexdigest()
