@@ -111,6 +111,23 @@ steps:
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s kernels/test_top_k_per_row.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) DeepSeek V4 Fused Kernels"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 60
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+      - vllm/models/deepseek_v4/common/ops/
+      - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
 
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
