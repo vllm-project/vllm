@@ -378,7 +378,7 @@ RUN ldconfig
 
 # This is to prevent resolvers from checking METADATA and RECORD and clobbering
 # the Triton source build we installed. Constraints files are unable to help
-# with this. However, theses entires are optional and can be blanked which
+# with this. However, these entries are optional and can be blanked which
 # solves the problem.
 RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
     && grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
