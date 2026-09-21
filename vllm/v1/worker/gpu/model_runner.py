@@ -56,6 +56,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -920,10 +921,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_reqs, self.input_buffers
         )
 
-        # NOTE(woosuk): During the initial memory profiling, the sampler may skip
-        # top_k, top_p, and logprobs, using less GPU memory than what is possible
-        # during actual execution.
+        # InputBatch.make_dummy registers no sampling parameters, so the dummy
+        # requests leave needs_logits_processing False, apply_sampling_params
+        # early-exits, and the fp32 logits upcast stays out of the profiled peak
+        # -- while warmup_kernels, running once the KV cache is already sized,
+        # samples with these same params and does pay for it. The slots keep the
+        # params afterwards, as they do after warmup_kernels' own add_requests.
         assert self.sampler is not None
+        warmup_params = SamplingParams.for_sampler_warmup()
+        for req_idx in range(num_reqs):
+            self.sampler.add_request(req_idx, warmup_params)
+        self.sampler.apply_staged_writes()
         self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()

@@ -9,6 +9,7 @@ import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.sampling_params import SamplingParams
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -311,3 +312,53 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+
+def test_dummy_sampler_run_registers_warmup_params_before_sampling(monkeypatch):
+    """profile_run sizes the KV cache from the peak this produces, so the
+    sampler has to be exercised on the path warmup_kernels later takes.
+    InputBatch.make_dummy registers no sampling params, so they must be
+    registered here and the staged writes flushed *before* the sampler runs --
+    otherwise apply_sampling_params early-exits and the fp32 logits upcast never
+    enters the profiled peak, leaving warmup_kernels to OOM against a KV cache
+    that has already been allocated."""
+    events: list[str] = []
+    registered: list[tuple[int, SamplingParams]] = []
+
+    class _RecordingSampler:
+        def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+            events.append("add_request")
+            registered.append((req_idx, sampling_params))
+
+        def apply_staged_writes(self) -> None:
+            events.append("apply_staged_writes")
+
+        def __call__(self, logits, input_batch) -> None:
+            events.append("sample")
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.sampler = _RecordingSampler()
+    runner.input_buffers = object()
+    runner.model = SimpleNamespace(
+        compute_logits=lambda hidden: torch.zeros(hidden.shape[0], 5)
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "InputBatch",
+        SimpleNamespace(make_dummy=lambda *args, **kwargs: "dummy_batch"),
+    )
+
+    GPUModelRunner._dummy_sampler_run(runner, torch.zeros(3, 2))
+
+    # Ordering is the point: flushing after every request is registered, and
+    # before the sampler runs, is what puts the work inside the profiled peak.
+    assert events == ["add_request"] * 3 + ["apply_staged_writes", "sample"]
+    assert [req_idx for req_idx, _ in registered] == [0, 1, 2]
+
+    # The same helper warmup_kernels uses, so the two stay in step.
+    warmup = SamplingParams.for_sampler_warmup()
+    for _, params in registered:
+        assert params.top_k == warmup.top_k
+        assert params.top_p == warmup.top_p
+        assert params.min_p == warmup.min_p
+        assert params.logprobs == warmup.logprobs
