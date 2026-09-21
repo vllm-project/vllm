@@ -685,6 +685,13 @@ def test_engram_dp_shared_memory_runtime_requirements(
         )
 
 
+def test_engram_tables_without_shm_are_not_shared(monkeypatch, tmp_path):
+    """A missing /dev/shm must fall back before any distributed group is touched."""
+    monkeypatch.setattr(engram_ops, "SHM_PATH", str(tmp_path / "shm"))
+    layout = SimpleNamespace(num_embeddings=(1,), head_dim=DIM)
+    assert not engram_ops.can_share_engram_tables(layout)
+
+
 def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch):
     """A /dev/shm smaller than the tables must fall back instead of failing startup."""
     monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: 2)

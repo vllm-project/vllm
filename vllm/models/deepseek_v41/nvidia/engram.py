@@ -3,6 +3,7 @@
 """NVIDIA Engram DP sharding, shared host storage, and asynchronous prefetch."""
 
 import mmap
+import os
 import shutil
 import tempfile
 import weakref
@@ -19,6 +20,10 @@ from vllm.distributed import (
     get_engram_dp_size,
     get_tensor_model_parallel_rank,
     tensor_model_parallel_all_gather,
+)
+from vllm.distributed.device_communicators.shm_broadcast import (
+    SHM_PATH,
+    check_shm_free_space,
 )
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context
@@ -92,6 +97,13 @@ def gather_engram_hashes(
 
 def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     """Whether co-located DP replicas exist and /dev/shm can hold the full tables."""
+    if not os.path.isdir(SHM_PATH):
+        logger.warning_once(
+            "%s is not mounted; storing the offloaded Engram tables per rank "
+            "instead of sharing them across DP replicas.",
+            SHM_PATH,
+        )
+        return False
     if get_engram_dp_size() == 1:
         logger.warning_once(
             "Engram DP replicas are not co-located on one node; "
@@ -101,11 +113,12 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     num_bytes = sum(layout.num_embeddings) * (
         layout.head_dim + layout.head_dim // block_size
     )
-    if shutil.disk_usage("/dev/shm").total < num_bytes:
+    if shutil.disk_usage(SHM_PATH).total < num_bytes:
         logger.warning_once(
-            "Sharing Engram tables across DP replicas needs %.1f GiB of /dev/shm "
+            "Sharing Engram tables across DP replicas needs %.1f GiB of %s "
             "(--shm-size or --ipc=host); sharding them across replicas instead.",
             num_bytes / 1024**3,
+            SHM_PATH,
         )
         return False
     return True
@@ -126,10 +139,6 @@ class DPSharedEngramStorage:
 
     def _allocate(self, num_bytes: int) -> torch.Tensor:
         """Map and register one physical allocation across a node-local DP group."""
-        from vllm.distributed.device_communicators.shm_broadcast import (
-            check_shm_free_space,
-        )
-
         group = self.group
         with ExitStack() as stack:
             path, error = None, None
@@ -137,9 +146,7 @@ class DPSharedEngramStorage:
                 try:
                     check_shm_free_space(num_bytes)
                     backing_file = stack.enter_context(
-                        tempfile.NamedTemporaryFile(
-                            prefix="vllm_engram_", dir="/dev/shm"
-                        )
+                        tempfile.NamedTemporaryFile(prefix="vllm_engram_", dir=SHM_PATH)
                     )
                     backing_file.truncate(num_bytes)
                     path = backing_file.name
