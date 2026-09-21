@@ -18,6 +18,7 @@
 
 # tests/distributed/ - multi-GPU / multi-node suites, launched via torchrun or a
 # custom runner rather than a directory-level pytest invocation.
+tests/distributed/aux_output_connector/test_store.py  # added by #45635 (2026-09-21), no job collects this path
 tests/distributed/test_dcp_a2a.py  # multi-GPU DCP all-to-all; no dir-level pytest job
 tests/distributed/test_dcp_direct_a2a_lse_reduce.py  # multi-GPU DCP all-to-all; no dir-level pytest job
 tests/distributed/test_eplb_events.py  # multi-GPU EPLB; no dir-level pytest job
@@ -49,8 +50,11 @@ tests/lora/test_qwen3moe_tp.py  # --ignore'd from sharded LoRA run; no dedicated
 
 # tests/models/ - the models_*.yaml jobs run specific paths, not all of models/.
 tests/models/deepseek_v32/test_sequence_parallel.py  # no models_*.yaml job collects this path
+tests/models/test_deepseek_v4_dspark_rocm.py  # added by #52362 (2026-09-21), no models_*.yaml job collects this path
 tests/models/test_deepseek_v4_fi_moe_ep.py  # no models_*.yaml job collects this path
 tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py  # no models_*.yaml job collects this path
+tests/models/test_deepseek_v4_rocm_wo_a.py  # added by #54894 (2026-09-20), no models_*.yaml job collects this path
+tests/models/test_deepseek_v41_replay_start.py  # added by #56227 (2026-09-18), no models_*.yaml job collects this path
 tests/models/test_dspark_mla.py  # no models_*.yaml job collects this path
 tests/models/test_language_model_cache_is_weak.py  # no models_*.yaml job collects this path
 tests/models/transformers/test_layer_registry.py  # no models_*.yaml job collects this path
