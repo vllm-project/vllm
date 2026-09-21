@@ -148,8 +148,16 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
 
 
 def test_mm_support_configured_after_model_load(monkeypatch):
-    target_model_config = object()
-    draft_model_config = object()
+    checked_configs = []
+
+    class _ModelConfig:
+        @property
+        def supports_multimodal_inputs(self):
+            checked_configs.append(self)
+            return True
+
+    target_model_config = _ModelConfig()
+    draft_model_config = _ModelConfig()
     vllm_config = SimpleNamespace(model_config=target_model_config)
     draft_model = _MultimodalDraftModel()
 
@@ -164,19 +172,8 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.supports_mm_inputs = False
         speculator.use_acceptance_estimator = False
 
-    checked_configs = []
-
-    def supports_multimodal_inputs(model_config):
-        checked_configs.append(model_config)
-        return True
-
     monkeypatch.setattr(DraftModelSpeculator, "__init__", init_base)
     _mock_base_model_load(monkeypatch)
-    monkeypatch.setattr(
-        base_spec_module.MULTIMODAL_REGISTRY,
-        "supports_multimodal_inputs",
-        supports_multimodal_inputs,
-    )
 
     speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
 

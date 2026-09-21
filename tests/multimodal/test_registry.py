@@ -32,7 +32,7 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
         model_id,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
-    assert MULTIMODAL_REGISTRY.supports_multimodal_inputs(ctx.model_config) is expected
+    assert ctx.model_config.supports_multimodal_inputs is expected
 
 
 def test_create_processor_error_uses_served_model_name():
