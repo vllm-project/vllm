@@ -730,7 +730,7 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("register_fails", [False, True])
-def test_engram_thp_packing_lookup_and_fallback(monkeypatch, register_fails):
+def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
     """Huge-page tables and their pinned fallback both give exact lookup rows."""
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
@@ -741,7 +741,7 @@ def test_engram_thp_packing_lookup_and_fallback(monkeypatch, register_fails):
     rows, dim = 32769, 64
     with torch.device("cuda"):
         layer = ParallelEngramEmbedding(
-            rows, dim, (rows,), cpu_offload=True, thp_packing=True
+            rows, dim, (rows,), cpu_offload=True, use_thp=True
         )
     assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
     same_storage = layer.weight.untyped_storage().data_ptr() == (

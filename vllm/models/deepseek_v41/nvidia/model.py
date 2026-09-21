@@ -39,7 +39,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    drop_checkpoint_cache,
+)
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
@@ -577,6 +580,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         self.engram_layout = EngramLayout.from_config(config)
         engram_config = vllm_config.engram_config
+        self.vllm_config = vllm_config
         engram_prefetch_stream = (
             torch.cuda.Stream()
             if self.engram_layout is not None
@@ -584,6 +588,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and engram_config.cpu_offload
             else None
         )
+
+        if self.engram_layout is not None and engram_config and engram_config.use_thp:
+            # Release old checkpoint cache before allocating the Engram host tables.
+            self._drop_checkpoint_cache()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -1035,6 +1043,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if layer.engram is not None:
                 layer.engram.embed_tokens.finish_weight_loading()
 
+    def _drop_checkpoint_cache(self) -> None:
+        """Evict cached checkpoint pages so contiguous memory is free for huge pages."""
+        model_config = self.vllm_config.model_config
+        drop_checkpoint_cache(
+            model_config.model_weights or model_config.model,
+            revision=model_config.revision,
+            cache_dir=self.vllm_config.load_config.download_dir,
+        )
+
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
             return
@@ -1284,13 +1301,17 @@ class DeepseekV41LLMForCausalLM(
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.process_weights_after_loading()
+        config = self.model.vllm_config
+        if config.engram_config and config.engram_config.use_thp:
+            # Loading weights refills the file cache; release it before MADV_COLLAPSE.
+            self.model._drop_checkpoint_cache()
+            self.model.finalize_engram_host_pages()
         return loaded_params
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
         self.model.finalize_mega_attn_weights()
-        self.model.finalize_engram_host_pages()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

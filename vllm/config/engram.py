@@ -56,7 +56,7 @@ class EngramConfig:
     memory without per-step Engram DP collectives. Requires sufficient
     /dev/shm capacity and a shared IPC namespace."""
 
-    thp_packing: bool = False
+    use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
     effort, falls back to ordinary pinned pages). Prefaulting the tables at
     startup takes longer. Requires cpu_offload without dp_shared_memory."""
@@ -65,9 +65,9 @@ class EngramConfig:
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
-        if self.thp_packing and (not self.cpu_offload or self.dp_shared_memory):
+        if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
             raise ValueError(
-                "thp_packing requires cpu_offload=True and dp_shared_memory=False"
+                "use_thp requires cpu_offload=True and dp_shared_memory=False"
             )
         return self
 

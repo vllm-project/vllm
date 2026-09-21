@@ -1431,9 +1431,9 @@ def test_engram_explicit_config_requires_supported_model():
 @pytest.mark.parametrize(
     "options", [{"cpu_offload": False}, {"cpu_offload": True, "dp_shared_memory": True}]
 )
-def test_engram_thp_packing_requires_private_cpu_storage(options):
-    with pytest.raises(ValueError, match="thp_packing requires"):
-        EngramConfig(thp_packing=True, **options)
+def test_engram_use_thp_requires_private_cpu_storage(options):
+    with pytest.raises(ValueError, match="use_thp requires"):
+        EngramConfig(use_thp=True, **options)
 
 
 @pytest.mark.parametrize("target_has_ple", [False, True])

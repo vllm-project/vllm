@@ -14,7 +14,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import IO, Any
 
@@ -713,6 +713,49 @@ def np_cache_weights_iterator(
         with open(param_path, "rb") as f:
             param = np.load(f)
         yield name, torch.from_numpy(param)
+
+
+def drop_checkpoint_cache(
+    model_name_or_path: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+) -> None:
+    checkpoint_dir: Path | None = None
+    if os.path.isdir(model_name_or_path):
+        checkpoint_dir = Path(model_name_or_path)
+    else:
+        with suppress(OSError, ValueError):
+            checkpoint_dir = Path(
+                hf_api().snapshot_download(
+                    model_name_or_path,
+                    revision=revision,
+                    cache_dir=cache_dir,
+                    local_files_only=True,
+                )
+            )
+    if checkpoint_dir is None:
+        logger.info_once(
+            "No local checkpoint found for %s; skipping page-cache eviction",
+            model_name_or_path,
+        )
+        return
+    files = nbytes = 0
+    for path in checkpoint_dir.glob("*.safetensors"):
+        try:
+            with path.open("rb") as file:
+                os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+                nbytes += os.fstat(file.fileno()).st_size
+                files += 1
+        except OSError as exc:
+            logger.warning(
+                "Could not release checkpoint page cache for %s: %s", path, exc
+            )
+    if files:
+        logger.info(
+            "Released the page cache of %d checkpoint files (%.0f GiB)",
+            files,
+            nbytes / 2**30,
+        )
 
 
 def _get_checkpoints_size_bytes(files: list[str]) -> int:
