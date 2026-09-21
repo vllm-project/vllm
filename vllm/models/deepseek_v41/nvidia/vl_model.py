@@ -37,7 +37,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
-from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.model_executor.models.vision import FusedInputNorm, is_vit_use_data_parallel
 from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
@@ -136,6 +136,7 @@ class DeepseekV41ForCausalLM(
     """
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     packed_modules_mapping = {
         "gate_up_proj": ["w1", "w3"],
@@ -182,6 +183,12 @@ class DeepseekV41ForCausalLM(
             )
             self.vision.to(dtype=model_config.dtype)
             self.aligner.to(dtype=model_config.dtype)
+            if self.multimodal_config.mm_device_do_normalize:
+                self.vision.patch_embed.input_norm = FusedInputNorm(
+                    image_mean=[0.5, 0.5, 0.5],
+                    image_std=[0.5, 0.5, 0.5],
+                    rescale_factor=1 / 255,
+                )
 
         with self._mark_language_model(vllm_config):
             self.language_model = DeepseekV41LLMForCausalLM(
@@ -222,7 +229,7 @@ class DeepseekV41ForCausalLM(
         self,
         image_input: DeepseekV4VLImagePixelInputs,
     ) -> tuple[torch.Tensor, ...]:
-        patches = image_input.patches.to(self.aligner.w1.weight.dtype)
+        patches = image_input.patches
         vit_grid = image_input.vit_grid.tolist()
 
         image_embeds_list: list[torch.Tensor]

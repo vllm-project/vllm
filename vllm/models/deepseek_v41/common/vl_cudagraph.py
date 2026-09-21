@@ -236,7 +236,9 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         total_patches = r * r * per_item_out * max_batch_size
 
         p = config.vision_patch_size
-        patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=dtype)
+        input_norm = self.vision.patch_embed.input_norm
+        patch_dtype = dtype if input_norm.is_identity else torch.uint8
+        patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=patch_dtype)
 
         metadata = build_packed_vit_metadata(
             grids,
@@ -275,8 +277,10 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
         patches = mm_kwargs["patches"]
         dtype = self.aligner.w1.weight.dtype
-        if patches.dtype != dtype:
-            patches = patches.to(dtype)
+        input_norm = self.vision.patch_embed.input_norm
+        patch_dtype = dtype if input_norm.is_identity else torch.uint8
+        if patches.dtype != patch_dtype:
+            patches = patches.to(patch_dtype)
 
         # Unpadded: the manager zero-pads patches/cos/sin/merge buffers, and
         # pad_cu_seqlens pads the tail with zero-length sequences.
