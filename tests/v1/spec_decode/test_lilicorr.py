@@ -17,7 +17,7 @@ from vllm.config import (
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers import logits_processor
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.models.qwen3_lilicorr import LiLiCorrConfig, LiLiCorrHead
+from vllm.model_executor.models.lilicorr import LiLiCorrConfig, LiLiCorrHead
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
@@ -307,10 +307,10 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
 def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     monkeypatch, convolution, mismatch, quantized
 ):
+    from vllm.model_executor.models.lilicorr import LiLiCorrForCausalLM
     from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
-    from vllm.model_executor.models.qwen3_lilicorr import LiLiCorrQwen3ForCausalLM
 
-    wrapper = LiLiCorrQwen3ForCausalLM.__new__(LiLiCorrQwen3ForCausalLM)
+    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)
     nn.Module.__init__(wrapper)
     wrapper.model = nn.Module()
     with set_current_vllm_config(

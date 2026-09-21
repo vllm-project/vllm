@@ -200,7 +200,7 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
         DFlash2Qwen3DecoderLayer,
         DFlash2Qwen3Model,
     )
-    from vllm.model_executor.models.qwen3_lilicorr import LiLiCorrQwen3Model
+    from vllm.model_executor.models.lilicorr import LiLiCorr
 
     # 1. Mock get_current_vllm_config and TP groups
     mock_current_vllm_config = SimpleNamespace(
@@ -310,7 +310,7 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
 
     # 3. Instantiate the model under meta device to avoid parameter allocation issues
     with set_current_vllm_config(mock_current_vllm_config), torch.device("meta"):
-        model_cls = DFlash2Qwen3Model if variant == "dflash2" else LiLiCorrQwen3Model
+        model_cls = DFlash2Qwen3Model if variant == "dflash2" else LiLiCorr
         model = model_cls(vllm_config=vllm_config)
 
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)

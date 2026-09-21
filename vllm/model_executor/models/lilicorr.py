@@ -473,7 +473,7 @@ class LiLiCorrHead(nn.Module):
         return torch.cat((first, pairs[:, 0]), dim=1)
 
 
-class LiLiCorrQwen3Model(DFlashQwen3Model):
+class LiLiCorr(DFlashQwen3Model):
     def __init__(
         self, *, vllm_config: VllmConfig, start_layer_id: int = 0, prefix: str = ""
     ):
@@ -511,8 +511,8 @@ class LiLiCorrQwen3Model(DFlashQwen3Model):
             )
 
 
-class LiLiCorrQwen3ForCausalLM(DFlashQwen3ForCausalLM):
-    model_cls = LiLiCorrQwen3Model
+class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
+    model_cls = LiLiCorr
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         spec = vllm_config.speculative_config
@@ -578,4 +578,4 @@ class LiLiCorrQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         head.materialize_inference_buffers(parameter.device, parameter.dtype)
 
 
-EntryClass = LiLiCorrQwen3ForCausalLM
+EntryClass = LiLiCorrForCausalLM
