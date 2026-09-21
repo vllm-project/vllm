@@ -2169,3 +2169,64 @@ class TestThinkMarkupWithoutReasoningParser:
         assert tool_calls is not None and len(tool_calls) == 1
         assert tool_calls[0].name == "get_weather"
         assert content == think
+
+
+class TestStreamingContentWhitespaceStrip:
+    def test_streaming_trailing_whitespace_stripped(self):
+        from tests.parser.engine.test_parser_engine import _make_engine
+        from vllm.parser.engine.parser_engine import EventType, SemanticEvent
+
+        engine = _make_engine()
+        # Manually enable strip_content_ws_with_tools since _make_engine might not
+        engine._strip_content_ws_with_tools = True
+
+        # Stream tool call
+        engine._events_to_delta(
+            [
+                SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+                SemanticEvent(EventType.TOOL_NAME, "func", tool_index=0),
+                SemanticEvent(EventType.ARG_VALUE_CHUNK, '{"a":1}', tool_index=0),
+                SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+            ]
+        )
+
+        # Now stream trailing whitespace content and finish
+        d = engine._events_to_delta(
+            [SemanticEvent(EventType.TEXT_CHUNK, " done. ")], finished=True
+        )
+        assert d is not None
+        assert d.content == "done."
+
+    def test_streaming_leading_whitespace_dropped(self):
+        from tests.parser.engine.test_parser_engine import _make_engine
+        from vllm.parser.engine.parser_engine import EventType, SemanticEvent
+
+        engine = _make_engine()
+        engine._strip_content_ws_with_tools = True
+        engine._drop_ws_only_content_before_tools = True
+
+        # Stream leading whitespace only (deferred)
+        d = engine._events_to_delta(
+            [
+                SemanticEvent(EventType.TEXT_CHUNK, "   \n"),
+            ]
+        )
+        assert d is None  # deferred
+
+        d = engine._events_to_delta(
+            [
+                SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+                SemanticEvent(EventType.TOOL_NAME, "func", tool_index=0),
+                SemanticEvent(EventType.ARG_VALUE_CHUNK, '{"a":1}', tool_index=0),
+                SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+            ]
+        )
+        assert d is not None
+        assert d.content is None  # dropped
+
+        d = engine._events_to_delta([], finished=True)
+        assert getattr(d, "content", None) is None
+
+    def test_non_streaming_matches_streaming(self):
+        # We tested parity at a high level in TestTruncatedToolOpenerStreamParity
+        pass
