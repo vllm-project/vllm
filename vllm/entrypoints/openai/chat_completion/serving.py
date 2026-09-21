@@ -220,6 +220,25 @@ class OpenAIServingChat(GenerateBaseServing):
         """
         return chat_template_kwargs
 
+    @staticmethod
+    def _inline_system_text(message: Any) -> str | None:
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return None
+
+        texts: list[str] = []
+        for part in content:
+            if (
+                not isinstance(part, dict)
+                or part.get("type") != "text"
+                or not isinstance(part.get("text"), str)
+            ):
+                return None
+            texts.append(part["text"])
+        return "".join(texts)
+
     def _normalize_inline_system_messages(
         self, request: ChatCompletionRequest
     ) -> None:
@@ -227,19 +246,23 @@ class OpenAIServingChat(GenerateBaseServing):
             return
 
         system_messages = [
-            message
-            for message in request.messages
-            if message["role"] == "system"
-            and isinstance(message.get("content"), str)
+            message for message in request.messages if message["role"] == "system"
         ]
         if not system_messages or (
             len(system_messages) == 1 and request.messages[0] is system_messages[0]
         ):
             return
 
+        system_texts: list[str] = []
+        for message in system_messages:
+            text = OpenAIServingChat._inline_system_text(message)
+            if text is None:
+                return
+            system_texts.append(text)
+
         merged_system = {
             "role": "system",
-            "content": "".join(message["content"] for message in system_messages),
+            "content": "".join(system_texts),
         }
         request.messages = [
             merged_system,

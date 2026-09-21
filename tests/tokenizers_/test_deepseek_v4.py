@@ -106,6 +106,35 @@ def test_deepseek_v4_merges_inline_system_messages_before_rendering():
     )
 
 
+def test_deepseek_v4_merges_structured_inline_system_text():
+    request = ChatCompletionRequest(
+        messages=[
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "INITIAL"}],
+            },
+            {"role": "user", "content": "Q"},
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "LATE"},
+                    {"type": "text", "text": "SYS"},
+                ],
+            },
+            {"role": "user", "content": "Q2"},
+        ]
+    )
+    serving = SimpleNamespace(inline_system_messages="merge")
+
+    OpenAIServingChat._normalize_inline_system_messages(serving, request)
+    prompt = _tokenizer().apply_chat_template(request.messages, tokenize=False)
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜>INITIALLATESYS<｜User｜>Q<｜User｜>Q2"
+        "<｜Assistant｜></think>"
+    )
+
+
 def test_deepseek_v4_can_preserve_inline_system_messages():
     request = ChatCompletionRequest(
         messages=[
