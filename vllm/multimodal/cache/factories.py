@@ -89,13 +89,19 @@ def engine_receiver_cache_from_config(
 
 def worker_receiver_cache_from_config(
     vllm_config: VllmConfig,
-    shared_worker_lock: LockType,
+    shared_worker_lock: LockType | None,
 ) -> BaseMultiModalReceiverCache | None:
     """Return a `BaseMultiModalReceiverCache` for the worker process."""
     cache_type = _get_cache_type(vllm_config)
     if cache_type in (None, "processor_only", "lru"):
         return None
     elif cache_type == "shm":
+        if shared_worker_lock is None:
+            raise ValueError(
+                "Missing `shared_worker_lock` argument from executor. "
+                "This argument is needed for mm_processor_cache_type='shm'."
+            )
+
         return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
     else:
         raise ValueError(f"Unknown cache type: {cache_type!r}")
