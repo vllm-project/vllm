@@ -19,6 +19,7 @@ from vllm.config import (
     KVTransferConfig,
     set_current_vllm_config,
 )
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -29,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,

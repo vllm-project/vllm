@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from typing_extensions import override
 
 import vllm.envs as envs
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.logger import init_logger
-from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.kv_cache_utils import get_none_hash_seed
 from vllm.v1.kv_offload.base import (
     LookupResult,
