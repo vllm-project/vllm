@@ -401,7 +401,9 @@ class SpecDecodeBaseProposer:
                 "specified in its config.json."
             )
 
-        if self.pass_hidden_states_to_model:
+        # PARD-2 fills masked slots with repeat-last-feat instead of a static
+        # mask feature, so it needs neither the tensor nor the model buffer.
+        if self.pass_hidden_states_to_model and self.method != "pard2":
             self.parallel_drafting_hidden_state_tensor = torch.empty(
                 self.hidden_size, dtype=self.dtype, device=self.device
             )

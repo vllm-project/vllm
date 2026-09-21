@@ -24,6 +24,9 @@ from .utils import get_draft_quant_config
 
 
 class Pard2LlamaDecoderLayer(LlamaDecoderLayer):
+    # LlamaDecoderLayer resolves its own quant config rather than taking one, so
+    # the draft's has to be supplied by override; Qwen3 takes `quant_config` as a
+    # constructor argument and is wired directly in Pard2Qwen3Model.
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""
         return get_draft_quant_config(vllm_config)
