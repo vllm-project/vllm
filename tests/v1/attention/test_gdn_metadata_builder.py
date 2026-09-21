@@ -108,6 +108,20 @@ GDN_BUILD_TEST_CASES = {
         expected_num_prefill_tokens=3,
         expected_num_spec_decodes=1,
     ),
+    # Pure-spec batch at the max-model-len boundary: the scheduler hands the
+    # final speculative step fewer than num_spec + 1 query tokens per
+    # sequence. The partial group must be reclassified as a stateful
+    # non-spec prefill so the request can finish without padding.
+    "partial_final_spec_group_at_max_len_uses_full_group": GDNBuildTestCase(
+        seq_lens=[4, 4],
+        query_lens=[3, 2],
+        num_decode_draft_tokens=[2, 2],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=2,
+        expected_num_prefill_tokens=5,
+        expected_num_spec_decodes=0,
+    ),
     # Zero-length padded sequence excluded from counts
     "zero_length_padding_with_spec": GDNBuildTestCase(
         seq_lens=[16, 65, 20],
@@ -221,3 +235,81 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+def test_partial_final_spec_group_reclassified_as_prefill():
+    """A truncated pure-spec step (fewer than num_spec + 1 query tokens per
+    sequence) must come out as a non-spec prefill batch, not as a spec
+    batch with a partial group: spec metadata is None, state indices and
+    has_initial_state point at the existing mamba state blocks."""
+    num_speculative_tokens = 2
+    builder = _create_gdn_builder(num_speculative_tokens=num_speculative_tokens)
+    batch = BatchSpec(seq_lens=[4, 4], query_lens=[3, 2])
+    meta = _build(builder, batch, num_decode_draft_tokens=[2, 2])
+
+    assert meta.num_spec_decodes == 0
+    assert meta.num_spec_decode_tokens == 0
+    assert meta.num_prefills == 2
+    assert meta.num_prefill_tokens == 5
+    assert meta.num_decodes == 0
+    assert meta.spec_sequence_masks is None
+    assert meta.spec_token_indx is None
+    assert meta.spec_state_indices_tensor is None
+    assert meta.spec_query_start_loc is None
+    assert meta.num_accepted_tokens is None
+    assert meta.non_spec_query_start_loc is not None
+    # (CPU mirror of non_spec_query_start_loc is a build-local, not a
+    # metadata field; assert the group itself carries the full 5 tokens.)
+    assert meta.non_spec_query_start_loc.tolist() == [0, 3, 5]
+    assert meta.non_spec_state_indices_tensor is not None
+    assert meta.non_spec_state_indices_tensor.shape == (batch.batch_size,)
+    assert meta.has_initial_state is not None
+    assert meta.has_initial_state.tolist() == [True, True]
+
+
+def test_partial_final_spec_group_padded_batch_shapes():
+    """A truncated pure-spec step in a batch that also carries a trailing
+    zero-length padded sequence must expose non-spec metadata sized by the
+    reclassified rows only, matching the fused non-spec op contract:
+    non_spec_query_start_loc is sized num_prefills + num_decodes + 1 and
+    non_spec_state_indices_tensor / has_initial_state are sized
+    num_prefills + num_decodes. Full-batch sizing (the pre-fix
+    ``block_table_tensor[:, 0]`` / ``query_start_loc`` pass-through) leaks
+    the padded row into these tensors and trips the kernel-side shape
+    checks on a CUDA-graph-padded batch."""
+    num_speculative_tokens = 2
+    builder = _create_gdn_builder(num_speculative_tokens=num_speculative_tokens)
+    # Rows 0-1: one complete 3-token group plus a final group truncated to
+    # 2 of num_spec + 1 tokens at the max-model-len boundary; row 2 is a
+    # zero-length CUDA-graph padding slot.
+    batch = BatchSpec(seq_lens=[4, 4, 16], query_lens=[3, 2, 0])
+    meta = _build(builder, batch, num_decode_draft_tokens=[2, 2, -1])
+
+    # Reclassification semantics: the partial final group is counted as a
+    # stateful non-spec prefill, not kept as a (partial) spec group.
+    assert meta.num_spec_decodes == 0
+    assert meta.num_spec_decode_tokens == 0
+    assert meta.num_decodes == 0
+    assert meta.num_prefills == 2  # both spec rows, partial group included
+    assert meta.num_prefill_tokens == 5
+    assert meta.spec_sequence_masks is None
+    assert meta.spec_token_indx is None
+    assert meta.spec_state_indices_tensor is None
+    assert meta.spec_query_start_loc is None
+    assert meta.num_accepted_tokens is None
+
+    # Op-contract sizing: the padded row must not be counted.
+    assert meta.non_spec_query_start_loc is not None
+    assert meta.non_spec_query_start_loc.size(0) == (
+        meta.num_prefills + meta.num_decodes + 1
+    )
+    assert meta.non_spec_query_start_loc.tolist() == [0, 3, 5]
+    assert meta.non_spec_state_indices_tensor is not None
+    assert meta.non_spec_state_indices_tensor.size(0) == (
+        meta.num_prefills + meta.num_decodes
+    )
+    assert meta.has_initial_state is not None
+    assert meta.has_initial_state.size(0) == meta.num_prefills + meta.num_decodes
+    # Only the two continuing sequences carry an initial state; the padded
+    # row's stale (True) entry must be excluded.
+    assert meta.has_initial_state.tolist() == [True, True]
