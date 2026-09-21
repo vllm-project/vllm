@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.models.vision import (
+    FusedInputNorm,
     get_load_balance_assignment,
     is_vit_use_data_parallel,
 )
@@ -88,9 +89,11 @@ class DeepseekV4PatchEmbed(nn.Module):
             bias=True,
             quant_config=None,
         )
+        self.input_norm = FusedInputNorm.identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out, _ = self.proj(x.flatten(1))
+        x = self.input_norm(x.flatten(1), self.proj.weight.dtype)
+        out, _ = self.proj(x)
         return out
 
 
@@ -454,7 +457,11 @@ def run_dp_sharded_vision_tower(
     if local_embeds:
         embeds_local = torch.cat(local_embeds, dim=0)
     else:
-        embeds_local = patches.new_zeros((0, aligner.out_dim))
+        embeds_local = torch.zeros(
+            (0, aligner.out_dim),
+            device=patches.device,
+            dtype=aligner.w2.weight.dtype,
+        )
     if embeds_local.shape[0] < max_rows:
         embeds_local = torch.cat(
             [
