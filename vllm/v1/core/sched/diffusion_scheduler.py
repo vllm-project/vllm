@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Scheduling policy for per-request diffusion canvases."""
+"""Async scheduling for diffusion requests.
+
+These rules live here so Scheduler.schedule() and AsyncScheduler stay
+unchanged. VllmConfig selects this class for a diffusion model under async
+scheduling. A sync scheduler creates no output placeholders, which both rules
+read.
+"""
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.request import Request
 
 
@@ -32,18 +36,6 @@ def _read_in_flight(request: Request, width: int) -> bool:
         return False
     # Each in-flight denoise step holds one canvas of placeholders.
     return request.num_output_placeholders >= steps * width
-
-
-class DiffusionScheduler(Scheduler):
-    def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
-        for req_id, tokens in zip(
-            draft_token_ids.req_ids, draft_token_ids.draft_token_ids
-        ):
-            request = self.requests.get(req_id)
-            if request is not None:
-                width = diffusion_canvas_width(request, self.num_spec_tokens)
-                del tokens[width:]
-        super().update_draft_token_ids(draft_token_ids)
 
 
 class DiffusionAsyncScheduler(AsyncScheduler):

@@ -42,7 +42,6 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
-    DiffusionScheduler,
     diffusion_canvas_width,
 )
 from vllm.v1.core.sched.interface import PauseState
@@ -6884,7 +6883,7 @@ def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
         async_scheduling=async_scheduling, diffusion_canvas_length=8
     ).vllm_config.scheduler_config
     assert config.get_scheduler_cls() is (
-        DiffusionAsyncScheduler if config.async_scheduling else DiffusionScheduler
+        DiffusionAsyncScheduler if config.async_scheduling else Scheduler
     )
 
 
@@ -6904,19 +6903,10 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
     assert narrow.num_output_placeholders == 4
 
 
-@pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.parametrize("structured", [False, True])
-def test_diffusion_scheduler_trims_full_width_worker_drafts(
-    async_scheduling, structured
-):
+def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
     """Padded worker drafts must be narrowed before scheduling or grammar validation."""
-    scheduler = create_scheduler(
-        async_scheduling=async_scheduling,
-        diffusion_canvas_length=8,
-        scheduler_cls=(
-            DiffusionAsyncScheduler if async_scheduling else DiffusionScheduler
-        ),
-    )
+    scheduler = _diffusion_scheduler()
     wide = _diffusion_request("wide", {})
     narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
     for request in (wide, narrow):
@@ -6931,12 +6921,8 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(
             )
     tokens = list(range(8)) if structured else [-1] * 8
     drafts = DraftTokenIds(["wide", "narrow"], [tokens.copy(), tokens.copy()])
-    if async_scheduling:
-        output = scheduler.schedule()
-        scheduler.update_draft_token_ids_in_output(drafts, output)
-    else:
-        scheduler.update_draft_token_ids(drafts)
-        output = scheduler.schedule()
+    output = scheduler.schedule()
+    scheduler.update_draft_token_ids_in_output(drafts, output)
 
     assert output.scheduled_spec_decode_tokens == {
         "wide": tokens,

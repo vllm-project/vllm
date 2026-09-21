@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
+from vllm.v1.engine.input_processor import InputProcessor
 
 
 @dataclass
@@ -13,6 +15,7 @@ class MockModelConfig:
     is_diffusion: bool = False
     max_logprobs: int = 20
     logits_processors: list | None = None
+    return_sampling_mask: bool = False
 
     def get_vocab_size(self) -> int:
         return 1024
@@ -75,6 +78,38 @@ def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
         None,
         diffusion_config=diffusion_config,
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        {},
+        {"diffusion_canvas_length": None},
+        {"diffusion_canvas_length": 4},
+        {"diffusion_canvas_length": 8},
+    ],
+)
+def test_narrow_diffusion_canvas_requires_async_scheduling(
+    async_scheduling, extra_args
+):
+    processor = SimpleNamespace(
+        model_config=MockModelConfig(is_diffusion=True),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
+        ),
+        speculative_config=None,
+        structured_outputs_config=None,
+        diffusion_config=MockDiffusionConfig(canvas_length=8),
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+    )
+    params = SamplingParams(extra_args=extra_args)
+    if not async_scheduling and extra_args.get("diffusion_canvas_length") == 4:
+        with pytest.raises(VLLMValidationError, match="requires --async-scheduling"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+    else:
+        InputProcessor._validate_params(processor, params, ("generate",))
 
 
 @pytest.mark.parametrize(

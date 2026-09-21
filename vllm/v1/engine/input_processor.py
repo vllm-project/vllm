@@ -131,6 +131,20 @@ class InputProcessor:
 
             self.validate_logits_processors_params(params)
 
+            if (
+                self.diffusion_config is not None
+                and self.model_config.is_diffusion
+                and not self.vllm_config.scheduler_config.async_scheduling
+                and params.extra_args
+            ):
+                width = params.extra_args.get("diffusion_canvas_length")
+                if width is not None and width != self.diffusion_config.canvas_length:
+                    raise VLLMValidationError(
+                        "A diffusion_canvas_length smaller than the served canvas "
+                        "requires --async-scheduling.",
+                        parameter="extra_args",
+                    )
+
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
                     raise ValueError(

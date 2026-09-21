@@ -29,9 +29,10 @@ curl -s localhost:8011/v1/chat/completions -H 'content-type: application/json' -
   ]}'
 ```
 
-Diffusion models automatically select the diffusion scheduler for the active
-scheduling mode. Use `--no-async-scheduling` for synchronous execution;
-`--scheduler-cls` is only needed to override the default.
+Per-request canvas widths smaller than the served canvas require async
+scheduling. The diffusion async scheduler is selected automatically; no
+`--scheduler-cls` argument is needed. Synchronous execution supports full-width
+canvases only.
 
 Question types: `noul` (yes/no), `choice` with `options`, `score` with
 ordered `levels`. Each label must be a single token in the answer template,

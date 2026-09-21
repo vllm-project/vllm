@@ -1878,18 +1878,14 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # The platform has the last word on async scheduling.
+        # After the platform hook, which has the last word on async scheduling.
         if (
             self.diffusion_config is not None
+            and self.scheduler_config.async_scheduling
             and self.scheduler_config.scheduler_cls is None
         ):
-            scheduler_cls = (
-                "DiffusionAsyncScheduler"
-                if self.scheduler_config.async_scheduling
-                else "DiffusionScheduler"
-            )
             self.scheduler_config.scheduler_cls = (
-                f"vllm.v1.core.sched.diffusion_scheduler.{scheduler_cls}"
+                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
             )
 
         self._normalize_piecewise_cudagraph_mode(
