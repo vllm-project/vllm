@@ -78,6 +78,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
@@ -1206,14 +1207,16 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
-    def _call_hf_processor(
+    def _get_hf_mm_inputs(
         self,
-        hf_data: Mapping[str, object],
+        mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
+
         if videos := hf_data.get("videos"):
             # HF expects video metadata as a separate argument.
-            hf_data = dict(hf_data)
             hf_data["videos"] = [video for video, _ in videos]
             hf_data["video_metadata"] = [
                 VideoMetadata(
@@ -1221,7 +1224,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 )
                 for _, metadata in videos
             ]
-        return super()._call_hf_processor(hf_data, hf_kwargs)
+        return hf_inputs
 
     def _get_prompt_updates(
         self,
