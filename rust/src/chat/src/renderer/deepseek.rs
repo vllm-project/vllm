@@ -16,10 +16,11 @@ use serde_json_fmt::JsonFormat;
 
 use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
 
+use super::MediaPartSource;
+use crate::EffortValue;
 use crate::error::{Error, Result};
-use crate::request::{
-    ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ReasoningEffort,
-};
+use crate::reasoning::ReasoningControl;
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 
 const BOS_TOKEN: &str = "<｜begin▁of▁sentence｜>";
@@ -86,13 +87,26 @@ struct RenderedToolSchema<'a> {
 }
 
 /// Render one chat request into the final prompt string.
-pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Result<String> {
-    let (thinking_mode, reasoning_effort_prompt) = match dialect {
-        DsDialect::V4 => {
-            resolve_thinking_options(request).map(|(mode, prompt)| (mode, Cow::Borrowed(prompt)))?
-        }
-        DsDialect::V41 => resolve_v41_thinking_options(request)?,
+pub(super) fn render_request(
+    request: &ChatRequest,
+    dialect: DsDialect,
+    reasoning: &ReasoningControl,
+) -> Result<String> {
+    render_request_with_media_order(request, dialect, reasoning).map(|(prompt, _)| prompt)
+}
+
+/// Render one chat request and record media in placeholder order.
+pub(super) fn render_request_with_media_order(
+    request: &ChatRequest,
+    dialect: DsDialect,
+    reasoning: &ReasoningControl,
+) -> Result<(String, Vec<MediaPartSource>)> {
+    let thinking_mode = if reasoning.is_enabled() {
+        ThinkingMode::Thinking
+    } else {
+        ThinkingMode::Chat
     };
+    let reasoning_effort_prompt = reasoning_prompt(reasoning, dialect);
     let request_tools = request_tools(request);
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
@@ -112,6 +126,7 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
         dialect,
     );
     let mut out = String::from(BOS_TOKEN);
+    let mut media_order = Vec::new();
     if dialect == DsDialect::V41
         && (thinking_mode == ThinkingMode::Thinking
             || synthetic_tool_system
@@ -126,7 +141,7 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
     let mut request_tools_attached = false;
     let mut render_index = 0isize;
     if synthetic_tool_system {
-        render_system_message(&mut out, None, request_tools, dialect)?;
+        render_system_message(&mut out, None, request_tools, dialect, &mut media_order)?;
         request_tools_attached = true;
         render_index += 1;
     }
@@ -157,14 +172,22 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
                 } else {
                     &[]
                 };
-                render_system_message(&mut out, Some(content), tools, dialect)?;
+                render_system_message(
+                    &mut out,
+                    Some((message_index, content)),
+                    tools,
+                    dialect,
+                    &mut media_order,
+                )?;
             }
             ChatMessage::Developer { content, tools } => {
                 render_developer_message(
                     &mut out,
+                    message_index,
                     content,
                     tools.as_deref().unwrap_or(&[]),
                     dialect,
+                    &mut media_order,
                 )?;
             }
             ChatMessage::User { .. } | ChatMessage::ToolResponse { .. } => {
@@ -174,6 +197,7 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
                     message_index,
                     &last_tool_call_order,
                     dialect,
+                    &mut media_order,
                 )?;
             }
             ChatMessage::Assistant { content } => {
@@ -205,97 +229,93 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
             }
         }
 
-        if (is_user_like_entry(message, current_render_index as usize, dialect)
-            || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. })))
-            && next_rendered_entry_is_assistant_or_end(
+        if is_user_like_entry(message, current_render_index as usize, dialect)
+            || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. }))
+        {
+            // Skip the opener only at the last rendered entry when
+            // add_generation_prompt is off. Inspect the next rendered
+            // entry, not the raw index: V4 merges trailing tool results.
+            let should_write_transition = match next_rendered_entry(
                 request.messages.as_slice(),
                 message_index,
                 drop_historical_developers,
                 last_user_like_message_index,
-            )
-        {
-            write_assistant_transition(
-                &mut out,
-                thinking_mode,
-                drop_thinking,
-                current_render_index >= last_user_render_index,
-            );
+            ) {
+                Some(ChatMessage::Assistant { .. }) => true,
+                None => request.chat_options.add_generation_prompt(),
+                Some(_) => false,
+            };
+            if should_write_transition {
+                write_assistant_transition(
+                    &mut out,
+                    thinking_mode,
+                    drop_thinking,
+                    current_render_index >= last_user_render_index,
+                );
+            }
         }
     }
 
-    Ok(out)
+    Ok((out, media_order))
 }
 
-/// Resolve DeepSeek V4's thinking controls. Unlike the Python tokenizer
-/// wrapper, the Rust renderer only consumes the typed top-level
-/// `reasoning_effort`; the generic template-kwargs map is left for HF
-/// templates.
-fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'static str)> {
-    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(true) {
-        true => ThinkingMode::Thinking,
-        false => ThinkingMode::Chat,
-    };
-    let mut reasoning_effort_prompt = REASONING_EFFORT_HIGH;
-
-    match request.chat_options.reasoning_effort {
-        Some(ReasoningEffort::None) => thinking_mode = ThinkingMode::Chat,
-        Some(ReasoningEffort::Max) => {
-            reasoning_effort_prompt = REASONING_EFFORT_MAX;
-        }
-        Some(ReasoningEffort::XHigh | ReasoningEffort::High) => {
-            reasoning_effort_prompt = REASONING_EFFORT_HIGH;
-        }
-        Some(ReasoningEffort::Minimal | ReasoningEffort::Medium | ReasoningEffort::Low) => {
-            reasoning_effort_prompt = "";
-        }
-        None => {}
+/// Map the shared reasoning decision to the selected DeepSeek effort dialect.
+pub(super) fn resolve_reasoning(
+    control: ReasoningControl,
+    dialect: DsDialect,
+) -> Result<ReasoningControl> {
+    let control = control.fallback(ReasoningControl::enabled("high"));
+    if !control.is_enabled() {
+        return Ok(control);
     }
-
-    Ok((thinking_mode, reasoning_effort_prompt))
+    let effort = control.effort().expect("enabled DeepSeek reasoning has a default effort");
+    let effort = match dialect {
+        DsDialect::V4 => {
+            let effort = match effort.as_str() {
+                Some("minimal" | "medium" | "low") => "low",
+                Some("high" | "xhigh") => "high",
+                Some("max") => "max",
+                _ => {
+                    return Err(Error::InvalidReasoningEffort(format!(
+                        "DeepSeek V4 reasoning_effort must be minimal, low, medium, high, xhigh, or max, got {effort}"
+                    )));
+                }
+            };
+            EffortValue::from(effort)
+        }
+        DsDialect::V41 => {
+            let budget = match effort {
+                EffortValue::String(effort) => match effort.as_str() {
+                    "low" => 25,
+                    "high" => 50,
+                    "xhigh" => 75,
+                    "max" => 100,
+                    _ => return Err(invalid_v41_reasoning_effort()),
+                },
+                EffortValue::Number(budget) => budget
+                    .as_u64()
+                    .filter(|budget| (1..=100).contains(budget))
+                    .ok_or_else(invalid_v41_reasoning_effort)?,
+            };
+            EffortValue::Number(budget.into())
+        }
+    };
+    Ok(ReasoningControl::enabled(effort))
 }
 
-/// Resolve V4.1's numeric reasoning effort using the top-level value before template kwargs.
-fn resolve_v41_thinking_options(
-    request: &ChatRequest,
-) -> Result<(ThinkingMode, Cow<'static, str>)> {
-    let mut thinking = request.enable_thinking()?.unwrap_or(true);
-    let budget = match request.chat_options.reasoning_effort {
-        Some(ReasoningEffort::None) => {
-            thinking = false;
-            50
-        }
-        Some(ReasoningEffort::Low) => 25,
-        Some(ReasoningEffort::High) => 50,
-        Some(ReasoningEffort::XHigh) => 75,
-        Some(ReasoningEffort::Max) => 100,
-        Some(ReasoningEffort::Minimal | ReasoningEffort::Medium) => {
-            return Err(invalid_v41_reasoning_effort());
-        }
-        None => match request.chat_options.template_kwargs.get("reasoning_effort") {
-            None | Some(Value::Null) => 50,
-            Some(Value::String(effort)) => match effort.as_str() {
-                "low" => 25,
-                "high" => 50,
-                "xhigh" => 75,
-                "max" => 100,
-                _ => return Err(invalid_v41_reasoning_effort()),
-            },
-            Some(Value::Number(budget)) => budget
-                .as_u64()
-                .filter(|budget| (1..=100).contains(budget))
-                .ok_or_else(invalid_v41_reasoning_effort)?,
-            Some(_) => return Err(invalid_v41_reasoning_effort()),
-        },
+fn reasoning_prompt(control: &ReasoningControl, dialect: DsDialect) -> Cow<'static, str> {
+    let Some(effort) = control.effort() else {
+        return Cow::Borrowed("");
     };
-    if thinking {
-        Ok((
-            ThinkingMode::Thinking,
-            Cow::Owned(format!(
-                "Reasoning Effort: {budget} (range 1-100, the higher the value, the more thorough the reasoning)\n\n"
-            )),
-        ))
-    } else {
-        Ok((ThinkingMode::Chat, Cow::Borrowed("")))
+    match dialect {
+        DsDialect::V4 => Cow::Borrowed(match effort.as_str() {
+            Some("high") => REASONING_EFFORT_HIGH,
+            Some("max") => REASONING_EFFORT_MAX,
+            _ => "",
+        }),
+        DsDialect::V41 => Cow::Owned(format!(
+            "Reasoning Effort: {effort} (range 1-100, the higher the value, the more thorough the reasoning)\n\n"
+        )),
     }
 }
 
@@ -401,14 +421,17 @@ fn is_historical_developer(
         && last_user_like_message_index.is_some_and(|last_index| message_index < last_index)
 }
 
-/// Return whether the next rendered entry is assistant, or there is no next
-/// entry.
-fn next_rendered_entry_is_assistant_or_end(
+/// Return the next rendered message after `message_index`.
+///
+/// Skips merged user-content tails and dropped historical developers so the
+/// caller can tell a following assistant turn apart from the end of the
+/// conversation.
+fn next_rendered_entry(
     messages: &[ChatMessage],
     message_index: usize,
     drop_historical_developers: bool,
     last_user_like_message_index: Option<usize>,
-) -> bool {
+) -> Option<&ChatMessage> {
     let mut next_index = message_index + 1;
     while next_index < messages.len()
         && (is_following_user_content(messages, next_index)
@@ -422,10 +445,7 @@ fn next_rendered_entry_is_assistant_or_end(
         next_index += 1;
     }
 
-    messages
-        .get(next_index)
-        .map(|message| matches!(message, ChatMessage::Assistant { .. }))
-        .unwrap_or(true)
+    messages.get(next_index)
 }
 
 /// Render the tool preamble shown to the model for one DeepSeek dialect.
@@ -488,12 +508,13 @@ fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
 /// Render a system turn, optionally followed by the V4 tool preamble.
 fn render_system_message(
     out: &mut String,
-    content: Option<&ChatContent>,
+    content: Option<(usize, &ChatContent)>,
     tools: &[ChatTool],
     dialect: DsDialect,
+    media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
-    if let Some(content) = content {
-        write_chat_content(out, content, dialect)?;
+    if let Some((message_index, content)) = content {
+        write_chat_content(out, content, dialect, message_index, media_order)?;
     }
     if !tools.is_empty() {
         out.push_str("\n\n");
@@ -505,9 +526,11 @@ fn render_system_message(
 /// Developer messages are rendered as user-like turns with optional tools.
 fn render_developer_message(
     out: &mut String,
+    message_index: usize,
     content: &ChatContent,
     tools: &[ChatTool],
     dialect: DsDialect,
+    media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     if content.is_empty() {
         return Err(Error::ChatTemplate(
@@ -516,7 +539,7 @@ fn render_developer_message(
     }
 
     out.push_str(USER_SP_TOKEN);
-    write_chat_content(out, content, dialect)?;
+    write_chat_content(out, content, dialect, message_index, media_order)?;
     if !tools.is_empty() {
         out.push_str("\n\n");
         render_tools(out, tools, dialect)?;
@@ -531,6 +554,7 @@ fn render_user_content_block(
     message_index: usize,
     tool_call_order: &HashMap<String, usize>,
     dialect: DsDialect,
+    media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     let (block_start, block_end) = user_content_block_bounds(messages, message_index);
     let mut sorted_tool_indices =
@@ -542,7 +566,9 @@ fn render_user_content_block(
             out.push_str("\n\n");
         }
         match &messages[message_index] {
-            ChatMessage::User { content } => write_chat_content(out, content, dialect)?,
+            ChatMessage::User { content } => {
+                write_chat_content(out, content, dialect, message_index, media_order)?;
+            }
             ChatMessage::ToolResponse { .. } => {
                 let sorted_index = sorted_tool_indices
                     .next()
@@ -550,7 +576,7 @@ fn render_user_content_block(
                 let ChatMessage::ToolResponse { content, .. } = &messages[sorted_index] else {
                     unreachable!("sorted tool response index should reference a tool message");
                 };
-                write_tool_result(out, content, dialect)?;
+                write_tool_result(out, content, dialect, sorted_index, media_order)?;
             }
             _ => unreachable!("user content block should only contain user content messages"),
         }
@@ -597,9 +623,15 @@ fn sorted_tool_response_indices(
 }
 
 /// Render one tool response payload inside a V4 `<tool_result>` block.
-fn write_tool_result(out: &mut String, content: &ChatContent, dialect: DsDialect) -> Result<()> {
+fn write_tool_result(
+    out: &mut String,
+    content: &ChatContent,
+    dialect: DsDialect,
+    message_index: usize,
+    media_order: &mut Vec<MediaPartSource>,
+) -> Result<()> {
     out.push_str("<tool_result>");
-    write_chat_content(out, content, dialect)?;
+    write_chat_content(out, content, dialect, message_index, media_order)?;
     out.push_str("</tool_result>");
     Ok(())
 }
@@ -727,7 +759,13 @@ fn encode_arguments_to_dsml(
 /// The V4.1 dialect inlines the image placeholder at each image part's
 /// position unconditionally (matching the Python encoding's
 /// `IMAGE_PLACEHOLDER`); other dialects reject multimodal parts.
-fn write_chat_content(out: &mut String, content: &ChatContent, dialect: DsDialect) -> Result<()> {
+fn write_chat_content(
+    out: &mut String,
+    content: &ChatContent,
+    dialect: DsDialect,
+    message_index: usize,
+    media_order: &mut Vec<MediaPartSource>,
+) -> Result<()> {
     match content {
         ChatContent::Text(text) => out.push_str(text),
         ChatContent::Parts(parts) => {
@@ -738,6 +776,10 @@ fn write_chat_content(out: &mut String, content: &ChatContent, dialect: DsDialec
                 match part {
                     ChatContentPart::ImageUrl { .. } if dialect == DsDialect::V41 => {
                         out.push_str(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
+                        media_order.push(MediaPartSource {
+                            message_index,
+                            content_part_index: index,
+                        });
                     }
                     _ => out.push_str(part.as_text()?),
                 }

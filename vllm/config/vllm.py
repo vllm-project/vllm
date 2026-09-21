@@ -27,14 +27,14 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
-from .attention import AttentionConfig
+from .attention import AttentionConfig, HiSparseConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
-from .engram import EngramConfig
+from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -50,7 +50,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, replace
+from .utils import SupportsHash, config, get_field, replace
 from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
@@ -110,10 +110,17 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        # Breakable CUDA graphs currently regress performance on ROCm, so no
-        # architecture opts in by default here. Users can still force it with
+        # Breakable CUDA graphs currently regress performance on ROCm for
+        # models that can use torch.compile piecewise graphs instead. Do not
+        # opt those in by default. Users can still force them with
         # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
-        return frozenset()
+        #
+        # DeepseekV41ForCausalLM cannot torch.compile, and the ROCm sparse
+        # SWA backend only reports AttentionCGSupport.UNIFORM_BATCH. Default
+        # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
+        # graphs are on. Enable this architecture so the published AMD
+        # recipe can start.
+        return frozenset({"DeepseekV41ForCausalLM"})
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
@@ -147,7 +154,6 @@ IS_DENSE = False
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
     otherwise Inductor handles fusion."""
-
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
@@ -156,8 +162,7 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
-    """
-    Enable if either SiLU+Mul or quant FP8 custom op is active;
+    """Enable if either SiLU+Mul or quant FP8 custom op is active;
     otherwise Inductor handles fusion.
     Also enable for FP4 models as FP4 quant is always custom so Inductor cannot fuse it.
     """
@@ -213,7 +218,6 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     """Enable if use_inductor_graph_partition is enabled."""
-
     return (
         cfg.compilation_config.use_inductor_graph_partition
         or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
@@ -222,7 +226,6 @@ def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
-
     return (
         cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
         and cfg.model_config is not None
@@ -374,7 +377,7 @@ class VllmConfig:
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
     engram_config: EngramConfig | None = None
-    """Optional Engram configuration, only valid for supported PLE models."""
+    """N-gram embedding storage and sharding settings."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -453,8 +456,7 @@ class VllmConfig:
     """
 
     def compute_hash(self, include_version: bool = True) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -466,6 +468,7 @@ class VllmConfig:
 
         Args:
             include_version: Include the vLLM version in the hash.
+
         """
         factors: list[Any] = []
 
@@ -644,6 +647,29 @@ class VllmConfig:
         return 0
 
     @property
+    def num_prefill_lookahead_tokens(self) -> int:
+        """Prefill tokens past the computed range that the drafter reads.
+
+        Mid-prefill the drafter consumes tokens the target model has not been
+        scheduled for yet, so every component that has to keep them available
+        must apply this margin: the scheduler, which never ends a chunk within
+        it and shifts encoder scheduling by it, and the KV cache manager, which
+        treats the trailing `this - 1` tokens as re-prefillable rather than
+        finalized. Consumers must read this property rather than re-deriving
+        their own per-method lookahead, so those components cannot drift apart.
+        """
+        speculative_config = self.speculative_config
+        if speculative_config is None or not speculative_config.use_eagle():
+            return 0
+        if speculative_config.use_multi_module_mtp():
+            # Each MTP module reads one token further ahead than the one before
+            # it, so the chain needs num_speculative_tokens of runway at a
+            # chunked-prefill boundary.
+            return self.num_speculative_tokens
+        # Eagle-family drafters read only the immediate next token.
+        return 1
+
+    @property
     def uniform_decode_query_len(self) -> int:
         """Query length of every request in a uniform decode batch.
 
@@ -666,6 +692,14 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if self.attention_config.hisparse_config is not None:
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    "HiSparse requires Model Runner V2; remove "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
         if getattr(self, "watermark_config", None) is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 logger.info_once(
@@ -760,8 +794,7 @@ class VllmConfig:
 
     @property
     def needs_dp_coordinator(self) -> bool:
-        """
-        Determine if the DPCoordinator process is needed.
+        """Determine if the DPCoordinator process is needed.
 
         The DPCoordinator is needed in two cases:
         1. For MoE models with DP > 1: to handle wave coordination
@@ -771,8 +804,8 @@ class VllmConfig:
 
         Returns:
             True if DPCoordinator process is needed, False otherwise.
-        """
 
+        """
         # For non-MoE models, only need coordinator in internal/hybrid LB mode
         # (for stats collection).
         return self.parallel_config.data_parallel_size > 1 and (
@@ -782,8 +815,7 @@ class VllmConfig:
         )
 
     def enable_trace_function_call_for_thread(self) -> None:
-        """
-        Set up function tracing for the current thread,
+        """Set up function tracing for the current thread,
         if enabled via the `VLLM_TRACE_FUNCTION` environment variable.
         """
         if envs.VLLM_TRACE_FUNCTION:
@@ -917,6 +949,7 @@ class VllmConfig:
             config_obj: Configuration object to update.
             key: Attribute name.
             value: Default value (static or callable).
+
         """
         if getattr(config_obj, key) is None:
             # Some config values are known before initialization and are
@@ -938,6 +971,7 @@ class VllmConfig:
 
         Args:
             defaults: Dictionary of default values to apply.
+
         """
 
         def apply_recursive(config_obj: Any, config_defaults: dict[str, Any]) -> None:
@@ -1134,14 +1168,67 @@ class VllmConfig:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
             return
-        if (
-            self.speculative_config is not None
-            and not watermark_config.supports_speculative_decoding
-        ):
-            raise ValueError(
-                f"The {watermark_config.algorithm} watermarking algorithm "
-                "does not support speculative decoding."
-            )
+        if self.speculative_config is not None:
+            speculative_config = self.speculative_config
+            if speculative_config.draft_sample_method != "probabilistic":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "draft_sample_method='probabilistic'."
+                )
+            if speculative_config.rejection_sample_method != "standard":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "rejection_sample_method='standard'."
+                )
+            if (
+                speculative_config.parallel_drafting
+                and speculative_config.method != "dspark"
+            ):
+                raise ValueError(
+                    "Parallel speculative drafting is not supported with watermarking."
+                )
+            if speculative_config.method not in ("dspark", "eagle", "eagle3", "mtp"):
+                raise ValueError(
+                    "Watermarking supports only autoregressive model-based "
+                    "speculative decoding."
+                )
+            if (
+                not watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                raise ValueError(
+                    f"The '{watermark_config.algorithm}' watermarking algorithm "
+                    "does not support speculative decoding. Set "
+                    "allow_target_only_watermarking=true to leave draft tokens "
+                    "unwatermarked."
+                )
+            if (
+                watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                logger.warning_once(
+                    "Target-only watermarking leaves accepted draft tokens "
+                    "unwatermarked, weakening detectability in proportion to the "
+                    "share of output tokens supplied by accepted drafts.",
+                    scope="global",
+                )
+            if watermark_config.deduplicate_contexts != "none":
+                logger.warning_once(
+                    "Context deduplication is not supported with speculative "
+                    "decoding and will not be applied to accepted drafts, "
+                    "rejection-recovery tokens, or bonus tokens.",
+                    scope="global",
+                )
+            if watermark_config.algorithm == "dual_key_gumbel" and (
+                watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
+            ):
+                logger.warning_once(
+                    "Speculative decoding selects the watermark key by token role: "
+                    "draft tokens use key A, recovery and bonus tokens use key B. "
+                    "The configured alpha=%s is not used.",
+                    watermark_config.alpha,
+                    scope="global",
+                )
         if beam_search:
             raise ValueError("Beam search is not supported with watermarking.")
         if custom_sampler:
@@ -1150,27 +1237,41 @@ class VllmConfig:
             )
 
     def _resolve_and_verify_engram_config(self) -> None:
-        """Resolve legacy offload settings and validate model and parallel configs."""
-        if self.engram_config is None:
-            if not envs.VLLM_PLE_CPU_OFFLOAD:
-                return
-            self.engram_config = EngramConfig()
+        """Resolve defaults and validate n-gram embedding settings."""
+        from vllm.platforms import current_platform
+
         model_config = self.model_config
         speculative_config = self.speculative_config
         # Draft configs inherit the target's communication groups and settings.
-        # Qwen4Exp MTP itself disables PLE, so validate its target instead.
+        # Validate the target because the draft may disable n-gram embeddings.
         if (
             speculative_config is not None
             and model_config is speculative_config.draft_model_config
         ):
             model_config = speculative_config.target_model_config
+        if (
+            model_config is not None
+            and model_config.architecture == "DeepseekV41ForCausalLM"
+            and getattr(model_config.hf_text_config, "engram_layer_ids", None)
+            and self.parallel_config.use_ubatching
+        ):
+            raise ValueError(
+                "DeepSeek V4.1 Engram does not support DBO or microbatching. "
+                "Disable --enable-dbo and set --ubatch-size to 0."
+            )
+        if self.engram_config is None:
+            if not current_platform.is_cuda_alike() or not model_has_engram_layers(
+                model_config
+            ):
+                return
+            self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
+        self.engram_config.resolve_dp_shared_memory(self.parallel_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
-
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 
@@ -1246,14 +1347,14 @@ class VllmConfig:
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlConnector")
         ):
-            assert self.parallel_config.prefill_context_parallel_size == 1, (
-                "NIXL does not support prefill context parallelism."
-            )
             dcp_size = self.parallel_config.decode_context_parallel_size
-            tp_size = self.parallel_config.tensor_parallel_size
-            assert dcp_size in (1, tp_size), (
+            transfer_tp_size = max(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.prefill_context_parallel_size,
+            )
+            assert dcp_size in (1, transfer_tp_size), (
                 f"decode_context_parallel_size={dcp_size} must be 1 or equal "
-                f"to tensor_parallel_size={tp_size} when using NixlConnector."
+                f"to the NIXL transfer parallel size={transfer_tp_size}."
             )
             if self.model_config is not None:
                 assert self.model_config.use_mla or dcp_size == 1, (
@@ -1468,18 +1569,6 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if self.profiler_config.profiler == "proton":
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "The Proton profiler currently supports NVIDIA CUDA only"
-                )
-            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                raise ValueError(
-                    "The Proton profiler requires CUDA graphs to be disabled. "
-                    "Use --enforce-eager or set "
-                    "--compilation-config.cudagraph_mode=none."
-                )
-
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
@@ -1558,6 +1647,46 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        if (
+            self.attention_config.hisparse_config is None
+            and self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("HiSparseConnector")
+        ):
+            self.attention_config.hisparse_config = HiSparseConfig()
+
+        if self.attention_config.hisparse_config is not None:
+            if not current_platform.is_cuda():
+                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError("HiSparse does not support pipeline parallelism.")
+            if self.parallel_config.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "HiSparse does not support decode context parallelism."
+                )
+            if self.model_config is not None and not hasattr(
+                self.model_config.hf_config, "index_topk"
+            ):
+                raise ValueError(
+                    "HiSparse is only supported for DSA models with index_topk."
+                )
+            if self.kv_transfer_config is not None and (
+                self.kv_transfer_config.kv_connector
+                not in (
+                    None,
+                    "NixlConnector",
+                    "MooncakeStoreConnector",
+                    "MultiConnector",
+                )
+            ):
+                logger.warning(
+                    "HiSparse host-resident KV is configured with connector "
+                    "%s. NixlConnector (GPU-staged host imports) and "
+                    "MooncakeStoreConnector (shared-store offload) are the "
+                    "validated paths; other connectors are treated as "
+                    "debug/fallback paths.",
+                    self.kv_transfer_config.kv_connector,
+                )
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
@@ -1744,12 +1873,62 @@ class VllmConfig:
         else:
             self._validate_v1_model_runner()
 
+        self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
+
+        if self.parallel_config.all2all_backend == "moonep":
+            if (
+                self.model_config is not None
+                and self.model_config.quantization is not None
+            ):
+                raise ValueError(
+                    "The moonep all2all backend currently supports unquantized "
+                    "BF16 models only; got "
+                    f"quantization={self.model_config.quantization!r}. Use a "
+                    "different --all2all-backend for quantized models."
+                )
+            if (
+                self.model_config is not None
+                and self.model_config.dtype != torch.bfloat16
+            ):
+                raise ValueError(
+                    "The moonep all2all backend currently supports BF16 models "
+                    f"only; got dtype={self.model_config.dtype}. Use a "
+                    "different --all2all-backend or --dtype bfloat16."
+                )
+            if self.parallel_config.enable_eplb:
+                raise ValueError(
+                    "The moonep all2all backend does not support EPLB yet: "
+                    "EPLB rearranges expert parameters in a layout MoonEP's "
+                    "replicated [E+B] weights do not follow. Disable "
+                    "--enable-eplb or use a different --all2all-backend."
+                )
+            if self.parallel_config.expert_placement_strategy != "linear":
+                raise ValueError(
+                    "The moonep all2all backend requires linear expert "
+                    "placement: its load-time all-gather assumes each rank "
+                    "holds a contiguous chunk of the global expert range. Got "
+                    "--expert-placement-strategy "
+                    f"{self.parallel_config.expert_placement_strategy!r}."
+                )
+            # Enforced here rather than in set_splitting_ops_for_v1 so it
+            # holds for every compilation mode, and keyed on use_all2all so
+            # PCP/SP-only topologies are covered too: MoonEP dispatch/combine
+            # are eager-only and must not be captured.
+            if (
+                self.parallel_config.use_all2all
+                and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            ):
+                logger.info(
+                    "MoonEP: Disabling CUDA Graphs since the MoonEP "
+                    "integration is currently eager-only."
+                )
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
@@ -1937,6 +2116,16 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
+        if (
+            self.attention_config.hisparse_config is not None
+            and self.scheduler_config.disable_hybrid_kv_cache_manager
+        ):
+            raise ValueError(
+                "HiSparse requires the hybrid KV cache manager; remove "
+                "--disable-hybrid-kv-cache-manager or use connectors that "
+                "support HMA."
+            )
+
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
@@ -1988,8 +2177,7 @@ class VllmConfig:
         ]
 
     def _set_max_num_scheduled_tokens(self):
-        """
-        In most cases, the scheduler may schedule a batch with as many tokens as the
+        """In most cases, the scheduler may schedule a batch with as many tokens as the
         worker is configured to handle.
         """
         if self.speculative_config is not None:
@@ -2027,8 +2215,7 @@ class VllmConfig:
                 )
 
     def _set_cudagraph_sizes(self):
-        """
-        vLLM defines the default candidate list of batch sizes for CUDA graph
+        """VLLM defines the default candidate list of batch sizes for CUDA graph
         capture as:
 
         ```python
@@ -2074,8 +2261,8 @@ class VllmConfig:
             padded CUDA graph will be used.
             - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
             not be used.
-        """
 
+        """
         if (
             self.model_config is not None
             and not self.model_config.enforce_eager
@@ -2085,9 +2272,9 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
-            # Decode sizes to cover, in tokens. Populated only when a request
-            # is more than one token wide and only when the default is computed
-            # here, so an explicit capture range is left exactly as configured.
+            # Decode sizes to cover, in tokens. Populated only when the default
+            # is computed here, so an explicit capture range is left exactly as
+            # configured.
             uniform_decode_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
                 from vllm.platforms import current_platform
@@ -2178,6 +2365,8 @@ class VllmConfig:
                             if n * query_len <= max_cudagraph_capture_size
                         }
                     )
+                elif max_num_seqs <= max_cudagraph_capture_size:
+                    uniform_decode_sizes = [max_num_seqs]
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
@@ -2296,9 +2485,7 @@ class VllmConfig:
         self.compilation_config.post_init_cudagraph_sizes()
 
     def _set_compile_ranges(self):
-        """
-        Set the compile ranges for the compilation config.
-        """
+        """Set the compile ranges for the compilation config."""
         compilation_config = self.compilation_config
         computed_compile_ranges_endpoints = []
 
@@ -2693,7 +2880,6 @@ class VllmConfig:
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
-        model_config = self.model_config
         speculative_config = self.speculative_config
 
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
@@ -2714,16 +2900,16 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
-            if speculative_config.method in ("ngram", "ngram_gpu"):
-                unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in (
-                "eagle",
-                "eagle3",
-                "mtp",
-                "dflash",
-                "dspark",
-                "extract_hidden_states",
+            if speculative_config.method in (
+                # https://github.com/vllm-project/vllm/pull/40704
+                "ngram",
+                "ngram_gpu",
+                # https://github.com/vllm-project/vllm/pull/43091
+                "draft_model",
+                "suffix",
+                "medusa",
+                "mlp_speculator",
+                "custom_class",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
@@ -2741,17 +2927,6 @@ class VllmConfig:
 
         if self.parallel_config.enable_elastic_ep:
             unsupported.append("elastic expert parallelism")
-
-        has_logitsproc_plugins = False
-        if model_config is not None:
-            from importlib.metadata import entry_points
-
-            has_logitsproc_plugins = bool(entry_points(group="vllm.logits_processors"))
-
-        if model_config is not None and (
-            model_config.logits_processors or has_logitsproc_plugins
-        ):
-            unsupported.append("custom logits processors")
 
         if self.cache_config.mamba_cache_mode == "all":
             unsupported.append("mamba cache mode 'all'")
@@ -2908,12 +3083,51 @@ class VllmConfig:
             unsupported.append("dual batch overlap with multimodal models")
         if model_config is not None and model_config.is_hybrid:
             unsupported.append("dual batch overlap with hybrid models")
-        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            unsupported.append("dual batch overlap with CUDA graphs")
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            # DBO captures FULL graphs only.
+            unsupported.append("dual batch overlap with PIECEWISE CUDA graphs")
         if self.is_mm_encoder_only:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
+
+    def _validate_profiler_config(self) -> None:
+        if self.profiler_config.profiler != "proton":
+            return
+
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            raise ValueError("The Proton profiler currently supports NVIDIA CUDA only")
+        if (
+            self.profiler_config.proton_graph_attribution
+            and not self.use_v2_model_runner
+        ):
+            raise ValueError(
+                "Proton CUDA graph attribution requires the V2 model runner."
+            )
+
+        has_cuda_graphs = (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or (
+                self.compilation_config.cudagraph_mm_encoder
+                and not (self.model_config and self.model_config.enforce_eager)
+            )
+        )
+        if not has_cuda_graphs:
+            return
+        mode = self.profiler_config.proton_mode
+        if mode and mode.split(":", 1)[0].lower() == "pcsampling":
+            raise ValueError(
+                "Proton PC sampling requires CUDA graphs to be disabled. "
+                "Use --enforce-eager."
+            )
+        if not self.profiler_config.proton_graph_attribution:
+            raise ValueError(
+                "Proton profiling with CUDA graphs requires "
+                "proton_graph_attribution=True to capture replayed kernels. "
+                "Enable attribution or use --enforce-eager."
+            )
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
@@ -3126,8 +3340,7 @@ _current_prefix: str | None = None
 def set_current_vllm_config(
     vllm_config: VllmConfig, check_compile=False, prefix: str | None = None
 ):
-    """
-    Temporarily set the current vLLM config.
+    """Temporarily set the current vLLM config.
     Used during model initialization.
     We save the current vLLM config in a global variable,
     so that all modules can access it, e.g. custom ops
@@ -3208,15 +3421,14 @@ def get_layers_from_vllm_config(
     layer_type: type[T],
     layer_names: Iterable[str] | None = None,
 ) -> dict[str, T]:
-    """
-    Get layers from the vLLM config.
+    """Get layers from the vLLM config.
 
     Args:
         vllm_config: The vLLM config.
         layer_type: The type of the layer to get.
         layer_names: The names of the layers to get. If None, return all layers.
-    """
 
+    """
     forward_context = vllm_config.compilation_config.static_forward_context
     if layer_names is None:
         layer_names = forward_context.keys()

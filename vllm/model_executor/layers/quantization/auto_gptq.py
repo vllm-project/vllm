@@ -16,7 +16,6 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
-    FusedMoEExpertsModular,
     FusedMoEMethodBase,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
@@ -46,7 +45,6 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
 )
@@ -305,6 +303,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The AutoGPTQ quantization config.
+
     """
 
     _kernel_backends_being_used: set[str] = set()
@@ -600,12 +599,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_bias", w2_bias)
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
-        if self.experts_cls is not None and issubclass(
-            self.experts_cls, FusedMoEExpertsModular
-        ):
-            device = layer.w13_qweight.device
-            layer.workspace = marlin_make_workspace_new(device, 4)
-
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         def replace_or_register(name: str, val: torch.Tensor | None):
             if val is None:
@@ -685,7 +678,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         """Build the FusedMoEKernel for this layer."""
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
@@ -697,7 +689,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            from vllm.model_executor.layers.quantization.utils.humming import (
                 get_humming_moe_quant_config,
             )
 

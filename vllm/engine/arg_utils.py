@@ -10,7 +10,6 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
-from itertools import permutations
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
@@ -23,6 +22,7 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    is_typeddict,
 )
 
 import huggingface_hub
@@ -76,7 +76,12 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
-from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
+from vllm.config.kernel import (
+    IrOpPriorityConfig,
+    LinearBackend,
+    MoEBackend,
+    SparseIndexerTopkBackend,
+)
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
@@ -177,6 +182,18 @@ def union_dict_and_str(val: str) -> str | dict[str, str] | None:
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     """Check if the type hint is a specific type."""
     return type_hint is type or get_origin(type_hint) is type
+
+
+def is_dict_subclass(type_hint: TypeHint) -> bool:
+    """Check if the type hint is a subclass of `dict`.
+
+    `TypedDict`s are excluded because they do not support class checks.
+    """
+    return (
+        isinstance(type_hint, type)
+        and not is_typeddict(type_hint)
+        and issubclass(type_hint, dict)
+    )
 
 
 def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
@@ -301,6 +318,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     for field in fields(cls):
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = get_type_hints(field.type)
+        # Subclasses of dict (e.g. MultiModalDummyOptions) are CLI dicts
+        type_hints = {dict if is_dict_subclass(th) else th for th in type_hints}
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
@@ -406,7 +425,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         if type(None) in type_hints and not contains_type(type_hints, bool):
             kwargs[name]["type"] = optional_type(kwargs[name]["type"])
             if kwargs[name].get("choices"):
-                kwargs[name]["choices"].append("None")
+                kwargs[name]["choices"].append(None)
     return kwargs
 
 
@@ -505,8 +524,12 @@ class EngineArgs:
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
+    sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
+        KernelConfig.sparse_indexer_topk_backend
+    )
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
+    elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -548,6 +571,7 @@ class EngineArgs:
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
+    max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -729,8 +753,8 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
-    enable_mamba_fine_grained_prefix_cache: bool = (
-        CacheConfig.enable_mamba_fine_grained_prefix_cache
+    enable_mamba_shared_prefix_checkpoint: bool = (
+        CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
@@ -757,6 +781,7 @@ class EngineArgs:
     stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+    swa_bounded_replay: bool = CacheConfig.swa_bounded_replay
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
 
@@ -857,7 +882,6 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
-
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
         model_group = parser.add_argument_group(
@@ -1202,6 +1226,10 @@ class EngineArgs:
             "--enable-elastic-ep", **parallel_kwargs["enable_elastic_ep"]
         )
         parallel_group.add_argument(
+            "--elastic-ep-max-dp-size",
+            **parallel_kwargs["elastic_ep_max_dp_size"],
+        )
+        parallel_group.add_argument(
             "--dbo-decode-token-threshold",
             **parallel_kwargs["dbo_decode_token_threshold"],
         )
@@ -1284,6 +1312,9 @@ class EngineArgs:
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
         )
         cache_group.add_argument(
+            "--swa-bounded-replay", **cache_kwargs["swa_bounded_replay"]
+        )
+        cache_group.add_argument(
             "--mamba-cache-dtype", **cache_kwargs["mamba_cache_dtype"]
         )
         cache_group.add_argument(
@@ -1299,8 +1330,8 @@ class EngineArgs:
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
         cache_group.add_argument(
-            "--enable-mamba-fine-grained-prefix-cache",
-            **cache_kwargs["enable_mamba_fine_grained_prefix_cache"],
+            "--enable-mamba-shared-prefix-checkpoint",
+            **cache_kwargs["enable_mamba_shared_prefix_checkpoint"],
         )
         cache_group.add_argument(
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
@@ -1511,13 +1542,6 @@ class EngineArgs:
         observability_group.add_argument(
             "--otlp-traces-endpoint", **observability_kwargs["otlp_traces_endpoint"]
         )
-        # TODO: generalise this special case
-        choices = observability_kwargs["collect_detailed_traces"]["choices"]
-        metavar = f"{{{','.join(choices)}}}"
-        observability_kwargs["collect_detailed_traces"]["metavar"] = metavar
-        observability_kwargs["collect_detailed_traces"]["choices"] += [
-            ",".join(p) for p in permutations(get_args(DetailedTraceModules), r=2)
-        ]
         observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
@@ -1584,6 +1608,10 @@ class EngineArgs:
                 **scheduler_kwargs["max_num_seqs"],
                 "default": None,
             },
+        )
+        scheduler_group.add_argument(
+            "--max-num-active-seqs",
+            **scheduler_kwargs["max_num_active_seqs"],
         )
         scheduler_group.add_argument(
             "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
@@ -1665,6 +1693,11 @@ class EngineArgs:
         linear_backend_kwargs = kernel_kwargs["linear_backend"]
         linear_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--linear-backend", **linear_backend_kwargs)
+        sparse_indexer_topk_kwargs = kernel_kwargs["sparse_indexer_topk_backend"]
+        sparse_indexer_topk_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        kernel_group.add_argument(
+            "--sparse-indexer-topk-backend", **sparse_indexer_topk_kwargs
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -2024,8 +2057,7 @@ class EngineArgs:
         usage_context: UsageContext | None = None,
         headless: bool = False,
     ) -> VllmConfig:
-        """
-        Create the VllmConfig.
+        """Create the VllmConfig.
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
@@ -2033,7 +2065,7 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
-        envs.validate_environ(self.fail_on_environ_validation)
+        current_platform.validate_environ(self.fail_on_environ_validation)
 
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
@@ -2090,13 +2122,14 @@ class EngineArgs:
             prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
+            swa_bounded_replay=self.swa_bounded_replay,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
-            enable_mamba_fine_grained_prefix_cache=(
-                self.enable_mamba_fine_grained_prefix_cache
+            enable_mamba_shared_prefix_checkpoint=(
+                self.enable_mamba_shared_prefix_checkpoint
             ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
@@ -2345,6 +2378,7 @@ class EngineArgs:
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
+            elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
@@ -2412,6 +2446,7 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_num_active_seqs=self.max_num_active_seqs,
             max_num_queued_reqs=self.max_num_queued_reqs,
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
@@ -2542,6 +2577,8 @@ class EngineArgs:
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":
             kernel_config.linear_backend = self.linear_backend
+        if self.sparse_indexer_topk_backend != "auto":
+            kernel_config.sparse_indexer_topk_backend = self.sparse_indexer_topk_backend
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
         for op_name, op_priority in asdict(self.ir_op_priority).items():

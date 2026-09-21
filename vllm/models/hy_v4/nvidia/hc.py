@@ -107,6 +107,7 @@ class HYV4HCPreLayer(nn.Module):
         Returns:
             A tuple of the pre-gated reduction ``[num_tokens, d]`` and the post
             gates ``[num_tokens, hc]`` consumed by `HYV4HCPostLayer`.
+
         """
         if self.hpc_op is not None:
             return self.hpc_op(x)
@@ -186,6 +187,7 @@ class HYV4HCPostLayer(nn.Module):
 
         Returns:
             The updated residual channels ``[num_tokens, hc, d]``.
+
         """
         if self.hpc_op is not None:
             return self.hpc_op(x, residual, post)
@@ -272,6 +274,7 @@ class HYV4HCHeadLayer(nn.Module):
 
         Returns:
             The merged hidden state ``[num_tokens, d]``.
+
         """
         if self.hpc_op is not None:
             return self.hpc_op(x)
@@ -367,6 +370,7 @@ class HYV4HCLayer(nn.Module):
             A tuple of the reduced hidden states ``[num_tokens, d]``, the post
             gates ``[num_tokens, hc]`` (``None`` when iHC is disabled) and the
             residual (the untouched input).
+
         """
         if not self.enable_ihc:
             return hidden_states, None, hidden_states

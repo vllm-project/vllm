@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
-    """AITER FlashAttention backend for MLA prefill"""
+    """AITER FlashAttention backend for MLA prefill."""
 
     @staticmethod
     def get_name() -> str:
