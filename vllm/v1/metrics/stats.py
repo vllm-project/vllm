@@ -3,7 +3,7 @@
 
 import time
 from collections import defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -261,6 +261,69 @@ class FinishedRequestStats:
 
 
 @dataclass
+class ExternalCacheSources:
+    """External cached tokens as ordered ``(source, count)`` segments.
+
+    Adjacent same-source segments are coalesced; the total is derived.
+    Prompt order is required by :meth:`truncate`.
+    """
+
+    segments: list[tuple[CacheHitSource, int]] = field(default_factory=list)
+
+    @classmethod
+    def build(
+        cls,
+        num_tokens: int,
+        segments: Sequence[tuple[str | CacheHitSource, int]] | None = None,
+    ) -> "ExternalCacheSources":
+        """Canonicalize ``segments`` summing to ``num_tokens``.
+
+        ``None`` attributes everything to ``EXTERNAL_UNSPECIFIED``.
+        """
+        assert num_tokens >= 0
+        if segments is None:
+            if num_tokens == 0:
+                return cls()
+            return cls([(CacheHitSource.EXTERNAL_UNSPECIFIED, num_tokens)])
+
+        canonical: list[tuple[CacheHitSource, int]] = []
+        for source, count in segments:
+            assert source
+            assert count >= 0
+            canonical_source = CacheHitSource(source)
+            if count == 0:
+                continue
+            if canonical and canonical[-1][0] is canonical_source:
+                canonical[-1] = (canonical_source, canonical[-1][1] + count)
+            else:
+                canonical.append((canonical_source, count))
+        result = cls(canonical)
+        assert result.total == num_tokens
+        return result
+
+    @property
+    def total(self) -> int:
+        return sum(num_tokens for _, num_tokens in self.segments)
+
+    def __iter__(self) -> Iterator[tuple[CacheHitSource, int]]:
+        return iter(self.segments)
+
+    def truncate(self, num_tokens: int) -> None:
+        """Keep the first ``num_tokens`` tokens."""
+        assert 0 <= num_tokens <= self.total
+        remaining = num_tokens
+        kept: list[tuple[CacheHitSource, int]] = []
+        for source, count in self.segments:
+            if remaining == 0:
+                break
+            kept_tokens = min(count, remaining)
+            kept.append((source, kept_tokens))
+            remaining -= kept_tokens
+        assert remaining == 0
+        self.segments = kept
+
+
+@dataclass
 class PrefillStats:
     """Breakdown of a scheduled prefill computation.
 
@@ -269,9 +332,8 @@ class PrefillStats:
         num_computed_tokens: Tokens to be prefilled locally (actual compute work).
         num_cached_tokens: Tokens to be prefilled without actual compute work.
         num_local_cached_tokens: Tokens to be prefilled from local prefix cache.
-        num_external_cached_tokens: Tokens to be prefilled from external KV transfer.
-        external_cached_token_sources: Ordered external token counts by the
-            cache tier that supplied them, using canonical CacheHitSource values.
+        external_cached_sources: Tokens to be prefilled from external KV
+            transfer, as ordered segments by source.
         num_cache_creation_tokens: Tokens computed and written to the prefix cache.
     """
 
@@ -279,70 +341,38 @@ class PrefillStats:
     num_computed_tokens: int = 0
     num_cached_tokens: int = 0
     num_local_cached_tokens: int = 0
-    num_external_cached_tokens: int = 0
-    external_cached_token_sources: list[tuple[str, int]] = field(default_factory=list)
+    external_cached_sources: ExternalCacheSources = field(
+        default_factory=ExternalCacheSources
+    )
     num_cache_creation_tokens: int = 0
+
+    @property
+    def num_external_cached_tokens(self) -> int:
+        """Tokens to be prefilled from external KV transfer."""
+        return self.external_cached_sources.total
 
     def set(
         self,
         num_prompt_tokens: int,
         num_local_cached_tokens: int,
         num_external_cached_tokens: int,
-        external_cached_token_sources: Sequence[tuple[str | CacheHitSource, int]]
+        external_cached_sources: Sequence[tuple[str | CacheHitSource, int]]
         | None = None,
     ):
         num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens
         assert num_cached_tokens <= num_prompt_tokens
 
-        sources: list[tuple[str, int]]
-        if external_cached_token_sources is None:
-            sources = (
-                [("external_unspecified", num_external_cached_tokens)]
-                if num_external_cached_tokens
-                else []
-            )
-        else:
-            sources = []
-            for source, num_tokens in external_cached_token_sources:
-                assert source
-                assert num_tokens >= 0
-                canonical_source = CacheHitSource(source).value
-                if num_tokens == 0:
-                    continue
-                if sources and sources[-1][0] == canonical_source:
-                    previous_source, previous_tokens = sources[-1]
-                    sources[-1] = (
-                        previous_source,
-                        previous_tokens + num_tokens,
-                    )
-                else:
-                    sources.append((canonical_source, num_tokens))
-        assert sum(num_tokens for _, num_tokens in sources) == (
-            num_external_cached_tokens
-        )
-
         self.num_prompt_tokens = num_prompt_tokens
         self.num_computed_tokens = num_prompt_tokens - num_cached_tokens
         self.num_cached_tokens = num_cached_tokens
         self.num_local_cached_tokens = num_local_cached_tokens
-        self.num_external_cached_tokens = num_external_cached_tokens
-        self.external_cached_token_sources = sources
+        self.external_cached_sources = ExternalCacheSources.build(
+            num_external_cached_tokens, external_cached_sources
+        )
 
     def truncate_external_cached_tokens(self, num_external_cached_tokens: int) -> None:
         """Keep only the successfully restored prefix of external tokens."""
-        assert 0 <= num_external_cached_tokens <= self.num_external_cached_tokens
-        remaining = num_external_cached_tokens
-        sources: list[tuple[str, int]] = []
-        for source, num_tokens in self.external_cached_token_sources:
-            if remaining == 0:
-                break
-            kept_tokens = min(num_tokens, remaining)
-            sources.append((source, kept_tokens))
-            remaining -= kept_tokens
-        assert remaining == 0
-
-        self.num_external_cached_tokens = num_external_cached_tokens
-        self.external_cached_token_sources = sources
+        self.external_cached_sources.truncate(num_external_cached_tokens)
         self.num_cached_tokens = (
             self.num_local_cached_tokens + num_external_cached_tokens
         )
@@ -507,7 +537,7 @@ class PromptTokenStats:
         self.local_cache_hit += prefill_stats.num_local_cached_tokens
         self.external_kv_transfer += prefill_stats.num_external_cached_tokens
         self.cached_tokens_by_source.device += prefill_stats.num_local_cached_tokens
-        for source, num_tokens in prefill_stats.external_cached_token_sources:
+        for source, num_tokens in prefill_stats.external_cached_sources:
             self.cached_tokens_by_source.add(source, num_tokens)
 
     def get_by_source(self, source: str) -> int:

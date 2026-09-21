@@ -19,7 +19,9 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
-use vllm_engine_core_client::protocol::stats::{CacheHitSource, PrefillStats};
+use vllm_engine_core_client::protocol::stats::{
+    CacheHitSource, ExternalCacheSources, PrefillStats,
+};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
@@ -759,8 +761,9 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                                 num_prompt_tokens: 2,
                                 num_cached_tokens: 2,
                                 num_local_cached_tokens: 1,
-                                num_external_cached_tokens: 1,
-                                external_cached_token_sources: vec![(CacheHitSource::P2p, 1)],
+                                external_cached_sources: ExternalCacheSources {
+                                    segments: vec![(CacheHitSource::P2p, 1)],
+                                },
                                 ..Default::default()
                             }),
                             ..request_output_with_events(

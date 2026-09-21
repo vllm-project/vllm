@@ -206,7 +206,7 @@ impl RequestMetricsTracker {
     fn record_prompt_tokens(&self, prefill_stats: &PrefillStats) {
         let computed = prefill_stats.num_computed_tokens as u64;
         let local_cache_hit = prefill_stats.num_local_cached_tokens as u64;
-        let external_kv_transfer = prefill_stats.num_external_cached_tokens as u64;
+        let external_kv_transfer = prefill_stats.num_external_cached_tokens() as u64;
 
         self.handles.prompt_tokens.inc_by(prefill_stats.num_prompt_tokens as u64);
         self.handles.prompt_tokens_local_compute.inc_by(computed);
@@ -215,12 +215,12 @@ impl RequestMetricsTracker {
         self.handles.prompt_tokens_cached.inc_by(prefill_stats.num_cached_tokens as u64);
         let cached_by_source = &self.handles.prompt_tokens_cached_by_source;
         cached_by_source[CacheHitSource::Device as usize].inc_by(local_cache_hit);
-        if prefill_stats.external_cached_token_sources.is_empty() {
+        if prefill_stats.external_cached_sources.is_empty() {
             // Older engines only supply the aggregate external count.
             cached_by_source[CacheHitSource::ExternalUnspecified as usize]
                 .inc_by(external_kv_transfer);
         } else {
-            for &(source, num_tokens) in &prefill_stats.external_cached_token_sources {
+            for &(source, num_tokens) in &prefill_stats.external_cached_sources.segments {
                 cached_by_source[source as usize].inc_by(num_tokens as u64);
             }
         }
@@ -373,7 +373,9 @@ pub fn current_unix_timestamp_secs() -> f64 {
 #[cfg(test)]
 mod tests {
     use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
-    use vllm_engine_core_client::protocol::stats::{CacheHitSource, PrefillStats};
+    use vllm_engine_core_client::protocol::stats::{
+        CacheHitSource, ExternalCacheSources, PrefillStats,
+    };
 
     use super::{RequestMetricsTracker, diff_or_zero};
 
@@ -389,15 +391,16 @@ mod tests {
                 num_computed_tokens: 8,
                 num_cached_tokens: 56,
                 num_local_cached_tokens: 16,
-                num_external_cached_tokens: 40,
-                external_cached_token_sources: vec![
-                    (CacheHitSource::Host, 3),
-                    (CacheHitSource::Disk, 12),
-                    (CacheHitSource::Host, 5),
-                    (CacheHitSource::P2p, 16),
-                    (CacheHitSource::ExternalUnspecified, 4),
-                    (CacheHitSource::Disk, 0),
-                ],
+                external_cached_sources: ExternalCacheSources {
+                    segments: vec![
+                        (CacheHitSource::Host, 3),
+                        (CacheHitSource::Disk, 12),
+                        (CacheHitSource::Host, 5),
+                        (CacheHitSource::P2p, 16),
+                        (CacheHitSource::ExternalUnspecified, 4),
+                        (CacheHitSource::Disk, 0),
+                    ],
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -429,7 +432,9 @@ mod tests {
         assert_eq!(counts(&aborted), first_token);
 
         let mut legacy = RequestMetricsTracker::new(model, 0, 104.0, 64, None, 1);
-        output.prefill_stats.as_mut().unwrap().external_cached_token_sources.clear();
+        let legacy_stats = output.prefill_stats.as_mut().unwrap();
+        legacy_stats.external_cached_sources.segments.clear();
+        legacy_stats.legacy_num_external_cached_tokens = 40;
         output.new_token_ids = vec![2];
         legacy.observe_output(14.0, 104.2, &output);
         expect_test::expect![[r#"
@@ -488,7 +493,6 @@ mod tests {
                     num_computed_tokens: 60,
                     num_cached_tokens: 4,
                     num_local_cached_tokens: 4,
-                    num_external_cached_tokens: 0,
                     ..Default::default()
                 }),
                 ..Default::default()

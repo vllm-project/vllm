@@ -925,9 +925,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 num_external_computed_tokens = 0
-                external_cached_token_sources: (
-                    list[tuple[CacheHitSource, int]] | None
-                ) = None
+                external_cached_sources: list[tuple[CacheHitSource, int]] | None = None
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 did_prefix_cache_lookup = False
@@ -1260,7 +1258,7 @@ class Scheduler(SchedulerInterface):
                     if num_external_computed_tokens and isinstance(
                         self.connector, KVConnectorBase_V1
                     ):
-                        external_cached_token_sources = (
+                        external_cached_sources = (
                             self.connector.get_external_cache_hit_sources(
                                 request, num_external_computed_tokens
                             )
@@ -1269,7 +1267,7 @@ class Scheduler(SchedulerInterface):
                         num_prompt_tokens=request.num_prompt_tokens,
                         num_local_cached_tokens=num_new_local_computed_tokens,
                         num_external_cached_tokens=num_external_computed_tokens,
-                        external_cached_token_sources=external_cached_token_sources,
+                        external_cached_sources=external_cached_sources,
                     )
 
                 # Record at admission so unscheduled lookups are not counted.

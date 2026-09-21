@@ -55,7 +55,7 @@ def test_prefill_cache_sources_serialization():
         num_prompt_tokens=16,
         num_local_cached_tokens=4,
         num_external_cached_tokens=8,
-        external_cached_token_sources=[("p2p", 4), ("host", 4)],
+        external_cached_sources=[("p2p", 4), ("host", 4)],
     )
     outputs = EngineCoreOutputs(
         outputs=[
@@ -71,7 +71,7 @@ def test_prefill_cache_sources_serialization():
     decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
 
     assert decoded.outputs[0].prefill_stats is not None
-    assert decoded.outputs[0].prefill_stats.external_cached_token_sources == [
+    assert decoded.outputs[0].prefill_stats.external_cached_sources.segments == [
         ("p2p", 4),
         ("host", 4),
     ]
@@ -273,7 +273,7 @@ def test_prompt_token_stats_mixed_sources():
         num_prompt_tokens=1000,
         num_local_cached_tokens=400,
         num_external_cached_tokens=200,
-        external_cached_token_sources=[("host", 100), ("disk", 100)],
+        external_cached_sources=[("host", 100), ("disk", 100)],
     )
     stats.update_from_output(prefill_stats)
 
@@ -341,7 +341,7 @@ def test_prefill_stats_truncates_failed_external_source_segments():
         num_prompt_tokens=1000,
         num_local_cached_tokens=100,
         num_external_cached_tokens=400,
-        external_cached_token_sources=[("p2p", 200), ("host", 200)],
+        external_cached_sources=[("p2p", 200), ("host", 200)],
     )
 
     prefill_stats.truncate_external_cached_tokens(250)
@@ -350,7 +350,7 @@ def test_prefill_stats_truncates_failed_external_source_segments():
     assert prefill_stats.num_cached_tokens == 350
     assert prefill_stats.num_local_cached_tokens == 100
     assert prefill_stats.num_external_cached_tokens == 250
-    assert prefill_stats.external_cached_token_sources == [
+    assert prefill_stats.external_cached_sources.segments == [
         ("p2p", 200),
         ("host", 50),
     ]
@@ -385,7 +385,7 @@ def test_prefill_stats_coalesces_external_source_segments():
         num_prompt_tokens=16,
         num_local_cached_tokens=4,
         num_external_cached_tokens=8,
-        external_cached_token_sources=[
+        external_cached_sources=[
             ("p2p", 0),
             ("host", 3),
             ("host", 5),
@@ -393,11 +393,11 @@ def test_prefill_stats_coalesces_external_source_segments():
         ],
     )
 
-    assert prefill_stats.external_cached_token_sources == [("host", 8)]
+    assert prefill_stats.external_cached_sources.segments == [("host", 8)]
 
     prefill_stats.truncate_external_cached_tokens(0)
 
-    assert prefill_stats.external_cached_token_sources == []
+    assert prefill_stats.external_cached_sources.segments == []
     assert prefill_stats.num_external_cached_tokens == 0
     assert prefill_stats.num_cached_tokens == 4
     assert prefill_stats.num_computed_tokens == 12
@@ -411,10 +411,10 @@ def test_prefill_stats_accepts_canonical_sources(source, as_string):
         num_prompt_tokens=16,
         num_local_cached_tokens=0,
         num_external_cached_tokens=16,
-        external_cached_token_sources=[(source.value if as_string else source, 16)],
+        external_cached_sources=[(source.value if as_string else source, 16)],
     )
 
-    assert prefill_stats.external_cached_token_sources == [(source.value, 16)]
+    assert prefill_stats.external_cached_sources.segments == [(source.value, 16)]
 
 
 @pytest.mark.parametrize(
@@ -429,7 +429,7 @@ def test_prefill_stats_rejects_noncanonical_sources(source, num_tokens):
             num_prompt_tokens=16,
             num_local_cached_tokens=0,
             num_external_cached_tokens=num_tokens,
-            external_cached_token_sources=[(source, num_tokens)],
+            external_cached_sources=[(source, num_tokens)],
         )
 
 
@@ -452,7 +452,7 @@ def test_prefill_stats_rejects_malformed_external_source_segments(
             num_prompt_tokens=16,
             num_local_cached_tokens=4,
             num_external_cached_tokens=8,
-            external_cached_token_sources=sources,
+            external_cached_sources=sources,
         )
 
 
@@ -463,14 +463,14 @@ def test_prompt_token_stats_accumulates_sources_across_outputs():
         num_prompt_tokens=16,
         num_local_cached_tokens=4,
         num_external_cached_tokens=4,
-        external_cached_token_sources=[("host", 4)],
+        external_cached_sources=[("host", 4)],
     )
     second = PrefillStats()
     second.set(
         num_prompt_tokens=16,
         num_local_cached_tokens=2,
         num_external_cached_tokens=6,
-        external_cached_token_sources=[("host", 2), ("disk", 4)],
+        external_cached_sources=[("host", 2), ("disk", 4)],
     )
 
     stats.update_from_output(first)

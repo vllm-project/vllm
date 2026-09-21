@@ -107,6 +107,24 @@ impl CacheHitSource {
     }
 }
 
+/// External cached tokens as ordered `(source, count)` segments; mirrors
+/// Python's `ExternalCacheSources`. The total is derived.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalCacheSources {
+    #[serde(default)]
+    pub segments: Vec<(CacheHitSource, u32)>,
+}
+
+impl ExternalCacheSources {
+    pub fn total(&self) -> u32 {
+        self.segments.iter().map(|&(_, count)| count).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+}
+
 /// Breakdown of a scheduled prefill computation.
 ///
 /// Python models this as a plain `@dataclass`, so it is serialized by msgspec
@@ -129,15 +147,27 @@ pub struct PrefillStats {
     /// Tokens to be prefilled from local prefix cache.
     #[serde(default)]
     pub num_local_cached_tokens: u32,
-    /// Tokens to be prefilled from external KV transfer.
+    /// External cached tokens by source, in prompt order.
     #[serde(default)]
-    pub num_external_cached_tokens: u32,
-    /// Ordered external token counts by the tier that supplied their KV.
-    #[serde(default)]
-    pub external_cached_token_sources: Vec<(CacheHitSource, u32)>,
+    pub external_cached_sources: ExternalCacheSources,
+    /// Legacy aggregate from engines without per-source attribution. Read
+    /// only by `num_external_cached_tokens()` when `segments` is empty.
+    #[serde(default, rename = "num_external_cached_tokens", skip_serializing)]
+    pub legacy_num_external_cached_tokens: u32,
     /// Prompt tokens newly admitted into the local prefix cache.
     #[serde(default)]
     pub num_cache_creation_tokens: u32,
+}
+
+impl PrefillStats {
+    /// Tokens to be prefilled from external KV transfer.
+    pub fn num_external_cached_tokens(&self) -> u32 {
+        if self.external_cached_sources.is_empty() {
+            self.legacy_num_external_cached_tokens
+        } else {
+            self.external_cached_sources.total()
+        }
+    }
 }
 
 /// Stats for debugging the metrics calculation.
@@ -350,8 +380,9 @@ mod tests {
             "num_computed_tokens": 8,
             "num_cached_tokens": 56,
             "num_local_cached_tokens": 16,
-            "num_external_cached_tokens": 40,
-            "external_cached_token_sources": [["host", 8], ["disk", 12], ["p2p", 16], ["external_unspecified", 4]]
+            "external_cached_sources": {
+                "segments": [["host", 8], ["disk", 12], ["p2p", 16], ["external_unspecified", 4]]
+            }
         });
         let wire = rmp_serde::to_vec_named(&payload).unwrap();
         let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
@@ -361,25 +392,27 @@ mod tests {
                 num_computed_tokens: 8,
                 num_cached_tokens: 56,
                 num_local_cached_tokens: 16,
-                num_external_cached_tokens: 40,
-                external_cached_token_sources: [
-                    (
-                        Host,
-                        8,
-                    ),
-                    (
-                        Disk,
-                        12,
-                    ),
-                    (
-                        P2p,
-                        16,
-                    ),
-                    (
-                        ExternalUnspecified,
-                        4,
-                    ),
-                ],
+                external_cached_sources: ExternalCacheSources {
+                    segments: [
+                        (
+                            Host,
+                            8,
+                        ),
+                        (
+                            Disk,
+                            12,
+                        ),
+                        (
+                            P2p,
+                            16,
+                        ),
+                        (
+                            ExternalUnspecified,
+                            4,
+                        ),
+                    ],
+                },
+                legacy_num_external_cached_tokens: 0,
                 num_cache_creation_tokens: 0,
             }
         "#]]
@@ -388,8 +421,8 @@ mod tests {
         let legacy = serde_json::json!({"num_external_cached_tokens": 40});
         let wire = rmp_serde::to_vec_named(&legacy).unwrap();
         let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
-        assert!(stats.external_cached_token_sources.is_empty());
-        assert_eq!(stats.num_external_cached_tokens, 40);
+        assert!(stats.external_cached_sources.is_empty());
+        assert_eq!(stats.num_external_cached_tokens(), 40);
 
         for (index, source) in CacheHitSource::ALL.into_iter().enumerate() {
             assert_eq!(source as usize, index);
@@ -406,7 +439,7 @@ mod tests {
             serde_json::json!(["host", -1]),
             serde_json::json!(["disk", 1.5]),
         ] {
-            let payload = serde_json::json!({"external_cached_token_sources": [segment]});
+            let payload = serde_json::json!({"external_cached_sources": {"segments": [segment]}});
             let wire = rmp_serde::to_vec_named(&payload).unwrap();
             assert!(rmp_serde::from_slice::<PrefillStats>(&wire).is_err());
         }

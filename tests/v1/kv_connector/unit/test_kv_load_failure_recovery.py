@@ -147,9 +147,8 @@ def test_async_load_failure(
                 if min_invalid_block_idx
                 else []
             )
-            assert (
-                request.prefill_stats.external_cached_token_sources == expected_sources
-            )
+            segments = request.prefill_stats.external_cached_sources.segments
+            assert segments == expected_sources
         else:
             assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS

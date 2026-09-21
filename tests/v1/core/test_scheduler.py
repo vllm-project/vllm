@@ -2540,14 +2540,14 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
     get_sources.assert_called_once_with(request, num_matched_tokens)
     assert [c[0] for c in calls.mock_calls] == ["allocated", "sources"]
     assert request.prefill_stats is not None
-    assert request.prefill_stats.external_cached_token_sources == [
+    assert request.prefill_stats.external_cached_sources.segments == [
         ("p2p", block_size),
         ("host", block_size),
     ]
     if is_async:
         _step_until_kv_transfer_finished(scheduler, [request.request_id])
         get_sources.assert_called_once()
-        assert request.prefill_stats.external_cached_token_sources == [
+        assert request.prefill_stats.external_cached_sources.segments == [
             ("p2p", block_size),
             ("host", block_size),
         ]
