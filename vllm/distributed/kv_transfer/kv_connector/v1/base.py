@@ -47,7 +47,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+    CacheHitSource,
+)
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -518,20 +521,18 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         num_external_tokens: int,
-    ) -> list[tuple[CacheHitSource, int]]:
-        """Describe the source of externally cached prompt tokens.
+    ) -> CachedTokensBySource:
+        """Split ``num_external_tokens`` by the cache tier that supplied them.
 
-        The returned segments must be in prompt-token order, contain canonical
-        ``CacheHitSource`` values, and sum to ``num_external_tokens``. The
-        scheduler calls this after :meth:`update_state_after_alloc`, so
-        connectors can attribute the accepted hit using the actual load plan
-        rather than a speculative lookup result.
+        Called after :meth:`update_state_after_alloc`, so the load plan is
+        known. Counts must sum to ``num_external_tokens``; a mismatch is
+        reported as ``external_unspecified``.
 
         Default: all tokens under ``_cache_hit_source``.
         """
-        if num_external_tokens == 0:
-            return []
-        return [(self._cache_hit_source, num_external_tokens)]
+        sources = CachedTokensBySource()
+        sources.add(self._cache_hit_source, num_external_tokens)
+        return sources
 
     @abstractmethod
     def update_state_after_alloc(

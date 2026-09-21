@@ -10,7 +10,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -431,7 +433,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         request: "Request",
         num_external_tokens: int,
-    ) -> list[tuple[CacheHitSource, int]]:
+    ) -> CachedTokensBySource:
         chosen_connector = self._requests_to_connector.get(request.request_id)
         if chosen_connector is None:
             return super().get_external_cache_hit_sources(request, num_external_tokens)

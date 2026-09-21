@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain, islice
@@ -9,7 +8,10 @@ from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+    CacheHitSource,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
@@ -380,8 +382,11 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
-    # Logical token ranges supported by the keys selected for this load.
+    # Keys selected for this load, for cache-hit attribution. Full-attention
+    # keys carry the token range they supply; sparse-group (SWA, recurrent)
+    # keys support the whole reused prefix.
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
+    sparse_load_keys: list[OffloadKey] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
 
@@ -1102,52 +1107,46 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
         num_external_tokens: int,
-    ) -> list[tuple[CacheHitSource, int]]:
-        """Return ordered token counts by the tier that supplied each hit.
+    ) -> CachedTokensBySource:
+        """Split the accepted external hit by the tier each loaded key came from.
 
-        Full-attention keys support their own token ranges. Sparse groups
-        (sliding-window, chunked-local, or recurrent state) support the whole
-        reused prefix, including tokens whose KV is no longer retained.
-        Only keys selected for loading participate. Overlapping dependencies
-        from different sources are reported as ``external``.
+        Full-attention keys own disjoint token ranges and are attributed
+        directly. Without a full-attention group, the sparse keys support the
+        whole range: one tier if they agree, else ``external_unspecified``.
+        Tokens no selected key covers are ``external_unspecified``.
         """
+        sources = CachedTokensBySource()
         if num_external_tokens == 0:
-            return []
+            return sources
         req_status = self._req_status[request.request_id]
         start = req_status.num_locally_computed_tokens
         end = start + num_external_tokens
-        events: dict[int, Counter[CacheHitSource]] = {
-            start: Counter(),
-            end: Counter(),
-        }
-        for range_start, range_end, key in req_status.load_key_ranges:
-            range_start, range_end = max(start, range_start), min(end, range_end)
-            if range_start >= range_end:
-                continue
-            source = self.manager.get_load_source(key, req_status.req_context)
-            events.setdefault(range_start, Counter())[source] += 1
-            events.setdefault(range_end, Counter())[source] -= 1
+        req_context = req_status.req_context
 
-        ordered_boundaries = sorted(events)
-        active_sources: Counter[CacheHitSource] = Counter()
-        segments: list[tuple[CacheHitSource, int]] = []
-        for segment_start, segment_end in zip(
-            ordered_boundaries, ordered_boundaries[1:]
-        ):
-            active_sources.update(events[segment_start])
-            sources = {source for source, count in active_sources.items() if count > 0}
+        covered = 0
+        for range_start, range_end, key in req_status.load_key_ranges:
+            num_tokens = min(end, range_end) - max(start, range_start)
+            if num_tokens <= 0:
+                continue
+            sources.add(self.manager.get_load_source(key, req_context), num_tokens)
+            covered += num_tokens
+
+        if covered == 0 and req_status.sparse_load_keys:
+            tiers = {
+                self.manager.get_load_source(key, req_context)
+                for key in req_status.sparse_load_keys
+            }
             source = (
-                next(iter(sources))
-                if len(sources) == 1
-                else CacheHitSource.EXTERNAL_UNSPECIFIED
+                tiers.pop() if len(tiers) == 1 else CacheHitSource.EXTERNAL_UNSPECIFIED
             )
-            num_tokens = segment_end - segment_start
-            if segments and segments[-1][0] == source:
-                previous_source, previous_tokens = segments[-1]
-                segments[-1] = (previous_source, previous_tokens + num_tokens)
-            else:
-                segments.append((source, num_tokens))
-        return segments
+            sources.add(source, num_external_tokens)
+            return sources
+
+        if covered < num_external_tokens:
+            sources.add(
+                CacheHitSource.EXTERNAL_UNSPECIFIED, num_external_tokens - covered
+            )
+        return sources
 
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
@@ -1165,6 +1164,9 @@ class OffloadingConnectorScheduler:
 
         keys_to_load: list[OffloadKey] = []
         req_status.load_key_ranges.clear()
+        req_status.sparse_load_keys.clear()
+        # Full-attention groups partition the same tokens; attribute via one.
+        full_ranges_recorded = False
         dst_block_ids: list[int] = []
         # per group
         group_sizes: list[int] = []
@@ -1228,11 +1230,13 @@ class OffloadingConnectorScheduler:
                         )
                     )
                 keys_to_load.extend(group_keys_to_load)
-                for chunk_idx, key in enumerate(group_keys_to_load, start_chunk_idx):
-                    if group_config.sliding_window_size_in_chunks is not None:
-                        range_start = num_locally_computed_tokens
-                        range_end = num_cached_tokens
-                    else:
+                if group_config.sliding_window_size_in_chunks is not None:
+                    req_status.sparse_load_keys.extend(group_keys_to_load)
+                elif not full_ranges_recorded:
+                    full_ranges_recorded = True
+                    for chunk_idx, key in enumerate(
+                        group_keys_to_load, start_chunk_idx
+                    ):
                         range_start = max(
                             load_start_gpu_block_idx * tokens_per_block,
                             chunk_idx * tokens_per_chunk,
@@ -1240,7 +1244,7 @@ class OffloadingConnectorScheduler:
                         range_end = min(
                             num_cached_tokens, (chunk_idx + 1) * tokens_per_chunk
                         )
-                    req_status.load_key_ranges.append((range_start, range_end, key))
+                        req_status.load_key_ranges.append((range_start, range_end, key))
 
             dst_block_ids.extend(
                 block.block_id

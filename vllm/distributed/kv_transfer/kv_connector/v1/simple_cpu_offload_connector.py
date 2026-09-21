@@ -100,7 +100,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
         disk_mode = kv_offload_backend == "disk"
-        self._cache_source = CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
+        self._cache_hit_source = (
+            CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
+        )
 
         disk_path = extra_config.get("disk_path", None) or None
         disk_capacity_bytes = int(
@@ -251,15 +253,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 request, num_computed_tokens
             )
         return 0, False
-
-    def get_external_cache_hit_sources(
-        self,
-        request: "Request",
-        num_external_tokens: int,
-    ) -> list[tuple[CacheHitSource, int]]:
-        if num_external_tokens == 0:
-            return []
-        return [(self._cache_source, num_external_tokens)]
 
     def update_state_after_alloc(
         self,

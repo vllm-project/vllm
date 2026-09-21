@@ -24,6 +24,9 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -2518,39 +2521,44 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
         block_size=block_size,
     )[0]
     assert scheduler.connector is not None
-    get_sources = Mock(return_value=[("p2p", block_size), ("host", block_size)])
+    get_sources = Mock(
+        return_value=CachedTokensBySource(p2p=block_size, host=block_size)
+    )
     update_state = Mock(wraps=scheduler.connector.update_state_after_alloc)
     calls = Mock()
     calls.attach_mock(update_state, "allocated")
     calls.attach_mock(get_sources, "sources")
     monkeypatch.setattr(scheduler.connector, "update_state_after_alloc", update_state)
     monkeypatch.setattr(
-        scheduler.connector,
-        "get_external_cache_hit_sources",
-        get_sources,
+        scheduler.connector, "get_external_cache_hit_sources", get_sources
     )
 
     scheduler.add_request(request)
+    # A failed allocation is not an admission: nothing is attributed.
     with patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None):
         scheduler.schedule()
     get_sources.assert_not_called()
     update_state.assert_not_called()
-    scheduler.schedule()
 
+    scheduler.schedule()
+    # Attribution runs once, after the connector has built its load plan.
     get_sources.assert_called_once_with(request, num_matched_tokens)
     assert [c[0] for c in calls.mock_calls] == ["allocated", "sources"]
-    assert request.prefill_stats is not None
-    assert request.prefill_stats.external_cached_sources.segments == [
-        ("p2p", block_size),
-        ("host", block_size),
-    ]
+    connector_stats = scheduler.connector_prefix_cache_stats
+    assert connector_stats is not None
+    assert connector_stats.hits == num_matched_tokens
+    assert connector_stats.hits_by_source == CachedTokensBySource(
+        p2p=block_size, host=block_size
+    )
+
     if is_async:
+        # Re-admission after the async load completes is not a new hit.
+        scheduler.make_stats()
         _step_until_kv_transfer_finished(scheduler, [request.request_id])
         get_sources.assert_called_once()
-        assert request.prefill_stats.external_cached_sources.segments == [
-            ("p2p", block_size),
-            ("host", block_size),
-        ]
+        connector_stats = scheduler.connector_prefix_cache_stats
+        assert connector_stats is not None
+        assert connector_stats.hits_by_source == CachedTokensBySource()
 
 
 @pytest.mark.parametrize("is_async", [False, True])

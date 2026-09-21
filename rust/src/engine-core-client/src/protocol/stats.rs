@@ -21,6 +21,33 @@ pub struct BaseCacheStats {
     pub hits: u64,
 }
 
+/// Cache-hit tokens per source tier, matching Python's `CachedTokensBySource`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CachedTokensBySource {
+    pub device: u64,
+    pub host: u64,
+    pub disk: u64,
+    pub p2p: u64,
+    pub external_unspecified: u64,
+}
+
+impl CachedTokensBySource {
+    /// Label values, in the same order as [`Self::counts`].
+    pub const SOURCES: [&'static str; 5] =
+        ["device", "host", "disk", "p2p", "external_unspecified"];
+
+    pub fn counts(&self) -> [u64; 5] {
+        [
+            self.device,
+            self.host,
+            self.disk,
+            self.p2p,
+            self.external_unspecified,
+        ]
+    }
+}
+
 /// Stores prefix cache hit statistics.
 /// - `reset`: Whether `reset_prefix_cache` was invoked.
 /// - `queries`: Refers to the number of tokens that were queried.
@@ -38,6 +65,9 @@ pub struct PrefixCacheStats {
     pub preempted_queries: u64,
     /// The `hits` number for preempted requests.
     pub preempted_hits: u64,
+    /// `hits` split by the cache tier that supplied them (connector stats only).
+    #[serde(default)]
+    pub hits_by_source: CachedTokensBySource,
 }
 
 /// Single KV cache block eviction sample.
@@ -76,55 +106,6 @@ pub struct SpecDecodingStats {
     pub num_accepted_tokens_per_pos: Vec<u64>,
 }
 
-/// Canonical source of cached prompt tokens, matching Python's `CacheHitSource`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheHitSource {
-    Device,
-    Host,
-    Disk,
-    P2p,
-    ExternalUnspecified,
-}
-
-impl CacheHitSource {
-    pub const ALL: [Self; 5] = [
-        Self::Device,
-        Self::Host,
-        Self::Disk,
-        Self::P2p,
-        Self::ExternalUnspecified,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Device => "device",
-            Self::Host => "host",
-            Self::Disk => "disk",
-            Self::P2p => "p2p",
-            Self::ExternalUnspecified => "external_unspecified",
-        }
-    }
-}
-
-/// External cached tokens as ordered `(source, count)` segments; mirrors
-/// Python's `ExternalCacheSources`. The total is derived.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExternalCacheSources {
-    #[serde(default)]
-    pub segments: Vec<(CacheHitSource, u32)>,
-}
-
-impl ExternalCacheSources {
-    pub fn total(&self) -> u32 {
-        self.segments.iter().map(|&(_, count)| count).sum()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.segments.is_empty()
-    }
-}
-
 /// Breakdown of a scheduled prefill computation.
 ///
 /// Python models this as a plain `@dataclass`, so it is serialized by msgspec
@@ -147,27 +128,12 @@ pub struct PrefillStats {
     /// Tokens to be prefilled from local prefix cache.
     #[serde(default)]
     pub num_local_cached_tokens: u32,
-    /// External cached tokens by source, in prompt order.
+    /// Tokens to be prefilled from external KV transfer.
     #[serde(default)]
-    pub external_cached_sources: ExternalCacheSources,
-    /// Legacy aggregate from engines without per-source attribution. Read
-    /// only by `num_external_cached_tokens()` when `segments` is empty.
-    #[serde(default, rename = "num_external_cached_tokens", skip_serializing)]
-    pub legacy_num_external_cached_tokens: u32,
+    pub num_external_cached_tokens: u32,
     /// Prompt tokens newly admitted into the local prefix cache.
     #[serde(default)]
     pub num_cache_creation_tokens: u32,
-}
-
-impl PrefillStats {
-    /// Tokens to be prefilled from external KV transfer.
-    pub fn num_external_cached_tokens(&self) -> u32 {
-        if self.external_cached_sources.is_empty() {
-            self.legacy_num_external_cached_tokens
-        } else {
-            self.external_cached_sources.total()
-        }
-    }
 }
 
 /// Stats for debugging the metrics calculation.
@@ -371,77 +337,28 @@ pub struct SchedulerStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheHitSource, PrefillStats};
+    use super::{CachedTokensBySource, PrefixCacheStats};
 
     #[test]
-    fn prefill_sources_decode_python_named_fields_and_legacy_payloads() {
+    fn prefix_cache_stats_hits_by_source_defaults_and_decodes() {
+        // Engines without per-source attribution omit the field entirely.
+        let legacy = serde_json::json!({
+            "reset": false, "requests": 1, "queries": 8, "hits": 4,
+            "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0
+        });
+        let wire = rmp_serde::to_vec_named(&legacy).unwrap();
+        let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.base.hits, 4);
+        assert_eq!(stats.hits_by_source, CachedTokensBySource::default());
+
         let payload = serde_json::json!({
-            "num_prompt_tokens": 64,
-            "num_computed_tokens": 8,
-            "num_cached_tokens": 56,
-            "num_local_cached_tokens": 16,
-            "external_cached_sources": {
-                "segments": [["host", 8], ["disk", 12], ["p2p", 16], ["external_unspecified", 4]]
-            }
+            "reset": false, "requests": 1, "queries": 16, "hits": 12,
+            "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0,
+            "hits_by_source": {"host": 8, "p2p": 4}
         });
         let wire = rmp_serde::to_vec_named(&payload).unwrap();
-        let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
-        expect_test::expect![[r#"
-            PrefillStats {
-                num_prompt_tokens: 64,
-                num_computed_tokens: 8,
-                num_cached_tokens: 56,
-                num_local_cached_tokens: 16,
-                external_cached_sources: ExternalCacheSources {
-                    segments: [
-                        (
-                            Host,
-                            8,
-                        ),
-                        (
-                            Disk,
-                            12,
-                        ),
-                        (
-                            P2p,
-                            16,
-                        ),
-                        (
-                            ExternalUnspecified,
-                            4,
-                        ),
-                    ],
-                },
-                legacy_num_external_cached_tokens: 0,
-                num_cache_creation_tokens: 0,
-            }
-        "#]]
-        .assert_debug_eq(&stats);
-
-        let legacy = serde_json::json!({"num_external_cached_tokens": 40});
-        let wire = rmp_serde::to_vec_named(&legacy).unwrap();
-        let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
-        assert!(stats.external_cached_sources.is_empty());
-        assert_eq!(stats.num_external_cached_tokens(), 40);
-
-        for (index, source) in CacheHitSource::ALL.into_iter().enumerate() {
-            assert_eq!(source as usize, index);
-            assert_eq!(serde_json::to_value(source).unwrap(), source.as_str());
-        }
-    }
-
-    #[test]
-    fn prefill_sources_reject_noncanonical_labels_and_invalid_counts() {
-        for segment in [
-            serde_json::json!(["cpu", 1]),
-            serde_json::json!(["nvme", 0]),
-            serde_json::json!(["unknown", 1]),
-            serde_json::json!(["host", -1]),
-            serde_json::json!(["disk", 1.5]),
-        ] {
-            let payload = serde_json::json!({"external_cached_sources": {"segments": [segment]}});
-            let wire = rmp_serde::to_vec_named(&payload).unwrap();
-            assert!(rmp_serde::from_slice::<PrefillStats>(&wire).is_err());
-        }
+        let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.hits_by_source.counts(), [0, 8, 0, 4, 0]);
+        assert_eq!(CachedTokensBySource::SOURCES[1], "host");
     }
 }

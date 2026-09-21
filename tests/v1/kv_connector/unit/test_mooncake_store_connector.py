@@ -10,6 +10,9 @@ import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
@@ -225,10 +228,10 @@ def test_scheduler_reports_mooncake_cache_source():
 
     # Mooncake Store is an external cache service. Its internal memory and
     # local-storage policy is intentionally hidden behind that stable label.
-    assert connector.get_external_cache_hit_sources(None, 32) == [  # type: ignore[arg-type]
-        ("external_unspecified", 32)
-    ]
-    assert connector.get_external_cache_hit_sources(None, 0) == []  # type: ignore[arg-type]
+    assert connector.get_external_cache_hit_sources(
+        None,  # type: ignore[arg-type]
+        32,
+    ) == CachedTokensBySource(external_unspecified=32)
 
 
 def test_worker_methods_delegate_to_store_worker():

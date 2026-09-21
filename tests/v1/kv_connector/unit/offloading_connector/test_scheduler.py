@@ -19,6 +19,9 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -580,17 +583,10 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     assert 42 in loaded
 
 
-@pytest.mark.parametrize(
-    ("recurrent_source", "expected"),
-    [
-        ("host", [("external_unspecified", 16), ("host", 12)]),
-        ("p2p", [("p2p", 16), ("external_unspecified", 12)]),
-        (None, [("p2p", 16), ("host", 12)]),
-    ],
-)
-def test_external_cache_hit_sources_preserve_partial_tail_origin(
-    recurrent_source, expected
-):
+@pytest.mark.parametrize("recurrent_source", ["host", "p2p", None])
+def test_external_cache_hit_sources_preserve_partial_tail_origin(recurrent_source):
+    """Full-attention keys decide attribution; the recurrent group's tier
+    is not double counted, and the partial-tail key keeps its own origin."""
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
@@ -624,21 +620,17 @@ def test_external_cache_hit_sources_preserve_partial_tail_origin(
         num_external_tokens=28,
     )
     assert req_status.partial_tail_boundary is None
-    assert scheduler.get_external_cache_hit_sources(request, 28) == expected
+    assert scheduler.get_external_cache_hit_sources(
+        request, 28
+    ) == CachedTokensBySource(p2p=16, host=12)
 
 
-@pytest.mark.parametrize(
-    ("second_source", "expected"),
-    [
-        ("host", [("host", 4), ("external_unspecified", 4)]),
-        ("p2p", [("external_unspecified", 8)]),
-    ],
-)
-def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
+@pytest.mark.parametrize("second_source", ["host", "p2p"])
+def test_external_cache_hit_sources_use_one_full_attention_group(
     request_runner,
     second_source,
-    expected,
 ):
+    """Full-attention groups cover the same tokens; attribute through one."""
     block_size = 4
     groups = [
         KVCacheGroupSpec(
@@ -683,7 +675,9 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
         2 * block_size,
     )
 
-    assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == expected
+    assert scheduler.get_external_cache_hit_sources(
+        request, 2 * block_size
+    ) == CachedTokensBySource(host=block_size, disk=block_size)
 
 
 @pytest.mark.parametrize("source", ["host", "disk", "p2p", "external_unspecified"])
@@ -711,7 +705,9 @@ def test_external_cache_hit_sources_recurrent_only_state(source):
         ),
         48,
     )
-    assert scheduler.get_external_cache_hit_sources(request, 48) == [(source, 48)]
+    expected = CachedTokensBySource()
+    expected.add(source, 48)
+    assert scheduler.get_external_cache_hit_sources(request, 48) == expected
     scheduler.manager.get_load_source.assert_called_once()
 
 
@@ -729,7 +725,8 @@ def test_external_cache_hit_sources_use_required_sparse_state(
     full_attention,
     sparse_source,
 ):
-    """Skipped keys do not participate; sparse state supports the whole prefix."""
+    """Skipped keys do not participate. Full-attention keys decide when
+    present; otherwise the sparse keys attribute the whole prefix."""
     block_size = 4
     chunk_size = block_size * blocks_per_chunk
     spec_kwargs = dict(
@@ -795,30 +792,21 @@ def test_external_cache_hit_sources_use_required_sparse_state(
     scheduler.update_state_after_alloc(
         request, KVCacheBlocks(tuple(block_groups)), count
     )
+    expected = CachedTokensBySource()
     if full_attention:
-        expected = [
-            (
-                "host" if sparse_source == "host" else "external_unspecified",
-                2 * chunk_size - local_tokens,
-            ),
-            (
-                "disk" if sparse_source == "disk" else "external_unspecified",
-                2 * chunk_size,
-            ),
-        ]
-        if expected[0][0] == expected[1][0]:
-            expected = [("external_unspecified", count)]
+        expected.add("host", 2 * chunk_size - local_tokens)
+        expected.add("disk", 2 * chunk_size)
     else:
-        expected = [
-            (
-                "external_unspecified" if sparse_source == "mixed" else sparse_source,
-                count,
-            )
-        ]
+        expected.add(
+            "external_unspecified" if sparse_source == "mixed" else sparse_source,
+            count,
+        )
     result = scheduler.get_external_cache_hit_sources(request, count)
     assert result == expected
-    assert sum(tokens for _, tokens in result) == count
-    assert scheduler.get_external_cache_hit_sources(request, 0) == []
+    assert result.total == count
+    assert scheduler.get_external_cache_hit_sources(request, 0) == (
+        CachedTokensBySource()
+    )
 
 
 def test_partial_lookup_requires_every_cache_group():
@@ -1569,10 +1557,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-@pytest.mark.parametrize("sparse_source", ["host", "disk"])
-def test_two_groups_full_and_sliding_window(
-    request_runner, async_scheduling: bool, sparse_source: str
-):
+def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bool):
     block_size = 4
     num_gpu_blocks = 100
     # sliding_window=8 -> 2 offloaded chunks (blocks_per_chunk=1)
@@ -1640,10 +1625,6 @@ def test_two_groups_full_and_sliding_window(
 
     # full 3 blocks hit [0, 1, 2]
     runner.new_request(token_ids=[0] * (block_size * 3 + 1))
-    prefill_stats = runner.scheduler.requests[str(runner.req_id)].prefill_stats
-    runner.manager.get_load_source.side_effect = lambda key, req_context: (
-        "host" if get_offload_group_idx(key) == 0 else sparse_source
-    )
     runner.manager.lookup.return_value = LookupResult.HIT
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
@@ -1652,12 +1633,6 @@ def test_two_groups_full_and_sliding_window(
         #   are within the window → loads blocks 1,2
         expected_loaded=((0, 0), (0, 1), (0, 2), (1, 1), (1, 2)),
     )
-    assert prefill_stats is not None
-    assert prefill_stats.external_cached_sources.segments == [
-        ("host" if sparse_source == "host" else "external_unspecified", block_size * 3)
-    ]
-    assert prefill_stats.num_external_cached_tokens == block_size * 3
-
     runner.manager.touch.assert_not_called()
 
     # 3 blocks are hit on GPU [0, 1, 2]
