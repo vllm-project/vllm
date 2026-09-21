@@ -171,16 +171,14 @@ def _resolve_dsv4_kv_cache_dtype(
 def _maybe_bind_deepgemm_fp8_chain(
     attn: "DeepseekV4Attention", config, prefix: str, bind_wqa: bool
 ) -> tuple[bool, bool]:
-    """Route wo_b (and fused_wqa_wkv when ``bind_wqa``) to DeepGEMM when the
-    FP8 chain is opted in.
+    """Route wo_b (and fused_wqa_wkv when ``bind_wqa``) to DeepGEMM so they
+    consume the FP8 activations the upstream DeepGEMM kernels emit.
 
     Runs at construction, before weights load, so the DeepGEMM kernel packs the
     weights instead of FlashInfer. Every precondition failure logs once and
     leaves the layer on its default kernels. Returns ``(chain, wqa)``: whether
     the chain is on at all (wo_b / MoE legs) and whether fused_wqa_wkv is on it.
     """
-    if not envs.VLLM_DSV41_DEEPGEMM_FP8_CHAIN:
-        return False, False
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
         DeepGemmMxfp8LinearKernel,
     )
@@ -215,7 +213,7 @@ def _maybe_bind_deepgemm_fp8_chain(
             return False, False
     for layer in layers:
         kernel = DeepGemmMxfp8LinearKernel(Mxfp8LinearLayerConfig())
-        layer.quant_method.kernel = kernel
+        cast(Any, layer.quant_method).kernel = kernel
         expose_input_quant_key(layer, kernel)
     logger.info_once(
         "DeepSeek-V4.1 DeepGEMM FP8 chain enabled: %s run on DeepGEMM with "

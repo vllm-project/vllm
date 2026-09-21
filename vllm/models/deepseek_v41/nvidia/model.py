@@ -473,27 +473,30 @@ class DeepseekV4DecoderLayer(nn.Module):
         else:
             # The collapse already reads the post-mapped streams, so the mean
             # aux consumers want comes out of the same kernel.
-            residual, post_mix, res_mix, x, attn_pre, aux, x_q = mhc_shifted_post_pre(
-                x,
-                residual,
-                post_mix,
-                res_mix,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=pre_mix,
-                norm_weight=self.attn_norm.weight,
-                norm_eps=self.attn_norm.variance_epsilon,
-                capture_aux=capture_previous_aux,
-                stream=mhc_stream,
-                reduce_results=self.fuse_mhc_all_reduce,
-                fp8_out="gemm" if self.wqa_fp8_chain else None,
+            residual, post_mix, res_mix, x, attn_pre, aux, attn_fp8 = (
+                mhc_shifted_post_pre(
+                    x,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                    capture_aux=capture_previous_aux,
+                    stream=mhc_stream,
+                    reduce_results=self.fuse_mhc_all_reduce,
+                    fp8_out="gemm" if self.wqa_fp8_chain else None,
+                )
             )
+            x_q = attn_fp8 if isinstance(attn_fp8, QuantizedActivation) else None
             if capture_previous_aux:
                 previous_aux = aux
 

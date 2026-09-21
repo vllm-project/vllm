@@ -13,6 +13,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
     _replace_layer_index,
@@ -593,8 +594,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         return super()._fused_wqa_wkv_gemm(hidden_states)
 
     def _run_parallel_input_projections(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        hidden_states_q: "QuantizedActivation | None" = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        # ROCm never binds the DeepGEMM FP8 chain, so no pre-quantized input.
+        assert hidden_states_q is None
         return super()._run_parallel_input_projections(hidden_states)
 
     @functools.cached_property

@@ -318,7 +318,12 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         *,
         activation_clamp: float | None,
         fast_math: bool = True,
+        prequantized: bool = False,
     ) -> torch.Tensor:
+        if prequantized:
+            raise NotImplementedError(
+                "FlashInfer MegaMoE does not accept a pre-quantized input."
+            )
         # fast_math is a native deep_gemm knob; the FI kernels have no
         # equivalent toggle, so it is accepted for signature parity only.
         if hidden_states.shape[0] > self.max_num_tokens:

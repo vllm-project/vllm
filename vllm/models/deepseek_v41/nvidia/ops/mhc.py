@@ -250,7 +250,14 @@ def mhc_shifted_post_pre(
         and x.shape[0] <= 1 << 20
         and is_mega_mhc_supported(x.shape[1], residual.shape[1])
     ):
-        outputs = mhc_shifted_post_pre_deep_gemm(
+        (
+            new_residual,
+            new_post_mix,
+            new_comb_res_mix,
+            y_bf16,
+            new_prev_mix,
+            y_quant,
+        ) = mhc_shifted_post_pre_deep_gemm(
             x,
             residual,
             pre_mix,
@@ -269,11 +276,18 @@ def mhc_shifted_post_pre(
             fp8_out=fp8_out,
             moe_target=moe_target,
         )
-        *outputs, y_quant = outputs
         fp8_result: QuantizedActivation | bool | None = (
             True if fp8_out == "moe" else y_quant
         )
-        return *outputs, x.new_empty(0, x.shape[1]), fp8_result
+        return (
+            new_residual,
+            new_post_mix,
+            new_comb_res_mix,
+            y_bf16,
+            new_prev_mix,
+            x.new_empty(0, x.shape[1]),
+            fp8_result,
+        )
 
     tl_outputs = mhc_fused_post_pre_delayed_tilelang(
         x,

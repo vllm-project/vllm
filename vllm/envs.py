@@ -214,7 +214,6 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_GEMM_RS: bool = False
-    VLLM_DSV41_DEEPGEMM_FP8_CHAIN: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1626,15 +1625,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
     # row-parallel projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
-    # DeepSeek-V4.1 (SM100 + DeepGEMM): keep activations in MXFP8 between
-    # DeepGEMM kernels. Mega-mHC emits the normalized attention / FFN inputs as
-    # FP8 with packed UE8M0 scales, the wo_a einsum emits FP8 `z`, and
-    # `fused_wqa_wkv` / `wo_b` run on DeepGEMM `fp8_gemm_nt`, removing the
-    # standalone activation quantization kernels. On by default where the
-    # kernels are available; set to 0 to keep the FlashInfer MXFP8 path.
-    "VLLM_DSV41_DEEPGEMM_FP8_CHAIN": lambda: bool(
-        int(os.getenv("VLLM_DSV41_DEEPGEMM_FP8_CHAIN", "1"))
-    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
