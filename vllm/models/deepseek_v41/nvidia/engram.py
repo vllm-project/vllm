@@ -5,6 +5,7 @@
 import ctypes
 import mmap
 import os
+import shutil
 import tempfile
 import weakref
 from contextlib import ExitStack
@@ -135,6 +136,27 @@ def gather_engram_hashes(
         )
         hash_ids = torch.cat((hash_ids, pad))
     return dp_group.all_gather(hash_ids, dim=0)
+
+
+def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
+    """Whether co-located DP replicas exist and /dev/shm can hold the full tables."""
+    if get_engram_dp_size() == 1:
+        logger.warning_once(
+            "Engram DP replicas are not co-located on one node; "
+            "storing the offloaded tables per rank instead of sharing them."
+        )
+        return False
+    num_bytes = sum(layout.num_embeddings) * (
+        layout.head_dim + layout.head_dim // block_size
+    )
+    if shutil.disk_usage("/dev/shm").total < num_bytes:
+        logger.warning_once(
+            "Sharing Engram tables across DP replicas needs %.1f GiB of /dev/shm "
+            "(--shm-size or --ipc=host); sharding them across replicas instead.",
+            num_bytes / 1024**3,
+        )
+        return False
+    return True
 
 
 class DPSharedEngramStorage:
@@ -438,7 +460,7 @@ class Engram(BaseEngram):
             layout.head_dim,
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
             cpu_offload=engram_config.cpu_offload,
-            dp_shared_memory=engram_config.dp_shared_memory,
+            dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
         )
 
