@@ -121,6 +121,9 @@ class ModelCase:
     images: list | None = None
     llm_kwargs: dict[str, Any] = field(default_factory=dict)
     daemon_args: list[str] = field(default_factory=list)
+    # Daemon groups the launcher starts; 2 when a cached draft group joins the
+    # target group (MTP/EAGLE speculative decoding).
+    daemon_groups: int = 1
 
 
 def generate(
@@ -200,16 +203,22 @@ QWEN_MTP_CASE = ModelCase(
         "--speculative-config",
         '{"method": "mtp", "num_speculative_tokens": 1}',
     ],
+    daemon_groups=2,
 )
 
 
-@pytest.mark.parametrize("case", [QWEN_CASE, K3_CASE], ids=["qwen3.5", "kimi-k3"])
+@pytest.mark.parametrize(
+    "case",
+    [QWEN_CASE, K3_CASE, QWEN_MTP_CASE],
+    ids=["qwen3.5", "kimi-k3", "qwen3.5-mtp"],
+)
 def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     """Cold start falls back to disk; warm restarts load weights via CUDA IPC.
 
     All runs must produce outputs identical to a default-loader baseline. The
     warm runs disable the disk fallback, so they only pass if the weights
-    really came from the daemon.
+    really came from the daemon — for the MTP case, both the target's and the
+    draft's daemon groups.
     """
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
@@ -229,37 +238,11 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
         cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
 
-    with WeightCacheDaemon(case.model, tp_size=1, extra_args=case.daemon_args) as d:
-        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
-        # Warm restart: a second engine lifetime against the same daemon.
-        restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
-
-    assert cold_outputs == baseline_outputs
-    assert warm_outputs == baseline_outputs
-    assert restart_outputs == baseline_outputs
-
-
-def test_ipc_cache_caches_mtp_draft(vllm_runner):
-    """The daemon caches the MTP draft in its draft group alongside the target.
-
-    The warm runs use fallback=False, so both the target and the draft fail
-    hard unless their daemon groups served the weights; matching the
-    disk-loaded baseline proves the cached draft produces identical drafts.
-    """
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
-
-    case = QWEN_MTP_CASE
-    # Baseline: target and MTP draft both loaded from disk.
-    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
-    assert all(text for _, texts in baseline_outputs for text in texts)
-
-    # Cold start: no daemon is serving, so both models fall back to disk.
-    with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
-        cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
-
     with WeightCacheDaemon(
-        case.model, tp_size=1, extra_args=case.daemon_args, num_groups=2
+        case.model,
+        tp_size=1,
+        extra_args=case.daemon_args,
+        num_groups=case.daemon_groups,
     ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         # Warm restart: a second engine lifetime against the same daemon.
