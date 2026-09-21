@@ -154,7 +154,7 @@ print_bake_config() {
     local bake_tmp
     bake_tmp="$(mktemp -d)"
     BAKE_CONFIG_FILE="${bake_tmp}/bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
-    docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
+    docker buildx bake "${BAKE_FILES[@]}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
     echo "--- :arrow_down: Uploading bake config to Buildkite"
     (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
@@ -230,8 +230,10 @@ TARGET="test-ci"
 VLLM_BAKE_FILE_PATH="${VLLM_BAKE_FILE_PATH:-docker/docker-bake.hcl}"
 BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
 CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
-CI_HCL_PATH="/tmp/ci.hcl"
+CI_HCL_PATH="${CI_HCL_PATH:-/tmp/ci.hcl}"
+ZSTD_HCL_PATH="${ZSTD_HCL_PATH:-.buildkite/image_build/zstd.hcl}"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
+BAKE_FILES=(-f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" -f "${ZSTD_HCL_PATH}")
 
 prepare_cache_tags
 ecr_login
@@ -309,7 +311,7 @@ BUILD_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${BUILD_TMP_DIR}"' EXIT
 BUILD_METADATA_FILE="${BUILD_TMP_DIR}/build-metadata.json"
 BUILD_STATUS=0
-docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" \
+docker --debug buildx bake "${BAKE_FILES[@]}" \
     --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
 
 record_buildkit_trace "${BUILD_METADATA_FILE}" || true
