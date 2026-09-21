@@ -155,7 +155,7 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching group metadata lengths, "
         f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
     )
-    if source_groups is None:
+    if not source_groups:
         source_groups = [[g] for g in group_indices]
     assert len(source_groups) == len(layer_names), (
         "Mooncake transfer regions require matching packed-group metadata, "

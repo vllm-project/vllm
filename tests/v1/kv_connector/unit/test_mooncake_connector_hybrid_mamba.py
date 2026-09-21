@@ -189,6 +189,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
             gdn_spec.page_size_bytes,
         ]
         assert worker.registered_group_indices == [0, 1]
+        assert worker.registered_source_groups == [[0], [1]]
         assert worker.kv_caches_base_addr == [
             fa_cache.data_ptr(),
             gdn_cache.data_ptr(),
