@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from itertools import chain, count
 from typing import Any, Literal
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -632,3 +633,18 @@ def make_nixl_push_scheduler(
     sched.blocks_per_sw = []
 
     return sched
+
+
+def expand_strided_descs(strided_descs: np.ndarray) -> np.ndarray:
+    """Expand Nx5 (addr, len, dev, stride, count) rows to one row per block.
+
+    Mirrors how NIXL indexes a strided descriptor list, so desc ids computed
+    by the connector can be resolved to (addr, len, dev) byte ranges.
+    """
+    strided_descs = np.asarray(strided_descs, dtype=np.uint64).reshape(-1, 5)
+    counts = strided_descs[:, 4].astype(np.intp)
+    starts = np.cumsum(strided_descs[:, 4]) - strided_descs[:, 4]
+    out = np.repeat(strided_descs[:, :3], counts, axis=0)
+    offsets = np.arange(len(out), dtype=np.uint64) - np.repeat(starts, counts)
+    out[:, 0] += offsets * np.repeat(strided_descs[:, 3], counts)
+    return out

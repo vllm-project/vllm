@@ -74,7 +74,9 @@ class FakeNixlWrapper:
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in blocks_data]
 
-    def prep_xfer_dlist(self, agent_name: str, descs: list) -> int:
+    def prep_xfer_dlist(
+        self, agent_name: str, descs, mem_type: str | None = None
+    ) -> int:
         return uuid.uuid4().int
 
     def get_agent_metadata(self) -> bytes:

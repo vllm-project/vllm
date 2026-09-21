@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
 from .utils import (
     create_request,
     create_vllm_config,
+    expand_strided_descs,
     make_kv_cache_config,
     make_nixl_scheduler,
 )
@@ -2130,7 +2131,7 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         )
         for block in range(count)
     ]
-    local_descs = worker._expand_stride_descs(worker.src_blocks_data)
+    local_descs = expand_strided_descs(worker.src_blocks_data)
     assert local_descs[:, 0].tolist() == expected_addrs
 
 
@@ -2214,8 +2215,6 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert worker.num_regions == 2 and worker.num_descs == 24
     # Kernel-granularity block lens; TP-independent for MLA hybrids.
     assert worker.block_len_per_layer == [unified_page // 3] * 2
-    # Split handles must replicate every FA descriptor (MLA isn't head-sharded).
-    assert worker._fa_desc_replicated(worker.num_descs) == [True] * 24
     # FA runs: one per region x 12 kernel blocks, page stride = block_stride.
     # Mamba runs: 2 regions x (3 conv sub-projections + 1 ssm), 4 blocks each.
     assert worker.src_blocks_data.shape == (2 + 8, 5)
@@ -2229,7 +2228,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
         for tensor in tensors
         for block in range(12)
     ]
-    fa_descs = worker._expand_stride_descs(fa_runs)
+    fa_descs = expand_strided_descs(fa_runs)
     assert fa_descs[:, 0].tolist() == expected_addrs
     worker.nixl_wrapper.register_memory.assert_called_once()
     metadata = msgspec.msgpack.decode(

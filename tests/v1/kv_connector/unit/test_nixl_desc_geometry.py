@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import torch
 
-from .utils import create_vllm_config
+from .utils import create_vllm_config, expand_strided_descs
 
 
 class _RecordingNixl:
@@ -47,10 +47,11 @@ class _RecordingNixl:
     def get_xfer_descs(self, blocks_data, mem_type):
         return blocks_data
 
-    def prep_xfer_dlist(self, agent, descs):
+    def prep_xfer_dlist(self, agent, descs, mem_type=None):
         handle = self._next_handle
         self._next_handle += 1
-        self.dlists[handle] = np.asarray(descs, dtype=np.uint64).reshape(-1, 3)
+        # Store per-block (addr, len, dev) rows so desc ids index directly.
+        self.dlists[handle] = expand_strided_descs(np.asarray(descs, dtype=np.uint64))
         return handle
 
     def add_remote_agent(self, metadata):
@@ -259,7 +260,7 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
         backing.data_ptr() + block * block_stride for block in range(num_blocks)
     ]
     num_desc_regions = 2 if push_pp else 1
-    local_descs = worker._expand_stride_descs(worker.src_blocks_data)
+    local_descs = expand_strided_descs(worker.src_blocks_data)
     assert local_descs[:, 0].tolist() == expected_addrs * num_desc_regions
     assert worker.num_descs == num_blocks * num_desc_regions
     assert (
@@ -544,7 +545,7 @@ def test_register_compressed_indexer_uses_virtual_transfer_pages(
     assert worker.kv_caches_base_addr[worker.engine_id][0] == [raw.data_ptr()]
     assert worker._registered_descs[0] == [(raw.data_ptr(), raw.nbytes, 0, "")]
     np.testing.assert_array_equal(
-        worker._expand_stride_descs(worker.src_blocks_data), expected_descs
+        expand_strided_descs(worker.src_blocks_data), expected_descs
     )
     assert expected_descs[-1, 0] + expected_descs[-1, 1] == (
         raw.data_ptr() + raw.nbytes

@@ -79,6 +79,7 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    expand_strided_descs,
     make_kv_cache_config,
 )
 
@@ -2315,7 +2316,7 @@ def test_register_kv_caches(
         assert mock_wrapper_instance.prep_xfer_dlist.called
         _agent, block_runs = mock_wrapper_instance.prep_xfer_dlist.call_args[0]
         assert block_runs.shape[1] == 5
-        blocks_data = NixlConnectorWorker._expand_stride_descs(block_runs)
+        blocks_data = expand_strided_descs(block_runs)
 
         # Layout-blind contract: whatever regions the worker carves out,
         # transferring "block b" must move exactly logical block b's bytes for
