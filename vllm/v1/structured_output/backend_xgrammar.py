@@ -242,6 +242,18 @@ def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
     )
 
 
+# FIXME(arpera): The approach used here needs to be redesigned because of
+# existing bugs: https://github.com/vllm-project/vllm/issues/57550
+def _schema_types(schema: dict[str, Any]) -> set[str]:
+    """Normalize a scalar or list-valued JSON Schema type."""
+    schema_type = schema.get("type")
+    if isinstance(schema_type, str):
+        return {schema_type}
+    if isinstance(schema_type, list):
+        return {item for item in schema_type if isinstance(item, str)}
+    return set()
+
+
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
@@ -249,12 +261,14 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
+        schema_types = _schema_types(obj)
+
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
+        if (schema_types & {"integer", "number"}) and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
-        if obj.get("type") == "array" and any(
+        if "array" in schema_types and any(
             key in obj
             for key in ("uniqueItems", "contains", "minContains", "maxContains")
         ):
@@ -262,7 +276,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for strings
         if (
-            obj.get("type") == "string"
+            "string" in schema_types
             and "format" in obj
             and obj["format"] not in STRING_SUPPORTED_FORMATS
         ):
@@ -275,13 +289,13 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # the compiled EBNF: pattern/format grammars come out byte-identical
         # with and without the length keywords, while maxLength alone lowers
         # to {0, N} correctly.
-        if obj.get("type") == "string" and _has_pattern_and_length_bounds(obj):
+        if "string" in schema_types and _has_pattern_and_length_bounds(obj):
             return True
 
         # propertyNames validates names, so it is a string schema even when it
         # omits "type", which is the form that escapes the check above.
         if (
-            obj.get("type") == "object"
+            "object" in schema_types
             and isinstance(obj.get("propertyNames"), dict)
             and _has_pattern_and_length_bounds(obj["propertyNames"])
         ):
@@ -291,7 +305,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # additionalProperties/unevaluatedProperties under xgrammar.
         # https://github.com/mlc-ai/xgrammar/issues/826
         if (
-            obj.get("type") == "object"
+            "object" in schema_types
             and "propertyNames" in obj
             and (
                 "properties" in obj
@@ -305,7 +319,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # FIXME: multiple patternProperties, or patternProperties alongside
         # properties, conflict under xgrammar.
         if (
-            obj.get("type") == "object"
+            "object" in schema_types
             and isinstance(obj.get("patternProperties"), dict)
             and ("properties" in obj or len(obj["patternProperties"]) > 1)
         ):
