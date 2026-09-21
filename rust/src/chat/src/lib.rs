@@ -22,9 +22,6 @@ pub use event::{
 };
 use futures::{StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
-pub use multimodal::timing::{
-    RequestTimingStats as MultiModalTimingStats, mm_request_span, mm_timing_layer,
-};
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
     HarmonyChatOutputProcessor,
@@ -48,6 +45,9 @@ pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessag
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
 pub use vllm_text::GenerationConfigMode;
+pub use vllm_tracing::timing::{
+    RequestTimingStats as MultiModalTimingStats, mm_request_span, mm_timing_layer,
+};
 
 mod backend;
 mod error;

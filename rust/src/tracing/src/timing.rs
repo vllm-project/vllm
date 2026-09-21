@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tracing::field::{Field, Visit};
-use tracing::span::Attributes;
-use tracing::{Id, Subscriber};
+use tracing::span::{Attributes, Span};
+use tracing::{Id, Subscriber, info_span};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -137,6 +137,27 @@ where
         *stats.entry(request_id).or_default().entry(format!("{stage}_secs")).or_default() +=
             start.elapsed().as_secs_f64();
     }
+}
+
+/// Target of the multimodal preprocessing stage spans.
+const MM_STAGE_TARGET: &str = "mm_processor_timing";
+
+/// Create the timing layer and its stats handle for multimodal preprocessing
+/// stage spans (`vllm-bench mm-processor`), mirroring the Python
+/// `TimingContext` / `MultiModalTimingRegistry`.
+pub fn mm_timing_layer() -> (RequestTimingLayer, RequestTimingStats) {
+    RequestTimingLayer::new(MM_STAGE_TARGET)
+}
+
+/// Span carrying the `request_id` used to attribute multimodal stage timings.
+pub fn mm_request_span(request_id: &str) -> Span {
+    info_span!("mm_request", request_id)
+}
+
+/// Span for one multimodal preprocessing stage; the elapsed time is recorded
+/// on close.
+pub fn mm_stage_span(stage: &'static str) -> Span {
+    info_span!(target: MM_STAGE_TARGET, "mm_stage", stage)
 }
 
 #[cfg(test)]

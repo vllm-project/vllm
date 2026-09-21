@@ -43,12 +43,11 @@ mod input;
 mod item;
 mod preprocessed;
 mod tensor;
-pub mod timing;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
-use self::timing::{mm_request_span, mm_stage_span};
+use vllm_tracing::timing::{mm_request_span, mm_stage_span};
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
