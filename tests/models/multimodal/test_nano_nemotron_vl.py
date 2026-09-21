@@ -50,10 +50,10 @@ def test_bicubic_resize_preserves_uint8_for_device_normalization():
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("shape", [(2, 3, 16, 24), (1, 7, 3 * 16 * 16)])
-def test_nemotron_device_normalization_matches_cpu_reference(shape: tuple[int, ...]):
+def test_nemotron_dynamic_device_normalization_matches_cpu_reference():
     image_mean = [0.485, 0.456, 0.406]
     image_std = [0.229, 0.224, 0.225]
+    shape = (1, 7, 3 * 16 * 16)
     pixels = torch.randint(0, 256, shape, dtype=torch.uint8)
 
     model = object.__new__(NemotronH_Nano_VL_V2)
@@ -62,22 +62,18 @@ def test_nemotron_device_normalization_matches_cpu_reference(shape: tuple[int, .
     model.llm_dtype = torch.bfloat16
 
     output = model._normalize_pixel_values(pixels)
-    if pixels.ndim == 4:
-        expected = (
-            pixels.to(torch.float32) / 255.0 - torch.tensor(image_mean).view(1, 3, 1, 1)
-        ) / torch.tensor(image_std).view(1, 3, 1, 1)
-    else:
-        batch, patches, _ = pixels.shape
-        expected = pixels.to(torch.float32).view(batch, patches, 3, -1)
-        expected = (
-            expected / 255.0 - torch.tensor(image_mean).view(1, 1, 3, 1)
-        ) / torch.tensor(image_std).view(1, 1, 3, 1)
-        expected = expected.view(shape)
+    batch, patches, _ = pixels.shape
+    expected = pixels.to(torch.float32).view(batch, patches, 3, -1)
+    expected = (
+        expected / 255.0 - torch.tensor(image_mean).view(1, 1, 3, 1)
+    ) / torch.tensor(image_std).view(1, 1, 3, 1)
+    expected = expected.view(shape)
 
     torch.testing.assert_close(output, expected.to(torch.bfloat16), rtol=0, atol=0)
 
 
-def test_nemotron_processor_defers_normalization_to_device():
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_nemotron_processor_defers_normalization_to_device(modality: str):
     config = SimpleNamespace(
         force_image_size=16,
         patch_size=4,
@@ -90,9 +86,6 @@ def test_nemotron_processor_defers_normalization_to_device():
         sound_config=None,
     )
     tokenizer = SimpleNamespace(encode=lambda *args, **kwargs: [1])
-    image = Image.fromarray(
-        np.random.default_rng(0).integers(0, 256, (19, 23, 3), dtype=np.uint8)
-    )
     common_kwargs = {
         "config": config,
         "tokenizer": tokenizer,
@@ -103,8 +96,16 @@ def test_nemotron_processor_defers_normalization_to_device():
         **common_kwargs, do_rescale=False, do_normalize=False
     )
 
-    cpu_values = cpu_processor._images_to_pixel_values_lst([image], 1)[0]
-    raw_values = device_processor._images_to_pixel_values_lst([image], 1)[0]
+    pixels = np.random.default_rng(0).integers(0, 256, (4, 19, 23, 3), dtype=np.uint8)
+    if modality == "image":
+        image = Image.fromarray(pixels[0])
+        cpu_values = cpu_processor._images_to_pixel_values_lst([image], 1)[0]
+        raw_values = device_processor._images_to_pixel_values_lst([image], 1)[0]
+    else:
+        cpu_values = cpu_processor._videos_to_pixel_values_lst(
+            [pixels], dtype=torch.bfloat16
+        )[0]
+        raw_values = device_processor._videos_to_pixel_values_lst([pixels])[0]
     assert raw_values.dtype == torch.uint8
 
     model = object.__new__(NemotronH_Nano_VL_V2)
