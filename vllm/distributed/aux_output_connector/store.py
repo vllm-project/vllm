@@ -10,6 +10,10 @@ import threading
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.mooncake import MooncakeBlockObjectStore
 
 
 @dataclass(frozen=True)
@@ -27,7 +31,12 @@ class BlockObjectStoreError(RuntimeError):
 class BackgroundBlockObjectStore:
     """Serialize store mutations on a background thread."""
 
-    def __init__(self, store: BlockObjectStore, *, max_pending_batches: int) -> None:
+    def __init__(
+        self,
+        store: BlockObjectStore | MooncakeBlockObjectStore,
+        *,
+        max_pending_batches: int,
+    ) -> None:
         self._store = store
         self._queue: queue.Queue[
             tuple[list[BlockObject], tuple[str, ...], tuple[str, ...]] | None
@@ -81,9 +90,12 @@ class BackgroundBlockObjectStore:
         self._queue.put((objects, retains, releases))
         self._raise_if_failed()
 
-    def get_concatenated(self, keys: list[str]) -> bytes:
+    def flush(self) -> None:
         self._queue.join()
         self._raise_if_failed()
+
+    def get_concatenated(self, keys: list[str]) -> bytes:
+        self.flush()
         return self._store.get_concatenated(keys)
 
     def close(self) -> None:

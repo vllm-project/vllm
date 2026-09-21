@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.mooncake import MooncakeBlockObjectStore
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -99,6 +100,12 @@ class AuxOutputWorkerConnector:
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
+        self._return_keys = vllm_config.aux_output_config.backend == "mooncake"
+        self._key_namespace = (
+            f"{vllm_config.instance_id}:{vllm_config.parallel_config.data_parallel_rank}:"
+            if vllm_config.aux_output_config.backend == "mooncake"
+            else ""
+        )
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
         # Steps whose asynchronous copy has not been consumed yet. The engine
@@ -117,13 +124,24 @@ class AuxOutputWorkerConnector:
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        hashes_per_kv_block = scheduler_block_size // hash_block_size
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
-        max_bytes = vllm_config.aux_output_config.max_bytes
-        if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+        store: BlockObjectStore | MooncakeBlockObjectStore
+        if vllm_config.aux_output_config.backend == "mooncake":
+            from vllm.distributed.aux_output_connector.mooncake import (
+                create_mooncake_block_store,
+            )
+
+            store = create_mooncake_block_store(object_nbytes=block_nbytes)
+        else:
+            max_bytes = vllm_config.aux_output_config.max_bytes
+            if max_bytes is None:
+                hashes_per_kv_block = scheduler_block_size // hash_block_size
+                max_bytes = (
+                    kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+                )
+            store = BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes)
         self._store = BackgroundBlockObjectStore(
-            BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
+            store,
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
         self._buffer = RoutedExpertsBuffer(
@@ -251,7 +269,7 @@ class AuxOutputWorkerConnector:
             block_batches.append((state, completed))
 
             if sampled > 0 and emit_start <= token_end:
-                if emit_start >= capture_start:
+                if emit_start >= capture_start and not self._return_keys:
                     outputs[request_id] = AuxRequestOutput(
                         emit_start, rows[emit_start - capture_start :]
                     )
@@ -267,6 +285,32 @@ class AuxOutputWorkerConnector:
             stored_end = (
                 min(token_end // block_size, len(state.aux_output_keys)) * block_size
             )
+            if self._return_keys:
+                keys = state.aux_output_keys[
+                    emit_start // block_size : stored_end // block_size
+                ]
+                tail_start = max(emit_start, stored_end)
+                chunks = []
+                cursor = tail_start
+                for block_start, block in state.pending_blocks:
+                    if block_start <= cursor < block_start + block_size:
+                        chunk = block[
+                            cursor - block_start : min(
+                                block_size, token_end - block_start
+                            )
+                        ]
+                        chunks.append(chunk)
+                        cursor += len(chunk)
+                if cursor < token_end:
+                    chunks.append(buffer.read(request_id, cursor, token_end))
+                outputs[request_id] = AuxRequestOutput(
+                    emit_start,
+                    np.concatenate(chunks) if chunks else routed_experts[:0],
+                    keys,
+                    block_size,
+                )
+                state.emit_cursor = token_end
+                continue
             if emit_start < stored_end:
                 first_block = emit_start // block_size
                 stored = materialize_routed_experts(
@@ -285,6 +329,8 @@ class AuxOutputWorkerConnector:
                 rows = buffer.read(request_id, emit_start, token_end)
             outputs[request_id] = AuxRequestOutput(emit_start, rows)
             state.emit_cursor = token_end
+        if self._return_keys and outputs:
+            store.flush()
         return outputs
 
     def _publish_blocks(
@@ -377,7 +423,9 @@ class AuxOutputWorkerConnector:
             retained_keys: list[str] = []
             for request_id, block_hashes in metadata.block_hashes.items():
                 state = self._requests[request_id]
-                keys = routed_experts_keys(block_hashes, str(self._generation))
+                keys = routed_experts_keys(
+                    block_hashes, f"{self._key_namespace}{self._generation}"
+                )
                 state.aux_output_keys.extend(keys)
                 retained_keys.extend(keys)
                 block_batches.append((state, []))

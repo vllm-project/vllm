@@ -65,6 +65,7 @@ def test_aux_output_config_defaults():
     assert not config.enabled
     assert not config.enable_return_routed_experts
     assert config.max_bytes is None
+    assert config.backend == "shm"
 
 
 def test_aux_output_capture_changes_compilation_hash():
@@ -72,6 +73,12 @@ def test_aux_output_capture_changes_compilation_hash():
     enabled = AuxOutputConfig(enable_return_routed_experts=True)
 
     assert disabled.compute_hash() != enabled.compute_hash()
+    assert (
+        enabled.compute_hash()
+        == AuxOutputConfig(
+            enable_return_routed_experts=True, backend="mooncake"
+        ).compute_hash()
+    )
 
 
 def test_legacy_routed_experts_flag_updates_aux_output_config():

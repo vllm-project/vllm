@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -16,6 +16,10 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
     PackedBlockHashes,
+)
+from vllm.distributed.aux_output_connector.mooncake import (
+    MooncakeBlockObjectStore,
+    MooncakeOutputPublisher,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -42,6 +46,184 @@ pytestmark = pytest.mark.cpu_test
 _SHAPE = (3, 2)
 _DTYPE = np.dtype("uint8")
 _BLOCK_SIZE = 4
+
+
+@pytest.fixture
+def remote_store(monkeypatch):
+    remote: dict[str, bytes] = {}
+    native = Mock()
+
+    def put(keys, values):
+        remote.update(zip(keys, values, strict=True))
+        return 0
+
+    native.put_batch.side_effect = put
+    native.batch_get_buffer.side_effect = lambda keys: [remote.get(k) for k in keys]
+    store = MooncakeBlockObjectStore(
+        native, object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)), max_batch_bytes=1024
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.aux_output_connector.mooncake.create_mooncake_block_store",
+        lambda **kwargs: store,
+    )
+    return store
+
+
+@pytest.mark.parametrize("start,end", [(0, 10), (1, 7), (4, 8), (8, 9), (10, 10)])
+def test_mooncake_output_keys_contain_exact_accepted_rows(remote_store, start, end):
+    rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
+    keys = ["block-0", "block-1"]
+    remote_store.put(
+        [
+            BlockObject(key, rows[i * 4 : i * 4 + 4].tobytes())
+            for i, key in enumerate(keys)
+        ]
+    )
+    output = AuxRequestOutput(start, rows[max(start, 8) :], keys[start // 4 :], 4)
+    publisher = MooncakeOutputPublisher(output)
+    request = _SchedulerRequest("request", [], num_tokens=end + 1, finished=True)
+    result = publisher.take_output(request, output)
+    assert result is not None
+    assert remote_store.get_concatenated(result) == rows[start:end].tobytes()
+    if start == 0 and end == 10:
+        assert result[:2] == keys
+    publisher.close()
+
+
+def test_mooncake_worker_and_publisher_reuse_prefix_and_finalize_tail(remote_store):
+    worker = _make_worker(2)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
+    hashes = [b"a" * 32, b"b" * 32]
+    rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
+    first = _metadata(0, [_request_metadata("first", 0, 8, 0, hashes)], {})
+    output = _process_output(worker, first, rows[:8], ["first"], np.array([0]))
+    assert len(output["first"].rows) == 0
+    assert len(output["first"].block_keys) == 2
+    second = _metadata(0, [_request_metadata("second", 8, 2, 0, hashes)], {"first": []})
+    output = _process_output(worker, second, rows[8:], ["second"], np.array([0]))
+    publisher = MooncakeOutputPublisher(output["second"])
+    keys = publisher.take_output(
+        _SchedulerRequest("second", [], num_tokens=11, finished=True), output["second"]
+    )
+    assert remote_store.get_concatenated(keys) == rows.tobytes()
+    worker.close()
+
+
+def test_mooncake_decode_crosses_blocks_and_clips_terminal_output(remote_store):
+    """Late full-block keys must not duplicate bytes accepted in earlier steps."""
+    rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
+    connector = AuxOutputSchedulerConnector()
+    request = _SchedulerRequest("request", [], num_tokens=4)
+    assert (
+        connector.take_output(
+            request, {"request": AuxRequestOutput(0, rows[:3], [], 4)}
+        )
+        is None
+    )
+    remote_store.put([BlockObject("block-0", rows[:4].tobytes())])
+    request.num_tokens = 6
+    assert (
+        connector.take_output(
+            request, {"request": AuxRequestOutput(3, rows[4:5], ["block-0"], 4)}
+        )
+        is None
+    )
+    remote_store.put([BlockObject("block-1", rows[4:8].tobytes())])
+    request.num_tokens = 10
+    request.finished = True
+    keys = connector.take_output(
+        request, {"request": AuxRequestOutput(5, rows[8:], ["block-1"], 4)}
+    )
+    assert remote_store.get_concatenated(keys) == rows[:9].tobytes()
+    connector.close()
+
+
+def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
+    rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
+    keys = ["block-0", "block-1"]
+    remote_store.put(
+        [
+            BlockObject(key, rows[i * 4 : i * 4 + 4].tobytes())
+            for i, key in enumerate(keys)
+        ]
+    )
+    connector = AuxOutputSchedulerConnector()
+    request = _SchedulerRequest("request", [], num_tokens=9)
+    assert (
+        connector.take_output(
+            request, {"request": AuxRequestOutput(0, rows[:0], keys, 4)}
+        )
+        is None
+    )
+    # Preemption terminates the Worker state, not the user request/output.
+    connector.request_finished(request)
+    request.num_tokens = 11
+    request.finished = True
+    result = connector.take_output(
+        request, {"request": AuxRequestOutput(8, rows[8:], [], 4)}
+    )
+    assert remote_store.get_concatenated(result) == rows.tobytes()
+    connector.request_finished(request)
+    connector.close()
+
+
+def test_mooncake_batches_preserve_order_and_request_release_keeps_objects():
+    """The shared writer publishes bytes; a request does not own remote retention."""
+    remote: dict[str, bytes] = {}
+    native = Mock()
+
+    def put(keys, values):
+        remote.update(zip(keys, values, strict=True))
+        return 0
+
+    native.put_batch.side_effect = put
+    native.batch_get_buffer.side_effect = lambda keys: [remote.get(k) for k in keys]
+    store = BackgroundBlockObjectStore(
+        MooncakeBlockObjectStore(native, object_nbytes=4, max_batch_bytes=8),
+        max_pending_batches=2,
+    )
+    store.put(
+        [
+            BlockObject("a", b"abcd"),
+            BlockObject("b", b"efgh"),
+            BlockObject("a", b"abcd"),
+            BlockObject("c", b"ij"),
+        ],
+        retain_keys=("a", "b", "c"),
+    )
+    store.put([], release_keys=("a", "b", "c"))
+    assert store.get_concatenated(["c", "a", "b", "a"]) == b"ijabcdefghabcd"
+    assert native.put_batch.call_count == 2
+    native.remove.assert_not_called()
+    store.close()
+    native.close.assert_called_once_with()
+
+
+def test_mooncake_missing_object_does_not_return_partial_output():
+    native = Mock()
+    native.batch_get_buffer.return_value = [b"abcd", None]
+    store = MooncakeBlockObjectStore(native, object_nbytes=4, max_batch_bytes=8)
+    with pytest.raises(BlockObjectStoreError, match="unavailable: missing"):
+        store.get_concatenated(["present", "missing"])
+
+
+def test_mooncake_failure_propagates_through_background_writer():
+    native = Mock()
+    native.put_batch.return_value = -800
+    store = BackgroundBlockObjectStore(
+        MooncakeBlockObjectStore(native, object_nbytes=4, max_batch_bytes=8),
+        max_pending_batches=1,
+    )
+    # put() can also observe the failure immediately, depending on thread timing.
+    with suppress(BlockObjectStoreError):
+        store.put([BlockObject("a", b"abcd")])
+    with pytest.raises(BlockObjectStoreError, match="publication failed"):
+        store.get_concatenated(["a"])
+    with pytest.raises(BlockObjectStoreError, match="publication failed"):
+        store.close()
+    native.close.assert_called_once_with()
 
 
 def test_background_store_publishes_without_blocking_caller():
@@ -180,6 +362,8 @@ def _make_worker(
         max_concurrent_batches,
     )
     worker._requests = {}
+    worker._return_keys = False
+    worker._key_namespace = ""
     worker._generation = 0
     worker._step_metadata = None
     worker._pending_outputs = []
@@ -196,6 +380,27 @@ def test_worker_rejects_metadata_generation_rollback():
         _begin_step(worker, _metadata(0, [], {}))
 
     worker.close()
+
+
+def test_mooncake_keys_isolate_independent_dp_caches(monkeypatch):
+    from vllm.distributed.aux_output_connector import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "RoutedExpertsCapturer", Mock())
+    monkeypatch.setattr(worker_module, "bind_routed_experts_capturer", Mock())
+    monkeypatch.setattr(
+        worker_module, "get_tp_group", lambda: SimpleNamespace(is_first_rank=False)
+    )
+    config = Mock(instance_id="deployment", max_concurrent_batches=2)
+    config.aux_output_config.backend = "mooncake"
+    keys = []
+    for rank in (0, 1, 0):
+        config.parallel_config.data_parallel_rank = rank
+        worker = AuxOutputWorkerConnector(
+            vllm_config=config, model=Mock(), kv_cache_config=Mock()
+        )
+        keys.append(routed_experts_keys([b"a" * 32], worker._key_namespace + "0"))
+    assert keys[0] != keys[1]
+    assert keys[0] == keys[2]
 
 
 def test_worker_rejects_run_and_finish_in_one_step():
@@ -564,8 +769,29 @@ def test_publish_routed_experts_publishes_full_blocks():
     store.close()
 
 
-def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
+@pytest.mark.parametrize("backend", ["shm", "mooncake"])
+def test_worker_data_plane_publishes_blocks_and_reuses_prefix(backend):
     worker = _make_worker(2)
+    if backend == "mooncake":
+        worker._key_namespace = "test-instance:"
+        worker._store.close()
+        remote: dict[str, bytes] = {}
+        native = Mock()
+
+        def put(keys, values):
+            remote.update(zip(keys, values, strict=True))
+            return 0
+
+        native.put_batch.side_effect = put
+        native.batch_get_buffer.side_effect = lambda keys: [remote.get(k) for k in keys]
+        worker._store = BackgroundBlockObjectStore(
+            MooncakeBlockObjectStore(
+                native,
+                object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)),
+                max_batch_bytes=1024,
+            ),
+            max_pending_batches=2,
+        )
 
     hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
     logical = np.arange(10 * 3 * 2, dtype=np.uint8).reshape(10, 3, 2)
