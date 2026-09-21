@@ -3460,7 +3460,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
             extra_indices = _as_int32_contiguous_1d(extra_indices)
             extra_indptr = _as_int32_contiguous_1d(extra_indptr)
             assert extra_indptr.numel() == num_queries + 1, (
-                f"expected extra_indptr shape [{num_queries + 1}], got {extra_indptr.shape}"
+                f"expected extra_indptr shape [{num_queries + 1}], "
+                f"got {extra_indptr.shape}"
             )
     else:
         extra_cache = main_cache
@@ -3599,7 +3600,11 @@ def _rocm_sparse_attn_decode_ragged_triton(
             main_cache.shape[1],
             extra_cache.shape[1],
             extra_indices.stride(0) if direct_extra else 0,
-            extra_block_table.stride(0) if direct_extra else 0,
+            (
+                extra_block_table.stride(0)
+                if direct_extra and extra_block_table is not None
+                else 0
+            ),
             extra_indices.shape[1] if direct_extra else 0,
             scale,
             num_heads,

@@ -1099,7 +1099,7 @@ def test_sparse_attn_decode_gfx950_direct_dense_topk(monkeypatch) -> None:
     device = torch.device("cuda")
     torch.manual_seed(41)
     block_size = 4
-    num_queries, num_heads, width = 3, 3, 8
+    num_queries, num_heads = 3, 3
     q = (
         torch.randn(
             num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
@@ -1121,7 +1121,6 @@ def test_sparse_attn_decode_gfx950_direct_dense_topk(monkeypatch) -> None:
         device=device,
     )
     token_to_req = torch.tensor([2, 0, 1], dtype=torch.int32, device=device)
-    valid_token = torch.tensor([True, False, True], device=device)
     block_table = torch.tensor(
         [[0, 1], [2, 3], [4, 5]], dtype=torch.int32, device=device
     )
@@ -1167,7 +1166,7 @@ def test_sparse_attn_decode_gfx950_derives_exact_direct_lengths(monkeypatch) -> 
     device = torch.device("cuda")
     torch.manual_seed(42)
     block_size = 4
-    num_queries, num_heads, width = 4, 3, 8
+    num_queries, num_heads = 4, 3
     q = (
         torch.randn(
             num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
@@ -1319,7 +1318,6 @@ def test_sparse_attn_decode_gfx950_derives_ratio1_lengths_above_32(
     )
     main_cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
     main_indices = torch.empty(0, dtype=torch.int32, device=device)
-    main_indptr = torch.zeros(num_queries + 1, dtype=torch.int32, device=device)
     extra_cache = _pack_fp8_ds_mla_cache(
         torch.randn(num_queries * width, HEAD_DIM, dtype=torch.bfloat16, device=device),
         block_size,
