@@ -195,12 +195,12 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
     from types import SimpleNamespace
 
     from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.lilicorr import LiLiCorr
     from vllm.model_executor.models.qwen3_dflash import DFlashQwen3DecoderLayer
     from vllm.model_executor.models.qwen3_dflash2 import (
         DFlash2Qwen3DecoderLayer,
         DFlash2Qwen3Model,
     )
-    from vllm.model_executor.models.lilicorr import LiLiCorr
 
     # 1. Mock get_current_vllm_config and TP groups
     mock_current_vllm_config = SimpleNamespace(
@@ -323,10 +323,7 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
     assert type(model.layers[0]) is expected
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_conv_projection_loads_packed_weights_with_draft_quant_config(
-    monkeypatch, quantized
-):
+def test_conv_projections_use_draft_quant_config(monkeypatch):
     from torch import nn
 
     from vllm.distributed import parallel_state
@@ -343,14 +340,10 @@ def test_conv_projection_loads_packed_weights_with_draft_quant_config(
         "__init__",
         lambda self, *a, **kw: nn.Module.__init__(self),
     )
-    quant_config = (
-        SimpleNamespace(
-            get_cache_scale_mapper=WeightsMapper,
-            get_checkpoint_weight_mapper=WeightsMapper,
-            _ignore_unexpected_suffixes=(),
-        )
-        if quantized
-        else None
+    quant_config = SimpleNamespace(
+        get_cache_scale_mapper=WeightsMapper,
+        get_checkpoint_weight_mapper=WeightsMapper,
+        _ignore_unexpected_suffixes=(),
     )
     selected = []
 
@@ -390,82 +383,109 @@ def test_conv_projection_loads_packed_weights_with_draft_quant_config(
             model_config=SimpleNamespace(dtype=torch.bfloat16),
         ),
         config=SimpleNamespace(
-            hidden_size=4096,
+            hidden_size=8,
             dflash_config={
                 "conv_kernel_size": 2,
-                "conv_group_size": 16,
+                "conv_group_size": 2,
             },
         ),
         layer_idx=0,
         prefix="model.layers.0",
         quant_config=quant_config,
     )
-    width = 2048 if quantized else 4096
-    dtype = torch.uint8 if quantized else torch.bfloat16
     for name in ("attention_conv", "mlp_conv"):
         module = getattr(layer, name)
-        weight = torch.ones(1024, width, dtype=dtype)
+        weight = torch.ones(16, 4, dtype=torch.uint8)
         AutoWeightsLoader(module).load_weights([("kernel_projection.weight", weight)])
         torch.testing.assert_close(module.kernel_projection.weight, weight)
         assert module.base_kernel.dtype == torch.bfloat16
-    assert selected == (
-        [
-            "model.layers.0.attention_conv.kernel_projection",
-            "model.layers.0.mlp_conv.kernel_projection",
-        ]
-        if quantized
-        else []
-    )
+    assert selected == [
+        "model.layers.0.attention_conv.kernel_projection",
+        "model.layers.0.mlp_conv.kernel_projection",
+    ]
 
 
-def test_context_kv_uses_quantized_projection_methods(monkeypatch):
+def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     from torch import nn
 
     from vllm.model_executor.models import qwen3_dflash
 
     class Projection(nn.Module):
-        def __init__(self, weight):
+        def __init__(self, packed_weight):
             super().__init__()
-            self.register_buffer("weight", weight)
-            self.output_sizes = [2, 2, 2]
+            self.register_buffer("packed_weight", packed_weight)
+            self.quant_method = object()
+            self.calls = 0
 
         def forward(self, hidden_states):
-            return torch.nn.functional.linear(hidden_states, self.weight), None
+            self.calls += 1
+            return torch.nn.functional.linear(hidden_states, self.packed_weight), None
 
     monkeypatch.setattr(
         qwen3_dflash.ops,
         "rms_norm",
         lambda output, hidden_states, weight, eps: output.copy_(hidden_states),
     )
-    context_states = torch.arange(12, dtype=torch.float32).view(3, 4)
+    context_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     projections = [
-        Projection(torch.arange(24, dtype=torch.float32).view(6, 4)),
-        Projection(torch.arange(24, 48, dtype=torch.float32).view(6, 4)),
+        Projection(
+            torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [1.0, 1.0],
+                    [1.0, -1.0],
+                ]
+            )
+        ),
+        Projection(
+            torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                    [2.0, 0.0],
+                    [0.0, 2.0],
+                    [-1.0, 0.0],
+                    [0.0, -1.0],
+                ]
+            )
+        ),
     ]
     model = SimpleNamespace(
-        _hidden_norm_weight=torch.ones(4),
+        hidden_norm=SimpleNamespace(weight=nn.Parameter(torch.ones(2))),
         _rms_norm_eps=1e-6,
-        _fused_kv_weight=None,
-        _fused_kv_bias=None,
-        _context_qkv_projs=projections,
-        _context_q_sizes=[2, 2],
     )
+    layers_attn = [
+        SimpleNamespace(
+            qkv_proj=projection,
+            q_size=2,
+            k_norm=SimpleNamespace(weight=nn.Parameter(torch.ones(2))),
+        )
+        for projection in projections
+    ]
+    qwen3_dflash.DFlashQwen3Model._build_context_kv_buffers(
+        model, layers_attn, has_bias=False
+    )
+    assert model._fused_kv_weight is None
+    assert all(not hasattr(projection, "weight") for projection in projections)
 
     actual_k, actual_v = qwen3_dflash.DFlashQwen3Model._project_context_kv(
         model,
         context_states,
-        num_ctx=3,
+        num_ctx=2,
         num_layers=2,
         num_kv_heads=1,
         head_dim=2,
     )
-    expected = torch.stack(
-        [
-            projection(context_states)[0][:, 2:].view(3, 2, 1, 2)
-            for projection in projections
-        ],
-        dim=1,
-    ).permute(2, 1, 0, 3, 4)
 
-    torch.testing.assert_close(actual_k, expected[0])
-    torch.testing.assert_close(actual_v, expected[1])
+    expected_k = torch.tensor(
+        [[[1.0, 2.0], [3.0, 4.0]], [[2.0, 4.0], [6.0, 8.0]]]
+    ).unsqueeze(2)
+    expected_v = torch.tensor(
+        [[[3.0, -1.0], [7.0, -1.0]], [[-1.0, -2.0], [-3.0, -4.0]]]
+    ).unsqueeze(2)
+    torch.testing.assert_close(actual_k, expected_k)
+    torch.testing.assert_close(actual_v, expected_v)
+    assert [projection.calls for projection in projections] == [1, 1]

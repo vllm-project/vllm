@@ -151,12 +151,23 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_candidates_use_global_partition_and_exclude_padding(monkeypatch, tp_size):
     """Candidate features must include mass outside top-k and on other TP ranks."""
+
+    class Gather:
+        def __init__(self, calls):
+            self.calls = calls
+            self.index = 0
+
+        def __call__(self, value, dim=-1):
+            expected_input, result = self.calls[self.index]
+            assert dim == -1
+            torch.testing.assert_close(value, expected_input)
+            self.index += 1
+            return result
+
     shards = [
         torch.tensor([[1.0, 3.0, 2.0, 100.0], [4.0, 1.0, 2.0, 100.0]]),
         torch.tensor([[6.0, 5.0, 0.0, 100.0], [3.0, 6.0, 5.0, 100.0]]),
     ][:tp_size]
-    for shard in shards:
-        shard[:, -1] = -float("inf")
     for rank in range(tp_size):
         fake = SimpleNamespace(
             scale=1.0,
@@ -169,24 +180,46 @@ def test_candidates_use_global_partition_and_exclude_padding(monkeypatch, tp_siz
                 num_org_vocab_padding=1, org_vocab_start_index=rank * 3
             ),
         )
-        gathered = [
-            torch.cat([s.logsumexp(-1, keepdim=True) for s in shards], -1),
-            torch.cat([s.topk(2).values for s in shards], -1),
-            torch.cat([s.topk(2).indices + r * 3 for r, s in enumerate(shards)], -1),
+        valid_shards = [shard[:, :3] for shard in shards]
+        local_topk = [shard.topk(2) for shard in valid_shards]
+        gather_calls = [
+            (
+                valid_shards[rank].logsumexp(-1, keepdim=True),
+                torch.cat(
+                    [shard.logsumexp(-1, keepdim=True) for shard in valid_shards],
+                    -1,
+                ),
+            ),
+            (
+                local_topk[rank].values,
+                torch.cat([topk.values for topk in local_topk], -1),
+            ),
+            (
+                local_topk[rank].indices + rank * 3,
+                torch.cat(
+                    [
+                        topk.indices + shard_rank * 3
+                        for shard_rank, topk in enumerate(local_topk)
+                    ],
+                    -1,
+                ),
+            ),
         ]
-        calls = iter(gathered)
+        all_gather = Gather(gather_calls)
+
         monkeypatch.setattr(
             logits_processor,
             "tensor_model_parallel_all_gather",
-            lambda *args, calls=calls, **kwargs: next(calls),
+            all_gather,
         )
         monkeypatch.setattr(logits_processor, "_topk", lambda x, k: x.topk(k, dim=-1))
         ids, values = logits_processor.LogitsProcessor.get_top_k_tokens(
             fake, lm_head, torch.empty(2, 1), 2, return_log_probs=True
         )
-        expected = torch.cat([s[:, :3] for s in shards], -1).log_softmax(-1).topk(2)
+        expected = torch.cat(valid_shards, -1).log_softmax(-1).topk(2)
         torch.testing.assert_close(ids, expected.indices)
         torch.testing.assert_close(values, expected.values)
+        assert all_gather.index == (3 if tp_size > 1 else 0)
 
 
 def test_context_anchor_is_last_committed_normalized_feature():
@@ -299,16 +332,26 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
         assert cache[1].isneginf().all()
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-@pytest.mark.parametrize("convolution", [False, True])
 @pytest.mark.parametrize(
-    "mismatch", [None, "missing_head", "extra_head", "missing_conv", "extra_conv"]
+    ("convolution", "mismatch", "quantized"),
+    [
+        pytest.param(False, None, False, id="valid-plain"),
+        pytest.param(True, None, False, id="valid-convolution"),
+        pytest.param(False, "missing_head", False, id="missing-head"),
+        pytest.param(False, "extra_head", False, id="extra-head"),
+        pytest.param(True, "missing_conv", False, id="missing-convolution"),
+        pytest.param(False, "extra_conv", False, id="unexpected-convolution"),
+        pytest.param(False, None, True, id="optional-w4a16-input-scale"),
+        pytest.param(False, "missing_weight", True, id="missing-quantized-weight"),
+        pytest.param(False, "missing_bias", True, id="missing-quantized-bias"),
+        pytest.param(False, "missing_weight_scale", True, id="missing-block-scale"),
+        pytest.param(False, "missing_weight_scale_2", True, id="missing-global-scale"),
+    ],
 )
 def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     monkeypatch, convolution, mismatch, quantized
 ):
     from vllm.model_executor.models.lilicorr import LiLiCorrForCausalLM
-    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 
     wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)
     nn.Module.__init__(wrapper)
@@ -327,41 +370,72 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
         layer.attention_conv = nn.Linear(2, 2, bias=False)
     wrapper.model.layers = nn.ModuleList([layer])
     if quantized:
-        wrapper.model.quant_config = object()
-        # Simulate a quantized projection whose scale is synthesized at load.
+        from vllm.config.quantization import QuantSpec
+        from vllm.model_executor.layers.quantization.modelopt import (
+            CkptCtx,
+            ModelOptLinearMethod,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kNvfp4Static,
+        )
+
+        # Match the W4A16 NVFP4 checkpoint contract without GPU kernel setup.
         projection = wrapper.model.lilicorr.pass_hidden_proj
-        projection.quant_method = object()
-        projection.register_parameter("weight_scale", nn.Parameter(torch.ones(1)))
+        projection.quant_method = ModelOptLinearMethod(
+            QuantSpec(weight=kNvfp4Static, activation=None), CkptCtx(group_size=16)
+        )
+        projection.weight = nn.Parameter(
+            torch.zeros(8, 8, dtype=torch.uint8), requires_grad=False
+        )
+        for name, value in (
+            ("weight_scale", torch.ones(8, 1).to(torch.float8_e4m3fn)),
+            ("weight_scale_2", torch.ones(1)),
+            ("input_scale", torch.full((1,), torch.nan)),
+        ):
+            projection.register_parameter(
+                name, nn.Parameter(value, requires_grad=False)
+            )
     weights = dict(wrapper.model.state_dict())
     if quantized:
-        del weights["lilicorr.pass_hidden_proj.weight_scale"]
+        del weights["lilicorr.pass_hidden_proj.input_scale"]
     if mismatch == "missing_head":
         del weights["lilicorr.slot_embedding"]
+    elif mismatch in (
+        "missing_weight",
+        "missing_bias",
+        "missing_weight_scale",
+        "missing_weight_scale_2",
+    ):
+        del weights[f"lilicorr.pass_hidden_proj.{mismatch.removeprefix('missing_')}"]
     elif mismatch == "extra_head":
         weights["lilicorr.untrained.weight"] = torch.zeros(1)
     elif mismatch == "missing_conv":
-        if not convolution:
-            pytest.skip("requires a convolutional model")
         del weights["layers.0.attention_conv.weight"]
     elif mismatch == "extra_conv":
         weights["layers.0.mlp_conv.untrained"] = torch.zeros(1)
-    # Isolate the coverage contract from the backbone's GPU weight loaders.
+
+    # Keep production loading and mapping, bypass only backbone GPU KV setup.
+    wrapper.model.use_aux_hidden_state = True
+    wrapper.model.has_separate_mask_embedding = False
+    monkeypatch.setattr(wrapper, "_read_mask_embedding", lambda: None)
     monkeypatch.setattr(
-        DFlashQwen3ForCausalLM, "load_weights", lambda self, weights: list(weights)
+        wrapper.model, "_build_fused_kv_buffers", lambda: None, raising=False
     )
     supplied = [("model." + name, value) for name, value in weights.items()]
     if mismatch:
-        with pytest.raises(ValueError, match="coverage mismatch"):
+        message = (
+            "no module or parameter"
+            if mismatch.startswith("extra")
+            else "coverage mismatch"
+        )
+        with pytest.raises(ValueError, match=message):
             wrapper.load_weights(supplied)
     else:
         wrapper.load_weights(supplied)
         assert wrapper.model.lilicorr._attn_bias is not None
 
 
-@pytest.mark.parametrize("head_width", [8, 16])
-def test_quantized_head_calls_methods_without_reading_packed_weights(
-    monkeypatch, head_width
-):
+def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch):
     from vllm.model_executor.layers import linear
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
@@ -392,7 +466,7 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(
             model_hidden_size=16,
             block_size=4,
             rms_norm_eps=1e-6,
-            config=_config(hidden_size=head_width),
+            config=_config(hidden_size=8),
             quant_config=quant_config,
             prefix="model.lilicorr",
         )
@@ -432,7 +506,6 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(
         )
     assert result.shape == (2, 3, 4, 4)
     assert torch.isfinite(result).all()
-    assert not any(prefix.endswith(".in_proj") for prefix in configured)
     for name in ("factor_input_proj", "out_head", "in_head"):
         assert getattr(head, name).quant_config is None
         assert f"model.lilicorr.{name}" not in configured

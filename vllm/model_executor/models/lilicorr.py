@@ -6,6 +6,7 @@
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .qwen3_dflash2 import DFlash2Qwen3DecoderLayer
@@ -45,7 +48,7 @@ class LiLiCorrConfig:
     def from_dict(cls, config: dict) -> "LiLiCorrConfig":
         if not config.get("lilicorr_enabled", True):
             raise ValueError("LiLiCorrDraftModel requires lilicorr_enabled.")
-        values = {}
+        values: dict[str, Any] = {}
         for name in cls.__dataclass_fields__:
             key = f"lilicorr_{name}"
             if key not in config:
@@ -65,19 +68,6 @@ class LiLiCorrConfig:
         ):
             raise ValueError("LiLiCorr candidate_topk must be a power of two <= 16.")
         return result
-
-
-class LiLiCorrRMSNorm(nn.Module):
-    def __init__(self, hidden_size: int, eps: float = 1e-06) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = float(eps)
-        self._normalized_shape = (int(hidden_size),)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return F.rms_norm(
-            hidden_states, self._normalized_shape, self.weight, self.variance_epsilon
-        )
 
 
 class LiLiCorrLatticeAttention(nn.Module):
@@ -144,11 +134,11 @@ class LiLiCorrLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.attn_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
+        self.attn_norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
         self.attn = LiLiCorrLatticeAttention(
             hidden_size, num_heads, quant_config, maybe_prefix(prefix, "attn")
         )
-        self.mlp_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
+        self.mlp_norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
         mlp_hidden_size = int(hidden_size * mlp_ratio)
         self.mlp = nn.Sequential(
             ReplicatedLinear(
@@ -268,8 +258,8 @@ class LiLiCorrHead(nn.Module):
                 for i in range(int(config.num_layers))
             ]
         )
-        self.output_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
-        self.anchor_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
+        self.output_norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.anchor_norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
         self.factor_input_proj = ReplicatedLinear(
             hidden_size * 3,
             hidden_size,
@@ -300,10 +290,10 @@ class LiLiCorrHead(nn.Module):
         )
         self._fused_edge_weight: torch.Tensor | None = None
         self._fused_edge_bias: torch.Tensor | None = None
-        self._factor_input_splits: tuple[torch.Tensor, ...] | None = None
+        self._factor_input_splits: tuple[torch.Tensor, ...]
         self._attn_bias: torch.Tensor | None = None
-        self._rank_frac_col: torch.Tensor | None = None
-        self._is_top1_col: torch.Tensor | None = None
+        self._rank_frac_col: torch.Tensor
+        self._is_top1_col: torch.Tensor
 
     @torch.no_grad()
     def materialize_inference_buffers(
@@ -330,11 +320,11 @@ class LiLiCorrHead(nn.Module):
         )
         if topk > 1:
             rank_frac = torch.arange(topk, device=device, dtype=torch.float32).view(
-                1, 1, 1, topk
+                1, 1, topk
             ) / float(topk - 1)
         else:
-            rank_frac = torch.zeros(1, 1, 1, topk, device=device, dtype=torch.float32)
-        is_top1 = torch.zeros(1, 1, 1, topk, device=device, dtype=torch.float32)
+            rank_frac = torch.zeros(1, 1, topk, device=device, dtype=torch.float32)
+        is_top1 = torch.zeros(1, 1, topk, device=device, dtype=torch.float32)
         is_top1[..., 0] = 1.0
         self._rank_frac_col = rank_frac.contiguous()
         self._is_top1_col = is_top1.contiguous()
@@ -355,12 +345,6 @@ class LiLiCorrHead(nn.Module):
         ) * self.same_slot_bias.view(-1, 1, 1)
         return bias.to(device=device, dtype=dtype).contiguous()
 
-    def _require_materialized(self) -> None:
-        if self._attn_bias is None:
-            raise RuntimeError(
-                "Call materialize_inference_buffers() after loading the LiLiCorr head."
-            )
-
     def _project_anchor(
         self, anchor_hidden: torch.Tensor, anchor_valid: torch.Tensor
     ) -> torch.Tensor:
@@ -375,10 +359,12 @@ class LiLiCorrHead(nn.Module):
         pass_hidden: torch.Tensor,
         anchor_hidden: torch.Tensor,
         anchor_valid: torch.Tensor,
-        already_projected: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        self._require_materialized()
-        bsz, n_blocks, n_slots, topk = candidate_log_probs.shape
+        if self._attn_bias is None:
+            raise RuntimeError(
+                "Call materialize_inference_buffers() after loading the LiLiCorr head."
+            )
+        bsz, n_slots, topk = candidate_log_probs.shape
         if topk != self.candidate_topk:
             raise ValueError(
                 f"LiLiCorr expects candidate_topk={self.candidate_topk}, got {topk}."
@@ -388,9 +374,7 @@ class LiLiCorrHead(nn.Module):
             token_embeddings = token_embeddings.to(proj_dtype)
         if pass_hidden.dtype != proj_dtype:
             pass_hidden = pass_hidden.to(proj_dtype)
-        token_states = (
-            token_embeddings if already_projected else self.token_proj(token_embeddings)
-        )
+        token_states = self.token_proj(token_embeddings)
         pass_states = self.pass_hidden_proj(pass_hidden).unsqueeze(-2)
         log_probs = candidate_log_probs.float()
         features = torch.stack(
@@ -407,26 +391,24 @@ class LiLiCorrHead(nn.Module):
         hidden_states = hidden_states + self.feature_mlp(
             features.to(dtype=token_states.dtype)
         )
-        hidden_states = hidden_states + self.slot_embedding
-        hidden_states = hidden_states + self.rank_embedding
-        hidden_states = hidden_states.reshape(
-            bsz * n_blocks, n_slots * topk, self.hidden_size
-        )
+        hidden_states = hidden_states + self.slot_embedding[:, 0]
+        hidden_states = hidden_states + self.rank_embedding[:, 0]
+        hidden_states = hidden_states.reshape(bsz, n_slots * topk, self.hidden_size)
         anchor_state = self._project_anchor(anchor_hidden, anchor_valid)
         lattice = self._attn_bias.shape[-1]
         attention_bias = (
             self._attn_bias.unsqueeze(0)
-            .expand(bsz * n_blocks, -1, -1, -1)
-            .reshape(bsz * n_blocks * self.num_heads, lattice, lattice)
+            .expand(bsz, -1, -1, -1)
+            .reshape(bsz * self.num_heads, lattice, lattice)
         )
         for layer in self.layers:
             hidden_states = layer(hidden_states, attention_bias)
         hidden_states = self.output_norm(hidden_states).reshape(
-            bsz, n_blocks, n_slots, topk, self.hidden_size
+            bsz, n_slots, topk, self.hidden_size
         )
         anchor_state = self.anchor_norm(anchor_state)
         w_self, w_anchor, w_cross = self._factor_input_splits
-        anchor_row = anchor_state[:, :, None, None, :]
+        anchor_row = anchor_state[:, None, None, :]
         pre = F.linear(hidden_states, w_self, self.factor_input_proj.bias)
         pre = pre + F.linear(anchor_row, w_anchor)
         pre = pre + F.linear(hidden_states * anchor_row, w_cross)
@@ -438,19 +420,9 @@ class LiLiCorrHead(nn.Module):
         anchor_out = F.normalize(
             self.anchor_out_head(anchor_state), dim=-1, eps=self.vector_eps
         )
-        start_scores = (anchor_out[:, :, None, :] * in_vec[:, :, 0, :, :]).sum(dim=-1)
-        pair_scores = torch.matmul(
-            out_vec[:, :, :-1], in_vec[:, :, 1:].transpose(-1, -2)
-        )
+        start_scores = (anchor_out[:, None, :] * in_vec[:, 0, :, :]).sum(dim=-1)
+        pair_scores = torch.matmul(out_vec[:, :-1], in_vec[:, 1:].transpose(-1, -2))
         return (start_scores, pair_scores)
-
-    def log_factors(
-        self, start_scores: torch.Tensor, pair_scores: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return (
-            self.logit_scale * start_scores.float(),
-            self.logit_scale * pair_scores.float(),
-        )
 
     def forward(
         self,
@@ -461,16 +433,17 @@ class LiLiCorrHead(nn.Module):
         anchor_valid: torch.Tensor,
     ) -> torch.Tensor:
         start, pairs = self.score(
-            token_embeddings=token_embeddings.unsqueeze(1),
-            candidate_log_probs=candidate_log_probs.unsqueeze(1),
-            pass_hidden=pass_hidden.unsqueeze(1),
-            anchor_hidden=anchor_hidden.unsqueeze(1),
-            anchor_valid=anchor_valid.unsqueeze(1),
+            token_embeddings=token_embeddings,
+            candidate_log_probs=candidate_log_probs,
+            pass_hidden=pass_hidden,
+            anchor_hidden=anchor_hidden,
+            anchor_valid=anchor_valid,
         )
-        start, pairs = self.log_factors(start, pairs)
+        start = self.logit_scale * start.float()
+        pairs = self.logit_scale * pairs.float()
         # The shared walk starts at predecessor index zero; all first rows agree.
-        first = start[:, 0, None, None, :].expand(-1, 1, self.candidate_topk, -1)
-        return torch.cat((first, pairs[:, 0]), dim=1)
+        first = start[:, None, None, :].expand(-1, 1, self.candidate_topk, -1)
+        return torch.cat((first, pairs), dim=1)
 
 
 class LiLiCorr(DFlashQwen3Model):
@@ -534,48 +507,52 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        quantized_prefixes = tuple(
-            name + "."
-            for name, module in self.model.named_modules()
-            if isinstance(module, LinearBase)
-            and not isinstance(module.quant_method, UnquantizedLinearMethod)
-        )
+        quantized_metadata: set[str] = set()
+        for name, module in self.model.named_modules():
+            if not isinstance(module, LinearBase) or isinstance(
+                module.quant_method, UnquantizedLinearMethod
+            ):
+                continue
+            required = {"weight", "bias"}
+            method = module.quant_method
+            if (
+                isinstance(method, ModelOptLinearMethod)
+                and method.spec.weight == kNvfp4Static
+            ):
+                # NVFP4 scales are trained checkpoint data. Only W4A16's
+                # deprecated, unused input_scale may be absent.
+                required.update(("weight_scale", "weight_scale_2"))
+                if method.spec.activation is not None:
+                    required.add("input_scale")
+            quantized_metadata.update(
+                f"{name}.{parameter}"
+                for parameter, _ in module.named_parameters(recurse=False)
+                if parameter not in required
+            )
         expected = {
             name
             for name, _ in self.model.named_parameters()
-            if name.startswith("lilicorr.")
-            or ".attention_conv." in name
-            or ".mlp_conv." in name
+            if (
+                name.startswith("lilicorr.")
+                or ".attention_conv." in name
+                or ".mlp_conv." in name
+            )
+            and name not in quantized_metadata
         }
-        seen = set()
+        seen: set[str] = set()
 
         def normalized_weights():
             for name, value in weights:
                 name = name.removeprefix("model.")
-                if (
-                    name.startswith("lilicorr.")
-                    or ".attention_conv." in name
-                    or ".mlp_conv." in name
-                ):
-                    seen.add(name)
+                seen.add(name)
                 yield name, value
 
         super().load_weights(normalized_weights())
-        # Quantized linears may remap or synthesize parameters during loading.
-        # Keep strict coverage for norms, embeddings, and unquantized linears.
-        expected = {
-            name for name in expected if not name.startswith(quantized_prefixes)
-        }
-        seen = {name for name in seen if not name.startswith(quantized_prefixes)}
-        if seen != expected:
+        missing = expected - seen
+        if missing:
             raise ValueError(
-                "LiLiCorr checkpoint coverage mismatch: "
-                f"missing={sorted(expected - seen)}, "
-                f"unexpected={sorted(seen - expected)}"
+                f"LiLiCorr checkpoint coverage mismatch: missing={sorted(missing)}"
             )
         head = self.model.lilicorr
         parameter = head.slot_embedding
         head.materialize_inference_buffers(parameter.device, parameter.dtype)
-
-
-EntryClass = LiLiCorrForCausalLM
