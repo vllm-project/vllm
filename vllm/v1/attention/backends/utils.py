@@ -1132,7 +1132,7 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
-def mamba_get_block_table_tensor(
+def mamba_get_block_table_tensor_reference(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     kv_cache_spec: KVCacheSpec,
@@ -1172,7 +1172,7 @@ def mamba_get_block_table_tensor(
         return torch.gather(block_table, 1, indices_to_gather)
 
 
-def mamba_get_block_table_tensor2(
+def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     kv_cache_spec: KVCacheSpec,
@@ -1182,7 +1182,7 @@ def mamba_get_block_table_tensor2(
     if mamba_cache_mode in ("all", "none"):
         return block_table
     if not block_table.is_cuda:
-        return mamba_get_block_table_tensor(
+        return mamba_get_block_table_tensor_reference(
             block_table, seq_lens, kv_cache_spec, mamba_cache_mode
         )
     assert isinstance(kv_cache_spec, MambaSpec)

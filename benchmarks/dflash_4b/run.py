@@ -23,6 +23,8 @@ def main():
     parser.add_argument("engine", choices=("vllm", "sglang"))
     parser.add_argument("mode", choices=("baseline", "dflash"))
     parser.add_argument("--port", type=int, default=8100)
+    parser.add_argument("--request-count", type=int, default=200)
+    parser.add_argument("--warmup-request-count", type=int, default=20)
     parser.add_argument("--output", type=Path, default=HERE / "results")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -51,19 +53,21 @@ def main():
         "server_command": command,
         "vllm_runner": "V2" if args.engine == "vllm" else None,
         "concurrency": 1,
-        "warmup_requests": 20,
-        "measured_requests": 200,
+        "warmup_requests": args.warmup_request_count,
+        "measured_requests": args.request_count,
         "requested_output_tokens": 256,
     }
     env = os.environ.copy()
     if args.engine == "vllm":
         env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     with (output / "server.log").open("w") as log:
+        startup_start = time.monotonic()
         server = subprocess.Popen(
             command, stdout=log, stderr=log, env=env, start_new_session=True
         )
         try:
             wait_ready(server, base)
+            startup_seconds = time.monotonic() - startup_start
             snapshot(base, output, "before", args.engine)
             bench = [
                 str(Path(sys.executable).parent / "aiperf"),
@@ -75,9 +79,9 @@ def main():
                 "--url",
                 base,
                 "--request-count",
-                "200",
+                str(args.request_count),
                 "--warmup-request-count",
-                "20",
+                str(args.warmup_request_count),
                 "--public-dataset",
                 "spec_al_gsm8k",
                 "--extra-inputs",
@@ -94,9 +98,15 @@ def main():
             write_json(output / "run_config.json", config)
             print(f"Running {args.engine} {args.mode}; logs: {output}", flush=True)
             with (output / "benchmark.log").open("w") as bench_log:
+                benchmark_start = time.monotonic()
                 subprocess.run(bench, stdout=bench_log, stderr=bench_log, check=True)
+                benchmark_seconds = time.monotonic() - benchmark_start
             snapshot(base, output, "after", args.engine)
-            summary = summarize(output, args.engine, args.mode)
+            summary = summarize(output, args.engine, args.mode, args.request_count)
+            summary["timing_seconds"] = {
+                "server_startup": startup_seconds,
+                "benchmark_wall_clock": benchmark_seconds,
+            }
             write_json(output / "summary.json", summary)
             print(json.dumps(summary, indent=2))
         finally:
@@ -123,6 +133,7 @@ def server_command(args, target, draft):
             sys.executable,
             "-m",
             "vllm.entrypoints.openai.api_server",
+            "--disable-uvicorn-access-log",
             "--model",
             target,
             "--served-model-name",
@@ -171,6 +182,8 @@ def server_command(args, target, draft):
             sys.executable,
             "-m",
             "sglang.launch_server",
+            "--log-level-http",
+            "warning",
             "--model-path",
             target,
             "--served-model-name",
@@ -200,10 +213,12 @@ def server_command(args, target, draft):
     return command + common
 
 
-def summarize(output, engine, mode):
+def summarize(output, engine, mode, request_count=200):
     report = json.loads((output / "aiperf/profile_export_aiperf.json").read_text())
-    if report["request_count"]["avg"] != 200:
-        raise RuntimeError("Expected 200 successful measured requests; inspect logs")
+    if report["request_count"]["avg"] != request_count:
+        raise RuntimeError(
+            f"Expected {request_count} successful measured requests; inspect logs"
+        )
     metrics = json.loads((output / "aiperf/server_metrics_export.json").read_text())[
         "metrics"
     ]
