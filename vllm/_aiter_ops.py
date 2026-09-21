@@ -2434,19 +2434,25 @@ class rocm_aiter_ops:
     @classmethod
     @functools.cache
     def is_gdn_flydsl_prefill_available(cls) -> bool:
-        """Whether the opt-in AITER FlyDSL GDN prefill path is installed.
+        """Whether the opt-in AITER FlyDSL GDN prefill path can be used.
 
-        This is a capability check rather than an environment-variable gate:
-        explicitly selecting the backend is sufficient to enable it.
+        Selecting the backend is an explicit opt-in in itself, but it still
+        runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch that
+        turns all of them off. Asking for the backend with AITER disabled is a
+        contradiction, and the caller reports it rather than quietly picking
+        one of the two answers.
         """
         return (
-            is_aiter_found_and_supported()
+            cls._AITER_ENABLED
+            and is_aiter_found_and_supported()
             and cls._gdn_flydsl_prefill_kernels_importable()
         )
 
     @classmethod
     def gdn_flydsl_prefill_unavailable_reason(cls) -> str:
         """Human-readable reason the FlyDSL GDN prefill path cannot run."""
+        if not cls._AITER_ENABLED:
+            return "AITER is disabled; set VLLM_ROCM_USE_AITER=1 to enable it"
         if not is_aiter_found_and_supported():
             return "AITER is not installed or this GPU is not CDNA 3 or newer"
         if cls._gdn_flydsl_prefill_import_error:

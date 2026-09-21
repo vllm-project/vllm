@@ -207,6 +207,24 @@ def test_chunk_metadata_keeps_its_two_tensor_contract():
     assert base.return_annotation == override.return_annotation
 
 
+def test_flydsl_availability_respects_the_aiter_switch(monkeypatch):
+    """VLLM_ROCM_USE_AITER stays the one switch that turns AITER kernels off.
+
+    Selecting the backend opts in to it specifically, but it cannot opt back
+    in to AITER as a whole once the user has disabled it.
+    """
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", False)
+    rocm_aiter_ops.is_gdn_flydsl_prefill_available.cache_clear()
+    try:
+        assert rocm_aiter_ops.is_gdn_flydsl_prefill_available() is False
+        assert (
+            "VLLM_ROCM_USE_AITER"
+            in rocm_aiter_ops.gdn_flydsl_prefill_unavailable_reason()
+        )
+    finally:
+        rocm_aiter_ops.is_gdn_flydsl_prefill_available.cache_clear()
+
+
 def _flydsl_prefill_unavailable() -> bool:
     return (
         not current_platform.is_rocm()
