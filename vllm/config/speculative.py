@@ -412,7 +412,9 @@ class SpeculativeConfig:
     attention_backend: AttentionBackendEnum | None = None
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
-    backend (e.g. DFlash needs a backend that supports non-causal attention)."""
+    backend (e.g. DFlash needs a backend that supports non-causal attention).
+    MLA DFlash2 defaults to FLASHINFER_MLA for full attention and always uses
+    TRITON_MLA for sliding-window attention."""
     kv_cache_dtype: CacheDType | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
     target model's `--kv-cache-dtype`."""
@@ -1459,6 +1461,30 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
+
+                if (
+                    self.method == "dflash"
+                    and "DFlash2DraftModel" in self.draft_model_config.architectures
+                    and self.draft_model_config.is_deepseek_mla
+                ):
+                    if self.target_parallel_config.decode_context_parallel_size > 1:
+                        raise ValueError(
+                            "MLA DFlash2 does not support decode context parallelism; "
+                            "set decode_context_parallel_size=1."
+                        )
+                    if self.attention_backend is None:
+                        self.attention_backend = AttentionBackendEnum.FLASHINFER_MLA
+                    elif self.attention_backend not in (
+                        AttentionBackendEnum.FLASHINFER_MLA,
+                        AttentionBackendEnum.TRITON_MLA,
+                    ):
+                        raise ValueError(
+                            "MLA DFlash2 requires attention_backend=FLASHINFER_MLA "
+                            "or TRITON_MLA for non-causal full attention; "
+                            "sliding-window layers always use TRITON_MLA."
+                        )
+                    if self.kv_cache_dtype is None:
+                        self.kv_cache_dtype = "auto"
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"

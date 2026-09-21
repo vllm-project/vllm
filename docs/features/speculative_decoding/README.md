@@ -105,6 +105,44 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 
 ### Method-specific keys
 
+#### Kimi-K3 DFlash2
+
+[lightseekorg/kimi-k3-dflash2](https://huggingface.co/lightseekorg/kimi-k3-dflash2)
+is an MLA draft for `moonshotai/Kimi-K3`. Its original `config.json` is supported,
+including `model_type: qwen3` and `architectures: [DFlash2DraftModel]`:
+`dflash_config.attention_mode: mla` selects the K3 MLA implementation.
+
+Add the following to your Kimi-K3 serving command, keeping the target's tensor
+parallelism and quantization settings:
+
+```bash
+--speculative-config '{
+  "method": "dflash",
+  "model": "lightseekorg/kimi-k3-dflash2",
+  "num_speculative_tokens": 7,
+  "attention_backend": "FLASHINFER_MLA",
+  "kv_cache_dtype": "auto"
+}'
+```
+
+You can also use a local checkpoint path as `model`. The eight-token block
+contains one bonus token and seven speculative tokens. DFlash2 automatically
+selects the V2 model runner. MLA drafts default to `FLASHINFER_MLA` for full
+attention and always use `TRITON_MLA` for sliding-window attention. Set
+`attention_backend` to `TRITON_MLA` to use it for full attention as well.
+The draft KV cache defaults to the model dtype (`kv_cache_dtype: auto`).
+Context parallelism must be disabled (`prefill_context_parallel_size=1` and
+`decode_context_parallel_size=1`). The Triton MLA backend supports CUDA graphs
+for uniform non-causal draft batches; draft layers do not constrain the target's
+CUDA graph support.
+
+The draft loads its own embedding and shares the target's LM head. Auxiliary
+target layers are `[19, 37, 66, 78, 90]`; the equivalent vLLM auxiliary-state
+indices logged at startup are `(20, 38, 67, 79, 91)`. Four layers use a 4096-token
+sliding window and the final layer uses full attention. The sliding-window
+layers use latent KV caches and retain visibility of later tokens in the same
+draft block.
+
 #### N-gram
 
 | Key | Type | Default | Meaning |
