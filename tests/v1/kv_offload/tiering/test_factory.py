@@ -44,7 +44,13 @@ def _make_mock_args():
 
 def test_pre_registered_tiers_can_be_imported():
     """CI sentinel: registered tiers import and yield SecondaryTierManager."""
-    expected_sources = {"fs": CacheHitSource.DISK, "p2p": CacheHitSource.P2P}
+    # Derived from each tier's ``medium``; P2P has none and sets its own.
+    expected_sources = {
+        "example": CacheHitSource.HOST,
+        "fs": CacheHitSource.DISK,
+        "obj": CacheHitSource.DISK,
+        "p2p": CacheHitSource.P2P,
+    }
     for tier_type in SecondaryTierFactory._registry:
         # KVCR is an optional external dependency and may not be installed.
         if tier_type == "kvcr" and find_spec("kvcr") is None:
@@ -123,8 +129,8 @@ def test_register_new_tier_type(tier_type):
 
     assert tier.tier_type == tier_type
     assert isinstance(tier, ExampleSecondaryTierManager)
-    # Registration names must not infer a physical source for custom tiers.
-    assert tier.cache_hit_source is CacheHitSource.EXTERNAL_UNSPECIFIED
+    # Attribution follows the tier's medium, never its registration name.
+    assert tier.cache_hit_source is CacheHitSource.HOST
 
 
 # ---------------------------------------------------------------------------

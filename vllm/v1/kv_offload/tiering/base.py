@@ -142,8 +142,17 @@ class SecondaryTierManager(ABC):
     """
 
     medium: ClassVar[Medium | None] = None
-    # Metric attribution is independent of the functional tier_type name.
+    # Cache tier reported for hits served from this tier. Derived from
+    # ``medium`` unless a subclass sets it; ``None`` medium means unknown.
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.EXTERNAL_UNSPECIFIED
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "cache_hit_source" not in cls.__dict__ and cls.medium is not None:
+            cls.cache_hit_source = {
+                Medium.CPU: CacheHitSource.HOST,
+                Medium.STORAGE: CacheHitSource.DISK,
+            }[cls.medium]
 
     def __init__(
         self,

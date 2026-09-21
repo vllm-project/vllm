@@ -20,6 +20,9 @@ from tests.v1.kv_connector.unit.utils import (
     create_vllm_config,
 )
 from vllm import SamplingParams
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
@@ -232,9 +235,9 @@ def test_nixl_wins_load_over_cpu_offload():
     assert not sched_out.has_sync_kv_loads
 
     assert mc._requests_to_connector[request.request_id] == 0
-    assert mc.get_external_cache_hit_sources(request, 2 * BLOCK_SIZE) == [
-        ("p2p", 2 * BLOCK_SIZE)
-    ]
+    assert mc.get_external_cache_hit_sources(
+        request, 2 * BLOCK_SIZE
+    ) == CachedTokensBySource(p2p=2 * BLOCK_SIZE)
 
     meta = sched_out.kv_connector_metadata
     assert isinstance(meta, MultiKVConnectorMetadata)
@@ -305,7 +308,9 @@ def test_cpu_offload_wins_when_nixl_has_no_match():
     assert hit_tokens is not None and hit_tokens > 0
     assert mc._requests_to_connector[req2.request_id] == 1
     assert is_async is True
-    assert mc.get_external_cache_hit_sources(req2, hit_tokens) == [("host", hit_tokens)]
+    assert mc.get_external_cache_hit_sources(req2, hit_tokens) == CachedTokensBySource(
+        host=hit_tokens
+    )
 
 
 @pytest.mark.parametrize("swa_enabled", [False, True], ids=["fa_only", "fa_sw"])

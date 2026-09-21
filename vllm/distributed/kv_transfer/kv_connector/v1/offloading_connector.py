@@ -8,7 +8,9 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
+from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
+    CachedTokensBySource,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -184,7 +186,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         request: "Request",
         num_external_tokens: int,
-    ) -> list[tuple[CacheHitSource, int]]:
+    ) -> CachedTokensBySource:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_external_cache_hit_sources(
             request, num_external_tokens

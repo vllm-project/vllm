@@ -23,9 +23,7 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
-use vllm_engine_core_client::protocol::stats::{
-    CacheHitSource, ExternalCacheSources, PrefillStats,
-};
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
@@ -767,11 +765,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                         outputs: vec![EngineCoreOutput {
                             prefill_stats: Some(PrefillStats {
                                 num_prompt_tokens: 2,
-                                num_cached_tokens: 2,
-                                num_local_cached_tokens: 1,
-                                external_cached_sources: ExternalCacheSources {
-                                    segments: vec![(CacheHitSource::P2p, 1)],
-                                },
+                                num_computed_tokens: 2,
                                 ..Default::default()
                             }),
                             ..request_output_with_events(
@@ -839,28 +833,17 @@ async fn generate_records_request_metrics_in_prometheus_output() {
         "vllm:prompt_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 2"
     )));
     assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_compute\"}} 0"
+        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_compute\"}} 2"
     )));
     assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_cache_hit\"}} 1"
+        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_cache_hit\"}} 0"
     )));
     assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"external_kv_transfer\"}} 1"
+        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"external_kv_transfer\"}} 0"
     )));
     assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"4\"}} 2"
+        "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"4\"}} 0"
     )));
-    for (source, count) in [
-        ("device", 1),
-        ("host", 0),
-        ("disk", 0),
-        ("p2p", 1),
-        ("external_unspecified", 0),
-    ] {
-        assert!(rendered.contains(&format!(
-            "vllm:prompt_tokens_cached_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"{source}\"}} {count}"
-        )));
-    }
     assert!(rendered.contains(&format!(
         "vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"
     )));
