@@ -544,6 +544,8 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
             )
+        elif moe_config.has_hash_routing and cls.is_monolithic():
+            return False, _make_reason("hash routing")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
         ):
