@@ -10,9 +10,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
-from vllm.models.common.ops.fused_allreduce_rms_norm import (
-    fused_allreduce_rms_norm_out,
-)
+from vllm.models.kimi_k3.amd.ops.fused_ar_rms import fused_allreduce_rms_norm_out
 
 logger = init_logger(__name__)
 
@@ -27,10 +25,8 @@ class ROCmLatentMoERunner(MoERunner):
     rank, so the base runner combines routed + shared correctly at any TP size.
 
     The latent all-reduce is fused with the following RMSNorm via AITER's
-    1-stage custom AR when the tensor fits that gate (decode-sized). That
-    call is a plain eager function: no ``@support_torch_compile``, no
-    ``eager_break_during_capture``. CompilationMode.NONE / breakable CUDA
-    graphs capture it on the main model stream.
+    one-stage custom AR when that kernel's gate admits the tensor; see
+    ``ops/fused_ar_rms.py``. Everything else keeps the unfused all-reduce.
     """
 
     def __init__(
@@ -75,10 +71,7 @@ class ROCmLatentMoERunner(MoERunner):
             self._logged_sharded_tail = True
             logger.info_once(
                 "Kimi-K3 latent-MoE tail: up-projecting only this rank's "
-                "hidden shard into the shared output. Fused AR+RMSNorm "
-                "(AITER 1-stage custom AR) runs as an eager launch on the "
-                "main stream so breakable CUDA graphs can capture it; "
-                "larger tensors fall back to unfused all-reduce + RMSNorm.",
+                "hidden shard into the shared output.",
                 scope="global",
             )
 
@@ -86,10 +79,6 @@ class ROCmLatentMoERunner(MoERunner):
         assert transform is not None
 
         if transform.norm is not None:
-            # Eager fused AR+RMSNorm (AITER 1-stage). Must stay on the main
-            # stream with no graph-break decorator so breakable capture
-            # records it. Decode-sized tensors hit the fused op; prefill
-            # falls back to unfused QR+norm.
             latent = fused_allreduce_rms_norm_out(fused_output, transform.norm)
         else:
             latent = tensor_model_parallel_all_reduce(fused_output)
