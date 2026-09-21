@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(
@@ -273,3 +274,41 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     assert (dummy[0] == 0).all()
     # CUDA graph invariant: same persistent tensor, not a fresh allocation.
     assert dummy[0].data_ptr() == block_tables.input_block_tables[0].data_ptr()
+
+
+def test_dummy_request_slot_mapping_is_pad():
+    """idx_mapping == -1 marks a dummy (or CUDA-graph padding) request.
+
+    A dummy draft decode step must not resolve slots through the persistent
+    block-table row of a real request slot, which may be stale and point at
+    blocks that are now in the prefix cache.
+    """
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[4],
+        max_num_reqs=2,
+        max_num_batched_tokens=16,
+        max_num_blocks_per_group=[4],
+        device=device,
+        kernel_block_sizes=[4],
+    )
+    block_tables.append_block_ids(req_index=0, new_block_ids=([7, 8],), overwrite=True)
+    block_tables.apply_staged_writes()
+    query_start_loc = torch.tensor([0, 3], dtype=torch.int32, device=device)
+    positions = torch.tensor([1, 2, 3], dtype=torch.int64, device=device)
+
+    real = block_tables.compute_slot_mappings(
+        torch.tensor([0], dtype=torch.int32, device=device),
+        query_start_loc,
+        positions,
+        num_tokens_padded=3,
+    )
+    assert real[0].tolist() == [7 * 4 + 1, 7 * 4 + 2, 7 * 4 + 3]
+
+    dummy = block_tables.compute_slot_mappings(
+        torch.tensor([-1], dtype=torch.int32, device=device),
+        query_start_loc,
+        positions,
+        num_tokens_padded=3,
+    )
+    assert dummy[0].tolist() == [PAD_SLOT_ID] * 3
