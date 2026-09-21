@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Implementation of Key-Replicated Cache (see docs/configuration/optimization.md)."""
 
 from typing_extensions import override
 

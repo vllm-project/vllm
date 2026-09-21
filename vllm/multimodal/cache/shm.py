@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Implementation of Shared Memory Cache (see docs/configuration/optimization.md)."""
+
 from collections.abc import Sequence
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, cast
