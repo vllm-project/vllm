@@ -271,6 +271,18 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+        # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
+        # after a prefix hit by recomputing its trailing tokens. One window
+        # for all such groups, so the rewind matches every group's allocation.
+        replay_windows = {
+            group.kv_cache_spec.prefix_replay_tokens
+            for group in kv_cache_config.kv_cache_groups
+            if group.kv_cache_spec.prefix_replay_tokens > 0
+        }
+        assert len(replay_windows) <= 1, (
+            f"Prefix replay windows should agree: {sorted(replay_windows)}"
+        )
+        self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
@@ -308,8 +320,8 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
-            enable_mamba_fine_grained_prefix_cache=(
-                self.cache_config.enable_mamba_fine_grained_prefix_cache
+            enable_mamba_shared_prefix_checkpoint=(
+                self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
         # Bind after construction so connectors can access the cache manager.
@@ -364,9 +376,9 @@ class Scheduler(SchedulerInterface):
         # manager decides whether it can check-point there (per-group eagle bit,
         # no MTP re-prefill tail); splitting for a stop it would refuse costs a
         # forward pass and displaces the block-boundary stop.
-        self.mamba_fine_grained_prefix_cache = (
+        self.mamba_shared_prefix_checkpoint = (
             self.mamba_partial_cache_hit
-            and self.kv_cache_manager.mamba_fine_grained_prefix_cache
+            and self.kv_cache_manager.mamba_shared_prefix_checkpoint
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
@@ -497,7 +509,7 @@ class Scheduler(SchedulerInterface):
         # output tokens can still observe a junction there.
         junction_stop = (
             junction
-            if self.mamba_fine_grained_prefix_cache
+            if self.mamba_shared_prefix_checkpoint
             and junction <= request.num_prompt_tokens
             else block_floored
         )
@@ -946,6 +958,17 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
+                        if self.prefix_replay_tokens:
+                            # SWA bounded replay recomputes the hit's last
+                            # window, from the block holding its first
+                            # token; the sliding-window groups retire
+                            # whole blocks below the window of the hit's
+                            # next token. Hits end on a block boundary, or
+                            # a hit ending one token short of one would
+                            # retire the block the replay starts in.
+                            ext_tokens -= ext_tokens % self.block_size
+                            load_kv_async = load_kv_async and ext_tokens > 0
+
                         if partial_tail and ext_tokens > partial_tail:
                             # Remote strictly exceeds the full local hit: drop the
                             # sub-block tail so no CoW is needed, and let the load
@@ -988,6 +1011,17 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
+                    if 0 < num_computed_tokens <= self.prefix_replay_tokens:
+                        # SWA bounded replay: a hit no longer than the replayed
+                        # window would be recomputed in full and save nothing.
+                        new_computed_blocks = (
+                            self.kv_cache_manager.empty_kv_cache_blocks
+                        )
+                        num_new_local_computed_tokens = 0
+                        num_external_computed_tokens = 0
+                        connector_prefix_cache_hits = 0
+                        num_computed_tokens = 0
+                        load_kv_async = False
 
                     # Skip request with pending mm encoding prefetches
                     if self._ec_transfer_pending(request, num_computed_tokens):
@@ -1022,6 +1056,11 @@ class Scheduler(SchedulerInterface):
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
 
+                # SWA bounded replay: recompute the tail of the hit without
+                # rewriting its cached KV. An async load replays once the KV
+                # has arrived (_update_waiting_for_remote_kv).
+                num_replay_tokens = 0
+
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
@@ -1032,6 +1071,12 @@ class Scheduler(SchedulerInterface):
                     break
                 else:
                     request_token_budget = min(token_budget, input_budget - draft_slots)
+                    if did_prefix_cache_lookup:
+                        # Fresh admission: local and/or sync external hit.
+                        num_replay_tokens = self._mark_prefix_replay(
+                            request, num_computed_tokens
+                        )
+                        num_computed_tokens -= num_replay_tokens
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -1159,9 +1204,12 @@ class Scheduler(SchedulerInterface):
                         + self._spec_decode_step_blocks()
                     )
 
+                # Replayed tokens are already counted in the adopted hit; a
+                # chunk that ends inside the replayed range needs no new slots.
+                num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens,
+                    num_tokens_past_hit,
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
@@ -2963,6 +3011,20 @@ class Scheduler(SchedulerInterface):
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
 
+    def _mark_prefix_replay(self, request: Request, num_hit_tokens: int) -> int:
+        """Record where a prefix hit's replay starts and return the number of
+        hit tokens to recompute; the caller rewinds the computed count by it.
+
+        The replayed tokens are the hit's last window (see
+        ``Request.replay_start``): the worker rebuilds their sliding-window KV
+        and leaves their cached KV alone.
+        """
+        if not self.prefix_replay_tokens:
+            return 0
+        num_replay_tokens = min(self.prefix_replay_tokens, num_hit_tokens)
+        request.replay_start = num_hit_tokens - num_replay_tokens
+        return num_replay_tokens
+
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """KV Connector: update request state after async recv is finished.
 
@@ -2998,11 +3060,16 @@ class Scheduler(SchedulerInterface):
             # This will cache the blocks iff caching is enabled.
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
-            # on a full prompt hit, we need to re-compute the last token
-            # in order to be able to sample the next token
-            if request.num_computed_tokens == request.num_tokens:
-                request.num_computed_tokens = request.num_tokens - 1
-
+        # SWA bounded replay recomputes the tail of the hit, which covers the
+        # last token; otherwise a full prompt hit re-computes that token so the
+        # next one can be sampled.
+        num_replay_tokens = self._mark_prefix_replay(
+            request, request.num_computed_tokens
+        )
+        if num_replay_tokens > 0:
+            request.num_computed_tokens -= num_replay_tokens
+        elif request.num_computed_tokens == request.num_tokens:
+            request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
