@@ -41,9 +41,6 @@ BLOCK_SHAPE = [128, 128]
 DTYPE = torch.bfloat16
 MS = [16, 64]
 SEEDS = [0]
-CLAMP_IGNORED_REASON = (
-    "TritonExperts fp8 block fast path ignores the swiglu clamp; remove when fixed"
-)
 
 
 @pytest.fixture(autouse=True)
@@ -129,19 +126,7 @@ def per_token_relative_l2(out: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     return diff / ref.float().norm(dim=-1).clamp_min(1e-6)
 
 
-@pytest.mark.parametrize(
-    "clamp",
-    [
-        pytest.param(
-            7.0,
-            marks=pytest.mark.xfail(strict=True, reason=CLAMP_IGNORED_REASON),
-        ),
-        pytest.param(
-            10.0,
-            marks=pytest.mark.xfail(strict=True, reason=CLAMP_IGNORED_REASON),
-        ),
-    ],
-)
+@pytest.mark.parametrize("clamp", [7.0, 10.0])
 @pytest.mark.parametrize("M", MS)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
@@ -186,16 +171,7 @@ def test_triton_experts_fp8_block_honors_swiglu_clamp(
     )
 
 
-@pytest.mark.parametrize(
-    "clamp",
-    [
-        None,
-        pytest.param(
-            10.0,
-            marks=pytest.mark.xfail(strict=True, reason=CLAMP_IGNORED_REASON),
-        ),
-    ],
-)
+@pytest.mark.parametrize("clamp", [None, 10.0])
 @torch.inference_mode()
 def test_triton_experts_fp8_block_fast_path_selection(
     clamp, monkeypatch, workspace_init, disable_deepgemm_ue8m0
