@@ -829,7 +829,6 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size, monkeypatch):
                 from vllm.models.deepseek_v41.nvidia.model_state import (
                     DeepseekV41ModelState,
                 )
-                from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import warmup_mega_mhc
                 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
                 monkeypatch.setattr(
@@ -842,28 +841,35 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size, monkeypatch):
                 state.lookback_token_ids = None
                 # Prepare capture on a fresh stream; runtime overlap must not warm.
                 state.prepare_dummy_inputs(num_tokens, num_tokens)
-                warmed = warmup_mega_mhc.cache_info()
-                side = torch.cuda.Stream()
-                mhc_shifted_post_pre(
-                    x,
-                    residual,
-                    post_mix,
-                    res_mix,
-                    fn,
-                    scale,
-                    base,
-                    2e-5,
-                    3e-4,
-                    2e-6,
-                    1.25,
-                    10,
-                    pre_mix=previous_mix,
-                    norm_weight=norm_weight,
-                    norm_eps=7e-6,
-                    stream=side,
-                )
-                stream.wait_stream(side)
-                assert warmup_mega_mhc.cache_info() == warmed
+
+                def unexpected_warmup(*args, **kwargs):
+                    pytest.fail("Runtime overlap must not invoke scratch warmup")
+
+                with monkeypatch.context() as warmup_patch:
+                    warmup_patch.setattr(
+                        "vllm.models.deepseek_v41.nvidia.ops.mega_mhc.warmup_mega_mhc",
+                        unexpected_warmup,
+                    )
+                    side = torch.cuda.Stream()
+                    mhc_shifted_post_pre(
+                        x,
+                        residual,
+                        post_mix,
+                        res_mix,
+                        fn,
+                        scale,
+                        base,
+                        2e-5,
+                        3e-4,
+                        2e-6,
+                        1.25,
+                        10,
+                        pre_mix=previous_mix,
+                        norm_weight=norm_weight,
+                        norm_eps=7e-6,
+                        stream=side,
+                    )
+                    stream.wait_stream(side)
             else:
                 mhc_shifted_post_pre_deep_gemm(*args)
             graph = torch.cuda.CUDAGraph()

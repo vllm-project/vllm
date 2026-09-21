@@ -176,7 +176,6 @@ class DeepseekV41ModelState(DefaultModelState):
             config = self.model_config.hf_config
             if is_mega_mhc_supported(config.hidden_size, config.hc_mult):
                 warmup_mega_mhc(
-                    torch.cuda.current_stream(),
                     min(num_tokens, MHC_OVERLAP_MAX_TOKENS),
                     config.hidden_size,
                     config.hc_mult,

@@ -44,12 +44,9 @@ def can_use_mega_mhc(
     )
 
 
-@functools.cache
-def warmup_mega_mhc(
-    stream: torch.cuda.Stream, num_tokens: int, hidden_size: int, hc_mult: int
-) -> None:
+def warmup_mega_mhc(num_tokens: int, hidden_size: int, hc_mult: int) -> None:
     """Initialize Mega mHC's stream-local barriers before graph capture."""
-    with torch.cuda.stream(stream), torch.device(stream.device):
+    with torch.device("cuda"):
         assert not torch.cuda.is_current_stream_capturing()
         mix_size = hc_mult * (hc_mult + 2)
         mhc_shifted_post_pre_deep_gemm(
