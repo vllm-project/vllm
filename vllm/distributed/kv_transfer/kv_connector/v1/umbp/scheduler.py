@@ -346,11 +346,15 @@ class UMBPStoreConnectorScheduler:
             if load_plans:
                 meta.load_plans.extend(load_plans)
                 meta.load_requests[request_id] = load_plans
-            elif self.save_decode_cache and not self.lazy_offload:
+            elif not self.lazy_offload:
                 cached_request = self._requests.get(request_id)
                 cached_tracker = self._request_trackers.get(request_id)
                 if cached_request is not None and cached_tracker is not None:
                     request_index = cached_reqs.req_ids.index(request_id)
+                    num_computed_tokens = cached_reqs.num_computed_tokens[request_index]
+                    is_prefill = num_computed_tokens < cached_request.num_tokens
+                    if not is_prefill and not self.save_decode_cache:
+                        continue
                     new_block_ids = cached_reqs.new_block_ids[request_index]
                     if new_block_ids:
                         selected = tuple(
@@ -364,9 +368,11 @@ class UMBPStoreConnectorScheduler:
                         else:
                             cached_tracker.update_blocks(selected)
                     total_tokens = (
-                        cached_reqs.num_computed_tokens[request_index]
+                        num_computed_tokens
                         + scheduler_output.num_scheduled_tokens[request_id]
                     )
+                    if not self.save_decode_cache:
+                        total_tokens = min(total_tokens, cached_request.num_tokens)
                     cached_tracker.token_len = total_tokens
                     store_plans = self._store_plans(
                         cached_request,
