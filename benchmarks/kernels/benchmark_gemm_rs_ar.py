@@ -271,7 +271,9 @@ def benchmark_shape(
         "gemm": [lambda x=x, w=w: gemm(x, w) for x, w in zip(inputs, projections)],
         "collective": [lambda p=p: collective(p) for p in partials],
         "vllm": [lambda x=x, w=w: unfused(x, w) for x, w in zip(inputs, projections)],
-        "gemm_rs_ar": [lambda x=x, w=w: fused(x, w) for x, w in zip(inputs, projections)],
+        "gemm_rs_ar": [
+            lambda x=x, w=w: fused(x, w) for x, w in zip(inputs, projections)
+        ],
     }
 
     candidate_graphs = {}
