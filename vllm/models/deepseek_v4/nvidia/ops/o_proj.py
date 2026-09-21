@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 
@@ -53,6 +55,54 @@ def compute_fp8_einsum_recipe(
     return einsum_recipe, tma_aligned_scales
 
 
+def wo_a_einsum_then_wo_b(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    wo_a: nn.Module,
+    wo_b: Callable[[torch.Tensor | QuantizedActivation], torch.Tensor],
+    *,
+    n_groups: int,
+    o_lora_rank: int,
+    recipe: tuple[int, int, int],
+    fp8_z: bool,
+) -> torch.Tensor:
+    """Grouped FP8 ``wo_a`` einsum on a pre-quantized attention output, then ``wo_b``.
+
+    With ``fp8_z`` the einsum emits ``z`` already quantized to MXFP8 with
+    DeepGEMM packed scales and ``wo_b`` receives a ``QuantizedActivation``
+    (its kernel must consume ``kMxfp8DynamicDeepGemm``); otherwise ``z`` is
+    BF16 and ``wo_b`` quantizes it itself.
+    """
+    weight_scale = (
+        wo_a.weight_scale if hasattr(wo_a, "weight_scale") else wo_a.weight_scale_inv
+    )
+    num_tokens = a.shape[0]
+    if fp8_z:
+        z_fp8, z_sf = alloc_fp8_einsum_output(
+            num_tokens, n_groups, o_lora_rank, a.device
+        )
+        fp8_einsum(
+            "bhr,hdr->bhd",
+            (a, a_scale),
+            (wo_a.weight, weight_scale),
+            (z_fp8, z_sf),
+            recipe=recipe,
+        )
+        z_flat = z_fp8.flatten(1)
+        return wo_b(
+            QuantizedActivation(
+                z_flat, z_sf, torch.bfloat16, z_flat.shape, kMxfp8DynamicDeepGemm
+            )
+        )
+    z = torch.empty(
+        (num_tokens, n_groups, o_lora_rank), device=a.device, dtype=torch.bfloat16
+    )
+    fp8_einsum(
+        "bhr,hdr->bhd", (a, a_scale), (wo_a.weight, weight_scale), z, recipe=recipe
+    )
+    return wo_b(z.flatten(1))
+
+
 def deep_gemm_fp8_o_proj(
     o: torch.Tensor,
     positions: torch.Tensor,
@@ -92,52 +142,25 @@ def deep_gemm_fp8_o_proj(
         tma_aligned_scales=tma_aligned_scales,
         quantize=use_fp8,
     )
-    if fp8_z:
-        assert use_fp8, "fp8_z needs the FP8 wo_a einsum"
-        z_fp8, z_sf = alloc_fp8_einsum_output(
-            o.shape[0], n_groups, o_lora_rank, o.device
-        )
-        weight_scale = (
-            wo_a.weight_scale
-            if hasattr(wo_a, "weight_scale")
-            else wo_a.weight_scale_inv
-        )
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (o_proj_input, o_scale),
-            (wo_a.weight, weight_scale),
-            (z_fp8, z_sf),
-            recipe=einsum_recipe,
-        )
-        z_flat = z_fp8.flatten(1)
-        return wo_b(
-            QuantizedActivation(
-                z_flat, z_sf, torch.bfloat16, z_flat.shape, kMxfp8DynamicDeepGemm
-            )
-        )
-    z = torch.empty(
-        (o.shape[0], n_groups, o_lora_rank),
-        device=o.device,
-        dtype=torch.bfloat16,
-    )
     if use_fp8:
-        weight_scale = (
-            wo_a.weight_scale
-            if hasattr(wo_a, "weight_scale")
-            else wo_a.weight_scale_inv
-        )
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (o_proj_input, o_scale),
-            (wo_a.weight, weight_scale),
-            z,
+        return wo_a_einsum_then_wo_b(
+            o_proj_input,
+            o_scale,
+            wo_a,
+            wo_b,
+            n_groups=n_groups,
+            o_lora_rank=o_lora_rank,
             recipe=einsum_recipe,
+            fp8_z=fp8_z,
         )
-    else:
-        grouped_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
-        torch.bmm(
-            o_proj_input.transpose(0, 1),
-            grouped_weight.transpose(1, 2),
-            out=z.transpose(0, 1),
-        )
+    assert not fp8_z, "fp8_z needs the FP8 wo_a einsum"
+    z = torch.empty(
+        (o.shape[0], n_groups, o_lora_rank), device=o.device, dtype=torch.bfloat16
+    )
+    grouped_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
+    torch.bmm(
+        o_proj_input.transpose(0, 1),
+        grouped_weight.transpose(1, 2),
+        out=z.transpose(0, 1),
+    )
     return wo_b(z.flatten(1))

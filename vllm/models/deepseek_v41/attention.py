@@ -168,25 +168,21 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
-def _maybe_bind_deepgemm_fp8_chain(
+def _select_deepgemm_fp8_chain(
     attn: "DeepseekV4Attention", config, prefix: str, bind_wqa: bool
 ) -> tuple[bool, bool]:
-    """Route wo_b (and fused_wqa_wkv when ``bind_wqa``) to DeepGEMM so they
-    consume the FP8 activations the upstream DeepGEMM kernels emit.
+    """Route wo_b (and fused_wqa_wkv when ``bind_wqa``) onto the FP8
+    activations the upstream DeepGEMM kernels emit.
 
-    Runs at construction, before weights load, so the DeepGEMM kernel packs the
-    weights instead of FlashInfer. Every precondition failure logs once and
-    leaves the layer on its default kernels. Returns ``(chain, wqa)``: whether
-    the chain is on at all (wo_b / MoE legs) and whether fused_wqa_wkv is on it.
+    Marks the layers so weight loading selects the DeepGEMM MXFP8 kernel for
+    them. Every precondition failure logs once and leaves the layer on its
+    default kernels. Returns ``(chain, wqa)``: whether the chain is on at all
+    (wo_b / MoE legs) and whether fused_wqa_wkv is on it.
     """
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
         DeepGemmMxfp8LinearKernel,
     )
-    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
-        Mxfp8LinearLayerConfig,
-    )
     from vllm.model_executor.layers.fusion.quant_activation import (
-        expose_input_quant_key,
         get_input_quant_key,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -203,18 +199,13 @@ def _maybe_bind_deepgemm_fp8_chain(
         return False, False
     layers = [attn.wo_b] + ([attn.fused_wqa_wkv] if bind_wqa else [])
     for layer in layers:
-        kernel = getattr(getattr(layer, "quant_method", None), "kernel", None)
-        if kernel is None or get_input_quant_key(layer) != kMxfp8Dynamic:
+        if get_input_quant_key(layer) != kMxfp8Dynamic:
             logger.warning_once(
-                "DeepGEMM FP8 chain disabled: %s is not an MXFP8 linear (kernel=%s).",
-                prefix,
-                type(kernel).__name__,
+                "DeepGEMM FP8 chain disabled: %s is not an MXFP8 linear.", prefix
             )
             return False, False
     for layer in layers:
-        kernel = DeepGemmMxfp8LinearKernel(Mxfp8LinearLayerConfig())
-        cast(Any, layer.quant_method).kernel = kernel
-        expose_input_quant_key(layer, kernel)
+        layer.deep_gemm_activations = True
     logger.info_once(
         "DeepSeek-V4.1 DeepGEMM FP8 chain enabled: %s run on DeepGEMM with "
         "pre-quantized inputs.",
@@ -452,10 +443,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # feeds fused_wqa_wkv the same way -- except under sequence parallel,
         # where the attention input is all-gathered in BF16 after the norm and
         # a per-rank FP8 copy cannot be used (an FP8 all-gather is future work).
-        self.use_deepgemm_fp8_chain, self.wqa_fp8_chain = (
-            _maybe_bind_deepgemm_fp8_chain(
-                self, config, prefix, bind_wqa=not sequence_parallel
-            )
+        self.use_deepgemm_fp8_chain, self.wqa_fp8_chain = _select_deepgemm_fp8_chain(
+            self, config, prefix, bind_wqa=not sequence_parallel
         )
 
         # Initialize rotary embedding before the indexer/compressor consume it.

@@ -85,6 +85,7 @@ from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
     MegaMoeFp8Target,
     prepare_megamoe_inputs,
+    stage_megamoe_routing,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -229,7 +230,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         num_logical_experts: int | None = None,
     ):
         super().__init__()
-        self.input_prequantized = False
         self.prefix = prefix
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.num_experts = num_experts
@@ -600,35 +600,37 @@ class DeepseekV4MegaMoEExperts(nn.Module):
     def has_fused_shared_experts(self) -> bool:
         return self._transformed_shared_l1_weights is not None
 
-    def fp8_input_target(self, num_tokens: int):
-        """Symmetric-buffer views a producer fills to skip input quantization.
+    def fp8_input_target(self, num_tokens: int) -> MegaMoeFp8Target | None:
+        """Symmetric-buffer views a producer fills so ``forward_staged`` can
+        skip input quantization.
 
-        Returns ``None`` when the shared experts are not fused into the mega
-        kernel: Mega mHC's FP8 MoE output requires both the routed and the
-        shared-expert scale layouts.
+        ``None`` when the shared experts are not fused into the mega kernel:
+        Mega mHC's FP8 MoE output writes both the routed and the shared-expert
+        scale layouts, so it needs both to exist.
         """
         if (
             type(self) is not DeepseekV4MegaMoEExperts
             or not self.has_fused_shared_experts
         ):
             return None
+        symm_buffer = self.get_symm_buffer()
+        return MegaMoeFp8Target(
+            x=symm_buffer.x,
+            x_sf=symm_buffer.x_sf,
+            shared_sf=symm_buffer.shared_l1_acts_sf,
+            shared_block_m=self._shared_block_m(symm_buffer, num_tokens),
+        )
+
+    def _shared_block_m(self, symm_buffer, num_tokens: int) -> int:
         from vllm.utils.deep_gemm import _import_deep_gemm
 
-        deep_gemm = _import_deep_gemm()
-        symm_buffer = self.get_symm_buffer()
-        shared_block_m = deep_gemm.get_block_m_for_mega_moe(
+        return _import_deep_gemm().get_block_m_for_mega_moe(
             get_ep_group().world_size,
             self.num_experts,
             symm_buffer.num_max_tokens_per_rank,
             num_tokens,
             self.top_k,
             "fp8xfp4",
-        )
-        return MegaMoeFp8Target(
-            x=symm_buffer.x,
-            x_sf=symm_buffer.x_sf,
-            shared_sf=symm_buffer.shared_l1_acts_sf,
-            shared_block_m=shared_block_m,
         )
 
     def get_symm_buffer(self):
@@ -723,11 +725,47 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         activation_clamp: float | None,
         fast_math: bool = True,
     ) -> torch.Tensor:
-        # Set by DeepseekV4MoE.forward for this call when the producer already
-        # wrote the batch's FP8 tokens and both scale layouts into the symmetric
-        # buffer (Mega mHC FP8 output); staging then only repacks the routing.
-        prequantized = self.input_prequantized
-        self.input_prequantized = False
+        return self._forward(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            None,
+            activation_clamp=activation_clamp,
+            fast_math=fast_math,
+        )
+
+    def forward_staged(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        staged: MegaMoeFp8Target,
+        *,
+        activation_clamp: float | None,
+        fast_math: bool = True,
+    ) -> torch.Tensor:
+        """``forward`` for a batch whose FP8 tokens and scales a producer already
+        wrote into ``staged`` (from ``fp8_input_target``); staging then only
+        repacks the routing."""
+        return self._forward(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            staged,
+            activation_clamp=activation_clamp,
+            fast_math=fast_math,
+        )
+
+    def _forward(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        staged: MegaMoeFp8Target | None,
+        *,
+        activation_clamp: float | None,
+        fast_math: bool,
+    ) -> torch.Tensor:
         if hidden_states.shape[0] > self.max_num_tokens:
             raise ValueError(
                 f"DeepSeek V4 MegaMoE got {hidden_states.shape[0]} tokens, "
@@ -771,32 +809,34 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 else None,
             )
 
-        shared_x_sf = None
-        shared_block_m = None
-        if self.has_fused_shared_experts:
-            shared_x_sf = symm_buffer.shared_l1_acts_sf
-            shared_block_m = deep_gemm.get_block_m_for_mega_moe(
-                get_ep_group().world_size,
-                self.num_experts,
-                symm_buffer.num_max_tokens_per_rank,
-                num_tokens,
-                self.top_k,
-                "fp8xfp4",
+        if staged is not None:
+            assert staged.x is symm_buffer.x
+            shared_block_m = staged.shared_block_m
+            stage_megamoe_routing(
+                topk_weights,
+                topk_ids,
+                symm_buffer.topk_idx[:num_tokens],
+                symm_buffer.topk_weights[:num_tokens],
+                is_padding=is_padding,
             )
-
-        prepare_megamoe_inputs(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            symm_buffer.x[:num_tokens],
-            symm_buffer.x_sf[:num_tokens],
-            symm_buffer.topk_idx[:num_tokens],
-            symm_buffer.topk_weights[:num_tokens],
-            is_padding=is_padding,
-            shared_x_sf=shared_x_sf,
-            shared_block_m=shared_block_m,
-            skip_quant=prequantized,
-        )
+        else:
+            shared_x_sf = None
+            shared_block_m = None
+            if self.has_fused_shared_experts:
+                shared_x_sf = symm_buffer.shared_l1_acts_sf
+                shared_block_m = self._shared_block_m(symm_buffer, num_tokens)
+            prepare_megamoe_inputs(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                symm_buffer.x[:num_tokens],
+                symm_buffer.x_sf[:num_tokens],
+                symm_buffer.topk_idx[:num_tokens],
+                symm_buffer.topk_weights[:num_tokens],
+                is_padding=is_padding,
+                shared_x_sf=shared_x_sf,
+                shared_block_m=shared_block_m,
+            )
 
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
@@ -1081,7 +1121,7 @@ class DeepseekV4MoE(nn.Module):
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
-        prequantized: bool = False,
+        staged: MegaMoeFp8Target | None = None,
     ) -> torch.Tensor:
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
@@ -1152,15 +1192,22 @@ class DeepseekV4MoE(nn.Module):
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )
-        if prequantized:
+        if staged is not None:
             assert isinstance(self.experts, DeepseekV4MegaMoEExperts)
-            self.experts.input_prequantized = True
-        final_hidden_states = self.experts(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            activation_clamp=activation_clamp,
-        )
+            final_hidden_states = self.experts.forward_staged(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                staged,
+                activation_clamp=activation_clamp,
+            )
+        else:
+            final_hidden_states = self.experts(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                activation_clamp=activation_clamp,
+            )
 
         if (
             self.shared_experts is not None

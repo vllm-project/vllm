@@ -143,10 +143,11 @@ def test_mega_mhc_fp8_gemm_output(tokens: int):
         w,
         1e-6,
     )
-    *ref, y_none = mhc_shifted_post_pre_deep_gemm(*args)
-    assert y_none is None
-    *out, y_q = mhc_shifted_post_pre_deep_gemm(*args, fp8_out="gemm")
-    assert isinstance(y_q, QuantizedActivation)
+    *ref, none = mhc_shifted_post_pre_deep_gemm(*args)
+    assert none == (None, None)
+    *out, fp8 = mhc_shifted_post_pre_deep_gemm(*args, fp8_gemm_output=True)
+    y_q = fp8.gemm_input
+    assert isinstance(y_q, QuantizedActivation) and fp8.moe_staged is None
     assert y_q.quant_key == kMxfp8DynamicDeepGemm
     for a, b in zip(ref, out):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
@@ -210,10 +211,11 @@ def test_fp8_einsum_fp8_output(tokens: int):
     )
 
 
-def test_prepare_megamoe_skip_quant():
-    """skip_quant leaves the FP8 buffers untouched and still repacks the top-k."""
+def test_stage_megamoe_routing():
+    """Routing-only staging leaves the FP8 buffers untouched and repacks the top-k."""
     from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
         prepare_megamoe_inputs,
+        stage_megamoe_routing,
     )
 
     torch.manual_seed(0)
@@ -225,7 +227,7 @@ def test_prepare_megamoe_skip_quant():
     x_sf = torch.zeros(tokens, hidden // 128, device=dev, dtype=torch.int32)
     idx_out = torch.empty(tokens, top_k, device=dev, dtype=torch.int64)
     w_out = torch.empty(tokens, top_k, device=dev, dtype=torch.float32)
-    prepare_megamoe_inputs(h, wts, ids, x, x_sf, idx_out, w_out, skip_quant=True)
+    stage_megamoe_routing(wts, ids, idx_out, w_out)
     assert x.float().abs().sum() == 0 and x_sf.abs().sum() == 0
     torch.testing.assert_close(idx_out, ids.to(torch.int64))
     torch.testing.assert_close(w_out, wts)
@@ -293,8 +295,8 @@ def test_mega_mhc_fp8_moe_output(tokens: int, shared_block_m: int):
         shared_block_m=shared_block_m,
     )
     target = mk()
-    *out, flag = mhc_shifted_post_pre_deep_gemm(*args, fp8_out="moe", moe_target=target)
-    assert flag is None
+    *out, fp8 = mhc_shifted_post_pre_deep_gemm(*args, moe_target=target)
+    assert fp8.moe_staged is target and fp8.gemm_input is None
     y_bf16 = out[3]
     # Reference: the staging kernel's own quantization of the same y_bf16.
     ref = mk()

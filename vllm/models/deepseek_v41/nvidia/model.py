@@ -33,7 +33,6 @@ from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -90,6 +89,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, gather_engram_hashes
+from .ops.mega_mhc import NO_FP8_OUTPUTS
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     mhc_pre_delayed_overlap,
@@ -389,7 +389,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         torch.Tensor | None,
     ]:
         previous_aux: torch.Tensor | None = None
-        x_q: QuantizedActivation | None = None
+        attn_fp8 = NO_FP8_OUTPUTS
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
@@ -493,18 +493,17 @@ class DeepseekV4DecoderLayer(nn.Module):
                     capture_aux=capture_previous_aux,
                     stream=mhc_stream,
                     reduce_results=self.fuse_mhc_all_reduce,
-                    fp8_out="gemm" if self.wqa_fp8_chain else None,
+                    fp8_gemm_output=self.wqa_fp8_chain,
                 )
             )
-            x_q = attn_fp8 if isinstance(attn_fp8, QuantizedActivation) else None
             if capture_previous_aux:
                 previous_aux = aux
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
-            assert x_q is None  # never requested under sequence parallel
+            assert attn_fp8.gemm_input is None  # per-rank; not gathered
 
-        x = self.attn(positions, x, None, hidden_states_q=x_q)
+        x = self.attn(positions, x, None, hidden_states_q=attn_fp8.gemm_input)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
@@ -533,10 +532,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=self.ffn_norm.variance_epsilon,
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
-            fp8_out="moe" if moe_target is not None else None,
             moe_target=moe_target,
         )
-        x = self.ffn(x, input_ids, mega_gate_metadata, prequantized=ffn_fp8 is True)
+        x = self.ffn(x, input_ids, mega_gate_metadata, staged=ffn_fp8.moe_staged)
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux

@@ -16,12 +16,14 @@ from vllm.model_executor.kernels.mhc.tilelang import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
-from .mega_mhc import is_mega_mhc_supported, mhc_shifted_post_pre_deep_gemm
+from .mega_mhc import (
+    NO_FP8_OUTPUTS,
+    MegaMhcFp8Outputs,
+    is_mega_mhc_supported,
+    mhc_shifted_post_pre_deep_gemm,
+)
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fusion.quant_activation import (
-        QuantizedActivation,
-    )
     from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import MegaMoeFp8Target
 
 if TYPE_CHECKING:
@@ -173,7 +175,7 @@ def mhc_shifted_post_pre(
     *,
     stream: torch.cuda.Stream | None = None,
     reduce_results: bool = False,
-    fp8_out: str | None = None,
+    fp8_gemm_output: bool = False,
     moe_target: "MegaMoeFp8Target | None" = None,
 ) -> tuple[
     torch.Tensor,
@@ -182,17 +184,16 @@ def mhc_shifted_post_pre(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    "QuantizedActivation | bool | None",
+    MegaMhcFp8Outputs,
 ]:
     """Dispatch shifted post/pre to overlap, Mega-mHC, or fused TileLang.
 
     When stream is supplied, join it before consuming the returned coefficients.
 
-    ``fp8_out`` asks the Mega-mHC path to also emit the normalized output as
-    MXFP8 (see ``mhc_shifted_post_pre_deep_gemm``). The last returned element
-    reports what happened: a ``QuantizedActivation`` for ``"gemm"``, ``True``
-    for ``"moe"`` (the symmetric buffer holds this batch's FP8 input), or
-    ``None`` when another path ran and the caller must quantize itself.
+    ``fp8_gemm_output`` / ``moe_target`` ask the Mega-mHC path to also emit
+    the normalized output as MXFP8 (see ``mhc_shifted_post_pre_deep_gemm``).
+    The last element reports what was produced; it is empty when another path
+    ran and the consumer must quantize itself.
     """
     layer_input = None
     if reduce_results:
@@ -241,7 +242,7 @@ def mhc_shifted_post_pre(
             stream=stream,
             layer_input=layer_input,
         )
-        return residual, *pre_outputs, aux, None
+        return residual, *pre_outputs, aux, NO_FP8_OUTPUTS
 
     if (
         pre_mix is not None
@@ -256,7 +257,7 @@ def mhc_shifted_post_pre(
             new_comb_res_mix,
             y_bf16,
             new_prev_mix,
-            y_quant,
+            fp8_outputs,
         ) = mhc_shifted_post_pre_deep_gemm(
             x,
             residual,
@@ -273,11 +274,8 @@ def mhc_shifted_post_pre(
             sinkhorn_repeat,
             norm_weight,
             norm_eps,
-            fp8_out=fp8_out,
+            fp8_gemm_output=fp8_gemm_output,
             moe_target=moe_target,
-        )
-        fp8_result: QuantizedActivation | bool | None = (
-            True if fp8_out == "moe" else y_quant
         )
         return (
             new_residual,
@@ -286,7 +284,7 @@ def mhc_shifted_post_pre(
             y_bf16,
             new_prev_mix,
             x.new_empty(0, x.shape[1]),
-            fp8_result,
+            fp8_outputs,
         )
 
     tl_outputs = mhc_fused_post_pre_delayed_tilelang(
@@ -307,4 +305,4 @@ def mhc_shifted_post_pre(
         norm_eps=norm_eps,
         capture_aux=capture_aux,
     )
-    return *tl_outputs, None
+    return *tl_outputs, NO_FP8_OUTPUTS

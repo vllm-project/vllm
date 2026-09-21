@@ -329,29 +329,22 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         )
 
 
-def _deepgemm_mxfp8_linear_modules(
+def _deepgemm_mxfp8_linear_weights(
     model: torch.nn.Module,
-) -> list[tuple[torch.Size, torch.nn.Module]]:
-    """Linear layers routed to ``DeepGemmMxfp8LinearKernel`` (one per weight shape)."""
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Weights of the linear layers on ``DeepGemmMxfp8LinearKernel``, one per shape."""
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
         DeepGemmMxfp8LinearKernel,
     )
 
-    seen: dict[torch.Size, torch.nn.Module] = {}
+    seen: dict[torch.Size, tuple[torch.Tensor, torch.Tensor]] = {}
     for module in model.modules():
-        kernel = getattr(getattr(module, "quant_method", None), "kernel", None)
-        if not isinstance(kernel, DeepGemmMxfp8LinearKernel):
+        provider = getattr(module, "deep_gemm_warmup_provider", None)
+        if not isinstance(provider, DeepGemmMxfp8LinearKernel):
             continue
-        weight = getattr(module, "weight", None)
-        if weight is None or weight.dtype != torch.float8_e4m3fn or weight.ndim != 2:
-            continue
-        seen.setdefault(weight.size(), module)
-    return list(seen.items())
-
-
-def _deepgemm_mxfp8_gemm_m_values(w: torch.Tensor, max_tokens: int) -> list[int]:
-    n = w.shape[0]
-    return _generate_optimal_warmup_m_values(max_tokens, n, w.device)
+        w, ws = provider.get_deep_gemm_warmup_weights(module)
+        seen.setdefault(w.size(), (w, ws))
+    return list(seen.values())
 
 
 def deepgemm_mxfp8_gemm_warmup(
@@ -360,12 +353,11 @@ def deepgemm_mxfp8_gemm_warmup(
     """Pre-compile ``fp8_gemm_nt`` with recipe (1, 1, 32) and packed UE8M0
     scales for every M bucket a DeepGEMM MXFP8 linear may see, so the DeepSeek
     V4.1 FP8 chain does not JIT during serving."""
-    for size, module in _deepgemm_mxfp8_linear_modules(model):
-        w, ws = module.weight, module.weight_scale
+    for w, ws in _deepgemm_mxfp8_linear_weights(model):
         n, k = w.shape
         device = w.device
         a = torch.empty((max_tokens, k), device=device, dtype=torch.float8_e4m3fn)
-        for m in _deepgemm_mxfp8_gemm_m_values(w, max_tokens):
+        for m in _generate_optimal_warmup_m_values(max_tokens, n, device):
             # DeepGEMM requires the packed scale's column stride to be the
             # TMA-aligned size of this M, so the scale is allocated per bucket.
             sf = torch.empty_strided(
@@ -404,8 +396,10 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
             if w2.size() not in seen_grouped_sizes:
                 total += n_values
                 seen_grouped_sizes.add(w2.size())
-    for _, module in _deepgemm_mxfp8_linear_modules(model):
-        total += len(_deepgemm_mxfp8_gemm_m_values(module.weight, max_tokens))
+    for w, _ in _deepgemm_mxfp8_linear_weights(model):
+        total += len(
+            _generate_optimal_warmup_m_values(max_tokens, w.shape[0], w.device)
+        )
     return total
 
 

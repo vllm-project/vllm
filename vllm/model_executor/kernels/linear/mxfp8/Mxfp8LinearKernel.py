@@ -18,6 +18,10 @@ class Mxfp8LinearLayerConfig:
     """
 
     bmm_batch_size: int | None = None
+    deep_gemm_activations: bool = False
+    """The layer's activations arrive as MXFP8 with DeepGEMM's packed UE8M0
+    scales (``kMxfp8DynamicDeepGemm``), produced by an upstream DeepGEMM
+    kernel; only the DeepGEMM GEMM consumes that layout."""
 
 
 class Mxfp8LinearKernel(ABC):

@@ -188,6 +188,12 @@ class DeepGemmMxfp8LinearKernel(Mxfp8LinearKernel):
         replace_parameter(layer, "weight", weight)
         replace_parameter(layer, "weight_scale", scale)
         layer.weight_block_size = [1, 32]
+        layer.deep_gemm_warmup_provider = self
+
+    def get_deep_gemm_warmup_weights(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return layer.weight, layer.weight_scale
 
     def apply_weights(
         self,

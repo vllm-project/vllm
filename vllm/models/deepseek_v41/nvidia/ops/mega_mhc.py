@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 
@@ -21,6 +21,20 @@ from vllm.utils.deep_gemm import (
 
 # Hidden elements per packed int32 scale word: 4 UE8M0 scales x 32-element groups.
 _HIDDEN_PER_SF_WORD = 128
+
+
+class MegaMhcFp8Outputs(NamedTuple):
+    """What Mega mHC emitted besides its BF16 output."""
+
+    gemm_input: QuantizedActivation | None
+    """The normalized output as MXFP8 with DeepGEMM packed scales, for a
+    ``fp8_gemm_nt`` consumer (the attention ``fused_wqa_wkv``)."""
+    moe_staged: MegaMoeFp8Target | None
+    """The normalized output written as FP8 tokens plus both scale layouts into
+    the Mega MoE symmetric buffer, so MoE input staging skips quantization."""
+
+
+NO_FP8_OUTPUTS = MegaMhcFp8Outputs(None, None)
 
 
 def make_deep_gemm_packed_scale(
@@ -67,7 +81,7 @@ def mhc_shifted_post_pre_deep_gemm(
     num_sinkhorn_iters: int,
     rmsnorm_weight: torch.Tensor,
     rmsnorm_eps: float,
-    fp8_out: str | None = None,
+    fp8_gemm_output: bool = False,
     moe_target: MegaMoeFp8Target | None = None,
 ) -> tuple[
     torch.Tensor,
@@ -75,19 +89,18 @@ def mhc_shifted_post_pre_deep_gemm(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    QuantizedActivation | None,
+    MegaMhcFp8Outputs,
 ]:
     """Run DSV4.1 shifted post, next pre, and BF16 RMSNorm with Mega mHC.
 
-    ``fp8_out`` additionally emits the normalized output as MXFP8 straight from
-    the kernel (the BF16 output is always produced for the BF16 consumers):
-
-    * ``"gemm"``: returns a ``QuantizedActivation`` with DeepGEMM packed scales
-      for a ``fp8_gemm_nt`` consumer (the attention ``fused_wqa_wkv``).
-    * ``"moe"``: writes the FP8 tokens and both scale layouts into
-      ``moe_target`` (the Mega MoE symmetric buffer), so the MoE input staging
-      no longer quantizes; returns ``None``.
+    The BF16 output is always produced for its BF16 consumers. In addition,
+    ``fp8_gemm_output`` returns the output as MXFP8 with DeepGEMM packed scales
+    (``MegaMhcFp8Outputs.gemm_input``), and ``moe_target`` makes the kernel
+    write the FP8 tokens and both scale layouts straight into the Mega MoE
+    symmetric buffer (``MegaMhcFp8Outputs.moe_staged``). DeepGEMM accepts
+    exactly one of the two per launch.
     """
+    assert not (fp8_gemm_output and moe_target is not None)
     num_tokens, hidden_size = x.shape
     hc_mult = residual.shape[1]
     new_residual = torch.empty_like(residual)
@@ -96,16 +109,18 @@ def mhc_shifted_post_pre_deep_gemm(
     new_comb_res_mix = torch.empty_like(comb_res_mix)
     y_bf16 = x.new_empty(num_tokens, hidden_size, dtype=torch.bfloat16)
     fp8_kwargs: dict[str, Any] = {}
-    y_quant: QuantizedActivation | None = None
-    if fp8_out == "gemm":
+    fp8_outputs = NO_FP8_OUTPUTS
+    if fp8_gemm_output:
         y_fp8 = x.new_empty(num_tokens, hidden_size, dtype=torch.float8_e4m3fn)
         y_gemm_sf = make_deep_gemm_packed_scale(num_tokens, hidden_size, x.device)
         fp8_kwargs = {"y_fp8": y_fp8, "y_gemm_sf": y_gemm_sf}
-        y_quant = QuantizedActivation(
-            y_fp8, y_gemm_sf, torch.bfloat16, y_fp8.shape, kMxfp8DynamicDeepGemm
+        fp8_outputs = MegaMhcFp8Outputs(
+            QuantizedActivation(
+                y_fp8, y_gemm_sf, torch.bfloat16, y_fp8.shape, kMxfp8DynamicDeepGemm
+            ),
+            None,
         )
-    elif fp8_out == "moe":
-        assert moe_target is not None
+    elif moe_target is not None:
         y_fp8 = moe_target.x[:num_tokens]
         assert y_fp8.is_contiguous() and y_fp8.shape == (num_tokens, hidden_size)
         fp8_kwargs = {
@@ -116,8 +131,7 @@ def mhc_shifted_post_pre_deep_gemm(
             "y_shared_sf": moe_target.shared_sf[:num_tokens],
             "shared_sf_block_m": moe_target.shared_block_m,
         }
-    elif fp8_out is not None:
-        raise ValueError(f"unknown fp8_out={fp8_out!r}")
+        fp8_outputs = MegaMhcFp8Outputs(None, moe_target)
     mega_mhc(
         x=x,
         residual=residual,
@@ -149,5 +163,5 @@ def mhc_shifted_post_pre_deep_gemm(
         new_comb_res_mix,
         y_bf16,
         new_prev_mix.squeeze(-1),
-        y_quant,
+        fp8_outputs,
     )
