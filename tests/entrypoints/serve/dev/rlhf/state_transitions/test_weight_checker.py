@@ -125,7 +125,7 @@ class TestWeightCheckerAPI:
         assert health(url) == 200
 
     def test_paused_server_is_conflict(self, wc_server):
-        """A paused or sleeping engine cannot hash or rewrite its weights.
+        """A paused engine cannot hash or rewrite its weights.
 
         ``compare`` is sent without a baseline, so 409 must win over the 400
         that a missing baseline would otherwise produce.

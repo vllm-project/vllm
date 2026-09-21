@@ -66,12 +66,13 @@ async def handle_weight_checker(body: dict, client: EngineClient) -> dict:
     * **reset**:    ``{"status": "reset"}``
     * **compare**:  ``{"match": bool, "mismatches": [str]}``
 
-    Sleep level 2 drops the weight storage, so a paused or sleeping engine
-    returns HTTP 409. The RL workflow is in docs/features/weight_checker.md.
+    A paused engine returns HTTP 409, and so does a duplicate key from the
+    workers. A sleeping engine is the caller's responsibility to wake first.
+    The RL workflow is in docs/features/weight_checker.md.
 
     Raises:
-        HTTPException: For an unknown action, a missing baseline, a paused or
-            sleeping engine, or duplicate keys from the workers.
+        HTTPException: For an unknown action, a missing baseline, a paused
+            engine, or duplicate keys from the workers.
     """
     action = _require_action(body)
     await _require_awake_engine(client)

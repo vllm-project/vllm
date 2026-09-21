@@ -12,11 +12,16 @@ Then run:
 
 The example follows the Weight Checker lifecycle:
 
-    checksum -> reset -> reload/transfer -> checksum -> compare
+    checksum -> pause -> reset -> reload/transfer -> checksum -> compare -> resume
 
 The server keeps no baseline state, so the caller holds the first checksum
 and sends it back when comparing. That keeps the check valid when requests
 are load-balanced over several API server processes.
+
+``reset`` overwrites the weights in place, so it is bracketed by ``/pause`` and
+``/resume``: serving between the reset and the reload would generate from random
+weights, and the prefix cache would keep those blocks. See
+docs/features/weight_checker.md for the full rationale.
 
 For a standalone demonstration, the existing ``collective_rpc`` development
 endpoint reloads the inference weights from the configured checkpoint. In a
@@ -60,21 +65,31 @@ def reload_inference_weights(base_url: str) -> None:
 
 def verify_weight_update(base_url: str) -> None:
     """Run a complete reset, reload, and byte-for-byte verification cycle."""
-    print("[1/4] Computing the original checksums and saving the baseline...")
+    print("[1/6] Computing the original checksums and saving the baseline...")
     original = check_weights(base_url, "checksum")["checksums"]
     print(f"      hashed {len(original)} tensors")
 
-    print("[2/4] Resetting inference weights...")
+    print("[2/6] Pausing generation so no request reads random weights...")
+    post(base_url, "/pause", params={"mode": "abort"})
+
+    print("[3/6] Resetting inference weights...")
     reset = check_weights(base_url, "reset")
     assert reset["status"] == "reset"
 
     print("      Reloading inference weights from the original checkpoint...")
     reload_inference_weights(base_url)
+    # /pause clears the prefix cache for mode=abort, so this is a safety net
+    # for callers whose pause configuration kept the blocks.
+    reset_cache = post(
+        base_url, "/reset_prefix_cache", params={"reset_running_requests": True}
+    )
+    if not reset_cache["success"]:
+        raise RuntimeError("Could not clear the blocks cached from random weights")
 
-    print("[3/4] Computing checksums of the reloaded inference weights...")
+    print("[4/6] Computing checksums of the reloaded inference weights...")
     check_weights(base_url, "checksum")
 
-    print("[4/4] Comparing the current weights with the original baseline...")
+    print("[5/6] Comparing the current weights with the original baseline...")
     comparison = check_weights(base_url, "compare", original)
     if not comparison["match"]:
         mismatches = comparison["mismatches"]
@@ -82,6 +97,9 @@ def verify_weight_update(base_url: str) -> None:
         raise RuntimeError(
             f"Weight verification failed with {len(mismatches)} mismatches:\n{preview}"
         )
+
+    print("[6/6] Resuming generation...")
+    post(base_url, "/resume")
 
     print("Weight verification passed: all inference weights match.")
 
