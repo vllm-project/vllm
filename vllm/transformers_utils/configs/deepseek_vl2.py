@@ -107,7 +107,7 @@ class DeepseekVLV2Config(PretrainedConfig):
 
     def __init__(
         self,
-        tile_tag: str = "tile_tag",
+        tile_tag: str = "2D",
         global_view_pos: str = "head",
         candidate_resolutions: tuple[tuple[int, int]] = ((384, 384),),
         **kwargs,
