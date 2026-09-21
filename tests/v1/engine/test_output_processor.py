@@ -41,7 +41,7 @@ from vllm.v1.outputs import IterStats
 def test_token_events_respect_otel_span_event_limit(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(observable_context, "_MAX_EVENTS", 2)
+    monkeypatch.setattr(observable_context, "_get_max_events", lambda: 2)
     context = observable_context.ObservableContext.from_new_request()
 
     for timestamp in (1.0, 2.0):
