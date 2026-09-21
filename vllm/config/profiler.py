@@ -152,7 +152,7 @@ class ProfilerConfig:
     """
 
     @property
-    def profile_frontend(self) -> bool:
+    def should_profile_frontend(self) -> bool:
         """Whether the frontend CPU profiler should be enabled."""
         activities = self.torch_profiler_activities
         return (
@@ -213,7 +213,7 @@ class ProfilerConfig:
                 raise ValueError(
                     "torch_profiler_activities must not contain duplicates"
                 )
-        if has_delay_or_limit and self.profile_frontend:
+        if has_delay_or_limit and self.should_profile_frontend:
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."
