@@ -19,6 +19,7 @@ import torch
 
 from vllm.model_executor.models.mimo_v2 import _shard_fp8_qkv_proj
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import set_default_torch_num_threads
 
 pytestmark = pytest.mark.cpu_test
 
@@ -37,6 +38,13 @@ GEOMETRIES = {
     "swa": (64, 8, 192, 128, 4),
     "pro": (128, 8, 192, 128, 8),
 }
+
+
+@pytest.fixture(scope="module", autouse=True)
+def single_threaded_cpu_ops():
+    # Do not prime the parent's thread pool before later engine forks.
+    with set_default_torch_num_threads(1):
+        yield
 
 
 def _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp):
