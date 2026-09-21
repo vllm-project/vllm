@@ -14,8 +14,8 @@ use vllm_engine_core_client::protocol::logprobs::Logprobs;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
 };
-use vllm_engine_core_client::protocol::prompt_token_id_logprobs::PromptTokenIdLogprobs;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
 use crate::error::Result;
@@ -39,7 +39,7 @@ pub struct CollectedGenerateOutput {
     pub request_id: String,
     pub prompt_token_ids: Vec<u32>,
     pub prompt_logprobs: Option<Logprobs>,
-    pub prompt_token_id_logprobs: Option<PromptTokenIdLogprobs>,
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
     pub token_ids: Vec<u32>,
     pub logprobs: Option<Logprobs>,
     pub finish_reason: FinishReason,
@@ -65,7 +65,7 @@ pub struct GeneratePromptInfo {
     /// when requested.
     pub prompt_logprobs: Option<Logprobs>,
     /// Log probabilities of `prompt_logprob_token_ids`, when requested.
-    pub prompt_token_id_logprobs: Option<PromptTokenIdLogprobs>,
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
 }
 
 /// The reason a request finished.
@@ -282,15 +282,16 @@ impl Stream for GenerateOutputStream {
         let raw = raw.output;
 
         // Populate the one-time prompt info on the first output.
-        if let Some(info) = &mut self.pending_prompt_info {
-            if info.prompt_logprobs.is_none() {
-                info.prompt_logprobs =
-                    raw.new_prompt_logprobs_tensors.map(|value| value.into_direct().unwrap());
-            }
-            if info.prompt_token_id_logprobs.is_none() {
-                info.prompt_token_id_logprobs =
-                    raw.prompt_token_id_logprobs.map(|value| value.into_direct().unwrap());
-            }
+        if let Some(info) = &mut self.pending_prompt_info
+            && info.prompt_logprobs.is_none()
+        {
+            info.prompt_logprobs =
+                raw.new_prompt_logprobs_tensors.map(|value| value.into_direct().unwrap());
+        }
+        if let Some(info) = &mut self.pending_prompt_info
+            && info.prompt_token_id_logprobs.is_none()
+        {
+            info.prompt_token_id_logprobs = raw.prompt_token_id_logprobs;
         }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());

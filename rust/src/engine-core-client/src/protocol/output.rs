@@ -15,9 +15,9 @@ use super::serde_utils::AllowTrailingFields;
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
-use crate::protocol::prompt_token_id_logprobs::MaybeWirePromptTokenIdLogprobs;
 use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
+use crate::protocol::tensor::WireNdArray;
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
 /// The stop reason associated with a finished output.
@@ -137,7 +137,7 @@ pub struct EngineCoreOutput {
     /// Log probabilities of `SamplingParams.prompt_logprob_token_ids`, set on
     /// the first output of a request that asked for them.
     #[serde(default)]
-    pub prompt_token_id_logprobs: Option<MaybeWirePromptTokenIdLogprobs>,
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -185,9 +185,11 @@ impl EngineCoreOutput {
         self.new_sampling_mask = (self.new_sampling_mask.take())
             .map(|value| value.resolve(frames, "new_sampling_mask"))
             .transpose()?;
-        self.prompt_token_id_logprobs = (self.prompt_token_id_logprobs.take())
-            .map(|value| value.resolve(frames, "prompt_token_id_logprobs"))
-            .transpose()?;
+        if let Some(value) = self.prompt_token_id_logprobs.as_mut() {
+            value
+                .resolve_aux_frame(frames)
+                .map_err(|message| ext_value_decode!("prompt_token_id_logprobs: {message}"))?;
+        }
         Ok(())
     }
 }

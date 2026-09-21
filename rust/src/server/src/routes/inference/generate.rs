@@ -21,9 +21,10 @@ use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
-use vllm_engine_core_client::protocol::prompt_token_id_logprobs::PromptTokenIdLogprobs;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
 };
@@ -327,7 +328,11 @@ fn collect_generate(
             token_ids: collected.token_ids,
         }],
         prompt_logprobs,
-        prompt_token_id_logprobs: collected.prompt_token_id_logprobs.as_ref().map(npy_base64),
+        prompt_token_id_logprobs: collected
+            .prompt_token_id_logprobs
+            .as_ref()
+            .map(npy_base64)
+            .transpose()?,
         prompt_token_ids: return_token_ids.then_some(collected.prompt_token_ids),
         mm_placeholders: return_token_ids.then_some(mm_placeholders).flatten(),
         kv_transfer_params: collected.kv_transfer_params,
@@ -430,22 +435,27 @@ fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, Generate
         .collect()
 }
 
-/// Encode as `np.save` does for a C-contiguous little-endian float32 array.
-fn npy_base64(scores: &PromptTokenIdLogprobs) -> String {
-    let mut header = format!(
-        "{{'descr': '<f4', 'fortran_order': False, 'shape': ({}, {}), }}",
-        scores.rows, scores.cols
-    );
-    header.push_str(&" ".repeat(21 - scores.rows.to_string().len()));
+/// Encode a float32 matrix as Python `numpy2base64` does.
+fn npy_base64(array: &WireNdArray) -> Result<String, ApiError> {
+    let (TensorDtype::F32, Some(data), [rows, cols]) = (
+        array.dtype.scalar,
+        array.data.as_raw_view(),
+        array.shape.as_slice(),
+    ) else {
+        bail_server_error!("prompt_token_id_logprobs: expected a float32 matrix");
+    };
+    let mut header =
+        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
+    header.push_str(&" ".repeat(21 - rows.to_string().len()));
     header.push_str(&" ".repeat(64 - (11 + header.len()) % 64));
     header.push('\n');
 
-    let mut npy = Vec::with_capacity(10 + header.len() + 4 * scores.data.len());
+    let mut npy = Vec::with_capacity(10 + header.len() + data.len());
     npy.extend_from_slice(b"\x93NUMPY\x01\x00");
     npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
     npy.extend_from_slice(header.as_bytes());
-    npy.extend(scores.data.iter().flat_map(|value| value.to_le_bytes()));
-    base64::engine::general_purpose::STANDARD.encode(npy)
+    npy.extend_from_slice(data);
+    Ok(base64::engine::general_purpose::STANDARD.encode(npy))
 }
 
 fn format_token_id(token_id: u32) -> String {
@@ -802,14 +812,11 @@ mod tests {
 
     #[test]
     fn prompt_token_id_logprobs_match_numpy2base64() {
-        let scores = PromptTokenIdLogprobs {
-            rows: 2,
-            cols: 3,
-            data: vec![-0.5, -1.5, -2.5, -3.5, -4.5, -5.5],
-        };
+        let scores =
+            WireNdArray::from_f32(vec![2, 3], vec![-0.5, -1.5, -2.5, -3.5, -4.5, -5.5]).unwrap();
         // numpy2base64(np.array([[-0.5, -1.5, -2.5], [-3.5, -4.5, -5.5]], np.float32))
         assert_eq!(
-            npy_base64(&scores),
+            npy_base64(&scores).unwrap(),
             "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDMpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAC/AADAvwAAIMAAAGDAAACQwAAAsMA="
         );
     }

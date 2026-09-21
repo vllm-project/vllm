@@ -12,7 +12,7 @@ use crate::protocol::dtype::{Endianness, TensorDtype};
 use crate::protocol::tensor::{ShapeExt as _, WireNdArray};
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DecodedArray2<T> {
+pub(super) struct DecodedArray2<T> {
     pub rows: usize,
     pub cols: usize,
     pub data: Vec<T>,
@@ -78,7 +78,7 @@ pub(crate) fn decode_array1_u32(
     Ok(data)
 }
 
-pub(crate) fn decode_array2_f32(
+pub(super) fn decode_array2_f32(
     value: WireNdArray,
     field: &str,
     frames: &[Bytes],
