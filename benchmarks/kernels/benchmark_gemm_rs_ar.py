@@ -5,7 +5,9 @@
 The baseline is what a model runs without the fusion: the projection's own
 linear kernel followed by vLLM's collective (``sp_reduce_scatter`` for RS,
 ``tensor_model_parallel_all_reduce`` for AR), with the collective backend
-chosen by vLLM's dispatch exactly as in serving.
+chosen by vLLM's dispatch exactly as in serving. The same two kernels are also
+timed bare (the GEMM alone, the collective alone on a precomputed partial);
+their max is the floor a perfectly overlapped fused kernel could reach.
 
 All ranks must belong to one NVLink domain. Run a TP8 sweep over the Kimi-K3
 projections with:
@@ -239,15 +241,23 @@ def benchmark_shape(
         for _ in range(num_workspaces)
     ]
 
-    def unfused(x: torch.Tensor, linear: RowParallelLinear) -> torch.Tensor:
+    def collective(partial: torch.Tensor) -> torch.Tensor:
         if all_reduce:
-            return tensor_model_parallel_all_reduce(linear(x))
-        return sp_reduce_scatter(linear(x))
+            return tensor_model_parallel_all_reduce(partial)
+        return sp_reduce_scatter(partial)
+
+    def gemm(x: torch.Tensor, linear: RowParallelLinear) -> torch.Tensor:
+        return linear(x)
+
+    def unfused(x: torch.Tensor, linear: RowParallelLinear) -> torch.Tensor:
+        return collective(linear(x))
 
     def fused(x: torch.Tensor, linear: RowParallelLinear) -> torch.Tensor:
         return gemm_rs_ar.apply(x, linear)
 
-    candidates = {"vllm": unfused, "gemm_rs_ar": fused}
+    # The bare collective runs on the GEMM's own output so it sees the same
+    # message size and layout the unfused path hands to the collective.
+    partials = [linear(x) for x, linear in zip(inputs, projections)]
 
     expected = unfused(inputs[0], projections[0])
     actual = fused(inputs[0], projections[0])
@@ -257,28 +267,37 @@ def benchmark_shape(
         actual[:rows], expected[:rows], rtol=5e-2, atol=4.0, msg=f"M={M}, K={K}"
     )
 
+    candidates: dict[str, list[Callable[[], torch.Tensor]]] = {
+        "gemm": [lambda x=x, w=w: gemm(x, w) for x, w in zip(inputs, projections)],
+        "collective": [lambda p=p: collective(p) for p in partials],
+        "vllm": [lambda x=x, w=w: unfused(x, w) for x, w in zip(inputs, projections)],
+        "gemm_rs_ar": [lambda x=x, w=w: fused(x, w) for x, w in zip(inputs, projections)],
+    }
+
     candidate_graphs = {}
     keepalive: list[object] = []
-    for name, fn in candidates.items():
+    for name, ops in candidates.items():
         stream = torch.cuda.Stream()
-        candidate_graphs[name] = [
-            capture_graph(lambda x=x, w=w, fn=fn: fn(x, w), stream, cpu_group)
-            for x, w in zip(inputs, projections)
-        ]
+        candidate_graphs[name] = [capture_graph(op, stream, cpu_group) for op in ops]
         keepalive.append(stream)
 
     times = benchmark_graphs(
         candidate_graphs, warmup_replays, samples, device_group, device_barrier
     )
+    floor = max(times["gemm"], times["collective"])
     return {
         "mode": mode.upper(),
         "backend": backend,
         "M": M,
         "N": N,
         "K": K,
+        "gemm_us": times["gemm"],
+        "collective_us": times["collective"],
+        "floor_us": floor,
         "vllm_us": times["vllm"],
         "gemm_rs_ar_us": times["gemm_rs_ar"],
         "latency_change": (times["gemm_rs_ar"] - times["vllm"]) / times["vllm"],
+        "floor_gap": (times["gemm_rs_ar"] - floor) / floor,
     }
 
 
@@ -286,12 +305,17 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
     collective = results[0]["mode"]
     backend = results[0]["backend"]
     print(f"### GEMM-{collective} vs vLLM unfused path ({backend} weights)")
-    print(f"| M | N | K | vLLM (us) | GEMM-{collective} (us) | latency |")
-    print("|---:|---:|---:|---:|---:|---:|")
+    print(
+        f"| M | N | K | GEMM (us) | {collective} (us) | floor (us) | vLLM (us) | "
+        f"GEMM-{collective} (us) | vs vLLM | vs floor |"
+    )
+    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in results:
         print(
-            f"| {r['M']} | {r['N']} | {r['K']} | {r['vllm_us']:.1f} | "
-            f"{r['gemm_rs_ar_us']:.1f} | {r['latency_change']:+.1%} |"
+            f"| {r['M']} | {r['N']} | {r['K']} | {r['gemm_us']:.1f} | "
+            f"{r['collective_us']:.1f} | {r['floor_us']:.1f} | {r['vllm_us']:.1f} | "
+            f"{r['gemm_rs_ar_us']:.1f} | {r['latency_change']:+.1%} | "
+            f"{r['floor_gap']:+.1%} |"
         )
 
 
