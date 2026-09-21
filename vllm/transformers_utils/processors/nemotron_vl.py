@@ -253,7 +253,7 @@ def build_siglip_transform(
 
     Extends the base transform from nemotron_vl with SigLIP-specific normalization.
     """
-    transforms: list[object] = [
+    transforms = [
         T.Lambda(lambda img: convert_image_mode(img, "RGB")),
         T.Resize((input_size, input_size), interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor() if normalize_on_cpu else T.PILToTensor(),
