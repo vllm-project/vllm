@@ -23,7 +23,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.layers.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
@@ -31,6 +30,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
+from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
@@ -296,7 +296,7 @@ class Indexer(nn.Module):
             cache_config=cache_config,
             index_kpool=self.index_kpool,
         )
-        self.max_model_len = vllm_config.model_config.max_model_len
+        self.max_pool_len = vllm_config.model_config.max_model_len // self.index_kpool
         self.prefix = prefix
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
@@ -307,7 +307,7 @@ class Indexer(nn.Module):
             self.scale_fmt,
             self.topk_tokens,
             self.head_dim,
-            self.max_model_len,
+            self.max_pool_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
             tail_cache=self.tail_cache,
@@ -496,9 +496,9 @@ class Glm5NextMLAAttention(nn.Module):
             assert config.rope_parameters is not None
             if config.rope_parameters["rope_type"] != "default":
                 config.rope_parameters["rope_type"] = (
-                    "deepseek_yarn"
-                    if config.rope_parameters.get("apply_yarn_scaling", True)
-                    else "deepseek_llama_scaling"
+                    "deepseek_llama_scaling"
+                    if config.rope_parameters.get("attention_factor") == 1.0
+                    else "deepseek_yarn"
                 )
 
             self.rotary_emb: RotaryEmbedding | None = get_rope(

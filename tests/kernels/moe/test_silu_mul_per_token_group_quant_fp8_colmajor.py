@@ -19,11 +19,9 @@ GROUP_SIZE = 128
 
 
 def reference_quant(x: torch.Tensor, use_ue8m0: bool):
-    """
-    Reference triton quant kernel from,
+    """Reference triton quant kernel from,
     vllm.model_executor.layers.quantization.utils.fp8_utils
     """
-
     x_q = torch.empty_like(x, device=x.device, dtype=FLOAT8_DTYPE)
 
     # Allocate the scale tensor in column-major format.
