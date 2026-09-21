@@ -10,12 +10,13 @@ import hashlib
 import inspect
 import json
 import os
+import queue
 import sys
 import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -24,6 +25,7 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
+from safetensors import _safe_open_handle
 from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -33,6 +35,8 @@ from vllm.config import ModelConfig
 from vllm.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
+    DEFAULT_STREAMING_IO_THREADS_PER_FILE,
+    DEFAULT_STREAMING_PREFETCH_FILE_WINDOW,
     LoadConfig,
 )
 from vllm.distributed import (
@@ -1110,6 +1114,231 @@ def _prefetch_all_checkpoints(
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
 
+def prefetch_checkpoints(
+    sorted_files: list[str],
+    prefetch_file_window: int = DEFAULT_STREAMING_PREFETCH_FILE_WINDOW,
+    io_threads_per_file: int = DEFAULT_STREAMING_IO_THREADS_PER_FILE,
+    block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+) -> tuple[int, int]:
+    """Read all selected files using the streaming I/O scheduler, without mapping."""
+    files = _prefetched_checkpoint_files(
+        sorted_files,
+        prefetch_file_window=prefetch_file_window,
+        io_threads_per_file=io_threads_per_file,
+        block_size=block_size,
+        map_after_prefetch=False,
+    )
+    try:
+        for result in files:
+            result.close()
+    finally:
+        files.close()
+    return min(prefetch_file_window, len(sorted_files)), io_threads_per_file
+
+
+class _PrefetchedFile:
+    """Own a checkpoint file and its mapping until the result is released."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.contexts = ExitStack()
+        self.file: IO[bytes] | None = None
+        self.size = 0
+        self.mapped: Any = None
+
+    def close(self) -> None:
+        self.contexts.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+
+def _prefetched_checkpoint_files(
+    hf_weights_files: list[str],
+    *,
+    prefetch_file_window: int,
+    io_threads_per_file: int,
+    block_size: int,
+    map_after_prefetch: bool,
+) -> Generator[_PrefetchedFile, None, None]:
+    """Read shards in parallel blocks and yield them in completion order."""
+    if min(prefetch_file_window, io_threads_per_file, block_size) < 1:
+        raise ValueError(
+            "Streaming prefetch file window, IO threads per file and block size "
+            "must be >= 1"
+        )
+
+    file_parallelism = (
+        min(prefetch_file_window, len(hf_weights_files)) if hf_weights_files else 1
+    )
+    stopped = threading.Event()
+    buffers = threading.local()
+    completed: queue.SimpleQueue = queue.SimpleQueue()
+
+    def read_blocks(fd: int, size: int, start: int) -> None:
+        if not hasattr(buffers, "data"):
+            buffers.data = bytearray(block_size)
+        buffer = memoryview(buffers.data)
+        stride = io_threads_per_file * block_size
+        for block_start in range(start, size, stride):
+            offset, end = block_start, min(block_start + block_size, size)
+            while offset < end:
+                if stopped.is_set():
+                    return
+                if hasattr(os, "preadv"):
+                    count = os.preadv(fd, [buffer[: end - offset]], offset)
+                else:
+                    count = len(os.pread(fd, end - offset, offset))
+                if count == 0:
+                    raise EOFError("Checkpoint truncated during streaming prefetch")
+                offset += count
+
+    def prefetch(
+        path: str, io_pool: concurrent.futures.ThreadPoolExecutor
+    ) -> _PrefetchedFile:
+        result = _PrefetchedFile(path)
+        try:
+            if stopped.is_set():
+                return result
+            file = result.contexts.enter_context(open(path, "rb"))  # noqa: SIM115
+            result.file = file
+            size = os.fstat(file.fileno()).st_size
+            result.size = size
+            if size == 0:
+                raise EOFError(f"Checkpoint file is empty: {path}")
+            reads = []
+            try:
+                for start in range(
+                    0,
+                    min(size, io_threads_per_file * block_size),
+                    block_size,
+                ):
+                    reads.append(
+                        io_pool.submit(read_blocks, file.fileno(), size, start)
+                    )
+                for future in concurrent.futures.as_completed(reads):
+                    future.result()
+            finally:
+                # A failed read must not close the fd while other reads use it.
+                concurrent.futures.wait(reads)
+            if map_after_prefetch and not stopped.is_set():
+                result.mapped = result.contexts.enter_context(
+                    _safe_open_handle(file, framework="pt")
+                )
+            return result
+        except BaseException:
+            result.close()
+            raise
+
+    paths = iter(hf_weights_files)
+    pending: set[concurrent.futures.Future] = set()
+
+    # Runtime IO threads are grouped too. Every concurrently active shard owns
+    # a dedicated executor and cannot consume another shard's IO slots.
+    io_groups: list[dict[str, Any]] = []
+    with ExitStack() as stack:
+        file_pool = stack.enter_context(
+            concurrent.futures.ThreadPoolExecutor(
+                max_workers=file_parallelism,
+                thread_name_prefix="safetensors-file",
+            )
+        )
+        for group_id in range(file_parallelism):
+            io_groups.append(
+                {
+                    "id": group_id,
+                    "io_pool": stack.enter_context(
+                        concurrent.futures.ThreadPoolExecutor(
+                            max_workers=io_threads_per_file,
+                            thread_name_prefix=(f"safetensors-io-group-{group_id}"),
+                        )
+                    ),
+                }
+            )
+
+        def submit_next(group: dict[str, Any]) -> None:
+            path = next(paths, None)
+            if path is None:
+                return
+            future = file_pool.submit(prefetch, path, group["io_pool"])
+            pending.add(future)
+
+            def on_done(
+                done: concurrent.futures.Future[_PrefetchedFile], group=group
+            ) -> None:
+                completed.put((done, group))
+
+            future.add_done_callback(on_done)
+
+        try:
+            for group in io_groups:
+                submit_next(group)
+            while pending:
+                future, group = completed.get()
+                pending.remove(future)
+                result = future.result()
+                del future
+                # Reuse this shard's runtime IO group for the next file.
+                submit_next(group)
+                try:
+                    yield result
+                finally:
+                    del result
+        finally:
+            stopped.set()
+            for future in pending:
+                future.cancel()
+            file_pool.shutdown(wait=True)
+            while True:
+                try:
+                    future, _ = completed.get_nowait()
+                except queue.Empty:
+                    break
+                with suppress(BaseException):
+                    future.result().close()
+
+
+def streaming_safetensors_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+    local_expert_ids: set[int] | None = None,
+    *,
+    prefetch_file_window: int = DEFAULT_STREAMING_PREFETCH_FILE_WINDOW,
+    io_threads_per_file: int = DEFAULT_STREAMING_IO_THREADS_PER_FILE,
+    block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Read shards in parallel blocks and consume them in completion order.
+
+    Up to ``prefetch_file_window`` shards are prefetched concurrently in input
+    order. Each active shard owns one executor with ``io_threads_per_file``
+    threads. Retained model tensors and the OS page cache can outlive this window.
+    """
+    files = _prefetched_checkpoint_files(
+        hf_weights_files,
+        prefetch_file_window=prefetch_file_window,
+        io_threads_per_file=io_threads_per_file,
+        block_size=block_size,
+        map_after_prefetch=True,
+    )
+    try:
+        with tqdm(
+            total=len(hf_weights_files),
+            desc="Streaming safetensors checkpoint shards",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+        ) as progress:
+            for result in files:
+                try:
+                    for name in result.mapped.keys():  # noqa: SIM118
+                        if not should_skip_weight(name, local_expert_ids):
+                            yield name, result.mapped.get_tensor(name)
+                finally:
+                    del result
+                progress.update(1)
+    finally:
+        files.close()
+
+
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -1118,13 +1347,26 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    prefetch_file_window: int = DEFAULT_STREAMING_PREFETCH_FILE_WINDOW,
+    io_threads_per_file: int = DEFAULT_STREAMING_IO_THREADS_PER_FILE,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
     When *local_expert_ids* is provided, expert weights not belonging to
-    this rank are skipped **before** reading from disk, which drastically
-    reduces storage I/O for MoE models under EP.
+    this rank are skipped before tensor materialization. Lazy loading also
+    avoids reading their payload; eager and streaming read whole shards.
     """
+    if safetensors_load_strategy == "streaming":
+        yield from streaming_safetensors_weights_iterator(
+            hf_weights_files,
+            use_tqdm_on_load,
+            prefetch_file_window=prefetch_file_window,
+            local_expert_ids=local_expert_ids,
+            io_threads_per_file=io_threads_per_file,
+            block_size=safetensors_prefetch_block_size,
+        )
+        return
+
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"

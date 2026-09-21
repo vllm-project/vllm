@@ -468,3 +468,302 @@ def test_dummy_norm_weights_are_neutral(default_vllm_config):
 
 if __name__ == "__main__":
     test_download_weights_from_hf()
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_streaming_weights_match_lazy_and_survive_close(tmp_path, workers):
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        safetensors_weights_iterator,
+        streaming_safetensors_weights_iterator,
+    )
+
+    paths = []
+    for i in range(5):
+        path = str(tmp_path / f"shard-{i}.safetensors")
+        save_file({f"weight_{i}": torch.arange(37) + i}, path)
+        paths.append(path)
+    expected = dict(safetensors_weights_iterator(paths, False, "lazy"))
+    actual = dict(
+        streaming_safetensors_weights_iterator(
+            paths,
+            False,
+            prefetch_file_window=workers,
+            io_threads_per_file=2,
+            block_size=31,
+        )
+    )
+    assert actual.keys() == expected.keys()
+    for name in expected:
+        assert torch.equal(actual[name], expected[name])
+
+
+def test_streaming_prefetch_respects_input_file_order(tmp_path):
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        streaming_safetensors_weights_iterator,
+    )
+
+    first = str(tmp_path / "z.safetensors")
+    second = str(tmp_path / "a.safetensors")
+    save_file({"first": torch.ones(1)}, first)
+    save_file({"second": torch.ones(1)}, second)
+
+    weights = streaming_safetensors_weights_iterator(
+        [first, second], False, prefetch_file_window=1
+    )
+    assert [name for name, _ in weights] == ["first", "second"]
+
+
+def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatch):
+    import threading
+    from unittest.mock import patch
+
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    paths = []
+    for i in range(8):
+        path = str(tmp_path / f"{i}.safetensors")
+        save_file({"weight": torch.arange(9)}, path)
+        paths.append(path)
+    opened = []
+    handles = []
+    mapped_handles = []
+    ahead = threading.Event()
+    real_open = open
+    real_safe_open_handle = wu._safe_open_handle
+
+    def track_open(path, *args, **kwargs):
+        opened.append(path)
+        handle = real_open(path, *args, **kwargs)
+        handles.append(handle)
+        if len(opened) == 2:
+            ahead.set()
+        return handle
+
+    monkeypatch.setattr(wu, "open", track_open, raising=False)
+
+    def track_mapping(handle, *args, **kwargs):
+        mapped_handles.append(handle)
+        return real_safe_open_handle(handle, *args, **kwargs)
+
+    monkeypatch.setattr(wu, "_safe_open_handle", track_mapping)
+    iterator = wu.streaming_safetensors_weights_iterator(
+        paths, False, prefetch_file_window=1
+    )
+    _, retained = next(iterator)
+    assert ahead.wait(5)
+    # The first shard is held by the consumer, with only one shard ahead.
+    assert len(opened) == 2
+    assert mapped_handles == handles[:1]
+    assert all(not handle.closed for handle in handles)
+    iterator.close()
+    assert len(opened) == 2
+    assert all(handle.closed for handle in handles)
+    assert torch.equal(retained, torch.arange(9))
+    with patch.object(wu, "safe_open") as mapped:
+        assert list(wu.streaming_safetensors_weights_iterator([], False)) == []
+        mapped.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["empty", "missing", "truncated", "io"])
+@pytest.mark.parametrize("prefetch_only", [False, True])
+def test_streaming_read_failures_propagate_before_mapping(
+    tmp_path, monkeypatch, failure, prefetch_only
+):
+    from unittest.mock import patch
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    path = tmp_path / "broken.safetensors"
+    expected: type[Exception] = EOFError
+    if failure != "missing":
+        path.write_bytes(b"" if failure == "empty" else b"data")
+    else:
+        expected = FileNotFoundError
+    # Exercise the portable pread fallback, including EOF and OS errors.
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
+    if failure == "truncated":
+        monkeypatch.setattr(wu.os, "pread", lambda *args: b"")
+    elif failure == "io":
+        expected = OSError
+
+        def fail(*args):
+            raise OSError("read failed")
+
+        monkeypatch.setattr(wu.os, "pread", fail)
+    with patch.object(wu, "_safe_open_handle") as mapped:
+        with pytest.raises(expected):
+            if prefetch_only:
+                wu.prefetch_checkpoints([str(path)])
+            else:
+                list(wu.streaming_safetensors_weights_iterator([str(path)], False))
+        mapped.assert_not_called()
+
+
+@pytest.mark.parametrize("use_preadv", [False, True])
+def test_streaming_retries_short_reads_and_filters_experts(
+    tmp_path, monkeypatch, use_preadv
+):
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    path = str(tmp_path / "weights.safetensors")
+    weights = {
+        f"model.layers.0.mlp.experts.{i}.weight": torch.arange(7) for i in range(2)
+    }
+    save_file(weights, path)
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
+    real_read = wu.os.pread
+    monkeypatch.setattr(
+        wu.os, "pread", lambda fd, n, off: real_read(fd, min(n, 3), off)
+    )
+    if use_preadv:
+
+        def short_preadv(fd, buffers, offset):
+            data = real_read(fd, min(len(buffers[0]), 3), offset)
+            buffers[0][: len(data)] = data
+            return len(data)
+
+        monkeypatch.setattr(wu.os, "preadv", short_preadv, raising=False)
+    result = dict(
+        wu.safetensors_weights_iterator(
+            [path],
+            False,
+            "streaming",
+            local_expert_ids={1},
+            safetensors_prefetch_block_size=19,
+        )
+    )
+    assert set(result) == {"model.layers.0.mlp.experts.1.weight"}
+    assert torch.equal(next(iter(result.values())), torch.arange(7))
+
+
+def test_streaming_consumes_completed_shard_before_slow_shard(tmp_path, monkeypatch):
+    import threading
+
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    slow = str(tmp_path / "0.safetensors")
+    fast = str(tmp_path / "1.safetensors")
+    save_file({"slow": torch.zeros(11)}, slow)
+    save_file({"fast": torch.ones(3)}, fast)
+    release = threading.Event()
+    real_open = open
+
+    def gated_open(path, *args, **kwargs):
+        if path == slow:
+            assert release.wait(5), "Consumer waited for input order"
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(wu, "open", gated_open, raising=False)
+    weights = wu.streaming_safetensors_weights_iterator(
+        [slow, fast],
+        False,
+        prefetch_file_window=2,
+    )
+    try:
+        name, tensor = next(weights)
+        assert name == "fast"
+        assert torch.equal(tensor, torch.ones(3))
+        release.set()
+        assert [name for name, _ in weights] == ["slow"]
+    finally:
+        release.set()
+        weights.close()
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "prefetch_file_window",
+        "io_threads_per_file",
+        "block_size",
+    ],
+)
+def test_streaming_rejects_invalid_limits(option):
+    from vllm.model_executor.model_loader.weight_utils import (
+        streaming_safetensors_weights_iterator,
+    )
+
+    with pytest.raises(ValueError, match="must be >= 1"):
+        list(streaming_safetensors_weights_iterator([], False, **{option: 0}))
+
+
+@pytest.mark.parametrize("prefetch_only", [False, True])
+def test_checkpoint_reads_cover_every_byte_before_mapping(
+    tmp_path, monkeypatch, prefetch_only
+):
+    import threading
+    from pathlib import Path
+
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    paths = []
+    for i in range(5):
+        path = str(tmp_path / f"{i}.safetensors")
+        save_file({f"weight_{i}": torch.arange(37)}, path)
+        paths.append(path)
+    reads: dict[str, list[tuple[int, int]]] = {path: [] for path in paths}
+    handles = {}
+    opened = []
+    lock = threading.Lock()
+    real_open = open
+    real_pread = wu.os.pread
+    real_mapping = wu._safe_open_handle
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
+
+    def track_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        with lock:
+            handles[handle.fileno()] = path
+            opened.append(handle)
+        return handle
+
+    def short_read(fd, count, offset):
+        data = real_pread(fd, min(count, 7), offset)
+        with lock:
+            reads[handles[fd]].append((offset, len(data)))
+        return data
+
+    def assert_fully_read(path):
+        end = 0
+        for offset, count in sorted(reads[path]):
+            assert offset == end
+            end += count
+        assert end == Path(path).stat().st_size
+
+    def map_after_read(handle, *args, **kwargs):
+        assert not prefetch_only, "Prefetch-only must not parse or map tensors"
+        assert_fully_read(handle.name)
+        return real_mapping(handle, *args, **kwargs)
+
+    monkeypatch.setattr(wu, "open", track_open, raising=False)
+    monkeypatch.setattr(wu.os, "pread", short_read)
+    monkeypatch.setattr(wu, "_safe_open_handle", map_after_read)
+    options = dict(prefetch_file_window=2, io_threads_per_file=3, block_size=19)
+    if prefetch_only:
+        assert wu.prefetch_checkpoints(paths, **options) == (2, 3)
+    else:
+        weights = dict(
+            wu.streaming_safetensors_weights_iterator(paths, False, **options)
+        )
+        assert len(weights) == len(paths)
+    for path in paths:
+        assert_fully_read(path)
+    assert all(handle.closed for handle in opened)

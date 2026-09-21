@@ -40,6 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     resolve_mm_encoder_only_lm_prefixes,
     safetensors_weights_iterator,
+    streaming_safetensors_weights_iterator,
 )
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
@@ -136,13 +137,13 @@ class DefaultModelLoader(BaseModelLoader):
         # The multi-thread loader ignores safetensors_load_strategy, so reject
         # the combination instead of silently dropping the requested strategy.
         if extra_config.get("enable_multithread_load") and (
-            load_config.safetensors_load_strategy not in (None, "lazy")
+            load_config.safetensors_load_strategy not in (None, "lazy", "streaming")
         ):
             raise ValueError(
                 "enable_multithread_load does not support "
                 "safetensors_load_strategy="
                 f"{load_config.safetensors_load_strategy!r}; the multi-thread "
-                "loader only implements the default lazy strategy."
+                "loader only supports the lazy and streaming strategies."
             )
 
     def _prepare_weights(
@@ -327,13 +328,28 @@ class DefaultModelLoader(BaseModelLoader):
                     ),
                 )
             else:
-                if extra_config.get("enable_multithread_load"):
+                if extra_config.get("enable_multithread_load") and (
+                    self.load_config.safetensors_load_strategy != "streaming"
+                ):
                     weights_iterator = multi_thread_safetensors_weights_iterator(
                         hf_weights_files,
                         self.load_config.use_tqdm_on_load,
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
                         ),
+                    )
+                elif self.load_config.safetensors_load_strategy == "streaming":
+                    weights_iterator = streaming_safetensors_weights_iterator(
+                        hf_weights_files,
+                        self.load_config.use_tqdm_on_load,
+                        prefetch_file_window=(
+                            self.load_config.safetensors_streaming_prefetch_file_window
+                        ),
+                        local_expert_ids=self.local_expert_ids,
+                        io_threads_per_file=(
+                            self.load_config.safetensors_streaming_io_threads_per_file
+                        ),
+                        block_size=(self.load_config.safetensors_prefetch_block_size),
                     )
                 else:
                     weights_iterator = safetensors_weights_iterator(

@@ -11,7 +11,11 @@ from vllm.utils.hashing import safe_hash
 
 DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS = 8
 DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
-SafetensorsLoadStrategy: TypeAlias = Literal["lazy", "eager", "prefetch", "torchao"]
+DEFAULT_STREAMING_PREFETCH_FILE_WINDOW = 4
+DEFAULT_STREAMING_IO_THREADS_PER_FILE = 8
+SafetensorsLoadStrategy: TypeAlias = Literal[
+    "lazy", "eager", "prefetch", "streaming", "torchao"
+]
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader import LoadFormats
@@ -79,6 +83,13 @@ class LoadConfig:
     - "prefetch": Checkpoint files are read into the OS page cache before
       workers load them, speeding up the model loading phase. Useful on
       network or high-latency storage.
+    - "streaming": Prefetch shards with parallel block reads, then memory-map
+      each completed shard while prefetching the next. Use
+      `safetensors_streaming_prefetch_file_window` for the number of files
+      prefetched concurrently and
+      `safetensors_streaming_io_threads_per_file` for IO threads per
+      active file. Each rank prefetches its own files. Expert filtering skips
+      tensor materialization, but reads whole shards.
     - "torchao": Weights are loaded in upfront and then reconstructed
       into torchao tensor subclasses. This is used when the checkpoint
       was quantized using torchao and saved using safetensors.
@@ -87,12 +98,21 @@ class LoadConfig:
     safetensors_prefetch_num_threads: int = Field(
         default=DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS, ge=1
     )
-    """Number of worker threads used to prefetch safetensors checkpoint files
-    into the OS page cache when safetensors prefetching is enabled."""
+    """Maximum number of file-level prefetch workers used by the ordinary
+    ``prefetch`` strategy. Each worker sequentially reads one checkpoint
+    file."""
     safetensors_prefetch_block_size: int = Field(
         default=DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE, ge=1
     )
-    """Read size in bytes for each safetensors checkpoint file prefetch."""
+    """Read size in bytes shared by ordinary and streaming safetensors prefetch."""
+    safetensors_streaming_prefetch_file_window: int = Field(
+        default=DEFAULT_STREAMING_PREFETCH_FILE_WINDOW, ge=1
+    )
+    """Number of checkpoint files whose streaming prefetch runs concurrently."""
+    safetensors_streaming_io_threads_per_file: int = Field(
+        default=DEFAULT_STREAMING_IO_THREADS_PER_FILE, ge=1
+    )
+    """Number of IO threads per concurrently active checkpoint shard."""
     model_loader_extra_config: dict | TensorizerConfig = Field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""

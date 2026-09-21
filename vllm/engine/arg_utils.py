@@ -510,6 +510,12 @@ class EngineArgs:
         LoadConfig.safetensors_load_strategy
     )
     safetensors_prefetch_num_threads: int = LoadConfig.safetensors_prefetch_num_threads
+    safetensors_streaming_prefetch_file_window: int = (
+        LoadConfig.safetensors_streaming_prefetch_file_window
+    )
+    safetensors_streaming_io_threads_per_file: int = (
+        LoadConfig.safetensors_streaming_io_threads_per_file
+    )
     safetensors_prefetch_block_size: int = LoadConfig.safetensors_prefetch_block_size
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
@@ -1100,6 +1106,14 @@ class EngineArgs:
         load_group.add_argument(
             "--safetensors-prefetch-num-threads",
             **load_kwargs["safetensors_prefetch_num_threads"],
+        )
+        load_group.add_argument(
+            "--safetensors-streaming-prefetch-file-window",
+            **load_kwargs["safetensors_streaming_prefetch_file_window"],
+        )
+        load_group.add_argument(
+            "--safetensors-streaming-io-threads-per-file",
+            **load_kwargs["safetensors_streaming_io_threads_per_file"],
         )
         load_group.add_argument(
             "--safetensors-prefetch-block-size",
@@ -2118,6 +2132,12 @@ class EngineArgs:
             safetensors_load_strategy=self.safetensors_load_strategy,
             safetensors_prefetch_num_threads=self.safetensors_prefetch_num_threads,
             safetensors_prefetch_block_size=self.safetensors_prefetch_block_size,
+            safetensors_streaming_prefetch_file_window=(
+                self.safetensors_streaming_prefetch_file_window
+            ),
+            safetensors_streaming_io_threads_per_file=(
+                self.safetensors_streaming_io_threads_per_file
+            ),
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
