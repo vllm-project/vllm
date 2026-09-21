@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
+    "AliceAIConfig": "vllm.transformers_utils.configs.alice_ai",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "BailingMoeV3TextConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "BailingMoeV3VisionConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
@@ -89,6 +90,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 }
 
 __all__ = [
+    "AliceAIConfig",
     "BagelConfig",
     "BailingMoeV3TextConfig",
     "BailingMoeV3VisionConfig",
