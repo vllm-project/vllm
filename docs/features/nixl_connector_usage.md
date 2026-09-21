@@ -402,6 +402,70 @@ GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVC
 
 ## Experimental Feature
 
+### Background pull receiver
+
+Set `kv_connector_extra_config.background_receiver` to `true` to run pull
+transfer preparation, posting, polling, notifications, and handle release on a
+dedicated thread. The model execution thread publishes logical block metadata
+and consumes completion records. This can reduce decode stalls caused by native
+transfer submission. The option is disabled by default and does not change the
+selected NIXL transport.
+
+For example, on the decoder:
+
+```bash
+--kv-transfer-config '{
+  "kv_connector": "NixlConnector",
+  "kv_role": "kv_consumer",
+  "kv_buffer_device": "cuda",
+  "kv_connector_extra_config": {"background_receiver": true}
+}'
+```
+
+Use the corresponding `kv_producer` configuration on the prefiller. This
+experimental mode supports matching TP sizes, PP1/PCP1/DCP1, direct CUDA buffers,
+unidirectional pull, and matching attention-cache geometry. It rejects push mode,
+Mamba, host staging, mixed device/host regions, layer-name descriptor routing,
+and cache layout conversion. Native peer registration validates the geometry
+before any READ is posted.
+
+Receive admission is bounded. When all receive credits are occupied, scheduler
+lookup defers the request without allocating destination blocks. Credits remain
+reserved through transport completion, native handle release, model-thread
+acknowledgment, and retirement aggregated across workers. A request abort does
+not release an in-flight transfer's destination early. Full local-cache hits and
+aborts before allocation keep a separate notification obligation; they never
+report receive completion for a request that was not waiting for remote KV.
+
+The following settings belong in `kv_connector_extra_config`:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `background_receiver` | `false` | Enable the background pull receiver. |
+| `background_receiver_max_pending` | `64` | Concurrent receives awaiting retirement. |
+| `background_receiver_max_controls` | `256` | Lifecycle control messages and deferred unmatched notifications. |
+| `background_receiver_max_seen_requests` | `100000` | Request identities retained for the entire engine lifetime. |
+| `background_receiver_max_notify_only` | Lifetime identity budget | Notification capacity; must be at least the lifetime identity budget. |
+| `background_receiver_max_heartbeat_targets` | `4096` | Requests retained in heartbeat membership. |
+| `background_receiver_heartbeat_interval` | `5.0` | Seconds between owner-thread heartbeat attempts. |
+
+Request IDs must remain unique for the engine lifetime; resumable requests and
+reusing a producer request for multiple consumers are unsupported. The identity
+history never evicts old entries because delayed notifications must not
+acknowledge recycled blocks. **The identity limit is a lifetime limit, not a
+concurrency limit:** reaching it fails the engine. Plan a bounded experiment or
+restart before that limit; this mode is not yet a long-lived serving solution.
+The optional `background_receiver_enforce_unique_ids` setting defaults to `true`
+when the receiver is enabled and cannot be disabled in that mode.
+
+Uncertain native failures terminate the worker instead of recycling potentially
+active DMA destinations. Shutdown waits for retirement; failure to quiesce within
+30 seconds also terminates the worker. Heartbeats share the receiver thread with
+native calls, so a blocking call can delay lease renewal. The existing producer
+lease must cover the deployment's worst-case transfer and recovery duration;
+this mode does not make an unbounded native stall safe under a finite lease.
+Native/GPU fault qualification is required before production use.
+
 ### Heterogeneous KV Layout support
 
 Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental configuration

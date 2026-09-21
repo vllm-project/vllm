@@ -978,7 +978,9 @@ class NixlBaseConnectorWorker:
         remote_dcp_size: int = 1,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> tuple[dict[tuple[int, int], str], float]:
+        *,
+        fetch_only: bool = False,
+    ) -> tuple[dict[tuple[int, int], Any], float]:
         """Do a NIXL handshake with a remote instance."""
         if self._is_csa_linear:
             self._validate_csa_linear_tp_layout(remote_tp_size)
@@ -992,7 +994,7 @@ class NixlBaseConnectorWorker:
         # when we are using device buffers, we need to set the device
         # explicitly to make sure the handshake background thread has a valid
         # cuda context.
-        if not self.use_host_buffer:
+        if not self.use_host_buffer and not fetch_only:
             current_platform.set_device(self.device_id)
 
         # When target instance TP > local TP, we need to perform multiple
@@ -1004,7 +1006,7 @@ class NixlBaseConnectorWorker:
         p_remote_ranks = self.transfer_topo.handshake_target_ranks(
             remote_tp_size, remote_dcp_size
         )
-        remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
+        remote_rank_to_agent_name: dict[tuple[int, int], Any] = {}
         path = make_zmq_path("tcp", host, port)
         # Clock offset to the peer, estimated from the handshake round-trip.
         # Keep the lowest-RTT sample: hop cost is ~uniform across ranks, so a
@@ -1061,9 +1063,8 @@ class NixlBaseConnectorWorker:
                 # Check compatibility hash BEFORE decoding agent metadata
                 assert self.compat_hash is not None
                 if (
-                    self.enforce_compat_hash
-                    and handshake_payload.compatibility_hash != self.compat_hash
-                ):
+                    self.enforce_compat_hash or fetch_only
+                ) and handshake_payload.compatibility_hash != self.compat_hash:
                     raise RuntimeError(
                         f"NIXL compatibility hash mismatch. "
                         f"Local: {self.compat_hash}, "
@@ -1103,6 +1104,12 @@ class NixlBaseConnectorWorker:
                         f"Expected {expected_engine_id},"
                         f"received {metadata.engine_id}."
                     )
+
+                if fetch_only:
+                    # The receiver owns registration. The executor returns only
+                    # decoded metadata and never touches the native agent/maps.
+                    remote_rank_to_agent_name[(remote_pp_rank, remote_rank)] = metadata
+                    continue
 
                 # Register Remote agent.
                 if notif_agents_only:

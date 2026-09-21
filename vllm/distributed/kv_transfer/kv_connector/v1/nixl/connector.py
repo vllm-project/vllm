@@ -238,13 +238,18 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
+        if isinstance(self.connector_worker, NixlPullConnectorWorker):
+            return self.connector_worker.get_finished(finished_req_ids)
         return self.connector_worker.get_finished()
 
     def get_transfer_results(
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
         assert self.connector_worker is not None
-        results = self.connector_worker.get_transfer_results()
+        if isinstance(self.connector_worker, NixlPullConnectorWorker):
+            results = self.connector_worker.get_transfer_results(finished_req_ids)
+        else:
+            results = self.connector_worker.get_transfer_results()
         if (
             self.kv_transfer_config.kv_role == "kv_producer"
             and self.connector_worker.pcp_rank > 0
@@ -374,6 +379,11 @@ class NixlPushConnector(NixlBaseConnector):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+        assert vllm_config.kv_transfer_config is not None
+        if vllm_config.kv_transfer_config.get_from_extra_config(
+            "background_receiver", False
+        ):
+            raise ValueError("background_receiver is supported only by NixlConnector")
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             raise ValueError(
                 "NixlPushConnector does not support decode_context_parallel_size > 1."

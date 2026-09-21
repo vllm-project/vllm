@@ -4,6 +4,7 @@
 
 import threading
 import time
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -55,6 +56,8 @@ class NixlBaseConnectorScheduler:
     # pull (READ) producer from a push (WRITE) one. Overridden by the push
     # scheduler.
     _TRANSFER_MODE: str = "pull"
+    background_receiver = False
+    _receiver_enforce_unique_ids = False
 
     def __init__(
         self,
@@ -78,6 +81,51 @@ class NixlBaseConnectorScheduler:
             + vllm_config.parallel_config.data_parallel_index
         )
         assert vllm_config.kv_transfer_config is not None
+        extra = vllm_config.kv_transfer_config.get_from_extra_config
+        self.background_receiver = extra("background_receiver", False)
+        self._receiver_enforce_unique_ids = extra(
+            "background_receiver_enforce_unique_ids", self.background_receiver
+        )
+        if not isinstance(self.background_receiver, bool) or not isinstance(
+            self._receiver_enforce_unique_ids, bool
+        ):
+            raise ValueError("Background receiver flags must be boolean")
+        self._receiver_max_pending = int(extra("background_receiver_max_pending", 64))
+        self._receiver_max_seen_requests = int(
+            extra("background_receiver_max_seen_requests", 100000)
+        )
+        self._receiver_max_heartbeat_targets = int(
+            extra("background_receiver_max_heartbeat_targets", 4096)
+        )
+        if self.background_receiver and (
+            self._receiver_max_pending <= 0 or self._receiver_max_heartbeat_targets <= 0
+        ):
+            raise ValueError("Background receiver capacity limits must be positive")
+        if (
+            self.background_receiver or self._receiver_enforce_unique_ids
+        ) and self._receiver_max_seen_requests <= 0:
+            raise ValueError("Background receiver identity capacity must be positive")
+        if self.background_receiver:
+            if not self._receiver_enforce_unique_ids:
+                raise ValueError("background_receiver requires unique request IDs")
+            if (
+                extra(
+                    "background_receiver_max_notify_only",
+                    self._receiver_max_seen_requests,
+                )
+                < self._receiver_max_seen_requests
+            ):
+                raise ValueError(
+                    "Background receiver notification capacity must cover "
+                    "lifetime identities"
+                )
+        self._receiver_seen_requests: set[ReqId] = set()
+        self._receiver_seen_remote_requests: set[tuple[EngineId, ReqId]] = set()
+        self._receiver_pending: set[ReqId] = set()
+        self._receiver_next_generation = 0
+        self._receiver_request_metadata: dict[ReqId, tuple[int, bool]] = {}
+        self._receiver_heartbeat_version = 0
+        self._receiver_heartbeat_published_version: int | None = None
         self._kv_lease_duration: int = (
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "kv_lease_duration", 30
@@ -198,6 +246,20 @@ class NixlBaseConnectorScheduler:
 
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
+        if self._receiver_enforce_unique_ids:
+            if getattr(request, "resumable", False):
+                raise ValueError(
+                    "NIXL request identity fencing does not support resumable requests"
+                )
+            if request.request_id in self._receiver_seen_requests:
+                raise RuntimeError(
+                    "NIXL request ID reuse would allow stale transfer notifications: "
+                    f"{request.request_id}"
+                )
+            if len(self._receiver_seen_requests) >= self._receiver_max_seen_requests:
+                raise RuntimeError("NIXL request identity capacity exhausted")
+            # Never evict this fence while this engine can receive old notifications.
+            self._receiver_seen_requests.add(request.request_id)
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode"):
             self._truncate_request_for_prefill(request)
@@ -222,6 +284,25 @@ class NixlBaseConnectorScheduler:
             or tp_size is None
         ):
             return
+        if self.background_receiver and (
+            len(self._heartbeat_req_engine) >= self._receiver_max_heartbeat_targets
+        ):
+            raise RuntimeError("Background receiver heartbeat capacity exhausted")
+        if self.background_receiver:
+            remote_key = (remote_engine_id, remote_request_id)
+            if remote_key in self._receiver_seen_remote_requests:
+                raise RuntimeError(
+                    "Background receiver cannot consume a producer request twice: "
+                    f"{remote_key}"
+                )
+            if (
+                len(self._receiver_seen_remote_requests)
+                >= self._receiver_max_seen_requests
+            ):
+                raise RuntimeError(
+                    "Background receiver remote identity capacity exhausted"
+                )
+            self._receiver_seen_remote_requests.add(remote_key)
         if remote_engine_id not in self._heartbeat_by_engine:
             self._heartbeat_by_engine[remote_engine_id] = HeartbeatInfo(
                 req_ids=set(),
@@ -236,16 +317,50 @@ class NixlBaseConnectorScheduler:
             remote_engine_id,
             remote_request_id,
         )
+        if self.background_receiver:
+            self._receiver_heartbeat_version += 1
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
         """Remove *req_id* from heartbeat tracking (if tracked)."""
         if key := self._heartbeat_req_engine.pop(req_id, None):
+            if self.background_receiver:
+                self._receiver_heartbeat_version += 1
             engine_id, remote_id = key
             if info := self._heartbeat_by_engine.get(engine_id):
                 info.req_ids.discard(remote_id)
                 if not info.req_ids:
                     # Clean up empty engines so we don't leak a key when remote dies.
                     del self._heartbeat_by_engine[engine_id]
+
+    def _queue_receiver_request(
+        self,
+        request: "Request",
+        block_ids: BlockIds,
+        is_async: bool,
+        local_num_computed_blocks: tuple[int, ...] = (),
+    ) -> None:
+        if self.background_receiver:
+            req_id = request.request_id
+            if (
+                req_id in self._receiver_request_metadata
+                or req_id in self._receiver_pending
+            ):
+                raise RuntimeError(f"Duplicate background receiver admission: {req_id}")
+            if is_async:
+                if len(self._receiver_pending) >= self._receiver_max_pending:
+                    raise RuntimeError("Background receiver admission exceeded credits")
+                self._receiver_pending.add(req_id)
+            self._receiver_next_generation += 1
+            self._receiver_request_metadata[req_id] = (
+                self._receiver_next_generation,
+                is_async,
+            )
+        self._reqs_need_recv[request.request_id] = (
+            request,
+            block_ids,
+            local_num_computed_blocks,
+            is_async,
+        )
 
     def get_exchange_clipped_blocks(
         self, block_ids: BlockIds, clip_ssm: bool = True
@@ -493,6 +608,15 @@ class NixlBaseConnectorScheduler:
                 local_num_computed_blocks=cached,
                 awaiting_kvs=awaiting_kvs,
             )
+            if self.background_receiver:
+                recv_meta = meta.reqs_to_recv[req_id]
+                recv_meta.receiver_generation, recv_meta.receiver_is_async = (
+                    self._receiver_request_metadata.pop(req_id)
+                )
+                recv_meta.local_block_ids = deepcopy(recv_meta.local_block_ids)
+                recv_meta.local_physical_block_ids = recv_meta.local_block_ids
+                assert recv_meta.remote is not None
+                recv_meta.remote.block_ids = deepcopy(recv_meta.remote.block_ids)
 
         if self.use_host_buffer:
             self._build_save_meta(meta, scheduler_output)
@@ -505,8 +629,18 @@ class NixlBaseConnectorScheduler:
         meta.reqs_in_batch = self._reqs_in_batch
         meta.reqs_not_processed = self._reqs_not_processed
 
-        # Package heartbeats, throttled by heartbeat_interval.
-        if self._heartbeat_by_engine:
+        # Receiver maintains its own timer; scheduler publishes membership changes.
+        if self.background_receiver:
+            if (
+                self._receiver_heartbeat_published_version
+                != self._receiver_heartbeat_version
+            ):
+                meta.receiver_heartbeat_version = self._receiver_heartbeat_version
+                meta.heartbeat_by_engine = deepcopy(self._heartbeat_by_engine)
+                self._receiver_heartbeat_published_version = (
+                    self._receiver_heartbeat_version
+                )
+        elif self._heartbeat_by_engine:
             now = time.perf_counter()
             if now - self._last_heartbeat_time >= self._heartbeat_interval:
                 self._last_heartbeat_time = now
@@ -524,6 +658,8 @@ class NixlBaseConnectorScheduler:
         """Stop heartbeating for requests whose KV transfer completed."""
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
+            if self.background_receiver:
+                self._receiver_pending.discard(req_id)
 
     def has_pending_push_work(self) -> bool:
         return False
@@ -534,7 +670,7 @@ class NixlBaseConnectorScheduler:
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         raise NotImplementedError
 
     def update_state_after_alloc(
