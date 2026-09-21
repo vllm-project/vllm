@@ -41,7 +41,6 @@ class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
     block_keys: list[str] | None = None
-    block_size: int = 0
 
 
 class AuxOutputSchedulerConnector:
@@ -124,7 +123,9 @@ class AuxOutputSchedulerConnector:
             )
 
             if self._mooncake_output is None:
-                self._mooncake_output = MooncakeOutputPublisher(request_output)
+                self._mooncake_output = MooncakeOutputPublisher(
+                    request_output, self._hash_block_size
+                )
             return self._mooncake_output.take_output(request, request_output)
         local_end = token_end - request_output.token_start
         if local_end < 0:
