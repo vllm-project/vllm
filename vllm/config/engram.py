@@ -74,7 +74,7 @@ class EngramConfig:
         if (
             model_config is None
             or field is None
-            or not current_platform.is_cuda()
+            or not current_platform.is_cuda_alike()
             or not getattr(model_config.hf_text_config, field, None)
         ):
             raise ValueError(
