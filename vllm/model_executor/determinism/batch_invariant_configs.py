@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
 from typing import NamedTuple
 
 import torch
@@ -523,21 +522,6 @@ def resolve_tuned_matmul_configs() -> None:
             arch_family
         )
     _TUNED_MATMUL_CONFIGS_RESOLVED = True
-
-
-def has_tuned_matmul_configs(
-    shapes: Iterable[tuple[int, int]] | None = None,
-) -> bool:
-    """Whether the current device has a tuned batch-invariant matmul table,
-    and (if ``shapes`` is given) whether any of these ``(N, K)`` shapes is in it.
-    """
-    if not _TUNED_MATMUL_CONFIGS_RESOLVED:
-        resolve_tuned_matmul_configs()
-    if _TUNED_MATMUL_CONFIGS_FOR_DEVICE is None:
-        return False
-    if shapes is None:
-        return True
-    return any(tuple(shape) in _TUNED_MATMUL_CONFIGS_FOR_DEVICE for shape in shapes)
 
 
 def _get_matmul_config(

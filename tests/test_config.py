@@ -645,8 +645,13 @@ def test_batch_invariant_breakable_cudagraph(
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     table = None if case == "no-table" else {(12288, 2048): None, (6144, 4096): None}
-    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
-    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_CONFIGS_FOR_DEVICE", table)
+    monkeypatch.setattr(current_platform, "get_device_capability", lambda: None)
+    monkeypatch.setattr(bi_configs, "_get_tuned_matmul_arch_family", lambda cap: "test")
+    monkeypatch.setattr(
+        bi_configs,
+        "_BATCH_INVARIANT_MATMUL_TUNED_CONFIGS",
+        {"test": table} if table else {},
+    )
     default_breakable_cudagraph_architectures.cache_clear()
     config = object.__new__(VllmConfig)
     config.model_config = SimpleNamespace(

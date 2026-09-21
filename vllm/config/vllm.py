@@ -780,9 +780,7 @@ class VllmConfig:
         """Avoid freezing runtime-M tile lookup in compiled forward (#54243).
         Breakable graphs look up tuned bf16, unquantized qkv/o/gate_up/down tiles
         at capture; lm_head runs outside compiled forward and does not benefit."""
-        from vllm.model_executor.determinism.batch_invariant_configs import (
-            has_tuned_matmul_configs,
-        )
+        from vllm.model_executor.determinism import batch_invariant_configs as bi
         from vllm.platforms import current_platform
 
         model = self.model_config
@@ -793,8 +791,12 @@ class VllmConfig:
             or model.dtype != torch.bfloat16
             or model.quantization is not None
             or not current_platform.is_cuda()
-            or not has_tuned_matmul_configs()
         ):
+            return False
+        table = bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS.get(
+            bi._get_tuned_matmul_arch_family(current_platform.get_device_capability())
+        )
+        if table is None:
             return False
         parallel = self.parallel_config
         tp = parallel.tensor_parallel_size
@@ -807,7 +809,7 @@ class VllmConfig:
         # Per-layer sizes (e.g. Gemma3n) are not modeled.
         if isinstance(intermediate, int):
             shapes += [(2 * intermediate // tp, hidden), (hidden, intermediate // tp)]
-        return has_tuned_matmul_configs(shapes)
+        return any(shape in table for shape in shapes)
 
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         if (
@@ -826,10 +828,8 @@ class VllmConfig:
         ):
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
             logger.info_once(
-                "VLLM_BATCH_INVARIANT=1: auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1 "
-                "so tuned matmul configs follow the runtime batch size "
-                "(vllm-project/vllm#54243). Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 "
-                "to opt out."
+                "VLLM_BATCH_INVARIANT=1: auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
         from vllm.compilation.breakable_cudagraph import (
