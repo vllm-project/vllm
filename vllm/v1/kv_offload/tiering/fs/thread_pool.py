@@ -103,6 +103,7 @@ class DualQueueThreadPool:
         self._n_write_threads = n_write_threads
         self._n_write_excl_threads = n_write_excl_threads
         self._condition = threading.Condition(threading.Lock())
+        self._idle_condition = threading.Condition(threading.Lock())
         self._stop = False
         self._threads: list[threading.Thread] = []
         self._finished_q: deque[tuple[JobId, bool, float]] = deque()
@@ -218,8 +219,8 @@ class DualQueueThreadPool:
         completed jobs may still be sitting in ``_finished_q`` waiting
         for ``get_finished()`` to drain them.
         """
-        with self._condition:
-            self._condition.wait_for(lambda: self._inflight_jobs == 0)
+        with self._idle_condition:
+            self._idle_condition.wait_for(lambda: self._inflight_jobs == 0)
 
     def shutdown(self, wait: bool = True) -> None:
         with self._condition:
@@ -229,6 +230,8 @@ class DualQueueThreadPool:
             # subsequent wait_idle() returns instead of hanging.
             self._inflight_jobs = 0
             self._condition.notify_all()
+        with self._idle_condition:
+            self._idle_condition.notify_all()
         if wait:
             for t in self._threads:
                 t.join()
@@ -268,4 +271,5 @@ class DualQueueThreadPool:
                 with self._condition:
                     self._finished_q.append((state.job_id, success, total_time))
                     self._inflight_jobs -= 1
-                    self._condition.notify_all()
+                with self._idle_condition:
+                    self._idle_condition.notify_all()
