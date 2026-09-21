@@ -169,16 +169,18 @@ def _resolve_dsv4_kv_cache_dtype(
 
 
 def _maybe_bind_deepgemm_fp8_chain(
-    attn: "DeepseekV4Attention", config, prefix: str
-) -> bool:
-    """Route fused_wqa_wkv / wo_b to DeepGEMM when the FP8 chain is opted in.
+    attn: "DeepseekV4Attention", config, prefix: str, bind_wqa: bool
+) -> tuple[bool, bool]:
+    """Route wo_b (and fused_wqa_wkv when ``bind_wqa``) to DeepGEMM when the
+    FP8 chain is opted in.
 
     Runs at construction, before weights load, so the DeepGEMM kernel packs the
     weights instead of FlashInfer. Every precondition failure logs once and
-    leaves the layer on its default kernels.
+    leaves the layer on its default kernels. Returns ``(chain, wqa)``: whether
+    the chain is on at all (wo_b / MoE legs) and whether fused_wqa_wkv is on it.
     """
     if not envs.VLLM_DSV41_DEEPGEMM_FP8_CHAIN:
-        return False
+        return False, False
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
         DeepGemmMxfp8LinearKernel,
     )
@@ -197,11 +199,11 @@ def _maybe_bind_deepgemm_fp8_chain(
     supported, reason = DeepGemmMxfp8LinearKernel.is_supported()
     if not supported:
         logger.warning_once("DeepGEMM FP8 chain disabled: %s", reason)
-        return False
+        return False, False
     if not is_mega_mhc_supported(config.hidden_size, config.hc_mult):
         logger.warning_once("DeepGEMM FP8 chain disabled: Mega mHC unsupported.")
-        return False
-    layers = [attn.fused_wqa_wkv, attn.wo_b]
+        return False, False
+    layers = [attn.wo_b] + ([attn.fused_wqa_wkv] if bind_wqa else [])
     for layer in layers:
         kernel = getattr(getattr(layer, "quant_method", None), "kernel", None)
         if kernel is None or get_input_quant_key(layer) != kMxfp8Dynamic:
@@ -210,16 +212,19 @@ def _maybe_bind_deepgemm_fp8_chain(
                 prefix,
                 type(kernel).__name__,
             )
-            return False
+            return False, False
     for layer in layers:
         kernel = DeepGemmMxfp8LinearKernel(Mxfp8LinearLayerConfig())
         layer.quant_method.kernel = kernel
         expose_input_quant_key(layer, kernel)
     logger.info_once(
-        "DeepSeek-V4.1 DeepGEMM FP8 chain enabled: fused_wqa_wkv and wo_b run on "
-        "DeepGEMM with pre-quantized inputs."
+        "DeepSeek-V4.1 DeepGEMM FP8 chain enabled: %s run on DeepGEMM with "
+        "pre-quantized inputs.",
+        "fused_wqa_wkv and wo_b"
+        if bind_wqa
+        else "wo_b (fused_wqa_wkv stays on FlashInfer under sequence parallel)",
     )
-    return True
+    return True, bind_wqa
 
 
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
@@ -320,6 +325,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         topk_indices_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
+        sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -443,11 +449,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             return_bias=False,
             prefix=f"{prefix}.wo_b",
         )
-        # Keep activations in MXFP8 between DeepGEMM kernels: Mega mHC feeds
-        # fused_wqa_wkv and the wo_a einsum feeds wo_b, both pre-quantized with
-        # DeepGEMM packed scales, so those two projections run on DeepGEMM.
-        self.use_deepgemm_fp8_chain = _maybe_bind_deepgemm_fp8_chain(
-            self, config, prefix
+        # Keep activations in MXFP8 between DeepGEMM kernels: the wo_a einsum
+        # feeds wo_b pre-quantized with DeepGEMM packed scales, and Mega mHC
+        # feeds fused_wqa_wkv the same way -- except under sequence parallel,
+        # where the attention input is all-gathered in BF16 after the norm and
+        # a per-rank FP8 copy cannot be used (an FP8 all-gather is future work).
+        self.use_deepgemm_fp8_chain, self.wqa_fp8_chain = (
+            _maybe_bind_deepgemm_fp8_chain(
+                self, config, prefix, bind_wqa=not sequence_parallel
+            )
         )
 
         # Initialize rotary embedding before the indexer/compressor consume it.

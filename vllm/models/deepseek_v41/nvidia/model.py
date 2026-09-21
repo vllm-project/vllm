@@ -236,10 +236,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
             candidate_block_buffer=candidate_block_buffer,
+            sequence_parallel=self.use_sequence_parallel,
         )
         self.use_deepgemm_fp8_chain = bool(
             getattr(self.attn, "use_deepgemm_fp8_chain", False)
         )
+        self.wqa_fp8_chain = bool(getattr(self.attn, "wqa_fp8_chain", False))
         if self.use_sequence_parallel or fuse_mhc_all_reduce:
             self.attn.wo_b.reduce_results = False
         self.ffn = DeepseekV4MoE(
@@ -490,16 +492,14 @@ class DeepseekV4DecoderLayer(nn.Module):
                 capture_aux=capture_previous_aux,
                 stream=mhc_stream,
                 reduce_results=self.fuse_mhc_all_reduce,
-                fp8_out="gemm" if self.use_deepgemm_fp8_chain else None,
+                fp8_out="gemm" if self.wqa_fp8_chain else None,
             )
             if capture_previous_aux:
                 previous_aux = aux
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
-            # The pre-quantized copy is this rank's shard; the gathered input
-            # is quantized by the projection itself.
-            x_q = None
+            assert x_q is None  # never requested under sequence parallel
 
         x = self.attn(positions, x, None, hidden_states_q=x_q)
         if self.use_sequence_parallel:
