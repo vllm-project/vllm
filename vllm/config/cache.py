@@ -145,6 +145,12 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
+    attn_group_size: int | None = Field(default=None, gt=0)
+    """Experimental override for the number of layers per KV cache group in
+    uniform-page-size hybrid grouping, including Mamba/GDN layers. Smaller
+    buckets are padded by the allocator. Larger groups may reduce metadata
+    overhead at the cost of cache capacity. None uses the existing heuristic.
+    Does not apply to uniform-type or specialized packed cache layouts."""
     prefix_cache_retention_interval: int | None = Field(default=0, ge=0)
     """Token interval between retained sliding-window and Mamba prefix-cache
     checkpoints. ``0`` retains only semantic checkpoints, including the latest

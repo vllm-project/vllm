@@ -1437,6 +1437,8 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    *,
+    group_size_override: int | None = None,
 ) -> list[KVCacheGroupSpec]:
     """Generates the KV cache groups for hybrid models with multiple
     attention types but still with a uniform page size (physical memory per
@@ -1496,6 +1498,8 @@ def _get_kv_cache_groups_uniform_page_size(
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
+        group_size_override: Optional positive layer count overriding the heuristic.
+
     Returns:
         The generated KVCacheGroupSpecs
 
@@ -1552,6 +1556,9 @@ def _get_kv_cache_groups_uniform_page_size(
         # layers while accommodating speculative decoding drafters that add
         # extra layers to one attention type.
         group_size = max_num_layers
+    if group_size_override is not None:
+        group_size = group_size_override
+        logger.info("Overriding hybrid KV cache group size to %d layers", group_size)
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size
@@ -2328,7 +2335,9 @@ def get_kv_cache_groups(
         if fallback_groups is None:
             raise
         return fallback_groups
-    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(
+        filtered_spec, group_size_override=vllm_config.cache_config.attn_group_size
+    )
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:

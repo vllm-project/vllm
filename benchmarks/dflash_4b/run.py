@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Run the four single-GPU, concurrency-one Qwen3.5-4B comparisons."""
+"""Run single-GPU, concurrency-one Qwen3.5 comparisons (4B by default)."""
 
 import argparse
 import importlib.metadata
@@ -16,27 +16,38 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TARGET = ("Qwen/Qwen3.5-4B", "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a")
 DRAFT = ("z-lab/Qwen3.5-4B-DFlash", "9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf")
+TARGET_27B = ("Qwen/Qwen3.5-27B", "fc05daec18b0a78c049392ed2e771dde82bdf654")
+DRAFT_27B = ("z-lab/Qwen3.5-27B-DFlash", "25ee0025ff950496a634e100b75c2db4515e9824")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("engine", choices=("vllm", "sglang"))
     parser.add_argument("mode", choices=("baseline", "dflash"))
+    parser.add_argument("--model-size", choices=("4B", "27B"), default="4B")
     parser.add_argument("--port", type=int, default=8100)
     parser.add_argument("--request-count", type=int, default=200)
     parser.add_argument("--warmup-request-count", type=int, default=20)
+    parser.add_argument("--attn-group-size", type=int)
     parser.add_argument("--output", type=Path, default=HERE / "results")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    target_model, draft_model = (
+        (TARGET_27B, DRAFT_27B) if args.model_size == "27B" else (TARGET, DRAFT)
+    )
+    if args.attn_group_size is not None and (
+        args.engine != "vllm" or args.attn_group_size <= 0
+    ):
+        parser.error("--attn-group-size requires vllm and a positive integer")
     if args.dry_run:
-        print(json.dumps(server_command(args, *[m[0] for m in (TARGET, DRAFT)])))
+        print(json.dumps(server_command(args, target_model[0], draft_model[0])))
         return
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         parser.error("Reserve a GPU using run.sh (canhazgpu) first")
     output = args.output.resolve() / f"{args.engine}_{args.mode}"
     output.mkdir(parents=True, exist_ok=False)
-    target = download_model(TARGET)
-    draft = download_model(DRAFT) if args.mode == "dflash" else DRAFT[0]
+    target = download_model(target_model)
+    draft = download_model(draft_model) if args.mode == "dflash" else draft_model[0]
     command = server_command(args, target, draft)
     base = f"http://127.0.0.1:{args.port}"
     # Refuse to accidentally benchmark an existing server on this port.
@@ -47,7 +58,7 @@ def main():
     config = {
         "engine": args.engine,
         "mode": args.mode,
-        "models": {"target": TARGET, "draft": DRAFT},
+        "models": {"target": target_model, "draft": draft_model},
         "public_dataset": "spec_al_gsm8k",
         "versions": versions(args.engine),
         "server_command": command,
@@ -56,6 +67,7 @@ def main():
         "warmup_requests": args.warmup_request_count,
         "measured_requests": args.request_count,
         "requested_output_tokens": 256,
+        "attn_group_size": args.attn_group_size,
     }
     env = os.environ.copy()
     if args.engine == "vllm":
@@ -166,6 +178,8 @@ def server_command(args, target, draft):
             "64",
             "128",
         ]
+        if args.attn_group_size is not None:
+            command += ["--attn-group-size", str(args.attn_group_size)]
         if args.mode == "dflash":
             command += [
                 "--speculative-config",

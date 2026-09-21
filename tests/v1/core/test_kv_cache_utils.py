@@ -3058,6 +3058,56 @@ def test_mixed_page_size_groups_use_spec_compatibility():
     assert sorted(len(group.layer_names) for group in groups) == [2, 3, 6]
 
 
+@pytest.mark.parametrize(
+    "group_size,expected_sizes",
+    [
+        (None, [1] * 38),
+        (1, [1] * 38),
+        (2, [1] * 2 + [2] * 18),
+        (4, [1, 2, 3] + [4] * 8),
+        (8, [1, 5] + [8] * 4),
+    ],
+)
+def test_hybrid_group_size_override_preserves_spec_compatibility(
+    group_size, expected_sizes
+):
+    # A singleton draft bucket must not force per-layer target metadata when
+    # the user explicitly chooses larger groups. Keep every layer exactly once
+    # and preserve the distinct target/draft cache geometries.
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=256, dtype=torch.bfloat16
+    )
+    draft = replace(full, num_kv_heads=8, head_size=128, head_size_v=128)
+    sliding = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=4096,
+    )
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((128,),),
+        dtypes=(torch.float32,),
+        page_size_padded=full.page_size_bytes,
+    )
+    specs = {
+        **{f"gdn.{i}": mamba for i in range(24)},
+        **{f"target.{i}": full for i in range(8)},
+        **{f"draft_sw.{i}": sliding for i in range(5)},
+        "draft_full.0": draft,
+    }
+    config = _grouping_config()
+    config.cache_config.attn_group_size = group_size
+    groups = get_kv_cache_groups(config, specs)
+
+    assert sorted(len(group.layer_names) for group in groups) == expected_sizes
+    names = [name for group in groups for name in group.layer_names]
+    assert sorted(names) == sorted(specs)
+    for group in groups:
+        assert all(specs[name] == group.kv_cache_spec for name in group.layer_names)
+
+
 def _grouping_config():
     cache_config = CacheConfig()
     cache_config.kv_cache_layout = "LBNHC"
