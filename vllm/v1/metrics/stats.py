@@ -432,6 +432,37 @@ class RequestSpecDecodeMetrics:
 
 
 @dataclass
+class CachedTokensBySource:
+    """Cached prompt tokens per ``CacheHitSource``.
+
+    Fixed int fields, not a dict: an unknown source fails type-checking
+    instead of creating a new metric series.
+    """
+
+    device: int = 0
+    host: int = 0
+    disk: int = 0
+    p2p: int = 0
+    external: int = 0
+
+    def add(self, source: str | CacheHitSource, num_tokens: int) -> None:
+        name = CacheHitSource(source).value
+        setattr(self, name, getattr(self, name) + num_tokens)
+
+    def items(self) -> list[tuple[str, int]]:
+        """Non-zero ``(label, count)`` pairs in ``CacheHitSource`` order."""
+        return [
+            (source.value, num_tokens)
+            for source in CacheHitSource
+            if (num_tokens := getattr(self, source.value))
+        ]
+
+    @property
+    def total(self) -> int:
+        return sum(getattr(self, source.value) for source in CacheHitSource)
+
+
+@dataclass
 class PromptTokenStats:
     """Breakdown of prompt tokens by source.
 
@@ -446,7 +477,7 @@ class PromptTokenStats:
     Invariants:
         computed + local_cache_hit + external_kv_transfer = total
         local_cache_hit + external_kv_transfer = cached_tokens
-        sum(cached_tokens_by_source.values()) = cached_tokens
+        cached_tokens_by_source.total = cached_tokens
     """
 
     ALL_SOURCES: tuple[str, ...] = (
@@ -462,7 +493,9 @@ class PromptTokenStats:
     local_cache_hit: int = 0
     external_kv_transfer: int = 0
     cached_tokens: int = 0
-    cached_tokens_by_source: dict[str, int] = field(default_factory=dict)
+    cached_tokens_by_source: CachedTokensBySource = field(
+        default_factory=CachedTokensBySource
+    )
     total: int = 0
 
     def update_from_output(self, prefill_stats: PrefillStats) -> None:
@@ -473,15 +506,9 @@ class PromptTokenStats:
 
         self.local_cache_hit += prefill_stats.num_local_cached_tokens
         self.external_kv_transfer += prefill_stats.num_external_cached_tokens
-        if prefill_stats.num_local_cached_tokens:
-            self.cached_tokens_by_source["device"] = (
-                self.cached_tokens_by_source.get("device", 0)
-                + prefill_stats.num_local_cached_tokens
-            )
+        self.cached_tokens_by_source.device += prefill_stats.num_local_cached_tokens
         for source, num_tokens in prefill_stats.external_cached_token_sources:
-            self.cached_tokens_by_source[source] = (
-                self.cached_tokens_by_source.get(source, 0) + num_tokens
-            )
+            self.cached_tokens_by_source.add(source, num_tokens)
 
     def get_by_source(self, source: str) -> int:
         """Get token count by source label."""

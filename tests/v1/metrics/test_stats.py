@@ -6,6 +6,7 @@ from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
+    CachedTokensBySource,
     IterationStats,
     PrefillStats,
     PromptTokenStats,
@@ -214,7 +215,7 @@ def test_prompt_token_stats_all_computed():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 0
-    assert stats.cached_tokens_by_source == {}
+    assert stats.cached_tokens_by_source == CachedTokensBySource()
     assert stats.total == 1000
 
 
@@ -235,7 +236,7 @@ def test_prompt_token_stats_partial_local_cache():
     assert stats.local_cache_hit == 300
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 300
-    assert stats.cached_tokens_by_source == {"device": 300}
+    assert stats.cached_tokens_by_source == CachedTokensBySource(device=300)
     assert stats.total == 1000
 
 
@@ -256,7 +257,7 @@ def test_prompt_token_stats_partial_external_transfer():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 500
     assert stats.cached_tokens == 500
-    assert stats.cached_tokens_by_source == {"external": 500}
+    assert stats.cached_tokens_by_source == CachedTokensBySource(external=500)
     assert stats.total == 1000
 
 
@@ -278,11 +279,9 @@ def test_prompt_token_stats_mixed_sources():
     assert stats.local_cache_hit == 400
     assert stats.external_kv_transfer == 200
     assert stats.cached_tokens == 600
-    assert stats.cached_tokens_by_source == {
-        "device": 400,
-        "host": 100,
-        "disk": 100,
-    }
+    assert stats.cached_tokens_by_source == CachedTokensBySource(
+        device=400, host=100, disk=100
+    )
     assert stats.total == 1000
 
 
@@ -307,7 +306,7 @@ def test_prompt_token_stats_full_local_cache_recompute():
     assert stats.local_cache_hit == 999
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 999
-    assert stats.cached_tokens_by_source == {"device": 999}
+    assert stats.cached_tokens_by_source == CachedTokensBySource(device=999)
     assert stats.total == 1000
 
 
@@ -328,7 +327,7 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
-    assert stats.cached_tokens_by_source == {"external": 999}
+    assert stats.cached_tokens_by_source == CachedTokensBySource(external=999)
     assert stats.total == 1000
 
 
@@ -354,11 +353,26 @@ def test_prefill_stats_truncates_failed_external_source_segments():
 
     stats = PromptTokenStats()
     stats.update_from_output(prefill_stats)
-    assert stats.cached_tokens_by_source == {
-        "device": 100,
-        "p2p": 200,
-        "host": 50,
-    }
+    assert stats.cached_tokens_by_source == CachedTokensBySource(
+        device=100, p2p=200, host=50
+    )
+
+
+def test_cached_tokens_by_source_typed_accumulator():
+    by_source = CachedTokensBySource()
+    by_source.add(CacheHitSource.HOST, 3)
+    by_source.add("host", 2)
+    by_source.add("disk", 4)
+    by_source.add("p2p", 0)
+
+    assert by_source.host == 5
+    assert by_source.disk == 4
+    assert by_source.total == 9
+    # Only non-zero sources are exported, in canonical order.
+    assert by_source.items() == [("host", 5), ("disk", 4)]
+
+    with pytest.raises(ValueError):
+        by_source.add("gpu", 1)
 
 
 def test_prefill_stats_coalesces_external_source_segments():
@@ -458,9 +472,7 @@ def test_prompt_token_stats_accumulates_sources_across_outputs():
     stats.update_from_output(first)
     stats.update_from_output(second)
 
-    assert stats.cached_tokens_by_source == {
-        "device": 6,
-        "host": 6,
-        "disk": 4,
-    }
-    assert sum(stats.cached_tokens_by_source.values()) == stats.cached_tokens == 16
+    assert stats.cached_tokens_by_source == CachedTokensBySource(
+        device=6, host=6, disk=4
+    )
+    assert stats.cached_tokens_by_source.total == stats.cached_tokens == 16
