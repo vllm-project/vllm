@@ -18,6 +18,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.config import KVEventsConfig
+from vllm.config.speculative import DraftInputLayout
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -4517,7 +4518,7 @@ def _shared_kv_mtp_config():
     spec.use_eagle_block_drop.return_value = True
     spec.use_multi_module_mtp.return_value = False
     spec.num_speculative_tokens_per_batch_size = None
-    spec.max_num_new_slots_for_drafting = 0
+    spec.draft_input_layout = DraftInputLayout("all_except_first", True, 0)
     spec.num_speculative_tokens = 1
     return spec
 

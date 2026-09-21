@@ -1678,27 +1678,60 @@ def test_draft_parallel_config_preserves_ep_without_model(
 
 
 @pytest.mark.parametrize(
-    ("method", "parallel_drafting", "expected_slots"),
+    ("method", "parallel_drafting", "sample_from_anchor", "expected"),
     [
-        pytest.param("eagle3", False, 0, id="eagle3"),
-        pytest.param("eagle3", True, 7, id="p-eagle"),
-        pytest.param("dflash", True, 8, id="dflash"),
-        pytest.param("dspark", True, 7, id="dspark"),
-        pytest.param("mtp", False, 0, id="mtp"),
-        pytest.param("ngram", False, 0, id="ngram"),
-        pytest.param("draft_model", False, 1, id="draft-model"),
-        pytest.param("draft_model", True, 8, id="pard"),
+        ("ngram", False, None, ("none", False, 0, 0, 0)),
+        ("ngram_gpu", False, None, ("none", False, 0, 0, 0)),
+        ("suffix", False, None, ("none", False, 0, 0, 0)),
+        ("draft_model", False, None, ("all", True, 0, 2, 5)),
+        ("draft_model", True, None, ("all", True, 7, 9, 12)),
+        ("mtp", False, None, ("all_except_first", True, 0, 1, 4)),
+        ("eagle3", False, None, ("all_except_first", True, 0, 1, 4)),
+        ("eagle3", True, None, ("all_except_first", True, 7, 8, 11)),
+        ("dflash", True, None, ("none", True, 8, 9, 9)),
+        ("dspark", True, True, ("none", True, 7, 8, 8)),
+        ("dspark", True, False, ("none", True, 8, 9, 9)),
+        ("medusa", False, None, ("last_valid", False, 0, 1, 1)),
+        ("extract_hidden_states", False, None, ("all", False, 0, 1, 4)),
     ],
+    ids=(
+        "ngram",
+        "ngram-gpu",
+        "suffix",
+        "draft-model",
+        "pard",
+        "mtp",
+        "eagle3",
+        "p-eagle",
+        "dflash",
+        "dspark",
+        "dspark-no-anchor",
+        "medusa",
+        "extract-hidden-states",
+    ),
 )
-def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
+def test_draft_input_layout(method, parallel_drafting, sample_from_anchor, expected):
+    # Start from a lightweight config to avoid loading model metadata.
     speculative_config = SpeculativeConfig(
-        model="ngram",
         num_speculative_tokens=8,
+        method="ngram",
     )
     speculative_config.method = method
     speculative_config.parallel_drafting = parallel_drafting
+    if sample_from_anchor is not None:
+        speculative_config.draft_model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(sample_from_anchor=sample_from_anchor)
+        )
 
-    assert speculative_config.max_num_new_slots_for_drafting == expected_slots
+    layout = speculative_config.draft_input_layout
+    assert (
+        layout.target_segment,
+        layout.includes_bonus_as_anchor,
+        layout.num_parallel_drafting_tokens,
+        layout.get_cost(1),
+        layout.get_cost(4),
+    ) == expected
+    assert layout.get_cost(0) == 0
 
 
 @dataclass
