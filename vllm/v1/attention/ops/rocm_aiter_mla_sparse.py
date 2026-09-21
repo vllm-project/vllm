@@ -19,6 +19,12 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+    candidate_mqa_logits,
+    candidate_scoring_admits,
+    compact_topk_bounds,
+    remap_compact_indices,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -1151,6 +1157,28 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
 
 
+# [B1] Candidate-only scoring costs O(n_cand * candidate_block_size) per row
+# whatever the context, while the dense scan costs O(row span), so break-even
+# is a RATIO, not a length.  Measured on gfx950 (rows=64..512, n_cand=2048,
+# block_size=8, capacity 16384) as a function of span/capacity, with the
+# packed chunk width varied independently over 0.5x-48x capacity:
+#   span/cap 0.5 -> 0.60x-0.68x   span/cap 1.0 -> 0.92x-1.35x
+#   span/cap 1.5 -> 1.24x-2.53x   span/cap 2.0 -> 1.58x-3.58x
+#   span/cap 4.0 -> 2.92x-6.58x   span/cap 6.0 -> 4.25x-9.83x
+# The speedup is set by the span and is only helped by extra packing (wider
+# buffers cost the dense mask and the -inf fill more), which is why gating on
+# the packed width is wrong in the one direction that matters: it admits
+# chunks of many short requests, where every row is already covered by its
+# candidate set and the compact path runs at 0.6x.
+#
+# The crossover brackets (1x, 1.5x), so 1.5 would also be safe on every shape
+# measured.  2.0 stands because it costs nothing to hold it there: the
+# consumer layers this branch serves run at compress_ratio 1, and AgentX C32
+# contexts (p50/mean/p90 = 73826/91824/161053) put them at span/capacity
+# 4.5/5.6/9.8.  The margin buys robustness on unsampled geometry for free.
+_CANDIDATE_SCORING_CROSSOVER = 2.0
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -1317,13 +1345,78 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
-            if candidate_blocks is not None:
+            topk_indices = topk_indices_buffer[
+                chunk.token_start : chunk.token_end, :topk_tokens
+            ]
+            chunk_candidates = (
+                candidate_blocks[chunk.token_start : chunk.token_end]
+                if candidate_blocks is not None
+                else None
+            )
+
+            # [B1] A consumer layer already holds the candidate set before it
+            # scores anything, and that set spans at most
+            # ``n_cand * candidate_block_size`` columns (16384 here). Scoring
+            # the full chunk width and then masking sizes three passes --
+            # score, mask, top-k -- to the KV buffer instead of to the
+            # columns the request can actually consume. Score the candidate
+            # columns directly once the width makes that cheaper; below the
+            # measured crossover the dense path is still the faster one and
+            # stays.
+            if (
+                chunk_candidates is not None
+                and not candidate_write
+                and candidate_block_size > 0
+                and candidate_scoring_admits(
+                    chunk.mean_row_context,
+                    chunk_candidates.shape[1],
+                    candidate_block_size,
+                    _CANDIDATE_SCORING_CROSSOVER,
+                )
+            ):
+                compact = candidate_mqa_logits(
+                    q_fp8[chunk.token_start : chunk.token_end],
+                    k_fp8,
+                    k_scale.view(torch.float32),
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    chunk_candidates,
+                    candidate_block_size,
+                )
+                num_rows = compact.shape[0]
+                compact_ks, compact_ke = compact_topk_bounds(
+                    num_rows,
+                    chunk_candidates.shape[1],
+                    candidate_block_size,
+                    compact.device,
+                )
+                torch.ops._C.top_k_per_row_prefill(
+                    compact,
+                    compact_ks,
+                    compact_ke,
+                    topk_indices,
+                    num_rows,
+                    compact.stride(0),
+                    compact.stride(1),
+                    topk_tokens,
+                )
+                remap_compact_indices(
+                    topk_indices,
+                    chunk_candidates,
+                    chunk.cu_seqlen_ks,
+                    candidate_block_size,
+                    k_fp8.shape[0],
+                    out=topk_indices,
+                )
+                continue
+
+            if chunk_candidates is not None:
                 from vllm.model_executor.layers.sparse_attn_indexer import (
                     _apply_candidate_mask,
                     _select_candidate_blocks,
                 )
 
-                chunk_candidates = candidate_blocks[chunk.token_start : chunk.token_end]
                 if candidate_write:
                     _select_candidate_blocks(
                         logits,
@@ -1341,9 +1434,6 @@ def rocm_aiter_sparse_attn_indexer(
                         chunk_candidates,
                         candidate_block_size,
                     )
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
 
             num_rows = logits.shape[0]
 
