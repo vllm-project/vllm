@@ -131,7 +131,7 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     profiler.assert_not_called()
 
 
-def test_profile_forwards_session_overrides_and_rejects_duplicate_start(
+def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
     monkeypatch: pytest.MonkeyPatch,
 ):
     vllm_config = MagicMock()
@@ -152,11 +152,18 @@ def test_profile_forwards_session_overrides_and_rejects_duplicate_start(
             await engine.start_profile("duplicate")
         assert exc_info.value.http_status == HTTPStatus.CONFLICT
         await engine.stop_profile()
+        await engine.start_profile("next-session")
+        await engine.stop_profile()
 
     asyncio.run(profile())
 
     engine_core.profile_async.assert_has_awaits(
-        [call(True, "session", 5, 2), call(False)]
+        [
+            call(True, "session", 5, 2),
+            call(False),
+            call(True, "next-session", None, None),
+            call(False),
+        ]
     )
 
 

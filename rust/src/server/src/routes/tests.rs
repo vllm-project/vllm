@@ -7598,6 +7598,55 @@ async fn duplicate_start_profile_returns_conflict() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn start_profile_succeeds_again_after_stop() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let expected_args = [
+                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                vec![Value::from(false), Value::Nil],
+                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                vec![Value::from(false), Value::Nil],
+            ];
+            for expected in expected_args {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                let call_id = array[1].as_u64().expect("call id");
+
+                assert_eq!(array[2], Value::from("profile"));
+                assert_eq!(array[3], Value::Array(expected));
+
+                send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            }
+        })
+    })
+    .await;
+
+    for uri in [
+        "/start_profile",
+        "/stop_profile",
+        "/start_profile",
+        "/stop_profile",
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn start_profile_route_rejects_invalid_prefix() {
     let (app, engine_task) =
         test_profiling_app_with_engine_script(|_, _| boxed_test_future(async move {})).await;
