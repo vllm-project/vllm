@@ -1,6 +1,9 @@
 # Qwen3.5-4B: vLLM / SGLang, DFlash on / off
 
-This benchmark compares Qwen3.5-4B throughput, streamed-chunk latency, and acceptance length across vLLM and SGLang, with DFlash enabled and disabled.
+This reproduction investigates [vLLM issue #49730: lower-than-expected DFlash performance with Qwen3.5-4B on H100](https://github.com/vllm-project/vllm/issues/49730).
+Our follow-up comparison found similar baseline performance across vLLM and SGLang, but lower throughput and longer intervals between streamed chunks with vLLM DFlash, despite similar acceptance lengths.
+The four configurations below measure both engines with DFlash enabled and disabled on the same workload, collecting throughput, streamed-chunk latency, and acceptance length to investigate that gap.
+
 The original measurements used one NVIDIA H100 80 GB per run, TP=1, FP8 target weights, BF16 compute, context length 32768, concurrency 1, 20 warmups followed by 200 measured requests, and 256 requested output tokens.
 No profiler is enabled.
 
