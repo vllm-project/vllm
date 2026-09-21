@@ -1179,79 +1179,61 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
-        # Chunk to avoid aten::new_empty integer overflow in the FlashMLA C++ wrapper
-        # during dummy runs where batch * seq_len can be 16k+
+        # Truncate massive query tensors to avoid aten::new_empty integer overflow in the FlashMLA C++ wrapper
+        # during dummy runs where batch * seq_len can be 16k+.
         # 16384 * 128 * 512 = 1.07e9 elements -> 2.14GB which overflows 32-bit int in some PyTorch versions
         MAX_ELEMENTS = 1024 * 1024 * 128  # Safe threshold
         elements_per_token = q.size(2) * 512
         max_tokens = max(1, MAX_ELEMENTS // elements_per_token)
 
+        orig_q_size_0 = q.size(0)
+        orig_q_size_1 = q.size(1)
+
         if q.size(0) * q.size(1) > max_tokens:
-            if q.size(0) > q.size(1):
-                # Chunk along batch dimension
-                chunk_size = max(1, max_tokens // q.size(1))
-                out_chunks, lse_chunks = [], []
-                for i in range(0, q.size(0), chunk_size):
-                    q_chunk = q[i:i + chunk_size]
-                    topk_chunk = topk_indices[i:i + chunk_size]
-                    bt_chunk = kernel_metadata.dummy_block_table[i:i + chunk_size]
-                    cl_chunk = kernel_metadata.cache_lens[i:i + chunk_size]
-                    
-                    chunk_out, chunk_lse = flash_mla_with_kvcache(
-                        q=q_chunk,
-                        k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
-                        block_table=bt_chunk,
-                        head_dim_v=512,
-                        cache_seqlens=cl_chunk,
-                        tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
-                        is_fp8_kvcache=True,
-                        indices=topk_chunk,
-                        softmax_scale=self.softmax_scale,
-                    )
-                    out_chunks.append(chunk_out)
-                    lse_chunks.append(chunk_lse)
-                out = torch.cat(out_chunks, dim=0)
-                lse = torch.cat(lse_chunks, dim=0) if lse_chunks[0] is not None else None
-            else:
-                # Chunk along seq_len dimension
-                chunk_size = max(1, max_tokens // q.size(0))
-                out_chunks, lse_chunks = [], []
-                for i in range(0, q.size(1), chunk_size):
-                    q_chunk = q[:, i:i + chunk_size]
-                    topk_chunk = topk_indices[:, i:i + chunk_size]
-                    
-                    chunk_out, chunk_lse = flash_mla_with_kvcache(
-                        q=q_chunk,
-                        k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
-                        block_table=kernel_metadata.dummy_block_table,
-                        head_dim_v=512,
-                        cache_seqlens=kernel_metadata.cache_lens,
-                        tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
-                        is_fp8_kvcache=True,
-                        indices=topk_chunk,
-                        softmax_scale=self.softmax_scale,
-                    )
-                    out_chunks.append(chunk_out)
-                    lse_chunks.append(chunk_lse)
-                out = torch.cat(out_chunks, dim=1)
-                lse = torch.cat(lse_chunks, dim=2) if lse_chunks[0] is not None else None
+            # During the eager dummy run, q.size(0) == 1 and q.size(1) is huge.
+            # We truncate seq_len and pad the output later, avoiding C++ memory overflow while profiling properly.
+            b_limit = min(q.size(0), max_tokens)
+            s_limit = min(q.size(1), max(1, max_tokens // b_limit))
+            
+            q_run = q[:b_limit, :s_limit]
+            topk_indices_run = topk_indices[:b_limit, :s_limit]
+            
+            bt_run = kernel_metadata.dummy_block_table[:b_limit]
+            cl_run = kernel_metadata.cache_lens[:b_limit]
         else:
-            out, lse = flash_mla_with_kvcache(
-                q=q,
-                k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
-                block_table=kernel_metadata.dummy_block_table,
-                head_dim_v=512,
-                cache_seqlens=kernel_metadata.cache_lens,
-                tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
-                is_fp8_kvcache=True,
-                indices=topk_indices,
-                softmax_scale=self.softmax_scale,
-            )
+            q_run = q
+            topk_indices_run = topk_indices
+            bt_run = kernel_metadata.dummy_block_table
+            cl_run = kernel_metadata.cache_lens
+
+        out, lse = flash_mla_with_kvcache(
+            q=q_run,
+            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+            block_table=bt_run,
+            head_dim_v=512,
+            cache_seqlens=cl_run,
+            tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
+            is_fp8_kvcache=True,
+            indices=topk_indices_run,
+            softmax_scale=self.softmax_scale,
+        )
+
+        # Pad back to original size. new_zeros uses int64 size computation in python, avoiding the overflow.
+        if out.size(0) != orig_q_size_0 or out.size(1) != orig_q_size_1:
+            out_padded = out.new_zeros((orig_q_size_0, orig_q_size_1, out.size(2), out.size(3)))
+            out_padded[:out.size(0), :out.size(1)] = out
+            out = out_padded
+            
+            if lse is not None:
+                lse_padded = lse.new_zeros((orig_q_size_0, lse.size(1), orig_q_size_1))
+                lse_padded[:lse.size(0), :, :lse.size(2)] = lse
+                lse = lse_padded
 
         # Slice output and lse back to actual head count if we padded
         if actual_num_heads < padded_num_heads:
             out = out[:, :, :actual_num_heads, :]
-            lse = lse[:, :actual_num_heads, :]
+            if lse is not None:
+                lse = lse[:, :actual_num_heads, :]
 
         return out, lse
 
