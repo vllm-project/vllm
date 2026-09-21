@@ -20,9 +20,6 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    _get_encoder_cache_hidden_dim,
-)
 from vllm.distributed.ec_transfer.ec_connector.mooncake.config import (
     _RESERVATION_TTL_SECONDS,
     MooncakeECConfig,
@@ -85,9 +82,6 @@ class ECMooncakeScheduler:
         self._is_consumer = config.is_consumer
         self._control_addr = config.control_addr
         self._push_wait_timeout = config.push_wait_timeout_s
-        self._encoder_cache_hidden_dim = (
-            _get_encoder_cache_hidden_dim(vllm_config) if config.is_producer else None
-        )
         self._model_config = vllm_config.model_config
         self._control_client = ControlClient(config.control_timeout_ms)
         self._control_executor = ThreadPoolExecutor(
@@ -447,8 +441,16 @@ class ECMooncakeScheduler:
     def _encoder_output_spec(self, request: Any, index: int) -> TensorSpec:
         dtype = self._model_config.dtype
         assert isinstance(dtype, torch.dtype)
-        assert self._encoder_cache_hidden_dim is not None
-        shape = (request.get_num_encoder_embeds(index), self._encoder_cache_hidden_dim)
+        hidden_dim = self._model_config.get_inputs_embeds_size()
+        if request.mm_features[index].modality in ("image", "video"):
+            hf_config = self._model_config.hf_config
+            hf_config = getattr(hf_config, "thinker_config", hf_config)
+            vision_config = getattr(hf_config, "vision_config", None)
+            out_hidden_size = getattr(vision_config, "out_hidden_size", None)
+            deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
+            if out_hidden_size is not None and deepstack_indexes:
+                hidden_dim = out_hidden_size * (1 + len(deepstack_indexes))
+        shape = (request.get_num_encoder_embeds(index), hidden_dim)
         return TensorSpec(shape, str(dtype), math.prod(shape) * dtype.itemsize)
 
     def update_state_after_alloc(self, request: Any, index: int) -> None:
