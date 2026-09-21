@@ -16,12 +16,12 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep_rocm import (
     MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO,
     _comm_overlap_active,
-    _DBOCommRegionMixin,
 )
 
 
-class _RegionProbe(_DBOCommRegionMixin):
+class _RegionProbe(MoEPrepareAndFinalizeNaiveDPEPModularROCmDBO):
     def __init__(self) -> None:
+        super().__init__()
         self.body_ran = False
 
     def run_comm(self) -> None:
