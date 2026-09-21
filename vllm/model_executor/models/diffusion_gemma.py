@@ -543,7 +543,7 @@ def _compiled_sample_step(
     if tp_size > 1:
         soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
     soft_embeds = soft_embeds * normalizer
-    sc_embeds[decode_slots] = soft_embeds * sc_keep
+    sc_embeds[decode_slots] = (soft_embeds * sc_keep).to(sc_embeds.dtype)
 
     # Overwrite canvas with argmax for newly converged denoise requests
     newly_converged = (converged & is_denoise).unsqueeze(1)
@@ -1014,7 +1014,7 @@ class DiffusionSampler:
         # on the subsequent commit step when num_sampled=CANVAS_LEN.
         self._pending_logprobs: dict[int, LogprobsTensors] = {}
 
-    def add_request(self, req_idx: int, prompt_len: int, sampling_params: Any) -> None:
+    def add_request(self, req_idx: int, sampling_params: Any) -> None:
         if use_penalty(sampling_params):
             logger.warning_once(
                 "DiffusionGemma does not support repetition/frequency/presence "
