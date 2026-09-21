@@ -1200,12 +1200,10 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
-  - tests/entrypoints/weight_transfer
   - tests/entrypoints/launchers
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/unit_tests
-  - pytest -v -s entrypoints/weight_transfer
   - pytest -v -s entrypoints/launchers
 
 - label: ":amd: (MI300) Entrypoints Integration (LLM)" # TBD

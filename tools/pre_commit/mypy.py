@@ -34,7 +34,6 @@ SILENT_GROUPS = [
     "tests/config",
     "tests/entrypoints/generate",
     "tests/entrypoints/tool_parsers",
-    "tests/entrypoints/weight_transfer",
     "tests/kernels/core",
     "tests/kernels/mamba",
     "tests/models/language",
