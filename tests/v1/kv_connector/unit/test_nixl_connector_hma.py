@@ -58,6 +58,7 @@ def region_pull_worker():
     worker._recving_transfers = {}
     worker.use_mla, worker._has_mamba = True, False
     worker.dcp_size = 1
+    worker.dcp_rank = 0
     spec = MLAAttentionSpec(
         block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
     )
@@ -163,6 +164,82 @@ def test_region_pull_ignores_allocation_padding(
         )
         for base in (30, 40)
     ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_pages", [0, 3, 19])
+@pytest.mark.parametrize("region_groups", [(0, 1), (1, 0, 1)])
+def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
+    """Read each uncached page from its DCP rank; notify ranks with no pages."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+
+    worker = region_pull_worker
+    worker.region_group_ids = list(region_groups)
+    worker.num_regions = len(region_groups)
+    worker.dst_region_group_ids = {"P": [0] * worker.num_regions}
+    worker.dst_region_num_blocks = {
+        engine: [100] * worker.num_regions for engine in ("P", "D")
+    }
+    worker.block_len_per_layer = [1024] * worker.num_regions
+    worker.dcp_rank = 0
+    remote = worker.transfer_topo.get_engine_info.return_value
+    remote.remote_tp_size = remote.remote_dcp_size = 8
+    remote.remote_physical_blocks_per_logical = 1
+    ranks = tuple(range(8))
+    worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 8)
+    worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
+    worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
+    # Two regions with different prefix hits, plus one padding page each.
+    local = (
+        [list(range(31, 31 + num_pages)), list(range(42, 41 + num_pages))]
+        if num_pages
+        else []
+    )
+    meta = ReqMeta(
+        local,
+        local,
+        tp_size=8,
+        local_num_computed_blocks=(0, 1, 2),
+        remote=RemoteMeta(
+            [[10, 11, 12]],
+            "localhost",
+            1,
+            "P",
+            "request-P",
+            num_tokens=max(0, num_pages * 64 - 7),
+        ),
+    )
+    worker._read_blocks_for_req("request", meta)
+    reads = {
+        call.kwargs["remote_xfer_side_handle"] - 1000: call.kwargs
+        for call in worker._read_blocks_mixed.call_args_list
+    }
+    notified = {call.args[0] for call in worker.nixl_wrapper.send_notif.call_args_list}
+    for rank in ranks:
+        expected = [
+            (region * 100 + 30 + group * 10 + page, region * 100 + 10 + page // 8)
+            for region, group in enumerate(region_groups)
+            for page in range(group + 1, num_pages)
+            if page % 8 == rank
+        ]
+        if expected:
+            read = reads[rank]
+            assert (
+                list(zip(read["local_block_descs_ids"], read["remote_block_descs_ids"]))
+                == expected
+            )
+            assert f"P-rank{rank}" not in notified
+        else:
+            assert rank not in reads and f"P-rank{rank}" in notified
+    assert meta.region_blocks_to_zero == (
+        [[30 + group * 10 + num_pages] for group in region_groups]
+        if num_pages
+        else None
+    )
 
 
 @pytest.mark.cpu_test
