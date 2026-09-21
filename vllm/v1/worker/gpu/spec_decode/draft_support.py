@@ -28,18 +28,25 @@ otherwise as tight as the blocks allow. The Gumbel sampling kernel drops
 everything below the threshold in its own vocab pass. A wider draft support
 only lowers the acceptance gain: rejection sampling keeps the output
 distribution for any draft distribution, as long as the cached draft logits
-match the sampled ones. Rows whose top-k exceeds the number of blocks are
-left unmasked, like rows without top-k.
+match the sampled ones. Rows with a top-k above ``_MAX_TOP_K`` are left
+unmasked, like rows without top-k.
 """
 
 import torch
 
 from vllm.triton_utils import tl, triton
 
-# The vocabulary is split into at most this many blocks.
+# Rows with a larger top-k are left unmasked: so wide a cut barely raises
+# acceptance, and masking it would still cost a pass over the logits.
+_MAX_TOP_K = 1024
+# The vocabulary is split into at most this many blocks, so that one program
+# holds all block maxima of a row in the threshold kernel.
 _MAX_NUM_BLOCKS = 4096
-# Programs that share one row's pass over the vocabulary.
+# Programs that share one row's pass over the vocabulary, so that a small
+# batch still spreads the pass over the GPU.
 _NUM_SPLITS = 16
+# Each step halves the search range. A gap left unresolved keeps an extra
+# block above the cut, never drops one.
 _BISECTION_STEPS = 30
 
 
@@ -49,9 +56,9 @@ def _block_layout(vocab_size: int) -> tuple[int, int]:
     return block, triton.cdiv(vocab_size, block)
 
 
-def draft_support_num_blocks(vocab_size: int) -> int:
-    """Number of block maxima per row; rows with top-k up to it are masked."""
-    return _block_layout(vocab_size)[1]
+def draft_support_max_top_k(vocab_size: int) -> int:
+    """Largest top-k that is masked; rows with a larger one are left unmasked."""
+    return min(_MAX_TOP_K, _block_layout(vocab_size)[1])
 
 
 @triton.jit
@@ -67,9 +74,9 @@ def _draft_block_max_kernel(
     temperature_ptr,
     vocab_size,
     num_blocks,
+    max_top_k,
     BLOCK: tl.constexpr,
     BLOCKS_PER_SPLIT: tl.constexpr,
-    NUM_SPLITS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     split = tl.program_id(1)
@@ -78,8 +85,8 @@ def _draft_block_max_kernel(
         # CUDA graph padding.
         return
     top_k = tl.load(top_k_ptr + req_state_idx)
-    if (top_k >= vocab_size) | (top_k > num_blocks):
-        # No top-k, or a top-k cut the block maxima cannot place.
+    if (top_k >= vocab_size) | (top_k > max_top_k):
+        # No top-k, or one too wide to be worth masking.
         return
     top_p = tl.load(top_p_ptr + req_state_idx).to(tl.float32)
 
@@ -116,6 +123,7 @@ def _draft_support_threshold_kernel(
     temperature_ptr,
     vocab_size,
     num_blocks,
+    max_top_k,
     NUM_BLOCKS_PADDED: tl.constexpr,
     BISECTION_STEPS: tl.constexpr,
 ):
@@ -125,7 +133,7 @@ def _draft_support_threshold_kernel(
         tl.store(threshold_ptr + row, float("-inf"))
         return
     top_k = tl.load(top_k_ptr + req_state_idx)
-    if (top_k >= vocab_size) | (top_k > num_blocks):
+    if (top_k >= vocab_size) | (top_k > max_top_k):
         tl.store(threshold_ptr + row, float("-inf"))
         return
     top_p = tl.load(top_p_ptr + req_state_idx).to(tl.float32)
@@ -202,8 +210,8 @@ def draft_top_k_top_p_threshold(
     temperature: torch.Tensor,
 ) -> torch.Tensor:
     """Per-row float32 threshold: logits below it are outside the top-k / top-p
-    support, -inf where the row stays unmasked (no top-k, or top-k beyond
-    ``draft_support_num_blocks``).
+    support, -inf where the row stays unmasked (no top-k, or top-k above
+    ``draft_support_max_top_k``). Otherwise it is one of the row's logits.
 
     Shapes and host-side control flow depend only on ``logits.shape``, so this
     can be recorded in a CUDA graph.
@@ -215,10 +223,12 @@ def draft_top_k_top_p_threshold(
     if num_tokens == 0:
         return threshold
     block, num_blocks = _block_layout(vocab_size)
+    max_top_k = min(_MAX_TOP_K, num_blocks)
     blocks_per_split = triton.next_power_of_2(triton.cdiv(num_blocks, _NUM_SPLITS))
+    num_splits = triton.cdiv(num_blocks, blocks_per_split)
     block_max = logits.new_empty((num_tokens, num_blocks), dtype=torch.float32)
     block_sum = logits.new_empty((num_tokens, num_blocks), dtype=torch.float32)
-    _draft_block_max_kernel[(num_tokens, _NUM_SPLITS)](
+    _draft_block_max_kernel[(num_tokens, num_splits)](
         block_max,
         block_sum,
         block_max.stride(0),
@@ -230,9 +240,9 @@ def draft_top_k_top_p_threshold(
         temperature,
         vocab_size,
         num_blocks,
+        max_top_k,
         BLOCK=block,
         BLOCKS_PER_SPLIT=blocks_per_split,
-        NUM_SPLITS=_NUM_SPLITS,
     )
     _draft_support_threshold_kernel[(num_tokens,)](
         threshold,
@@ -245,22 +255,22 @@ def draft_top_k_top_p_threshold(
         temperature,
         vocab_size,
         num_blocks,
+        max_top_k,
         NUM_BLOCKS_PADDED=triton.next_power_of_2(num_blocks),
         BISECTION_STEPS=_BISECTION_STEPS,
     )
     return threshold
 
 
-def apply_draft_top_k_top_p(
+def mask_below_threshold(
+    # [num_tokens, vocab_size]
     logits: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    top_k: torch.Tensor,
-    top_p: torch.Tensor,
-    temperature: torch.Tensor,
+    # [num_tokens] from draft_top_k_top_p_threshold
+    threshold: torch.Tensor,
 ) -> torch.Tensor:
-    """Return the logits with tokens outside the top-k / top-p support at -inf."""
-    threshold = draft_top_k_top_p_threshold(
-        logits, idx_mapping, top_k, top_p, temperature
-    )
-    below = logits.to(torch.float32) < threshold.unsqueeze(1)
+    """Return a copy of the logits with the values below their row's threshold
+    at -inf. The threshold is one of the row's logits or -inf, so it converts
+    to the logits' dtype exactly and the comparison matches the sampling
+    kernel's."""
+    below = logits < threshold.to(logits.dtype).unsqueeze(1)
     return logits.masked_fill(below, float("-inf"))

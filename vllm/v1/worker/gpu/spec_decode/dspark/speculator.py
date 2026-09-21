@@ -32,6 +32,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.draft_support import mask_below_threshold
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -133,6 +134,7 @@ class DSparkSpeculator(DFlashSpeculator):
             buf.index_copy_(1, self._d2t_scatter_index, logits.to(buf.dtype))
             logits = buf
 
+        threshold = self._draft_support_threshold(logits, idx_map, self.temperature)
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
         sampled = gumbel_sample(
@@ -146,10 +148,16 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache=self.draft_logits,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
+            logits_threshold=threshold,
         )
         if self.draft_watermarker is not None:
             sampled = self.draft_watermarker.sample(
-                logits, sampled, idx_map, self.temperature
+                logits
+                if threshold is None
+                else mask_below_threshold(logits, threshold),
+                sampled,
+                idx_map,
+                self.temperature,
             )
         return sampled
 
