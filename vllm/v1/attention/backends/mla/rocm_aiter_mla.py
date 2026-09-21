@@ -1081,7 +1081,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # to the original _copy_page_indices_kernel).
             # When kernel_block_size=K>1, block_table entry b covering K tokens
             # gets expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
-            _expand_page_indices_kernel[(num_reqs,)](
+            # Chunk count comes from the block table width, an upper bound on
+            # tokens per request that is available host-side, so this adds no
+            # device synchronisation. Programs whose chunk lies past
+            # num_tokens mask out entirely.
+            max_tokens_per_req = block_table_tensor.shape[1] * self.kernel_block_size
+            num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
+            _expand_page_indices_kernel[(num_reqs, num_chunks)](
                 self.paged_kv_indices,
                 block_table_tensor,
                 block_table_tensor.stride(0),
@@ -1300,32 +1306,34 @@ def _expand_page_indices_kernel(
     When KERNEL_BLOCK_SIZE=K: block table entry b (covering K tokens)
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
     """
+    # One program per (request, token-chunk). Parallelising over requests
+    # alone degenerates at low concurrency: with num_reqs == 1 a single
+    # workgroup walked the whole sequence in a serial loop.
     req_idx = tl.program_id(0)
+    chunk_idx = tl.program_id(1)
     row_ptr = block_table + req_idx * block_table_stride
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
-    offset = tl.arange(0, BLOCK_SIZE)
-    for i in tl.range(0, num_tokens, BLOCK_SIZE):
-        token_offsets = i + offset
-        mask = token_offsets < num_tokens
+    token_offsets = chunk_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = token_offsets < num_tokens
 
-        # Which block in the block table does this token belong to?
-        block_idx = token_offsets // KERNEL_BLOCK_SIZE
-        # Offset within that block
-        offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
+    # Which block in the block table does this token belong to?
+    block_idx = token_offsets // KERNEL_BLOCK_SIZE
+    # Offset within that block
+    offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
 
-        # Load the block ID from the block table
-        block_ids = tl.load(row_ptr + block_idx, mask=mask)
+    # Load the block ID from the block table
+    block_ids = tl.load(row_ptr + block_idx, mask=mask)
 
-        # Compute flat index in the flattened kv_buffer
-        flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
+    # Compute flat index in the flattened kv_buffer
+    flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
 
-        tl.store(
-            page_indices + start_idx + token_offsets,
-            flat_indices,
-            mask=mask,
-        )
+    tl.store(
+        page_indices + start_idx + token_offsets,
+        flat_indices,
+        mask=mask,
+    )
 
 
 class AiterMLAHelper:
