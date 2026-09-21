@@ -129,14 +129,30 @@ def _resolve_gdn_prefill_backend(
     )
 
     if current_platform.is_rocm():
-        supports_aiter_flydsl = (
-            backend == "aiter_flydsl"
-            and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
-            and head_k_dim == 128
-            and head_v_dim == 128
-            and vllm_config.model_config.dtype == torch.bfloat16
-        )
-        if supports_aiter_flydsl:
+        if backend == "aiter_flydsl":
+            if not rocm_aiter_ops.is_gdn_flydsl_prefill_available():
+                raise RuntimeError(
+                    "GDN prefill backend 'aiter_flydsl' was requested but is "
+                    "not available: "
+                    f"{rocm_aiter_ops.gdn_flydsl_prefill_unavailable_reason()}"
+                )
+            if head_k_dim != 128 or head_v_dim != 128:
+                logger.warning_once(
+                    "GDN prefill backend 'aiter_flydsl' was requested but "
+                    "linear head dims are K=%s V=%s; FlyDSL requires 128/128. "
+                    "Falling back to Triton/FLA.",
+                    head_k_dim,
+                    head_v_dim,
+                )
+                return backend, "triton"
+            if vllm_config.model_config.dtype != torch.bfloat16:
+                logger.warning_once(
+                    "GDN prefill backend 'aiter_flydsl' was requested but "
+                    "model dtype is %s; FlyDSL requires bfloat16. "
+                    "Falling back to Triton/FLA.",
+                    vllm_config.model_config.dtype,
+                )
+                return backend, "triton"
             return backend, "aiter_flydsl"
         return backend, "triton"
 
@@ -289,10 +305,7 @@ class ChunkGatedDeltaRule(CustomOp):
         backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
 
-        if (
-            backend in ("flashinfer", "cutedsl", "aiter_flydsl")
-            and active_backend != backend
-        ):
+        if backend in ("flashinfer", "cutedsl") and active_backend != backend:
             logger.warning_once(
                 "GDN prefill backend '%s' is selected but cannot use this "
                 "kernel on the current platform. Falling back to Triton/FLA.",
