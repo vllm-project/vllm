@@ -14,11 +14,14 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
+)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
-from vllm.models.common.kda import store_cache_checkpoints_kernel
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
@@ -1498,36 +1501,13 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     checkpoint_state_indices = torch.tensor(
         [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
     )
-    state_len = conv_state.shape[-1]
-    width = H * D
-    recurrent_row_size = checkpoint_state[0].numel()
-    block_size = 256
-    store_cache_checkpoints_kernel[
-        (
-            checkpoint_state_indices.numel(),
-            (max(width * state_len, recurrent_row_size) + block_size - 1) // block_size,
-        )
-    ](
-        conv_input,
-        conv_state,
-        checkpoint_state,
-        recurrent_state,
-        cu_seqlens,
-        checkpoint_offsets,
-        checkpoint_state_indices,
-        conv_input.stride(0),
-        conv_input.stride(1),
-        conv_state.stride(0),
-        conv_state.stride(1),
-        conv_state.stride(2),
-        checkpoint_state.stride(0),
-        recurrent_state.stride(0),
-        checkpoint_offsets.stride(0),
-        state_len,
-        width,
-        recurrent_row_size,
-        NULL_BLOCK_ID,
-        block_size,
+    FlashKDAPrefillCheckpointExporter().export(
+        MambaPrefillCheckpointMetadata(checkpoint_offsets, checkpoint_state_indices),
+        raw_qkv=conv_input,
+        conv_state=conv_state,
+        recurrent_checkpoint=checkpoint_state,
+        recurrent_state=recurrent_state,
+        cu_seqlens=cu_seqlens,
     )
     torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
     torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])

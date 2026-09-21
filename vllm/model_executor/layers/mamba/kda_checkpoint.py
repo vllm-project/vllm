@@ -5,24 +5,16 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.mamba_checkpoint import (
+from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
-@dataclass(frozen=True)
-class KDAPrefillCheckpointSpec:
-    enabled: bool
-    alignment: int | None = None
-
-
-def kdac_prefill_checkpoint_spec(backend: str) -> KDAPrefillCheckpointSpec:
-    if backend == "flashkda":
-        return KDAPrefillCheckpointSpec(enabled=True, alignment=16)
-    return KDAPrefillCheckpointSpec(enabled=False)
+def kda_prefill_checkpoint_alignment(backend: str) -> int | None:
+    return 16 if backend == "flashkda" else None
 
 
 @dataclass(frozen=True)
@@ -34,13 +26,13 @@ class FlashKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
     def export(
         self,
         checkpoint: MambaPrefillCheckpointMetadata,
-        **kwargs: torch.Tensor,
+        *,
+        raw_qkv: torch.Tensor,
+        conv_state: torch.Tensor,
+        recurrent_checkpoint: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        cu_seqlens: torch.Tensor,
     ) -> None:
-        raw_qkv = kwargs["raw_qkv"]
-        conv_state = kwargs["conv_state"]
-        recurrent_checkpoint = kwargs["recurrent_checkpoint"]
-        recurrent_state = kwargs["recurrent_state"]
-        cu_seqlens = kwargs["cu_seqlens"]
         state_len = (
             self.state_len if self.state_len is not None else conv_state.shape[-1]
         )

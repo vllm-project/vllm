@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -26,9 +30,6 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
-)
-from vllm.v1.attention.backends.mamba_checkpoint import (
-    MambaPrefillCheckpointMetadata,
 )
 from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
@@ -314,6 +315,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
         additional_config = vllm_config.additional_config
         self.use_flashinfer_prefill = (
             isinstance(additional_config, dict)
@@ -702,7 +706,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             request_rows = list(range(m.num_reqs))
             if active_non_spec_mask_cpu is not None:
                 request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
-            checkpoint = self._build_checkpoint_metadata(m, request_rows)
+            checkpoint = self.checkpoint_builder.build(m, request_rows)
 
         return KimiK3KDAMetadata(
             num_prefills=num_prefills,

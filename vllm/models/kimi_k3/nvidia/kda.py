@@ -21,6 +21,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
+    kda_prefill_checkpoint_alignment,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -42,10 +46,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.common.kda import (
-    FlashKDAPrefillCheckpointExporter,
-    kdac_prefill_checkpoint_spec,
-)
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -741,11 +741,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(spec, MambaSpec)
-        checkpoint_spec = kdac_prefill_checkpoint_spec(self.kda_prefill_backend)
+        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
         return replace(
             spec,
-            num_prefill_checkpoint_blocks=int(checkpoint_spec.enabled),
-            prefill_checkpoint_alignment=checkpoint_spec.alignment,
+            num_prefill_checkpoint_blocks=int(alignment is not None),
+            prefill_checkpoint_alignment=alignment,
         )
 
     def forward(
