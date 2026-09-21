@@ -756,9 +756,9 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output2.num_scheduled_tokens[requests[2].request_id] == 800 - 224 - 224
 
 
-def test_long_prefill_threshold_fills_idle_budget():
-    """A lone long prefill is not capped by the threshold when nothing else
-    needs the token budget."""
+def test_long_prefill_threshold_ignored_when_alone():
+    """A lone long prefill is not capped by the threshold: it has no other
+    request to starve."""
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
         long_prefill_token_threshold=400,
@@ -770,21 +770,19 @@ def test_long_prefill_threshold_fills_idle_budget():
     assert output.num_scheduled_tokens[request.request_id] == 1024
 
 
-def test_long_prefill_threshold_shares_surplus_budget():
-    """The first long prefill takes only the budget the others don't need at
-    the threshold; the later ones stay capped."""
+def test_long_prefill_threshold_applies_with_other_requests():
+    """The threshold caps the prefill as soon as another request is queued."""
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
-        long_prefill_token_threshold=100,
+        long_prefill_token_threshold=400,
     )
-    long_reqs = create_requests(num_requests=2, num_tokens=2000)
+    long_req = create_requests(num_requests=1, num_tokens=2000)[0]
     short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
-    for request in [*long_reqs, short_req]:
+    for request in [long_req, short_req]:
         scheduler.add_request(request)
 
     output = scheduler.schedule()
-    assert output.num_scheduled_tokens[long_reqs[0].request_id] == 1024 - 100 - 10
-    assert output.num_scheduled_tokens[long_reqs[1].request_id] == 100
+    assert output.num_scheduled_tokens[long_req.request_id] == 400
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 

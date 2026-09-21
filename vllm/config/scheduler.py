@@ -81,8 +81,8 @@ class SchedulerConfig:
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default).
 
-    The cap is soft: a long prefill may exceed it with any token budget that
-    the other running and waiting requests would not use."""
+    The cap is not applied when the request is the only one in the batch,
+    since there is no other request for it to starve."""
 
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)

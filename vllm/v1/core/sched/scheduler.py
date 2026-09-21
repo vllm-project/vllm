@@ -78,32 +78,6 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
-class _LongPrefillCap:
-    """Soft `long_prefill_token_threshold`.
-
-    Every not-yet-visited request reserves the tokens it would take at the
-    threshold. A request may exceed the threshold by whatever budget is left
-    beyond those reservations, so a long prefill fills the batch when no
-    other work needs the budget.
-    """
-
-    def __init__(self, threshold: int, demands: dict[str, int]):
-        self.threshold = threshold
-        self.demands = demands
-        self.reserved_tokens = sum(demands.values())
-
-    def release(self, request_id: str) -> None:
-        self.reserved_tokens -= self.demands.pop(request_id, 0)
-
-    def get(self, token_budget: int, input_budget: int, draft_slots: int) -> int:
-        reserved_inputs = self.reserved_tokens + draft_slots * len(self.demands)
-        surplus = min(
-            token_budget - self.reserved_tokens,
-            input_budget - draft_slots - reserved_inputs,
-        )
-        return max(self.threshold, surplus)
-
-
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -581,38 +555,6 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
-    def _make_long_prefill_cap(self) -> _LongPrefillCap | None:
-        threshold = self.scheduler_config.long_prefill_token_threshold
-        if threshold <= 0:
-            return None
-        demands = {
-            req.request_id: max(
-                min(
-                    req.num_tokens_with_spec
-                    + req.num_output_placeholders
-                    - req.num_computed_tokens,
-                    threshold,
-                ),
-                0,
-            )
-            for req in self.running
-        }
-        num_free_slots = (
-            self.max_num_active_reqs
-            - len(self.running)
-            - self.num_waiting_for_streaming_input
-        )
-        if num_free_slots > 0 and self._pause_state == PauseState.UNPAUSED:
-            # Ignores prefix cache hits, so this may over-reserve.
-            min_new_tokens = 1 + self.num_spec_tokens
-            waiting = itertools.chain(self.skipped_waiting, self.waiting)
-            for req in itertools.islice(waiting, num_free_slots):
-                num_new_tokens = max(
-                    req.num_tokens - req.num_computed_tokens, min_new_tokens
-                )
-                demands[req.request_id] = min(num_new_tokens, threshold)
-        return _LongPrefillCap(threshold, demands)
-
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -662,14 +604,19 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
-        long_prefill_cap = self._make_long_prefill_cap()
+        # `long_prefill_token_threshold` exists to stop a long prefill from
+        # starving other requests of the token budget. When it is the only
+        # request there is nobody to starve, so let it use the whole budget.
+        long_prefill_token_threshold = (
+            self.scheduler_config.long_prefill_token_threshold
+            if len(self.running) + len(self.waiting) + len(self.skipped_waiting) > 1
+            else 0
+        )
 
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            if long_prefill_cap is not None:
-                long_prefill_cap.release(request.request_id)
             if input_budget <= draft_slots:
                 break
 
@@ -717,11 +664,8 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if long_prefill_cap is not None:
-                num_new_tokens = min(
-                    num_new_tokens,
-                    long_prefill_cap.get(token_budget, input_budget, draft_slots),
-                )
+            if 0 < long_prefill_token_threshold < num_new_tokens:
+                num_new_tokens = long_prefill_token_threshold
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -846,8 +790,6 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running.pop()
 
-                    if long_prefill_cap is not None:
-                        long_prefill_cap.release(preempted_req.request_id)
                     self._preempt_request(
                         preempted_req,
                         scheduled_timestamp,
@@ -933,8 +875,6 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-                if long_prefill_cap is not None:
-                    long_prefill_cap.release(request_id)
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -1129,13 +1069,8 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens = padded_num_tokens
                             pad_spec_decode = True
 
-                    if long_prefill_cap is not None:
-                        num_new_tokens = min(
-                            num_new_tokens,
-                            long_prefill_cap.get(
-                                token_budget, input_budget, draft_slots
-                            ),
-                        )
+                    if 0 < long_prefill_token_threshold < num_new_tokens:
+                        num_new_tokens = long_prefill_token_threshold
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
