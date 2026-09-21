@@ -895,7 +895,8 @@ class EngineCore:
         - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
-          output queue is empty.
+          output queue is empty. With clear_cache, running requests are
+          preempted back to the waiting queue.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
@@ -1995,7 +1996,8 @@ class EngineCoreProc(EngineCore):
         - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
-          output queue is empty.
+          output queue is empty. With clear_cache, running requests are
+          preempted back to the waiting queue.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
