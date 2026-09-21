@@ -14,10 +14,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.utils import next_power_of_2
-from vllm.v1.worker.gpu.attn_utils import (
-    build_attn_metadata,
-    build_slot_mappings_by_layer,
-)
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
@@ -199,31 +196,25 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
                 total_expanded,
                 out=self.expanded_slot_mappings,
             )
-            prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
-                prefill_slot_mappings, kv_cache_config
-            )
-
             qsl_np = input_batch.query_start_loc_np
             query_start_loc_cpu_expanded = (
                 torch.from_numpy(qsl_np[: num_reqs + 1]).int()
                 + torch.from_numpy(self.arange_np[: num_reqs + 1]).int()
             )
-            max_query_len = (
-                int((qsl_np[1 : num_reqs + 1] - qsl_np[:num_reqs]).max()) + 1
-            )
-
-            prefill_attn_md = build_attn_metadata(
-                attn_groups=self.attn_groups,
+            prefill_attn_md = self._build_attn_metadata(
+                batch_desc=BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.NONE,
+                    num_tokens=total_expanded,
+                    num_reqs=num_reqs,
+                ),
                 num_reqs=num_reqs,
-                num_tokens=total_expanded,
-                query_start_loc_gpu=self.input_buffers.query_start_loc[: num_reqs + 1],
-                query_start_loc_cpu=query_start_loc_cpu_expanded,
-                max_query_len=max_query_len,
-                seq_lens=self.input_buffers.seq_lens[:num_reqs],
-                max_seq_len=self.max_model_len,
-                block_tables=[x[:num_reqs] for x in block_tables.input_block_tables],
+                query_start_loc_np=query_start_loc_cpu_expanded.numpy(),
+                seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+                step=0,
                 slot_mappings=prefill_slot_mappings,
-                kv_cache_config=kv_cache_config,
+            )
+            prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
+                prefill_slot_mappings, kv_cache_config
             )
             hidden_states = self._run_model(
                 self.expanded_input_ids[:total_expanded],
@@ -416,7 +407,6 @@ def _prepare_prefill_inputs_kernel(
     query_start_loc_ptr,  # [num_reqs + 1] int32
     seq_lens_ptr,  # [num_reqs] int32
     num_rejected_ptr,  # [num_reqs] int32
-    src_tokens,
     max_num_reqs,
     max_model_len,
     BLOCK_SIZE: tl.constexpr,
@@ -444,7 +434,6 @@ def _prepare_prefill_inputs_kernel(
     num_valid = q_next - q_start - num_rejected
     correction_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
     start_pos = tl.load(target_positions_ptr + q_start)
-    correction_pos = start_pos + num_valid
     out_start = q_start + req_idx
     total_out = q_next - q_start + 1
 
@@ -458,7 +447,6 @@ def _prepare_prefill_inputs_kernel(
         token_ids = tl.load(target_input_ids_ptr + src_idx, mask=is_valid, other=0)
         positions = tl.minimum(start_pos + j, max_model_len - 1)
         token_ids = tl.where(is_correction, correction_token, token_ids)
-        positions = tl.where(j == num_valid, correction_pos, positions)
 
         out_idx = out_start + j
         tl.store(out_input_ids_ptr + out_idx, token_ids, mask=in_bounds)
@@ -529,7 +517,6 @@ def prepare_prefill_inputs(
         input_batch.query_start_loc,
         input_batch.seq_lens,
         num_rejected.int(),
-        src_tokens,
         max_num_reqs,
         max_model_len,
         BLOCK_SIZE=BLOCK_SIZE,
