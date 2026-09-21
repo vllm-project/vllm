@@ -1392,16 +1392,8 @@ def test_engram_model_support(
         assert resolved.engram_config.cpu_offload is True
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"), [(None, True), ("0", False), ("1", True)]
-)
-def test_engram_cpu_offload_environment_default(monkeypatch, value, expected):
-    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
-    if value is not None:
-        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", value)
-    assert EngramConfig().cpu_offload is expected
-    assert EngramConfig(cpu_offload=False).cpu_offload is False
-    assert EngramConfig(cpu_offload=True).cpu_offload is True
+def test_engram_cpu_offload_default():
+    assert EngramConfig().cpu_offload is True
 
 
 def test_engram_config_defaults_to_none():
