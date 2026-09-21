@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import ctypes
 import dataclasses
 import enum
@@ -26,7 +28,7 @@ class WorkItem:
     def unpack(self) -> tuple[Callable[[], None], int, Any]:
         return self.fn, len(self.tasks), self.state
 
-    def split(self, quanta: int | None) -> tuple["WorkItem", "WorkItem" | None]:
+    def split(self, quanta: int | None) -> tuple[WorkItem, WorkItem | None]:
         """Split into (stolen, remainder).
 
         Returns (self, None) when quanta is None or covers all tasks.

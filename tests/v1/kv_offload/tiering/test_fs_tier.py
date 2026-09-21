@@ -37,6 +37,7 @@ from vllm.v1.kv_offload.config import (
 )
 from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.kv_offload.tiering.fs.dispatch import _batch_tasks
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
@@ -361,8 +362,8 @@ def test_shutdown_discards_pending_tasks(fs_tier):
     tier.shutdown()
 
     # Verify queues are cleared and threads stopped
-    assert len(tier._pool._load_q) == 0
-    assert len(tier._pool._store_q) == 0
+    assert len(tier._pool._dispatcher._load_q) == 0
+    assert len(tier._pool._dispatcher._store_q) == 0
     assert all(not t.is_alive() for t in tier._pool._threads)
 
 
@@ -457,7 +458,13 @@ def test_wait_idle_blocks_until_tasks_complete():
     # dummy task
     task = Task(key=key(0), path="0", offset=0)
 
-    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    pool = DualQueueThreadPool(
+        n_read_threads=1,
+        n_write_threads=1,
+        n_write_excl_threads=1,
+        block_size=1,
+        locality=Locality.LOCAL,
+    )
     pool.enqueue_store(
         job_id=1,
         n_tasks=1,
@@ -491,45 +498,10 @@ def test_wait_idle_blocks_until_tasks_complete():
 def test_batch_tasks_distribution(n_tasks, n_threads, expected_sizes):
     """_batch_tasks splits tasks evenly across n_threads (largest remainder
     first), preserving order and accounting for every task."""
-    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
-    try:
-        tasks = [Task(key=key(i), path=str(i), offset=i) for i in range(n_tasks)]
-        batches = list(pool._batch_tasks(tasks, n_threads))
-        assert [len(b) for b in batches] == expected_sizes
-        assert [t for b in batches for t in b] == tasks
-    finally:
-        pool.shutdown(wait=True)
-
-
-def test_store_job_parallelized_across_threads():
-    """A single job's batches must be serviced by multiple threads at once,
-    not funneled through a single thread."""
-    n_threads = 4
-    barrier = threading.Barrier(n_threads, timeout=5.0)
-    seen_threads: set[str] = set()
-    lock = threading.Lock()
-
-    def make_batch_fn(batch: list[Task]):
-        def run() -> None:
-            with lock:
-                seen_threads.add(threading.current_thread().name)
-            barrier.wait()
-
-        return run
-
-    pool = DualQueueThreadPool(n_read_threads=0, n_write_threads=n_threads)
-    try:
-        tasks = [Task(key=key(i), path=str(i), offset=i) for i in range(n_threads)]
-        pool.enqueue_store(
-            job_id=1,
-            n_tasks=n_threads,
-            tasks=tasks,
-            make_batch_fn=make_batch_fn,
-        )
-        pool.wait_idle()
-        assert len(seen_threads) == n_threads
-    finally:
-        pool.shutdown(wait=True)
+    tasks = [Task(key=key(i), path=str(i), offset=i) for i in range(n_tasks)]
+    batches = list(_batch_tasks(tasks, n_threads))
+    assert [len(b) for b in batches] == expected_sizes
+    assert [t for b in batches for t in b] == tasks
 
 
 def test_batch_lookup_c_extension(tmp_path):
