@@ -885,7 +885,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         topk_lens = None
         topk_ragged_indices = None
         topk_ragged_indptr = None
-        use_direct_topk = _ON_GFX950 and 1 <= num_decode_tokens <= 64
+        use_direct_topk = not swa_only and _ON_GFX950 and num_decode_tokens <= 64
         if not swa_only:
             assert self.topk_indices_buffer is not None
             if use_direct_topk:

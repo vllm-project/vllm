@@ -1305,6 +1305,72 @@ def test_sparse_attn_decode_gfx950_derives_exact_direct_lengths(monkeypatch) -> 
 
 @requires_gfx950
 @torch.inference_mode()
+def test_sparse_attn_decode_gfx950_derives_ratio1_lengths_above_32(
+    monkeypatch,
+) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(43)
+    block_size = 4
+    num_queries, num_heads, width = 33, 1, 8
+    q = torch.randn(
+        num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    main_cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
+    main_indices = torch.empty(0, dtype=torch.int32, device=device)
+    main_indptr = torch.zeros(num_queries + 1, dtype=torch.int32, device=device)
+    extra_cache = _pack_fp8_ds_mla_cache(
+        torch.randn(num_queries * width, HEAD_DIM, dtype=torch.bfloat16, device=device),
+        block_size,
+        use_fnuz=False,
+    )
+    logical = torch.arange(width, dtype=torch.int32, device=device).repeat(
+        num_queries, 1
+    )
+    token_to_req = torch.arange(num_queries, dtype=torch.int32, device=device)
+    block_table = torch.arange(
+        num_queries * (width // block_size), dtype=torch.int32, device=device
+    ).reshape(num_queries, -1)
+    lengths = torch.arange(num_queries, dtype=torch.int32, device=device) % (width + 1)
+    seq_lens = lengths.clone()
+    query_start_loc = torch.arange(num_queries + 1, dtype=torch.int32, device=device)
+    valid_token = torch.ones(num_queries, dtype=torch.bool, device=device)
+    valid_token[-1] = False
+    lengths[-1] = 0
+    common = dict(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices.reshape(num_queries, 0),
+        main_lengths=torch.zeros(num_queries, dtype=torch.int32, device=device),
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=logical,
+        extra_token_to_req=token_to_req,
+        extra_block_table=block_table,
+    )
+
+    monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *args: 4)
+    explicit = mod._rocm_sparse_attn_decode_triton(
+        **common,
+        extra_lengths=lengths,
+    )
+    derived = mod._rocm_sparse_attn_decode_triton(
+        **common,
+        extra_seq_lens=seq_lens,
+        extra_query_start_loc=query_start_loc,
+        extra_is_valid_token=valid_token,
+        extra_compress_ratio=1,
+    )
+
+    torch.testing.assert_close(derived, explicit, atol=0, rtol=0)
+
+
+@requires_gfx950
+@torch.inference_mode()
 def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> None:
     device = torch.device("cuda")
     part_m = torch.full(

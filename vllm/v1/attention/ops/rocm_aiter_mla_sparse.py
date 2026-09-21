@@ -2645,6 +2645,10 @@ def _sparse_attn_decode_gfx950_partial_kernel(
         if DIRECT_EXTRA:
             extra_start = 0
             if DERIVE_EXTRA_LENGTHS:
+                # Keep this identical to the indexer's decode row bound:
+                # _indexer_decode_metadata_kernel derives the same absolute
+                # position, then the builder divides seq_lens by compress_ratio.
+                # The top-k writer fills every slot past that bound with -1.
                 req_idx = tl.load(extra_token_to_req_ptr + query_idx)
                 query_start = tl.load(extra_query_start_loc_ptr + req_idx)
                 query_end = tl.load(extra_query_start_loc_ptr + req_idx + 1)
