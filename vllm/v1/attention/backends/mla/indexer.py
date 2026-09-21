@@ -260,7 +260,7 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
+        return (KVCacheLayout.BLHNC,)
 
     @staticmethod
     def get_name() -> str:

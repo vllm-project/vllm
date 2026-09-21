@@ -27,18 +27,22 @@ import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV4IndexerBackend,
+    Glm5NextIndexerBackend,
     KpoolTailBackend,
     KpoolTailMetadataBuilder,
     compute_kpool_tail_slot_mapping,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.block_table import get_block_table_width
 
 KPOOL = 4
 
 
 def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
-    layout, *_ = KpoolTailBackend.supported_kv_cache_layouts()
+    (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
+    assert layout is KVCacheLayout.BLHNC
     spec = CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
@@ -52,6 +56,12 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     assert head_stride == KPOOL * 128 * torch.bfloat16.itemsize
     assert state_stride == 128 * torch.bfloat16.itemsize
     assert content_stride == 1
+
+
+def test_indexer_backends_keep_both_packed_layouts():
+    layouts = (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
+    assert DeepseekV4IndexerBackend.supported_kv_cache_layouts() == layouts
+    assert Glm5NextIndexerBackend.supported_kv_cache_layouts() == layouts
 
 
 @pytest.mark.parametrize(
