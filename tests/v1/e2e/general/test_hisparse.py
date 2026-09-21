@@ -82,11 +82,17 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
 @pytest.mark.parametrize(
     "with_offloading", [False, True], ids=["standalone", "offload"]
 )
+@pytest.mark.parametrize(
+    "attention_backend",
+    ["FLASHINFER_MLA_SPARSE", "FLASH_ATTN_MLA_SPARSE_FA4"],
+    ids=["flashinfer", "fa4"],
+)
 @fork_new_process_for_each_test
 def test_hisparse_spill_and_prefix_restore(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
     with_offloading: bool,
+    attention_backend: str,
 ):
     """Spilled prefixes restore and FULL-graph decode writes reach host KV.
 
@@ -96,6 +102,10 @@ def test_hisparse_spill_and_prefix_restore(
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
         pytest.skip("Sparse MLA requires Hopper or newer")
+    if attention_backend == "FLASH_ATTN_MLA_SPARSE_FA4" and (
+        not current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
 
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
@@ -137,6 +147,7 @@ def test_hisparse_spill_and_prefix_restore(
             )
         ),
         kv_transfer_config=kv_transfer_config,
+        attention_backend=attention_backend,
         block_size=64,
         max_model_len=320,
         max_num_batched_tokens=1024,
@@ -154,6 +165,8 @@ def test_hisparse_spill_and_prefix_restore(
         worker = _get_hisparse_worker(runner)
         engine_core = runner.llm.llm_engine.engine_core.engine_core
         model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+        selected = model_runner.attn_groups[0][0].backend.get_name()
+        assert selected == attention_backend
         full_graph_calls = 0
         full_replay_pending = False
         original_run_fullgraph = model_runner.cudagraph_manager.run_fullgraph

@@ -48,21 +48,18 @@ _SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 
 
 def autotune_hisparse_flashinfer_attention(runner: "GPUModelRunner") -> None:
-    """Autotune each HiSparse FlashInfer sparse-MLA configuration."""
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseImpl,
-    )
-
+    """Warm each HiSparse sparse-MLA config whose impl has autotune_hisparse_decode."""
     tuned: set[tuple[object, ...]] = set()
     for layer in runner.vllm_config.compilation_config.static_forward_context.values():
         impl = getattr(layer, "impl", None)
-        if not isinstance(impl, FlashInferMLASparseImpl):
+        if impl is None or not hasattr(impl, "autotune_hisparse_decode"):
             continue
         if getattr(layer, "hisparse_cache", None) is None:
             continue
         if impl.topk_indices_buffer is None:
             continue
         key = (
+            type(impl),
             impl.kv_cache_dtype,
             impl.num_heads,
             impl.qk_nope_head_dim,
