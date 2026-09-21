@@ -591,7 +591,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if self.engram_layout is not None and engram_config and engram_config.use_thp:
             # Release old checkpoint cache before allocating the Engram host tables.
-            self._drop_checkpoint_cache()
+            model_config = vllm_config.model_config
+            drop_checkpoint_cache(
+                model_config.model_weights or model_config.model,
+                revision=model_config.revision,
+                cache_dir=vllm_config.load_config.download_dir,
+            )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -1038,20 +1043,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if finalize is not None:
                 finalize()
 
-    def finalize_engram_host_pages(self) -> None:
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            if layer.engram is not None:
-                layer.engram.embed_tokens.finish_weight_loading()
-
-    def _drop_checkpoint_cache(self) -> None:
-        """Evict cached checkpoint pages so contiguous memory is free for huge pages."""
-        model_config = self.vllm_config.model_config
-        drop_checkpoint_cache(
-            model_config.model_weights or model_config.model,
-            revision=model_config.revision,
-            cache_dir=self.vllm_config.load_config.download_dir,
-        )
-
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
             return
@@ -1304,8 +1295,17 @@ class DeepseekV41LLMForCausalLM(
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.
-            self.model._drop_checkpoint_cache()
-            self.model.finalize_engram_host_pages()
+            model_config = config.model_config
+            drop_checkpoint_cache(
+                model_config.model_weights or model_config.model,
+                revision=model_config.revision,
+                cache_dir=config.load_config.download_dir,
+            )
+            for layer in islice(
+                self.model.layers, self.model.start_layer, self.model.end_layer
+            ):
+                if layer.engram is not None:
+                    layer.engram.embed_tokens.finish_weight_loading()
         return loaded_params
 
     def process_weights_after_loading(self) -> None:
