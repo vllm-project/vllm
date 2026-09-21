@@ -247,8 +247,6 @@ class ModelConfig:
 
     NOTE: This disables both `torch.compile` and CUDA graphs, and is
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
-    enable_return_routed_experts: bool = False
-    """Whether to return routed experts."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
@@ -867,6 +865,80 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
 
+    def _supports_multimodal_inputs(self) -> bool:
+        """Checks if the model supports multimodal inputs.
+        Returns True if the model is multimodal with any non-zero supported
+        modalities, otherwise returns False, effectively running in
+        text-only mode.
+        """
+        if not self.is_multimodal_model:
+            return False
+
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        mm_config = self.get_multimodal_config()
+        try:
+            info = MULTIMODAL_REGISTRY.get_processing_info(self)
+        except ValueError:
+            # Speculative drafters for multimodal targets (e.g. Qwen3_5MTP,
+            # Exaone4_5_MTP, MiMoV2OmniMTP) declare `SupportsMultiModal` so
+            # that they can consume the embeddings merged by the target model,
+            # but they never run a multi-modal processor of their own. Running
+            # in text-only mode is the expected outcome for them, not a
+            # misconfiguration worth warning about.
+            if self.runner_type != "draft":
+                logger.warning_once(
+                    "Model %s is treated as multimodal but has no registered "
+                    "multimodal processor; running in text-only mode.",
+                    self.model,
+                )
+            return False
+
+        # Check if all supported modalities have limit == 0
+        if all(
+            mm_config.get_limit_per_prompt(modality) == 0
+            for modality in info.supported_mm_limits
+        ):
+            # If enable_mm_embeds is True, we still need MM infrastructure
+            # to process pre-computed embeddings even though encoder won't run
+            if mm_config.enable_mm_embeds:
+                return True
+
+            logger.info_once(
+                "All limits of multimodal modalities supported by the model "
+                "are set to 0, running in text-only mode."
+            )
+            return False
+
+        return True
+
+    def _cached_supports_multimodal_inputs(self) -> bool:
+        cache = getattr(self, "_supports_multimodal_inputs_cache", None)
+        if cache is None:
+            self._supports_multimodal_inputs_cache = cache = {}
+
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            mm_cache_key = None
+        else:
+            limits_per_prompt = {
+                modality: mm_config.get_limit_per_prompt(modality)
+                for modality in mm_config.limit_per_prompt
+            }
+            mm_cache_key = (
+                mm_config.language_model_only,
+                tuple(limits_per_prompt.items()),
+                mm_config.enable_mm_embeds,
+            )
+
+        cache_key = (self.is_multimodal_model, self.runner_type, mm_cache_key)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        supports_mm = self._supports_multimodal_inputs()
+        cache[cache_key] = supports_mm
+        return supports_mm
+
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
 
@@ -883,24 +955,18 @@ class ModelConfig:
         vision modality is still enabled (e.g. ``image=0`` but video allowed).
         The deep-copied cache preserves the top-level decision instead.
         """
-        cached = getattr(self, "_supports_multimodal_inputs_cached", None)
-        if cached is not None:
-            return cached
-
         if self.multimodal_config is None:
             # Early call before multimodal init — do not clear mm_prefix yet.
             return True
 
-        from vllm.multimodal import MULTIMODAL_REGISTRY
-
-        supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(self)
-        self._supports_multimodal_inputs_cached = supports_mm
+        supports_mm = self._cached_supports_multimodal_inputs()
         if not supports_mm:
             logger.info_once(
                 "Disabled mm_prefix attention mode because multimodal inputs "
                 "are configuration-disabled. Attention backends without "
                 "mm_prefix support may now be selected."
             )
+
         return supports_mm
 
     def get_model_arch_config(self) -> ModelArchitectureConfig:
@@ -1860,6 +1926,10 @@ class ModelConfig:
     @property
     def is_multimodal_raw_input_only_model(self) -> bool:
         return self._model_info.supports_multimodal_raw_input_only
+
+    @property
+    def supports_multimodal_inputs(self) -> bool:
+        return self._cached_supports_multimodal_inputs()
 
     @property
     def requires_raw_input_tokens(self) -> bool:
