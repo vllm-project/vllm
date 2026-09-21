@@ -190,8 +190,7 @@ def run_vllm_chat(
     warmup_requests: list[SampleRequest] | None = None,
     prequeue_requests: bool = False,
 ) -> tuple[float, list[RequestOutput]]:
-    """
-    Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
+    """Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
     multimodal models as it properly handles multimodal inputs and chat
     formatting. For non-multimodal models, use run_vllm() instead.
     """
@@ -523,6 +522,7 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     Returns:
         A namespace satisfying get_samples's attribute reads.
+
     """
     d = vars(args).copy()
     # random_*: prefer --random-* over legacy --input/output/prefix-len.
@@ -614,10 +614,7 @@ def assign_loras(requests, args):
 
 
 def validate_args(args):
-    """
-    Validate command-line arguments.
-    """
-
+    """Validate command-line arguments."""
     # === Deprecation and Defaulting ===
     if args.dataset is not None:
         warnings.warn(

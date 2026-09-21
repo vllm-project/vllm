@@ -31,8 +31,7 @@ def mask_bbox_tokens(
     output: tuple[list[int], str, SampleLogprobs],
     tokenizer: TokenizerLike,
 ) -> tuple[list[int], str, SampleLogprobs]:
-    """
-    Always pass check_logprobs_close check for bounding box tokens
+    """Always pass check_logprobs_close check for bounding box tokens
     because it is reasonable for them to differ slightly.
     """
     ignore_pattern = r"<[xy]_[\d.]+>"

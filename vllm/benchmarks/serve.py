@@ -408,13 +408,15 @@ async def get_request(
     ramp_up_end_rps: int | None = None,
     self_timed: bool = False,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
-    """
-    Asynchronously generates requests at a specified rate
+    """Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
 
     Args:
         input_requests:
             A list of input requests, each represented as a SampleRequest.
+        self_timed:
+            If True, the requests carry their own arrival timing and no
+            request rate, burstiness or ramp-up is applied.
         request_rate:
             The rate at which requests are generated (requests/s).
         burstiness (optional):
@@ -432,6 +434,7 @@ async def get_request(
             The starting request rate for ramp-up.
         ramp_up_end_rps (optional):
             The ending request rate for ramp-up.
+
     """
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}."
@@ -527,6 +530,7 @@ def calculate_metrics_for_embeddings(
 
     Returns:
         The calculated benchmark metrics.
+
     """
     total_input = 0
     total_input_sequences = 0
@@ -586,6 +590,7 @@ def calculate_metrics(
 
     Returns:
         A tuple of the benchmark metrics and the actual output lengths.
+
     """
     actual_output_lens: list[int] = []
     total_input = 0
@@ -1558,6 +1563,7 @@ def compute_result_filename(
 
     Returns:
         The computed filename path or None if no result saving is requested
+
     """
     if not (args.plot_timeline or args.save_result or args.append_result):
         return None
