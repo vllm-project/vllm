@@ -83,3 +83,45 @@ steps:
       PY
       )"
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
+  mirror:
+    amd:
+      label: ":amd: (MI300) Mooncake EC TCP E2E"
+      dind: false
+      device: mi300_2
+      num_devices: 2
+      timeout_in_minutes: 60
+      working_dir: /vllm-workspace
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/ec_transfer/
+      - vllm/config/ec_transfer.py
+      - vllm/config/multimodal.py
+      - vllm/config/vllm.py
+      - vllm/multimodal/
+      - vllm/v1/core/encoder_cache_manager.py
+      - vllm/v1/core/sched/
+      - vllm/v1/engine/
+      - vllm/v1/worker/ec_connector_model_runner_mixin.py
+      - vllm/v1/worker/gpu_model_runner.py
+      - vllm/v1/worker/gpu_worker.py
+      - vllm/v1/worker/gpu/ec_connector.py
+      - vllm/v1/worker/gpu/model_runner.py
+      - vllm/v1/worker/mm_encoder_model_runner.py
+      - vllm/v1/worker/encoder_cudagraph.py
+      - vllm/v1/worker/encoder_cudagraph_defs.py
+      - vllm/v1/attention/ops/vit_attn_wrappers.py
+      - vllm/v1/worker/gpu/model_states/
+      - vllm/v1/worker/gpu/mm/
+      - tests/v1/cudagraph/test_encoder_cudagraph.py
+      - tests/models/multimodal/generation/test_vit_cudagraph.py
+      - examples/disaggregated/disaggregated_encoder/
+      - tests/v1/ec_connector/
+      - requirements/kv_connectors.txt
+      - vllm/platforms/rocm.py
+      - requirements/rocm.txt
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+        PYTHON_BIN: "python"
+      commands:
+      - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh

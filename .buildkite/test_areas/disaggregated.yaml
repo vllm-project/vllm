@@ -318,3 +318,24 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+  mirror:
+    amd:
+      label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 105
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/models/kimi_k3/
+      - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+      - tests/v1/kv_connector/nixl_integration/
+      - requirements/kv_connectors_rocm.txt
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
