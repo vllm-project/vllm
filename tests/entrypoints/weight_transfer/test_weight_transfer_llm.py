@@ -238,6 +238,74 @@ def test_update_weights_calls_engine(vllm_runner):
 
 
 @create_new_process_for_each_test()
+def test_weight_update_rejected_while_asleep(vllm_runner):
+    """A weight update against unmapped weights is refused, not a crash."""
+    if torch.accelerator.device_count() < 1:
+        pytest.skip("Need at least 1 GPU for this test")
+
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+    with (
+        patch(
+            "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+            mock_create_engine,
+        ),
+        vllm_runner(
+            MODEL_NAME,
+            enforce_eager=True,
+            load_format="dummy",
+            tensor_parallel_size=1,
+            enable_sleep_mode=True,
+            weight_transfer_config=WeightTransferConfig(backend="nccl"),
+        ) as runner,
+    ):
+        llm = weakref.proxy(runner.llm)
+        llm.init_weight_transfer_engine(
+            WeightTransferInitRequest(init_info={"test_param": "init"})
+        )
+
+        def assert_refused_until_weights_wake(level: int) -> None:
+            llm.sleep(level=level)
+            with pytest.raises(RuntimeError, match="asleep"):
+                llm.start_weight_update()
+            llm.wake_up(tags=["kv_cache"])  # weights still unmapped
+            with pytest.raises(RuntimeError, match="asleep"):
+                llm.start_weight_update()
+            llm.wake_up()
+
+        assert_refused_until_weights_wake(level=1)
+
+        # A session interrupted by sleep is dropped, not resumed.
+        llm.start_weight_update()
+        llm.sleep(level=1)
+        with pytest.raises(RuntimeError, match="asleep"):
+            llm.finish_weight_update()
+        llm.wake_up()
+        with pytest.raises(RuntimeError, match="without a matching"):
+            llm.finish_weight_update()
+
+        # Fully awake again: the normal flow works and the engine is alive.
+        llm.start_weight_update()
+        llm.update_weights(
+            WeightTransferUpdateRequest(
+                update_info={
+                    "names": ["layer.weight"],
+                    "dtype_names": ["float32"],
+                    "shapes": [[10, 10]],
+                }
+            )
+        )
+        llm.finish_weight_update()
+        outputs = llm.generate(["Hello"], use_tqdm=False)
+        assert len(outputs) == 1
+
+        # Level 2 discards the weights; with dummy weights there is nothing to
+        # reload, so only the refusal itself is checked here.
+        assert_refused_until_weights_wake(level=2)
+
+
+@create_new_process_for_each_test()
 def test_full_weight_transfer_flow(vllm_runner):
     """Test the complete weight transfer flow: init -> start -> update -> finish."""
     if torch.accelerator.device_count() < 1:

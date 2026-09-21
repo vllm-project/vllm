@@ -68,6 +68,7 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
+    worker._asleep_tags = set()
     worker.model_runner = _RecordingModelRunner()
     return worker
 
@@ -216,3 +217,109 @@ def test_missing_engine_raises():
     worker = _make_worker(None)
     with pytest.raises(RuntimeError, match="Weight transfer not configured"):
         Worker.start_weight_update(worker)
+
+
+def test_start_update_rejected_while_weights_asleep():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker._asleep_tags = {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        Worker.start_weight_update(worker)
+    assert engine.started is False
+    assert worker._weight_update_active is False
+
+
+def test_update_rejected_while_weights_asleep_resets_session():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    # The engine went to sleep between start and the first chunk.
+    worker._asleep_tags = {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        Worker.update_weights(worker, {"names": ["w"]})
+    assert engine.update_calls == []
+    assert worker._weight_update_active is False
+    assert engine.reset_count == 1
+
+
+def test_update_allowed_once_weights_are_resident_again():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker._asleep_tags = {"kv_cache"}  # weights woken, KV cache still asleep
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+    Worker.finish_weight_update(worker)
+    assert engine.update_calls == [{"names": ["w"]}]
+    assert engine.finished is True
+
+
+def test_finish_rejected_while_weights_asleep_resets_session():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+    # The engine went to sleep after the last chunk and before finish.
+    worker._asleep_tags = {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        Worker.finish_weight_update(worker)
+    assert engine.finished is False
+    assert worker._weight_update_active is False
+    assert engine.reset_count == 1
+
+
+def test_reload_weights_rejected_while_weights_asleep():
+    worker = _make_worker(None)
+    worker._asleep_tags = {"weights"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        Worker.reload_weights(worker)
+    assert worker.model_runner.seen_config is None
+
+
+def test_worker_tracks_asleep_tags_across_sleep_and_partial_wake(monkeypatch):
+    """Weight updates stay refused until the "weights" tag itself is woken."""
+    from types import SimpleNamespace
+
+    class _Backend:
+        def suspend(self, level: int = 1) -> None:
+            pass
+
+        def resume(self, tags: list[str] | None = None) -> None:
+            pass
+
+        def discard(self, tags: tuple[str, ...]) -> None:
+            pass
+
+    worker = _make_worker(_RecordingEngine())
+    worker._sleep_mode_backend = _Backend()
+    worker._sleep_saved_buffers = {}
+    worker._sleep_saved_draft_buffers = {}
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_nccl_comm_suspend=False)
+    )
+    monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
+    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
+    monkeypatch.setattr(Worker, "synchronize_device", lambda self: None)
+
+    worker._require_resident_weights("update weights")  # awake: allowed
+
+    worker.sleep(level=1)
+    assert worker._asleep_tags == {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        worker._require_resident_weights("update weights")
+
+    worker.wake_up(tags=["kv_cache"])
+    assert worker._asleep_tags == {"weights"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        worker._require_resident_weights("update weights")
+
+    worker.wake_up(tags=["weights"])
+    assert worker._asleep_tags == set()
+    worker._require_resident_weights("update weights")
+
+    worker.sleep(level=1)
+    worker.wake_up()
+    assert worker._asleep_tags == set()
+
+    worker.discard(("kv_cache",))
+    assert worker._asleep_tags == {"kv_cache"}
+    worker._require_resident_weights("update weights")  # only the KV cache is gone

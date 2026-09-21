@@ -80,6 +80,7 @@ from vllm.utils.mem_utils import (
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.executor.abstract import SLEEP_TAGS
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -230,6 +231,10 @@ class Worker(WorkerBase):
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
+        # Memory tags whose GPU allocations are currently unmapped by sleep
+        # mode (mirrors the executor's ``sleeping_tags``). Weight updates and
+        # reloads are refused while "weights" is in here.
+        self._asleep_tags: set[str] = set()
 
     @property
     def sleep_mode_backend(self) -> "SleepModeBackend":
@@ -260,6 +265,7 @@ class Worker(WorkerBase):
                 }
 
         self.sleep_mode_backend.suspend(level)
+        self._asleep_tags.update(SLEEP_TAGS)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
 
@@ -282,6 +288,10 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.sleep_mode_backend.resume(tags)
+        if tags is None:
+            self._asleep_tags.clear()
+        else:
+            self._asleep_tags.difference_update(tags)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
 
@@ -306,6 +316,32 @@ class Worker(WorkerBase):
 
     def discard(self, tags: tuple[str, ...]) -> None:
         self.sleep_mode_backend.discard(tags)
+        self._asleep_tags.update(tags)
+
+    def _require_resident_weights(self, action: str) -> None:
+        """Refuse to touch model weights whose GPU memory is unmapped.
+
+        After ``sleep()`` (level 1 or 2) the weight allocations stay unmapped
+        until ``wake_up(tags=["weights"])``. Copying into them would crash the
+        worker process (a segfault in the device copy), so fail the request
+        instead.
+        """
+        if "weights" in self._asleep_tags:
+            raise RuntimeError(
+                f"Cannot {action} while the model weights are asleep; "
+                "call wake_up(tags=['weights']) first."
+            )
+
+    def _abort_weight_update_session(self) -> None:
+        """Drop the active update session after a refused update or finish.
+
+        The trainer has to wake the weights and start the update again from
+        ``start_weight_update``: after a level-2 sleep the chunks already
+        received are gone, so the session cannot simply be resumed.
+        """
+        assert self.weight_transfer_engine is not None
+        self._weight_update_active = False
+        self.weight_transfer_engine.reset_weight_update_target()
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
@@ -525,6 +561,7 @@ class Worker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        self._require_resident_weights("reload weights")
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
@@ -1382,6 +1419,7 @@ class Worker(WorkerBase):
     def _start_weight_update(self, is_draft: bool = False) -> None:
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
+        self._require_resident_weights("start a weight update")
 
         if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
             raise RuntimeError(
@@ -1426,6 +1464,12 @@ class Worker(WorkerBase):
                 "start_weight_update must be called before update_weights."
             )
 
+        try:
+            self._require_resident_weights("update weights")
+        except RuntimeError:
+            self._abort_weight_update_session()
+            raise
+
         with set_current_vllm_config(self.vllm_config):
             try:
                 if isinstance(update_info, list):
@@ -1451,6 +1495,13 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 "finish_weight_update called without a matching start_weight_update."
             )
+
+        # finish may still write into the weights (layerwise reload finalize).
+        try:
+            self._require_resident_weights("finish a weight update")
+        except RuntimeError:
+            self._abort_weight_update_session()
+            raise
 
         with set_current_vllm_config(self.vllm_config):
             self.weight_transfer_engine.finish_weight_update()
