@@ -141,7 +141,7 @@ class DPSharedEngramStorage:
         """Map and register one physical allocation across a node-local DP group."""
         group = self.group
         with ExitStack() as stack:
-            path, error = None, None
+            path = error = None
             if group.rank_in_group == 0:
                 try:
                     check_shm_free_space(num_bytes)
@@ -158,57 +158,42 @@ class DPSharedEngramStorage:
                     "Engram shared-memory creation failed on EDP rank 0: " + error
                 )
 
-            mapping = owner = tensor = finalizer = None
-            stage = "open"
+            mapping = owner = tensor = None
             try:
-                try:
-                    with open(path, "r+b") as file:
-                        stage = "mmap"
-                        mapping = mmap.mmap(
-                            file.fileno(), num_bytes, flags=mmap.MAP_SHARED
-                        )
-                    stage = "cudaHostRegister"
-                    owner = np.frombuffer(mapping, dtype=np.uint8)
-                    pointer = owner.ctypes.data
-                    tensor = torch.from_numpy(owner)
-                    result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
-                    if result.value != 0:
-                        raise RuntimeError(f"cudaHostRegister failed: {result}")
-                    finalizer = weakref.finalize(
-                        owner, self._unregister, mapping, pointer
-                    )
-                    finalizer.atexit = False  # type: ignore[misc]
-                    # The UVA helper otherwise allocates a private pinned copy.
-                    if not tensor.is_pinned():
-                        raise RuntimeError(
-                            "CUDA did not recognize the shared Engram registration"
-                        )
-                except Exception as exc:
-                    error = f"{stage}: {type(exc).__name__}: {exc}"
-
-                errors: list[str | None] = [None] * group.world_size
-                # Also fences peer mappings before the leader unlinks the file.
-                torch.distributed.all_gather_object(
-                    errors, error, group=group.cpu_group
-                )
-                failures = "; ".join(
-                    f"EDP rank {rank}: {error}"
-                    for rank, error in enumerate(errors)
-                    if error is not None
-                )
-                if failures:
+                with open(path, "r+b") as file:
+                    mapping = mmap.mmap(file.fileno(), num_bytes, flags=mmap.MAP_SHARED)
+                owner = np.frombuffer(mapping, dtype=np.uint8)
+                pointer = owner.ctypes.data
+                tensor = torch.from_numpy(owner)
+                result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
+                if result.value != 0:
+                    raise RuntimeError(f"cudaHostRegister failed: {result}")
+                finalizer = weakref.finalize(owner, self._unregister, mapping, pointer)
+                finalizer.atexit = False  # type: ignore[misc]
+                # The UVA helper otherwise allocates a private pinned copy.
+                if not tensor.is_pinned():
                     raise RuntimeError(
-                        "Engram shared-memory initialization failed: " + failures
+                        "cudaHostRegister did not pin the shared Engram mapping"
                     )
-                assert tensor is not None
-                return tensor
-            except Exception:
-                if finalizer is not None:
-                    finalizer()
-                tensor = owner = None
-                if mapping is not None:
-                    mapping.close()
-                raise
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+
+            # Also fences peer mappings before the leader unlinks the file.
+            errors: list[str | None] = [None] * group.world_size
+            torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
+            failures = "; ".join(
+                f"EDP rank {rank}: {error}"
+                for rank, error in enumerate(errors)
+                if error is not None
+            )
+            if failures:
+                # Dropping the owner runs the finalizer; the mapping then unmaps.
+                del tensor, owner, mapping
+                raise RuntimeError(
+                    "Engram shared-memory initialization failed: " + failures
+                )
+            assert tensor is not None
+            return tensor
 
     @staticmethod
     def _unregister(mapping: mmap.mmap, pointer: int) -> None:
