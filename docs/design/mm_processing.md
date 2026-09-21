@@ -73,10 +73,11 @@ This GPU‑side fusion is controlled by a config flag called **`mm_device_do_nor
 - The flag is **enabled by default** for all models that support it.
 - Currently, it’s on by default for these architectures:
 
-| name         | Architecture                         | Example HF Models                   |
-|--------------|--------------------------------------|-------------------------------------|
-| `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.   |
-| `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc. |
+| name               | Architecture                         | Example HF Models                                           |
+|--------------------|--------------------------------------|-------------------------------------------------------------|
+| `qwen2-vl`         | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.                           |
+| `qwen2.5-vl`       | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                         |
+| `nano-nemotron-vl` | `NemotronH_Nano_VL_V2`               | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`, etc.          |
 
 #### What We Gain Overall
 
