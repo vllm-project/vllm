@@ -27,6 +27,14 @@ def _make_indexer_config(*, architecture: str, adaptive: bool):
     )
 
 
+def _mock_rocm_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Platform predicates are mutually exclusive in production. Override both
+    # so these ROCm policy tests do not inherit CUDA capabilities from the CI
+    # host running them.
+    monkeypatch.setattr(indexer.current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(indexer.current_platform, "is_rocm", lambda: True)
+
+
 def _make_indexer_builder(*, adaptive: bool, capacity: int = 12):
     builder = DeepseekV32IndexerMetadataBuilder.__new__(
         DeepseekV32IndexerMetadataBuilder
@@ -67,7 +75,7 @@ def test_deepseek_v4_rocm_adaptive_builders_support_varlen_full_graphs():
 
 @pytest.mark.cpu_test
 def test_deepseek_v4_rocm_adaptive_indexer_support(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(indexer.current_platform, "is_rocm", lambda: True)
+    _mock_rocm_platform(monkeypatch)
     adaptive_config = _make_indexer_config(
         architecture="DeepseekV4ForCausalLM", adaptive=True
     )
@@ -105,7 +113,7 @@ def test_rocm_adaptive_indexer_flattening_is_scoped_to_deepseek_v4(
     monkeypatch: pytest.MonkeyPatch,
     architecture: str,
 ):
-    monkeypatch.setattr(indexer.current_platform, "is_rocm", lambda: True)
+    _mock_rocm_platform(monkeypatch)
     adaptive_config = _make_indexer_config(architecture=architecture, adaptive=True)
 
     assert not indexer._rocm_supports_flattened_device_query_lens(adaptive_config)
