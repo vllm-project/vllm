@@ -720,7 +720,11 @@ def test_aiter_fusion_rmsnorm_gated_quant(
         model_unfused = torch.compile(model, backend=backend2)
         result_unfused = model_unfused(x, z)
 
-        torch.testing.assert_close(result_fused, result_unfused, atol=1e-2, rtol=1e-2)
+        # The opaque AITER quant op preserves a BF16 intermediate in the
+        # unfused path, while the fused kernel normalizes and quantizes
+        # directly. Allow for that extra rounding before the FP8 GEMM.
+        tol = 2e-2 if quant_fp8_op == "+quant_fp8" else 1e-2
+        torch.testing.assert_close(result_fused, result_unfused, atol=tol, rtol=tol)
 
         assert fusion_pass.matched_count == 1
         backend.check_after_ops(model.ops_in_model_after())
