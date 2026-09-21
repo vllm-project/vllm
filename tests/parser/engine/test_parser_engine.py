@@ -1021,6 +1021,24 @@ def test_delegating_streaming_engine_classifies_content_after_reasoning_transiti
     )
 
 
+def test_delegating_streaming_engine_keeps_truncated_reasoning_out_of_content():
+    parser = _CombinedReasoningOnlyDelegating(make_mock_tokenizer(_VOCAB))
+    token_ids = [ord("a"), ord("b")]
+    parser.reasoning_parser.extract_reasoning_streaming(
+        "", "ab", "ab", [], token_ids, token_ids
+    )
+
+    # Stream finalization emits a synthetic REASONING_END to flush parser
+    # state, but no input token actually transitioned into content.
+    parser.reasoning_parser.finish_streaming()
+
+    assert parser.classify_token_phases(token_ids) == TokenPhaseCounts(
+        reasoning=2,
+        content=0,
+        unclassified=0,
+    )
+
+
 def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):
     monkeypatch.setattr(
         ParserManager,

@@ -116,6 +116,7 @@ class ParserEngine(Parser):
             or parser_engine_config.initial_state == ParserState.REASONING
         )
         self._reasoning_ended: bool = not self._has_reasoning
+        self._reasoning_transitioned: bool = False
         self._streaming_initialized: bool = False
         self._prompt_streaming_prepared: bool = False
 
@@ -191,6 +192,11 @@ class ParserEngine(Parser):
     def reasoning_ended(self) -> bool:
         return self._reasoning_ended
 
+    @property
+    def reasoning_transitioned(self) -> bool:
+        """Whether input explicitly transitioned out of reasoning."""
+        return self._reasoning_transitioned
+
     def initialize_streaming(
         self,
         initial_state: ParserState | None = None,
@@ -212,6 +218,7 @@ class ParserEngine(Parser):
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
         self._reasoning_ended = not self._has_reasoning
+        self._reasoning_transitioned = False
         self._tool_slots.clear()
         self._deferred_content = ""
         self._deferred_reasoning = ""
@@ -237,7 +244,10 @@ class ParserEngine(Parser):
         delta_token_ids: Sequence[int],
     ) -> list[SemanticEvent]:
         delta_text, delta_token_ids = self._preprocess_feed(delta_text, delta_token_ids)
-        return self._engine.feed(delta_text, delta_token_ids)
+        events = self._engine.feed(delta_text, delta_token_ids)
+        if any(event.type == EventType.REASONING_END for event in events):
+            self._reasoning_transitioned = True
+        return events
 
     # ── Schema-aware type correction ─────────────────────────────────
 

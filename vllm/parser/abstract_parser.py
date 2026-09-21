@@ -853,7 +853,7 @@ class DelegatingParser(Parser):
             if parser_engine is None:
                 return None
             phase_counts = parser_engine.classify_token_phases(token_ids)
-            if phase_counts is None or not parser_engine.reasoning_ended:
+            if phase_counts is None or not parser_engine.reasoning_transitioned:
                 return phase_counts
 
             # After the reasoning transition, ordinary content is no longer
