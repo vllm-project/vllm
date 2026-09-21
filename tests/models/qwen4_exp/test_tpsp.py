@@ -57,6 +57,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionMetadata
+from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 from .test_ple import _ConvBatchCase, _make_conv_metadata
 
@@ -425,6 +426,8 @@ def _run_tpsp(rank: int, port: int, use_moe_sp: bool = False) -> None:
         distributed_init_method=f"tcp://127.0.0.1:{port}",
     )
     try:
+        # Spawned ranks bypass the GPU worker's workspace initialization.
+        init_workspace_manager(torch.device(f"cuda:{rank}"))
         with set_current_vllm_config(config):
             initialize_model_parallel(tensor_model_parallel_size=2)
             text_config = Qwen4ExpTextConfig(
@@ -458,6 +461,7 @@ def _run_tpsp(rank: int, port: int, use_moe_sp: bool = False) -> None:
                         _check_mtp(config, rank)
                     _check_ple(config)
     finally:
+        reset_workspace_manager()
         cleanup_dist_env_and_memory()
 
 
