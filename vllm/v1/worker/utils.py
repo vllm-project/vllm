@@ -4,6 +4,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from fnmatch import filter as fnmatch_filter
 from itertools import product as iprod
 from typing import Any
 
@@ -42,6 +43,36 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
+
+
+def save_sleep_parameters(
+    model: torch.nn.Module, patterns: list[str]
+) -> dict[str, torch.Tensor]:
+    """Back up selected device parameters before level-2 sleep."""
+    if not patterns:
+        return {}
+    parameters = dict(model.named_parameters())
+    names: set[str] = set()
+    for pattern in patterns:
+        matches = fnmatch_filter(parameters, pattern)
+        if not matches:
+            raise ValueError(f"No parameter matches sleep retention: {pattern}")
+        names.update(matches)
+    return {
+        name: param.detach().to("cpu")
+        for name, param in parameters.items()
+        if name in names and not param.is_cpu
+    }
+
+
+@torch.no_grad()
+def restore_sleep_parameters(
+    model: torch.nn.Module, saved: dict[str, torch.Tensor]
+) -> None:
+    """Restore parameters in place and release their CPU backups."""
+    for name, value in saved.items():
+        model.get_parameter(name).copy_(value)
+    saved.clear()
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
