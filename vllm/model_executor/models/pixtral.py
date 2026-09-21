@@ -221,21 +221,19 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
             )
         }
 
-    def get_dummy_processor_inputs(
+
+class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
+    def get_dummy_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
-        mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
+        builder = self.dummy_inputs
         tokenizer = self.info.get_tokenizer()
 
-        dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = (
-            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-            if mm_data is None
-            else mm_data
-        )
+        dummy_text = builder.get_dummy_text(mm_counts)
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
         dummy_images = (
             [] if "image" not in dummy_mm_data else dummy_mm_items["image"].get_all()
@@ -256,8 +254,6 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
 
         return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 
-
-class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
     # The tokens are already inserted by the chat template,
     # so we just double check that they exist
     def _maybe_apply_prompt_updates(
