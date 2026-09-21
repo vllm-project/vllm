@@ -5,8 +5,10 @@
 import pytest
 
 from vllm.config import ParallelConfig, VllmConfig
-from vllm.entrypoints.serve.dev.rlhf.weight_checker import compare_weight_checksums
-from vllm.utils.weight_checksum import combine_weight_checksums
+from vllm.utils.weight_checksum import (
+    combine_weight_checksums,
+    compare_weight_checksums,
+)
 from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import Worker
 

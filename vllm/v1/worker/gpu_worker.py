@@ -94,8 +94,10 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.utils.weight_checksum import compute_weight_checksums
-from vllm.utils.weight_checksum import reset_weights as randomize_weights
+from vllm.model_executor.model_loader.weight_checksum import (
+    compute_tensor_digests,
+    randomize_weights,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -334,9 +336,11 @@ class Worker(WorkerBase):
 
     def compute_weight_checksums(self) -> dict[str, str]:
         """Return SHA-256 digests for every checksum-covered tensor here."""
-        return compute_weight_checksums(
-            self.model_runner.model, self._weight_checksum_key_prefix()
-        )
+        prefix = self._weight_checksum_key_prefix()
+        return {
+            f"{prefix}{name}": digest
+            for name, digest in compute_tensor_digests(self.model_runner.model).items()
+        }
 
     def reset_weights(self) -> None:
         """Randomize exactly the tensors covered by compute_weight_checksums."""
