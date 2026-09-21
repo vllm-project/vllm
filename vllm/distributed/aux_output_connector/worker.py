@@ -89,8 +89,8 @@ class AuxOutputWorkerConnector:
         vllm_config: VllmConfig,
         model: torch.nn.Module,
         kv_cache_config: KVCacheConfig,
-        max_num_batched_tokens: int,
     ) -> None:
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
         )
@@ -137,8 +137,7 @@ class AuxOutputWorkerConnector:
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
-        buffer = self._buffer
-        if buffer is None or self._step_metadata is None:
+        if self._buffer is None or self._step_metadata is None:
             return None
 
         request_ids = list(input_batch.req_ids)
@@ -168,6 +167,7 @@ class AuxOutputWorkerConnector:
         """
         with self._lock:
             teardown = []
+            release_keys: list[str] = []
             try:
                 outputs = self._commit_output(pending)
             finally:
@@ -177,14 +177,9 @@ class AuxOutputWorkerConnector:
                     state.pending_outputs -= 1
                     if state.pending_outputs == 0 and state.finished:
                         teardown.append(request_id)
+                        release_keys.extend(reversed(state.aux_output_keys))
             if teardown:
-                release_keys = [
-                    key
-                    for request_id in teardown
-                    for key in reversed(self._requests[request_id].aux_output_keys)
-                ]
-                if release_keys:
-                    self._publish_blocks([], release_keys=release_keys)
+                self._publish_blocks([], release_keys=release_keys)
                 self._teardown(teardown)
             return outputs
 
@@ -250,11 +245,11 @@ class AuxOutputWorkerConnector:
             emit_start = state.emit_cursor
             # Complete blocks without keys remain pending until a hash update.
             completed = buffer.capture(request_id, capture_start, rows)
-            state.capture_cursor = capture_start + len(rows)
+            token_end = capture_start + len(rows)
+            state.capture_cursor = token_end
             state.scheduled_cursor = token_start + request_num_tokens
             block_batches.append((state, completed))
 
-            token_end = capture_start + len(rows)
             if sampled > 0 and emit_start < token_end:
                 if emit_start >= capture_start:
                     outputs[request_id] = AuxRequestOutput(
@@ -413,6 +408,5 @@ def get_aux_output_connector(
     return AuxOutputWorkerConnector(
         model=model,
         kv_cache_config=kv_cache_config,
-        max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
         vllm_config=vllm_config,
     )
