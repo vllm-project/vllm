@@ -34,7 +34,7 @@ class SessionUpdate(OpenAIBaseModel):
 
     type: Literal["session.update"] = "session.update"
     model: str | None = None
-    include: list[str] | None = None
+    include: list[Literal["item.input_audio_transcription.logprobs"]] | None = None
 
 
 class SessionCreated(OpenAIBaseModel):

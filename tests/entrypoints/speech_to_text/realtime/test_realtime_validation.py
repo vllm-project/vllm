@@ -284,7 +284,8 @@ async def test_empty_commit_does_not_crash_engine(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_session_update_invalid_model_returns_error(model_name):
-    """Test that session.update with an invalid model returns an error."""
+    """Test that session.update with an invalid model or include returns an
+    error."""
     server_args = ["--enforce-eager", "--max-model-len", "2048"]
 
     if model_name.startswith("mistralai"):
@@ -307,6 +308,19 @@ async def test_session_update_invalid_model_returns_error(model_name):
             event = await receive_event(ws, timeout=10.0)
             assert event["type"] == "error"
             assert "nonexistent-model" in event["error"]
+
+            await send_event(
+                ws,
+                {
+                    "type": "session.update",
+                    "model": model_name,
+                    "include": ["item.input_audio_transcription.bogus"],
+                },
+            )
+
+            event = await receive_event(ws, timeout=10.0)
+            assert event["type"] == "error"
+            assert "include" in event["error"]
 
 
 @pytest.mark.asyncio

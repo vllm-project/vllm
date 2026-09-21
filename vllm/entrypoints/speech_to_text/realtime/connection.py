@@ -26,6 +26,7 @@ from .protocol import (
     InputAudioBufferAppend,
     InputAudioBufferCommit,
     SessionCreated,
+    SessionUpdate,
     TranscriptionDelta,
     TranscriptionDone,
     TranscriptionLogProb,
@@ -109,7 +110,8 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            model = event.get("model")
+            session_update = SessionUpdate(**event)
+            model = session_update.model
             if model is None:
                 await self.send_error("Missing required field: model", "invalid_event")
                 return
@@ -118,9 +120,10 @@ class RealtimeConnection:
                 await self.send_error(err.error.message, "model_not_found")
                 return
             self._is_model_validated = True
-            if "include" in event:
-                include = event["include"] or []
-                self._include_logprobs = TRANSCRIPTION_LOGPROBS_INCLUDE in include
+            if session_update.include is not None:
+                self._include_logprobs = (
+                    TRANSCRIPTION_LOGPROBS_INCLUDE in session_update.include
+                )
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
             try:
