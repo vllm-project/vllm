@@ -25,6 +25,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import post_update
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.sample.logits_processor import LogitsProcRequestState
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -282,7 +283,9 @@ def test_rewind_sampled_state_drops_unaccepted_suffix(track_penalties: bool):
     req_states.apply_staged_writes()
     req_idx = req_states.req_id_to_index["req"]
 
-    penalties = PenaltiesState(req_states)
+    penalties = PenaltiesState(
+        SimpleNamespace(), LogitsProcRequestState.from_request_state(req_states)
+    )
     penalties.add_request(req_idx, SamplingParams(frequency_penalty=1.0))
     penalties.apply_staged_writes()
     output_bin_counts = penalties.output_bin_counts if track_penalties else None
@@ -361,7 +364,9 @@ def test_rewind_converges_emulated_worker_ranks() -> None:
         req_states.apply_staged_writes()
         req_idx = req_states.req_id_to_index["req"]
 
-        penalties = PenaltiesState(req_states)
+        penalties = PenaltiesState(
+            SimpleNamespace(), LogitsProcRequestState.from_request_state(req_states)
+        )
         penalties.add_request(req_idx, SamplingParams(frequency_penalty=1.0))
         penalties.apply_staged_writes()
         post_update(
