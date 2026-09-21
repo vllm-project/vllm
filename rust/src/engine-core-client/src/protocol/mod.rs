@@ -28,6 +28,7 @@ pub mod logprobs;
 pub mod lora;
 pub mod multimodal;
 pub mod output;
+pub mod prompt_token_id_logprobs;
 pub mod request;
 pub mod sampling;
 pub mod sampling_mask;

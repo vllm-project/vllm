@@ -381,6 +381,7 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
     metrics: PerRequestMetrics | None = None

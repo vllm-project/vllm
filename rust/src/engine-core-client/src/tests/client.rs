@@ -2673,6 +2673,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,

@@ -389,6 +389,11 @@ class ServingTokens(GenerateBaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_id_logprobs=(
+                numpy2base64(final_res.prompt_token_id_logprobs)
+                if final_res.prompt_token_id_logprobs is not None
+                else None
+            ),
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),

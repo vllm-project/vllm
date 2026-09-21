@@ -9,6 +9,7 @@ anyhow.workspace = true
 asynk-strim-attr.workspace = true
 auto_enums.workspace = true
 axum.workspace = true
+base64.workspace = true
 educe.workspace = true
 futures.workspace = true
 http-body.workspace = true

@@ -94,6 +94,8 @@ pub(super) struct GenerateResponse {
     pub request_id: String,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
+    /// Base64 `.npy` float32 array, as Python `numpy2base64` encodes it.
+    pub prompt_token_id_logprobs: Option<String>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
     pub kv_transfer_params: Option<Value>,
