@@ -1144,6 +1144,18 @@ class SamplingParams(
             raise VLLMValidationError(
                 "structured_outputs.regex must not contain a NUL character ('\\x00')"
             )
+        # Note(arpera):
+        # We do NOT check here structured output regex on emptiness because
+        # empty regex is indeed compiles to a valid grammar as well as
+        # whitespace-only regexps, for instance, regex="\n" or regex=" "
+        # are valid patterns and we MUST process them.
+        if (
+            isinstance(self.structured_outputs.structural_tag, str)
+            and self.structured_outputs.structural_tag.strip() == ""
+        ):
+            raise VLLMValidationError(
+                "structured_outputs.structural_tag cannot be an empty string"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
