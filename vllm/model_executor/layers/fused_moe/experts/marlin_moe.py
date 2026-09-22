@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8Static,
     kMxfp4Static,
     kMxfp8Static,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
@@ -612,7 +613,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             kInt4StaticAsym,
             kInt4Static32Asym,
         ]
-        return weight_key in SUPPORTED_W
+        return weight_key in SUPPORTED_W and activation_key != kNvfp4DynamicToken
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:

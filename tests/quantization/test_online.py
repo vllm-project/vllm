@@ -36,6 +36,7 @@ from vllm.model_executor.kernels.linear.mxfp8.marlin import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -92,6 +93,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     kMxfp8Dynamic,
+    kNvfp4DynamicToken,
+    kNvfp4Static,
     weight_amax,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -501,6 +504,73 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="does not match the quantization"):
         ModelConfig(model=str(tmp_path), quantization="fp8_per_channel")
+
+
+def test_nvfp4_per_token_rejects_one_sided_before_buffer_allocation(
+    monkeypatch,
+) -> None:
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsModular,
+    )
+
+    config = make_dummy_moe_config()
+    config.moe_parallel_config.dp_size = 2
+    config.moe_parallel_config.ep_size = 2
+    config.moe_parallel_config.use_ep = True
+    config.moe_parallel_config.all2all_backend = "flashinfer_nvlink_one_sided"
+    prepare = Mock(side_effect=AssertionError("must reject before allocating buffers"))
+    monkeypatch.setattr(nvfp4_oracle, "maybe_make_prepare_finalize", prepare)
+    with pytest.raises(NotImplementedError, match="flashinfer_nvlink_one_sided"):
+        nvfp4_oracle.make_nvfp4_moe_kernel(
+            moe_quant_config=Mock(),
+            moe_config=config,
+            experts_cls=TrtLlmNvFp4ExpertsModular,
+            backend=nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            per_token_activation=True,
+        )
+    prepare.assert_not_called()
+
+
+def test_nvfp4_per_token_backend_contract() -> None:
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        BatchedMarlinExperts,
+    )
+
+    scheme = (kNvfp4Static, kNvfp4DynamicToken)
+    for backend in nvfp4_oracle.NvFp4MoeBackend:
+        for experts_cls in nvfp4_oracle.backend_to_kernel_cls(backend):
+            expected = backend in (
+                nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                nvfp4_oracle.NvFp4MoeBackend.HUMMING,
+                nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+            )
+            assert experts_cls._supports_quant_scheme(*scheme) == expected, experts_cls
+    assert not BatchedMarlinExperts._supports_quant_scheme(*scheme)
+
+
+@pytest.mark.parametrize("backend", ["auto", "marlin"])
+def test_nvfp4_per_token_rejects_unsupported_backends(monkeypatch, backend) -> None:
+    """Neither automatic fallback nor explicit Marlin may discard per-token scaling."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    for candidate in nvfp4_oracle.NvFp4MoeBackend:
+        for experts_cls in nvfp4_oracle.backend_to_kernel_cls(candidate):
+            # Exercise scheme rejection independently of installed GPU kernels.
+            available = candidate not in (
+                nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                nvfp4_oracle.NvFp4MoeBackend.HUMMING,
+                nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+            )
+            monkeypatch.setattr(
+                experts_cls, "_supports_current_device", lambda v=available: v
+            )
+    config = make_dummy_moe_config()
+    config.moe_backend = backend
+    error = NotImplementedError if backend == "auto" else ValueError
+    reason = "No NvFp4 MoE backend" if backend == "auto" else "quantization scheme"
+    with pytest.raises(error, match=reason):
+        nvfp4_oracle.select_nvfp4_moe_backend(config, kNvfp4Static, kNvfp4DynamicToken)
 
 
 @pytest.mark.skipif(
@@ -1175,14 +1245,36 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
     ),
     reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
 )
-def test_online_nvfp4_quantizes_original_expert_weights() -> None:
+@pytest.mark.parametrize("e4m3_max", [None, 256, 448])
+def test_online_nvfp4_quantizes_original_expert_weights(monkeypatch, e4m3_max) -> None:
+    from flashinfer import fp4_quantize
+
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "0" if e4m3_max is None else "1")
+    monkeypatch.setenv(
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
+    )
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_MODE", "MSE")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "0")
+    monkeypatch.setenv("TRTLLM_DISABLE_FP4_QUANT_FAST_MATH", "0")
     torch.manual_seed(0)
     weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+    weight[1, -1, -1] = 20.75
 
     quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(weight)
-    global_encode_scale = 1.0 / global_decode_scale
+    amax = weight.float().abs().amax((1, 2))
+    if e4m3_max is None:
+        global_encode_scale = (6.0 * 448) / amax
+        expected_decode_scale = global_encode_scale.reciprocal()
+    else:
+        global_encode_scale = torch.div(6.0 * e4m3_max, amax)
+        expected_decode_scale = torch.div(1.0, global_encode_scale)
+    torch.testing.assert_close(
+        global_decode_scale, expected_decode_scale, rtol=0, atol=0
+    )
+    quantize = scaled_fp4_quant if e4m3_max is None else fp4_quantize
     expected = [
-        scaled_fp4_quant(
+        quantize(
             expert_weight,
             expert_scale,
             is_sf_swizzled_layout=False,
@@ -1199,9 +1291,44 @@ def test_online_nvfp4_quantizes_original_expert_weights() -> None:
         torch.stack([expert_weight for expert_weight, _ in expected]),
     )
     assert torch.equal(
-        block_scale,
-        torch.stack([expert_scale for _, expert_scale in expected]),
+        block_scale.view(torch.uint8),
+        torch.stack([expert_scale for _, expert_scale in expected]).view(torch.uint8),
     )
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="Per-token NVFP4 quantization needs a Blackwell (SM100) GPU.",
+)
+@pytest.mark.parametrize("e4m3_max", [256, 448])
+def test_online_nvfp4_per_token_4over6_scale(monkeypatch, e4m3_max):
+    from flashinfer import SfLayout, nvfp4_quantize
+
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        quantize_nvfp4_per_token_input,
+    )
+
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "1")
+    monkeypatch.setenv(
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
+    )
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_MODE", "MSE")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "1")
+    torch.manual_seed(0)
+    x = torch.randn(17, 64, device="cuda", dtype=torch.bfloat16)
+    x[0].zero_()
+    actual = quantize_nvfp4_per_token_input(x)
+    expected = nvfp4_quantize(
+        x,
+        1.0 / (6.0 * e4m3_max),
+        sfLayout=SfLayout.layout_linear,
+        per_token_activation=True,
+    )
+    for output, reference in zip(actual, expected):
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
