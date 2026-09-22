@@ -50,7 +50,7 @@ To rebuild only the Rust frontend binary:
 ./build_rust.sh --debug  # faster build for development
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
+If you are developing vLLM's Python and CUDA/C++ code, install PyTorch first:
 
 ```bash
 uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129

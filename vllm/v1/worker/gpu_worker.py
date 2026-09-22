@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
+from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -61,10 +62,9 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
-    CudaProfilerWrapper,
-    ProtonProfilerWrapper,
-    TorchProfilerWrapper,
     create_graph_capture_profiler,
+    create_worker_profiler,
+    validate_worker_profiler_config,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -98,6 +98,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
+from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
@@ -208,6 +209,7 @@ class Worker(WorkerBase):
             self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
@@ -221,6 +223,7 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
+        validate_worker_profiler_config(self.profiler_config)
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
@@ -242,6 +245,30 @@ class Worker(WorkerBase):
             )
         return self._sleep_mode_backend
 
+    def _save_sleep_parameters(self, model: nn.Module) -> None:
+        patterns = self.model_config.sleep_preserve_parameter_names
+        if not patterns:
+            self._sleep_saved_parameters = {}
+            return
+        parameters = dict(model.named_parameters())
+        names: set[str] = set()
+        for pattern in patterns:
+            matches = fnmatch_filter(parameters, pattern)
+            if not matches:
+                raise ValueError(f"No parameter matches sleep retention: {pattern}")
+            names.update(matches)
+        self._sleep_saved_parameters = {
+            name: param.detach().to("cpu")
+            for name, param in parameters.items()
+            if name in names and not param.is_cpu
+        }
+
+    @torch.no_grad()
+    def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        for name, value in self._sleep_saved_parameters.items():
+            model.get_parameter(name).copy_(value)
+        self._sleep_saved_parameters.clear()
+
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
@@ -249,6 +276,7 @@ class Worker(WorkerBase):
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
+            self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
@@ -286,6 +314,8 @@ class Worker(WorkerBase):
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
+        if wake_weights and self._sleep_saved_parameters:
+            self._restore_sleep_parameters(self.model_runner.model)
         if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
@@ -302,6 +332,9 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
@@ -536,6 +569,7 @@ class Worker(WorkerBase):
         Tip:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
+
         """
         maybe_apply_startup_plan(self)
 
@@ -694,7 +728,6 @@ class Worker(WorkerBase):
 
         Returned dict is keyed by `(pp_rank, tp_rank)`.
         """
-
         if not has_kv_transfer_group():
             return None
 
@@ -734,7 +767,6 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
@@ -758,9 +790,6 @@ class Worker(WorkerBase):
             ),
         )
 
-        if self.model_config.enable_return_routed_experts:
-            self.model_runner.init_routed_experts_capturer()
-
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.
@@ -773,7 +802,10 @@ class Worker(WorkerBase):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
-        if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        if (
+            self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and has_compiled_submodule(self.model_runner.get_model())
+        ):
             # warm up sizes that are not in cudagraph capture sizes,
             # but users still want to compile for better performance,
             # e.g. for the max-num-batched token size in chunked prefill.
@@ -806,9 +838,12 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner:
-            # A workspace resize after capture frees what the graphs point at.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        if self.use_v2_model_runner:  # noqa: SIM102
+            if self.vllm_config.kernel_config.enable_jit_warmup:
+                # A workspace resize after capture frees what the graphs point at.
+                warmup_kernels(
+                    self.model_runner, self.execute_model, self.sample_tokens
+                )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -1032,7 +1067,7 @@ class Worker(WorkerBase):
             return nullcontext()
 
         self.profiler.step()
-        if not self.profiler.is_running:
+        if not self.profiler.should_annotate:
             return nullcontext()
 
         iteration_details = compute_iteration_details(scheduler_output)
@@ -1256,7 +1291,6 @@ class Worker(WorkerBase):
             )
 
         if is_start:
-            profiler_type = self.profiler_config.profiler
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
 
@@ -1268,36 +1302,16 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
-            if profiler_type == "proton" and self.profiler is not None:
+            if self.profiler_config.profiler == "proton" and self.profiler is not None:
                 self.profiler.set_output_name(trace_name)
 
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
-                if profiler_type == "torch":
-                    self.profiler = TorchProfilerWrapper(
-                        self.profiler_config,
-                        worker_name=trace_name,
-                        local_rank=self.local_rank,
-                        activities=["CPU", "CUDA"],
-                    )
-                    logger.debug(
-                        "Starting torch profiler with trace name: %s", trace_name
-                    )
-                elif profiler_type == "cuda":
-                    self.profiler = CudaProfilerWrapper(self.profiler_config)
-                    logger.debug("Starting CUDA profiler")
-                elif profiler_type == "proton":
-                    self.profiler = ProtonProfilerWrapper(
-                        self.profiler_config, worker_name=trace_name
-                    )
-                    logger.debug(
-                        "Starting Proton profiler with trace name: %s", trace_name
-                    )
-                else:
-                    # Config validation should prevent this code being reached
-                    raise ValueError(
-                        f"Invalid profiler value of {self.profiler_config.profiler}"
-                    )
+                self.profiler = create_worker_profiler(
+                    self.profiler_config,
+                    worker_name=trace_name,
+                    local_rank=self.local_rank,
+                )
 
             self.profiler.start()
         else:
@@ -1364,12 +1378,12 @@ class Worker(WorkerBase):
             )
 
     def init_weight_transfer_engine(self, init_info: dict) -> None:
-        """
-        Initialize weight transfer mechanism.
+        """Initialize weight transfer mechanism.
         For NCCL backend, this creates a process group with the trainer.
 
         Args:
             init_info: Dictionary containing backend-specific initialization info
+
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1378,8 +1392,7 @@ class Worker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def start_weight_update(self) -> None:
-        """
-        Start a new weight update session.
+        """Start a new weight update session.
 
         Delegates engine-specific preparation (e.g. layerwise reload setup) to
         the configured weight transfer engine. The worker only tracks that a
@@ -1389,8 +1402,7 @@ class Worker(WorkerBase):
             self._start_weight_update()
 
     def start_draft_weight_update(self) -> None:
-        """
-        Like start_weight_update, but retargets the engine at the speculative
+        """Like start_weight_update, but retargets the engine at the speculative
         draft model for this session.
         """
         with set_current_vllm_config(self.vllm_config):
@@ -1423,8 +1435,7 @@ class Worker(WorkerBase):
         self._weight_update_is_draft = is_draft
 
     def update_weights(self, update_info: dict | list[dict]) -> None:
-        """
-        Receive one weight update chunk from the trainer.
+        """Receive one weight update chunk from the trainer.
 
         start_weight_update must be called before update_weights and
         finish_weight_update must be called after all chunks have been sent.
@@ -1434,6 +1445,7 @@ class Worker(WorkerBase):
         Args:
             update_info: Backend-specific update info, or a list indexed by
                 global worker rank across data parallel replicas.
+
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1448,7 +1460,7 @@ class Worker(WorkerBase):
                 if isinstance(update_info, list):
                     parallel_config = self.vllm_config.parallel_config
                     local_update_info = update_info[
-                        parallel_config.data_parallel_rank * parallel_config.world_size
+                        parallel_config.data_parallel_index * parallel_config.world_size
                         + self.rank
                     ]
                 else:

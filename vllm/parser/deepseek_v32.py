@@ -53,6 +53,7 @@ def deepseek_v32_config() -> ParserEngineConfig:
     return ParserEngineConfig(
         name="deepseek_v32",
         initial_state=ParserState.CONTENT,
+        wait_for_reasoning=False,
         terminals={
             "TOOL_START": DSML_FUNC_START,
             "TOOL_END": DSML_FUNC_END,
