@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 from vllm import RequestOutput, TextPrompt, TokensPrompt
-from vllm.entrypoints.offline_utils import OfflineInferenceMixin
+from vllm.entrypoints.launchers.offline import OfflineInferenceMixin
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams

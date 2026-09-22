@@ -56,7 +56,7 @@ from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from ..renderers import ChatParams
-from .offline_utils import _O, _R, OfflineInferenceMixin
+from vllm.entrypoints.launchers.offline import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
