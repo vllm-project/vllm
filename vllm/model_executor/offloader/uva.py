@@ -112,12 +112,19 @@ class UVAOffloader(BaseOffloader):
                     continue
 
             cpu_data = p.data.to(device="cpu")
-            if self.pin_memory:
-                cpu_data = cpu_data.pin_memory()
 
             if not self.uva_offloading:
+                if self.pin_memory:
+                    cpu_data = cpu_data.pin_memory()
                 p.data = cpu_data
             else:
+                # Do not pin through ``Tensor.pin_memory()`` here. It goes
+                # through the CachingHostAllocator, which rounds every
+                # allocation up to a power of two: a 4.5 GiB expert tensor
+                # occupies 8 GiB of host memory. ``get_cuda_view_from_cpu_tensor``
+                # allocates exact-size mapped pinned memory (``cudaHostAlloc``)
+                # for an unpinned input, so the view is pinned either way and
+                # the host footprint matches the offloaded bytes.
                 p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
                 p._vllm_is_uva_offloaded = True
 
