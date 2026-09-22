@@ -10,6 +10,7 @@ from uuid import uuid4
 import numpy as np
 import pybase64 as base64
 from fastapi import WebSocket
+from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
@@ -110,7 +111,11 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            session_update = SessionUpdate(**event)
+            try:
+                session_update = SessionUpdate(**event)
+            except ValidationError as e:
+                await self.send_error(sanitize_message(str(e)), "invalid_event")
+                return
             model = session_update.model
             if model is None:
                 await self.send_error("Missing required field: model", "invalid_event")

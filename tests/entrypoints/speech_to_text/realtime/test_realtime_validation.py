@@ -320,6 +320,7 @@ async def test_session_update_invalid_model_returns_error(model_name):
 
             event = await receive_event(ws, timeout=10.0)
             assert event["type"] == "error"
+            assert event["code"] == "invalid_event"
             assert "include" in event["error"]
 
 
