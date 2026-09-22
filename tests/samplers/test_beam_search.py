@@ -11,9 +11,10 @@ from unittest.mock import Mock
 
 import jsonschema
 import pytest
+import torch
 from transformers import AutoModelForSeq2SeqLM
 
-from vllm import CompletionOutput, RequestOutput
+from vllm import CompletionOutput, RequestOutput, envs
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.llm import LLM
 from vllm.logprobs import Logprob, SampleLogprobs
@@ -240,6 +241,15 @@ def test_beam_search_passes_multimodal_data(
     beam_width: int,
 ) -> None:
     """Ensure that beam search passes multimodal data through correctly."""
+    if (
+        current_platform.is_cuda()
+        and envs.is_set("VLLM_USE_FLASHINFER_SAMPLER")
+        and envs.VLLM_USE_FLASHINFER_SAMPLER
+        and current_platform.num_compute_units(torch.accelerator.current_device_index())
+        <= 16
+    ):
+        pytest.skip("FlashInfer top-k masking requires more than 16 SMs")
+
     # NOTE - this test is primarily to check that mm data is passed to beams
     # correctly. As such, we just need to check one extra modality to make
     # sure things pass through properly.
