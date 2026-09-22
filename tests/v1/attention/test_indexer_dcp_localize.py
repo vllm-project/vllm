@@ -962,3 +962,57 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     dcp_out, dcp_lse = _dcp_lse_merge(local_outs, local_lses)
     torch.testing.assert_close(dcp_out, ref_out, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("world,k", [(2, 16), (8, 128)])
+def test_candidate_exchange_matches_reconstruction_oracle(world: int, k: int):
+    """The candidate-exchange merge (per-rank local top-k -> exchange W*k
+    (score, global_id) candidates -> stable select) is EXACT against the
+    score-reconstruction oracle (rebuild the full dcp=1 score row, run the
+    dcp=1 top-k) — the pigeonhole argument: a global top-k member has at
+    most k-1 slots ranking above it anywhere, hence at most k-1 on its own
+    rank, so it survives its rank's local top-k. Pure tensor math on CPU;
+    pins the merge contract (incl. score-desc-then-lowest-id tie rule via
+    the shared reference selector) before any ROCm kernel exists. Covers
+    ragged rows and rows whose per-rank share is smaller than k."""
+    torch.manual_seed(7)
+    rows = 5
+    neg = float("-inf")
+    # Per-row global slot counts: long, short, k-adjacent, tiny (< k after
+    # sharding on every rank), and mid-size.
+    global_lens = [400, 37, k + world - 1, 3, 213]
+    s_max = max(global_lens)
+
+    scores = torch.full((rows, s_max), neg)
+    for row, length in enumerate(global_lens):
+        scores[row, :length] = torch.randn(length)
+
+    # Oracle (score reconstruction == the dcp=1 truth): full-width top-k.
+    global_ids = torch.arange(s_max, dtype=torch.int32).expand(rows, -1)
+    row_valid = torch.zeros((rows, s_max), dtype=torch.bool)
+    for row, length in enumerate(global_lens):
+        row_valid[row, :length] = True
+    oracle_ids = _ref_stable_topk_from_candidates_fp64(
+        scores, torch.where(row_valid, global_ids, global_ids.new_full((), -1)), k
+    )
+
+    # Candidate exchange: local top-k per shard, globalize, gather, select.
+    gathered_scores = []
+    gathered_ids = []
+    for rank in range(world):
+        shard_gids = torch.arange(rank, s_max, world, dtype=torch.int32)
+        shard = scores[:, shard_gids.to(torch.long)]
+        local_k = min(k, shard.shape[1])
+        top = shard.topk(local_k, dim=-1)
+        gids = shard_gids[top.indices]
+        valid = top.values > neg
+        gathered_scores.append(torch.where(valid, top.values, neg))
+        gathered_ids.append(torch.where(valid, gids, gids.new_full((), -1)))
+    merged_ids = _ref_stable_topk_from_candidates_fp64(
+        torch.cat(gathered_scores, dim=1), torch.cat(gathered_ids, dim=1), k
+    )
+
+    for row in range(rows):
+        assert set(merged_ids[row].tolist()) == set(oracle_ids[row].tolist()), (
+            f"row {row}: exchange selected a different set than the oracle"
+        )
