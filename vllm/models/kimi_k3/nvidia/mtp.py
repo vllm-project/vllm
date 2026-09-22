@@ -291,7 +291,12 @@ class KimiK3MTP(nn.Module):
         )
         if self.config.is_moe and use_mega_moe:
             expert_params_mapping = make_kimi_k3_mega_moe_expert_params_mapping(
-                self.config.num_experts
+                self.config.num_experts,
+                nvfp4=any(
+                    module.use_flashinfer_mega_moe
+                    for module in self.modules()
+                    if isinstance(module, KimiMoE)
+                ),
             )
         elif self.config.is_moe:
             expert_params_mapping = fused_moe_make_expert_params_mapping(
