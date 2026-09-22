@@ -73,6 +73,14 @@ from .interfaces import (
 logger = init_logger(__name__)
 
 
+def _compile_diffusion_fn(func):
+    if current_platform.is_xpu():
+        return func
+    return torch.compile(
+        func, dynamic=True, backend=current_platform.simple_compile_backend
+    )
+
+
 class DiffusionGemmaSelfConditioning(nn.Module):
     """Gated MLP that processes soft embeddings from the previous denoising step.
 
@@ -130,7 +138,7 @@ class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
         return super().get_mm_max_tokens_per_item(seq_len, mm_counts)
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@_compile_diffusion_fn
 def _softcap_logits(logits: torch.Tensor, cap: float) -> torch.Tensor:
     # fp32 before tanh for numerical stability (matches HF DiffusionGemma).
     # Compiling fuses the cast/div/tanh/mul into one elementwise kernel over
@@ -359,7 +367,7 @@ class DiffusionGemmaForConditionalGeneration(
         raise ValueError(f"Unsupported modality: {modality}")
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@_compile_diffusion_fn
 def _compute_num_rejected(
     num_logits: torch.Tensor,
     num_sampled: torch.Tensor,
@@ -371,7 +379,7 @@ def _compute_num_rejected(
     return torch.where(is_denoise, query_lens, num_rejected)
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@_compile_diffusion_fn
 def _compiled_sample_step(
     # Logits from the model [num_decode * CL, vocab]
     logits: torch.Tensor,
@@ -576,6 +584,7 @@ class DiffusionGemmaRequestStates:
         max_denoising_steps: int,
         device: torch.device,
         hidden_size: int,
+        hidden_dtype: torch.dtype,
         stability_threshold: int,
     ):
         self.max_num_reqs = max_num_reqs
@@ -634,7 +643,11 @@ class DiffusionGemmaRequestStates:
         # vocab/hidden (~170x) and moves the matmul to denoise time; the result
         # is identical (SC consumes probs @ embed_weight anyway).
         self.self_conditioning_embeds = torch.zeros(
-            max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
+            max_num_reqs,
+            canvas_length,
+            hidden_size,
+            dtype=hidden_dtype,
+            device=device,
         )
 
     def init_canvas(self, slot_indices: torch.Tensor) -> None:
@@ -703,6 +716,7 @@ class DiffusionGemmaModelState(ModelState):
             max_denoising_steps=max_denoising_steps,
             device=device,
             hidden_size=text_config.hidden_size,
+            hidden_dtype=self.model_config.dtype,
             # In Transformers, `stability_threshold=1` (the default) means the current
             # step must match the previous step. In vLLM, the history buffer includes
             # the current step, so we add 1 to match the same behavior.

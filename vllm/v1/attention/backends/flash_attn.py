@@ -540,6 +540,10 @@ def _maybe_symmetrize_window(
     return window
 
 
+def _supports_dynamic_causal(fa_version: int) -> bool:
+    return fa_version == 4 or (current_platform.is_xpu() and fa_version == 2)
+
+
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
     # FA3:
     # Supports full cudagraphs for all cases.
@@ -1365,9 +1369,10 @@ class FlashAttentionImpl(AttentionImpl):
 
                 dynamic_causal = None
                 if isinstance(causal, torch.Tensor):
-                    if self.vllm_flash_attn_version != 4:
+                    if not _supports_dynamic_causal(self.vllm_flash_attn_version):
                         raise NotImplementedError(
-                            "Per-sequence causal requires FA4. Current version: "
+                            "Per-sequence causal requires FA4 or XPU FA2. "
+                            "Current version: "
                             f"FA{self.vllm_flash_attn_version}"
                         )
                     dynamic_causal = causal
