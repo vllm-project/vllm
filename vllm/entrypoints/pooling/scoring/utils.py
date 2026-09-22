@@ -46,15 +46,40 @@ def truncate_text_to_tokens(
 ) -> str:
     """Truncate text to a maximum number of content tokens.
 
-    Uses offset_mapping to slice the original text at the exact character
-    boundary, avoiding lossy encode→decode round-trips that can shift
-    the token count by 1-3 tokens due to BPE merge boundary changes.
+    Prefer slicing at the end character offset of token ``max_tokens`` so the
+    returned string keeps the original spelling when that boundary is a safe
+    retokenization cut. Some multilingual / emoji sequences share or overlap
+    character spans across tokens, so a naive character slice can retokenize
+    to more than ``max_tokens``. In that case, shrink to the longest prefix
+    whose retokenized length stays within the limit.
     """
-    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-    if len(encoding["input_ids"]) <= max_tokens:
+    if max_tokens <= 0:
         return text
-    char_end = encoding["offset_mapping"][max_tokens - 1][1]
-    return text[:char_end]
+
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    input_ids = encoding["input_ids"]
+    if len(input_ids) <= max_tokens:
+        return text
+
+    offset_mapping = encoding["offset_mapping"]
+    hi = offset_mapping[max_tokens - 1][1]
+    candidate = text[:hi]
+    if len(tokenizer(candidate, add_special_tokens=False)["input_ids"]) <= max_tokens:
+        return candidate
+
+    # Longest prefix that retokenizes to at most max_tokens.
+    lo = 0
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        prefix = text[:mid]
+        n_tokens = len(tokenizer(prefix, add_special_tokens=False)["input_ids"])
+        if n_tokens <= max_tokens:
+            best = prefix
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
