@@ -23,10 +23,11 @@ are load-balanced over several API server processes.
 weights, and the prefix cache would keep those blocks. See
 docs/features/weight_checker.md for the full rationale.
 
-Pass ``--extra-url`` one or more times to also check that the replicas agree
-with each other. Their checksums ride along with the baseline on the final
-``compare``, which then holds every report to every other one instead of only
-to the baseline.
+Pass ``--extra-url`` one or more times to also check that other replicas hold
+the same weights. Each one is checked against the same reference baseline
+rather than against each other: a checksum key carries the data-parallel rank,
+so two replicas hold the same weights under different keys and a pairwise
+comparison would call every tensor a mismatch.
 
 For a standalone demonstration, the existing ``collective_rpc`` development
 endpoint reloads the inference weights from the configured checkpoint. In a
@@ -47,6 +48,16 @@ def post(base_url: str, path: str, **kwargs: Any) -> dict[str, Any]:
     if not response.content:
         return {}
     return response.json()
+
+
+def rank_prefixes(checksums: dict[str, str]) -> list[str]:
+    """Return the rank prefixes a checksum response covers.
+
+    A key is ``dp{..}:pp{..}:pcp{..}:tp{..}:ep{..}:{tensor name}``, so the
+    prefix is the first five fields. Splitting on the first five colons keeps a
+    tensor name containing a colon intact.
+    """
+    return sorted({":".join(key.split(":", 5)[:5]) for key in checksums})
 
 
 def check_weights(
@@ -130,31 +141,43 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         metavar="URL",
-        help="Another API server to include in a replica consistency check.",
+        help=(
+            "Another API server to check against the same baseline. Repeatable."
+        ),
     )
     return parser.parse_args()
 
 
-def check_replicas(
-    base_url: str, bundle: dict[str, str], extra_urls: list[str]
-) -> None:
-    """Ask one server whether all the replicas agree with each other.
+def check_replicas(extra_urls: list[str], bundle: dict[str, str]) -> None:
+    """Check every replica against one baseline.
 
-    Each extra URL is queried for its own checksums, and the answers ride along
-    with the baseline on a single ``compare``, which then holds every report to
-    every other one. A report agrees with itself, so the returned ``ranks`` is
-    what tells you the comparison covered the ranks you expected.
+    Comparing replicas against each other does not work: their checksum keys
+    carry their own data-parallel rank, so two replicas hold the same weights
+    under different keys and a pairwise comparison would report every tensor as
+    a mismatch. The shared reference has to be one baseline, which each replica
+    checks itself against.
     """
-    extra = [check_weights(url, "checksum")["checksums"] for url in extra_urls]
-    result = check_weights(base_url, "compare", bundle, extra)
-    print(f"compared {len(extra) + 2} reports covering {len(result['ranks'])} ranks")
+    ranks = rank_prefixes(bundle)
+    print(f"Reference baseline covers {len(bundle)} tensors over {len(ranks)} ranks")
 
-    if not result["match"]:
-        preview = "\n".join(f"  - {name}" for name in result["mismatches"][:10])
-        raise RuntimeError(
-            f"Replicas disagree on {len(result['mismatches'])} tensors:\n{preview}"
-        )
-    print("Replica consistency passed: every report agrees.")
+    for url in extra_urls:
+        other = check_weights(url, "checksum")["checksums"]
+        if rank_prefixes(other) != ranks:
+            raise RuntimeError(
+                f"{url} covers different ranks than {ranks}, so it cannot be "
+                "checked against this baseline"
+            )
+
+        result = check_weights(url, "compare", bundle)
+        if not result["match"]:
+            preview = "\n".join(f"  - {name}" for name in result["mismatches"][:10])
+            raise RuntimeError(
+                f"{url} disagrees with the baseline on "
+                f"{len(result['mismatches'])} tensors:\n{preview}"
+            )
+        print(f"{url}: matches the baseline over {len(result['ranks'])} ranks")
+
+    print(f"All {len(extra_urls) + 1} replicas hold the same weights.")
 
 
 if __name__ == "__main__":
@@ -163,4 +186,4 @@ if __name__ == "__main__":
     extra_urls = [url.rstrip("/") for url in args.extra_url]
     bundle = verify_weight_update(base_url)
     if extra_urls:
-        check_replicas(base_url, bundle, extra_urls)
+        check_replicas(extra_urls, bundle)

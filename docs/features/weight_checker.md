@@ -97,12 +97,10 @@ object returns HTTP 400.
 engine only reports the ranks it manages: a `match: true` over fewer ranks than
 you expected means part of the deployment was never checked.
 
-### Check that replicas agree
+### Check that several engines agree
 
-`compare` answers "does this engine still hold the weights the caller expects".
-To check that several API servers or replicas agree with *each other*, collect
-their `checksum` responses and send them back alongside the baseline as
-`checksums`. Every report is then held to every other one:
+Sending extra reports as `checksums` compares them against the baseline and
+against each other. Every report is held to every other one:
 
 ```bash
 curl -X POST 'http://localhost:8000/weight_checker' \
@@ -118,14 +116,30 @@ different rank holds a different shard of a TP or EP split, so its digest is
 Entries that not every report carries are listed in `mismatches` too, so a
 rank that no report reached cannot pass as consistent.
 
-Replica comparison is only meaningful between reports from one deployment with
-matching parallel configuration. Two independently started servers both begin
-at `dp0`, so their keys collide rather than compare; merge such reports by
-keeping their rank ranges disjoint.
+This covers reports that share a rank space: repeated samples, the same ranks
+before and after a restart, or the engines one frontend manages. It does **not**
+compare two replicas that sit on different data-parallel ranks.
 
-`ranks` is the part the verdict cannot carry on its own: a single report is
-consistent with itself, so `match: true` only means something once you can see
-that the reports actually covered the ranks you expected.
+### Check that a replica holds the same weights
+
+A checksum key carries the data-parallel rank, so two replicas hold the same
+weights under *different* keys. Comparing them against each other therefore
+reports every tensor as a mismatch, and each one only covers its own ranks.
+Checking them means giving them a shared reference instead:
+
+1. Take the baseline on one replica.
+2. Call `checksum` on a second replica and confirm it reports the same rank
+   prefixes. Different ranks mean the two cannot be checked against each other,
+   because no key is shared. That is the case in a deployment whose frontends
+   each manage a disjoint slice of the ranks, where a baseline covering all of
+   them has to be collected from every frontend first.
+3. Call `compare` on that second replica, passing the baseline from step 1.
+
+Repeat step 3 for every replica. `match: true` from all of them means they all
+hold the baseline's weights, so they hold the same weights as each other. What
+that is worth depends on the baseline: a baseline taken from a healthy replica
+or a checkpoint confirms the group agrees, while one taken after a `reset`
+would confirm only that the group agrees on random weights.
 
 ### RLHF weight-update workflow
 
