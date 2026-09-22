@@ -685,10 +685,23 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
     assert method is sentinel  # bespoke builder wins over the generic path
 
 
+def _expected_auto_w4a16_kernel() -> type:
+    """Default W4A16 NVFP4 kernel: FlashInfer CuTe-DSL on SM100/103 when
+    available, Marlin everywhere else (see ``init_nvfp4_linear_kernel``)."""
+    capability = current_platform.get_device_capability()
+    compute_capability = capability.to_int() if capability is not None else None
+    cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
+        compute_capability
+    )
+    if compute_capability in (100, 103) and cutedsl_ok:
+        return FlashInferCuteDslNvFp4W4A16LinearKernel
+    return MarlinNvFp4LinearKernel
+
+
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [
-        ("auto", MarlinNvFp4LinearKernel),
+        ("auto", None),
         ("humming", HummingNvFp4LinearKernel),
         ("flashinfer_cutedsl", FlashInferCuteDslNvFp4W4A16LinearKernel),
     ],
@@ -696,15 +709,18 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
-    ``use_a16=True`` defaults to Marlin, but an explicit backend wins. The
-    generic method routes this through ``select_linear_kernel``."""
+    ``use_a16=True`` picks the platform default (Marlin, or FlashInfer CuTe-DSL
+    on SM100/103), but an explicit backend wins. The generic method routes
+    this through ``select_linear_kernel``."""
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
         RuntimeDtypes,
         select_linear_kernel,
     )
 
-    if linear_backend != "auto":
+    if linear_backend == "auto":
+        kernel_cls = _expected_auto_w4a16_kernel()
+    else:
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             pytest.skip(reason)
