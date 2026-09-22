@@ -43,11 +43,13 @@ mod input;
 mod item;
 mod preprocessed;
 mod tensor;
+mod timing;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
-use vllm_tracing::timing::{mm_request_span, mm_stage_span};
+use self::timing::MM_STAGE_TARGET;
+pub use self::timing::{mm_request_span, mm_timing_layer};
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -760,13 +762,17 @@ impl MultimodalModelInfo {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype)
-            .instrument(mm_stage_span("preprocessor_total"))
-            .await
+        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype).await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
     /// span aggregated per request by the `vllm-tracing` timing layer.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocessor_total")
+    )]
     async fn prepare_multimodal_timed(
         &self,
         media_parts: Vec<MediaContentPart>,
@@ -775,34 +781,22 @@ impl MultimodalModelInfo {
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
-        let fetched =
-            self.fetch_media(media_parts).instrument(mm_stage_span("media_fetch")).await?;
+        let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared.push(
-                self.prepare_images(fetched.images, fetched.image_uuids, model_dtype)
-                    .instrument(mm_stage_span("preprocess_image"))
-                    .await?,
-            );
+            prepared
+                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
         }
         if !fetched.videos.is_empty() {
-            prepared.push(
-                self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype)
-                    .instrument(mm_stage_span("preprocess_video"))
-                    .await?,
-            );
+            prepared
+                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
         }
         if !fetched.audios.is_empty() {
-            prepared.push(
-                self.prepare_audios(fetched.audios, fetched.audio_uuids)
-                    .instrument(mm_stage_span("preprocess_audio"))
-                    .await?,
-            );
+            prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
         }
 
-        let mut ranges = mm_stage_span("prompt_expansion")
-            .in_scope(|| expand_prompt_token_ids(prompt_token_ids, &prepared))?;
+        let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
 
         let mut features = Vec::with_capacity(media_parts_len);
         for media in prepared {
@@ -845,6 +839,12 @@ impl MultimodalModelInfo {
 
     /// Fetch all connector-backed media parts and split them per modality,
     /// preserving their request-order UUID metadata.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "media_fetch")
+    )]
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
         for part in media_parts {
