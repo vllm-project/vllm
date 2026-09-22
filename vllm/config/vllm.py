@@ -1092,7 +1092,11 @@ class VllmConfig:
         """Reject configurations unsupported by enabled auxiliary outputs."""
         if not self.aux_output_config.enabled:
             return
-        if not self.use_v2_model_runner:
+        from vllm.platforms import current_platform
+
+        # On GPU, AuxOutput is only wired to MRV2, but on other platforms
+        # they might hook to their V1 model runner.
+        if not self.use_v2_model_runner and current_platform.is_cuda_alike():
             raise ValueError(
                 "AuxOutput Connector requires Model Runner V2; set "
                 "VLLM_USE_V2_MODEL_RUNNER=1."
