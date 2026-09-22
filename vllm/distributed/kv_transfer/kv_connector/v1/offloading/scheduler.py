@@ -26,9 +26,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     _ConnectorMetricName,
     _TransferMetricName,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.prefetch import (
+    GPUPrefetchReservation,
+    PrefetchJob,
+    PrefetchOutcome,
+)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
@@ -632,6 +639,157 @@ class OffloadingConnectorScheduler:
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
+
+        # Request-free prefetch (off unless explicitly enabled). Bound to a
+        # block pool by bind_gpu_block_pool(); until then, and when prefix
+        # caching is off, prefetches are reported UNSUPPORTED.
+        # Specs built by tests may not carry options at all; no options means
+        # the feature stays off.
+        extra_config = getattr(spec, "extra_config", None) or {}
+        self._prefetch_enabled: bool = (
+            bool(extra_config.get("enable_request_free_prefetch", False))
+            and vllm_config.cache_config.enable_prefix_caching
+        )
+        self._prefetch_reserve_blocks: int = int(
+            extra_config.get("prefetch_reserve_blocks", 0)
+        )
+        self._prefetch_reservation: GPUPrefetchReservation | None = None
+        self._prefetch_jobs: dict[int, PrefetchJob] = {}
+        self._prefetch_contexts: dict[int, ReqContext] = {}
+        # Destination block id -> prefetch job id, so a block handed to a
+        # request mid-flight invalidates the transfer landing in it.
+        self._prefetch_block_ids: dict[int, int] = {}
+        self._prefetch_counter: int = 0
+
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        """Take the scheduler's block pool, which prefetches allocate from."""
+        if not self._prefetch_enabled:
+            return
+        self._prefetch_reservation = GPUPrefetchReservation(
+            gpu_block_pool, self._prefetch_reserve_blocks
+        )
+
+    def request_free_prefetch(
+        self,
+        block_hashes: Sequence[BlockHash],
+        group_idx: int = 0,
+    ) -> PrefetchOutcome:
+        """Load offloaded KV for `block_hashes` with no request attached.
+
+        `block_hashes` is the prefix-cache hash of each GPU block, in order
+        from the start of the prefix - the same sequence a request would
+        produce, and what a caller holding BlockStored events already has. The
+        offloaded tier is keyed per chunk, so the chunk keys are derived here
+        the way a request's are.
+
+        The engine keeps ownership of the decision: the outcome says whether
+        the load was submitted (ACCEPTED), did not fit behind the free-block
+        reserve (DEFERRED), was unnecessary (COMPLETED), or is unavailable in
+        this deployment (UNSUPPORTED). Nothing is evicted to make room.
+        """
+        reservation = self._prefetch_reservation
+        if reservation is None:
+            return PrefetchOutcome.UNSUPPORTED
+        if group_idx >= len(self.config.kv_group_configs):
+            return PrefetchOutcome.UNSUPPORTED
+
+        group_config = self.config.kv_group_configs[group_idx]
+        hashes_per_chunk = group_config.hashes_per_chunk
+        if group_config.tokens_per_block != self.config.tokens_per_hash:
+            # `block_hashes` is one hash per GPU block of this group; when the
+            # hash unit and the group's block size differ, that mapping needs
+            # the caller's token positions, which this primitive does not take.
+            return PrefetchOutcome.UNSUPPORTED
+        blocks_per_chunk = (
+            group_config.tokens_per_chunk // group_config.tokens_per_block
+        )
+
+        # Whole chunks only: a partial trailing chunk was never offloaded
+        # under this key scheme, so it cannot be resolved here.
+        num_chunks = len(block_hashes) // hashes_per_chunk
+        if num_chunks == 0:
+            return PrefetchOutcome.COMPLETED
+
+        req_context = ReqContext(req_id=self._next_prefetch_id())
+        keys: list[OffloadKey] = []
+        for chunk_idx in range(num_chunks):
+            key = make_offload_key(
+                block_hashes[(chunk_idx + 1) * hashes_per_chunk - 1], group_idx
+            )
+            if self.manager.lookup(key, req_context) != LookupResult.HIT:
+                # Prefix order matters: stop at the first chunk that is not
+                # resident rather than loading a hole.
+                break
+            keys.append(key)
+            req_context.set_offload_key_position(
+                key, (chunk_idx + 1) * group_config.tokens_per_chunk
+            )
+
+        if not keys:
+            return PrefetchOutcome.COMPLETED
+
+        num_blocks = len(keys) * blocks_per_chunk
+        blocks = reservation.reserve(num_blocks)
+        if blocks is None:
+            self._connector_stats.increase_counter(
+                _ConnectorMetricName.PREFETCH_DEFERRED, 1
+            )
+            return PrefetchOutcome.DEFERRED
+
+        src_spec = self.manager.prepare_load(keys, req_context)
+        dst_spec = GPULoadStoreSpec(
+            [block.block_id for block in blocks],
+            group_sizes=[num_blocks],
+            block_indices=[0],
+        )
+
+        job_id = self._generate_job_id()
+        self._current_batch_load_jobs[job_id] = TransferJob(
+            req_id=req_context.req_id,
+            src_spec=src_spec,
+            dst_spec=dst_spec,
+        )
+        self._jobs[job_id] = TransferJobStatus(
+            req_id=req_context.req_id,
+            pending_count=self.config.num_workers,
+            keys=set(keys),
+            is_store=False,
+        )
+        self._prefetch_jobs[job_id] = PrefetchJob(
+            keys=set(keys),
+            blocks=blocks,
+            block_hashes=list(block_hashes[:num_blocks]),
+            group_idx=group_idx,
+            tokens_per_block=group_config.tokens_per_block,
+        )
+        for block in blocks:
+            self._prefetch_block_ids[block.block_id] = job_id
+        self._prefetch_contexts[job_id] = req_context
+        if self._chunks_being_loaded is not None:
+            self._chunks_being_loaded.update(keys)
+        self._connector_stats.increase_counter(
+            _ConnectorMetricName.PREFETCH_ACCEPTED, 1
+        )
+        return PrefetchOutcome.ACCEPTED
+
+    def _next_prefetch_id(self) -> str:
+        self._prefetch_counter += 1
+        return f"__kv_prefetch_{self._prefetch_counter}"
+
+    def _complete_prefetch_job(self, job_id: int, keys: set[OffloadKey]) -> None:
+        """Publish (or drop) the destination blocks of a finished prefetch."""
+        job = self._prefetch_jobs.pop(job_id)
+        req_context = self._prefetch_contexts.pop(job_id)
+        assert self._prefetch_reservation is not None
+        self.manager.complete_load(keys, req_context)
+        if self._chunks_being_loaded:
+            self._chunks_being_loaded.difference_update(keys)
+        for block in job.blocks:
+            self._prefetch_block_ids.pop(block.block_id, None)
+        num_published = self._prefetch_reservation.publish(job)
+        self._connector_stats.increase_counter(
+            _ConnectorMetricName.PREFETCH_BLOCKS_PUBLISHED, num_published
+        )
 
     def _maybe_observe_lookup_async_delay(
         self, req_status: RequestOffloadState
@@ -1895,6 +2053,13 @@ class OffloadingConnectorScheduler:
                 continue
             assert job_status.pending_count == 0
 
+            if job_id in self._prefetch_jobs:
+                # Request-free prefetch: no request state to advance, the
+                # destination blocks are published (or dropped) instead.
+                self._complete_prefetch_job(job_id, job_status.keys)
+                del self._jobs[job_id]
+                continue
+
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
                 self.manager.complete_store(job_status.keys, req_status.req_context)
@@ -1997,6 +2162,17 @@ class OffloadingConnectorScheduler:
 
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
+
+        # In-flight prefetches lose their source: drop the destination blocks
+        # instead of publishing data that may never arrive.
+        for job_id, job in list(self._prefetch_jobs.items()):
+            job.invalidated = True
+            assert self._prefetch_reservation is not None
+            self._prefetch_reservation.release(job)
+            for block in job.blocks:
+                self._prefetch_block_ids.pop(block.block_id, None)
+            self._prefetch_contexts.pop(job_id, None)
+            del self._prefetch_jobs[job_id]
 
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
