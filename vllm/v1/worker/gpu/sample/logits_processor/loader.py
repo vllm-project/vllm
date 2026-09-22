@@ -198,6 +198,9 @@ def build_custom_logits_processors_params_validator(
     """
     classes = _cached_load_v2_logitsprocs(tuple(custom_logitsprocs or ()))
 
+    if not classes:
+        return lambda _: None
+
     def validate_params(sampling_params: "SamplingParams") -> None:
         for cls in classes:
             try:
