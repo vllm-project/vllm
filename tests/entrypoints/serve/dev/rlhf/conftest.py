@@ -348,11 +348,19 @@ def health(url) -> int:
 # ---------------------------------------------------------------------------
 
 
-def weight_checker(url: str, action: str, baseline=None) -> requests.Response:
-    """POST one weight-checker action and return the raw response."""
+def weight_checker(
+    url: str, action: str, baseline=None, checksums=None
+) -> requests.Response:
+    """POST one weight-checker action and return the raw response.
+
+    ``checksums`` carries a caller's other checksum reports, which makes
+    ``compare`` hold them against the baseline as well.
+    """
     payload = {"action": action}
     if baseline is not None:
         payload["baseline"] = baseline
+    if checksums is not None:
+        payload["checksums"] = checksums
     return requests.post(f"{url}/weight_checker", json=payload, timeout=180)
 
 

@@ -21,6 +21,7 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     reusable_server,
     weight_checker,
 )
+from vllm.utils.weight_checksum import split_checksum_key
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -76,6 +77,24 @@ def _mode_args(mode: dict) -> list[str]:
     if mode["ep"]:
         args += ["--enable-expert-parallel"]
     return args
+
+
+def _rank_prefixes(checksums: dict[str, str]) -> list[str]:
+    """Return the rank prefixes present in a checksum response.
+
+    Derived from the keys rather than hardcoded, so it tracks whatever
+    topology the fixture actually started.
+    """
+    return sorted({split_checksum_key(key)[0] for key in checksums})
+
+
+def _matches(comparison: requests.Response, checksums: dict[str, str]) -> bool:
+    """Whether a comparison reports a match over exactly the given ranks."""
+    return comparison.json() == {
+        "match": True,
+        "mismatches": [],
+        "ranks": _rank_prefixes(checksums),
+    }
 
 
 @pytest.fixture(scope="class")
@@ -166,7 +185,7 @@ class TestWeightCheckerAPI:
         for _ in range(2):
             comparison = weight_checker(url, "compare", checksums)
             assert comparison.status_code == 200, comparison.text
-            assert comparison.json() == {"match": True, "mismatches": []}
+            assert _matches(comparison, checksums), comparison.text
 
     def test_compare_reports_changed_and_missing_tensors(self, wc_server):
         mode, url = wc_server
@@ -185,6 +204,32 @@ class TestWeightCheckerAPI:
         assert comparison.json() == {
             "match": False,
             "mismatches": sorted([changed_key, missing_key]),
+            "ranks": _rank_prefixes(baseline_checksums),
+        }, mode["name"]
+
+    def test_compare_holds_the_callers_other_reports_to_the_baseline(
+        self, wc_server
+    ):
+        """Extra reports turn compare into a replica check over the wire."""
+        mode, url = wc_server
+        baseline = weight_checker(url, "checksum")
+        baseline.raise_for_status()
+        checksums = baseline.json()["checksums"]
+
+        comparison = weight_checker(url, "compare", checksums, [checksums])
+        assert comparison.status_code == 200, comparison.text
+        assert _matches(comparison, checksums), comparison.text
+
+        # A report that disagrees must be reported, not ignored.
+        diverged = dict(checksums)
+        diverged_key = next(iter(diverged))
+        diverged[diverged_key] = "0" * 64
+        comparison = weight_checker(url, "compare", checksums, [diverged])
+        assert comparison.status_code == 200, comparison.text
+        assert comparison.json() == {
+            "match": False,
+            "mismatches": [diverged_key],
+            "ranks": _rank_prefixes(checksums),
         }, mode["name"]
 
     def test_reset_changes_weights_and_reload_restores_them(self, wc_server):
@@ -207,7 +252,7 @@ class TestWeightCheckerAPI:
         assert restored.json()["checksums"] == baseline
         comparison = weight_checker(url, "compare", baseline)
         comparison.raise_for_status()
-        assert comparison.json() == {"match": True, "mismatches": []}
+        assert _matches(comparison, baseline), comparison.text
         assert ok(gen(url))
 
 
@@ -244,4 +289,4 @@ class TestWeightCheckerTP2DP2EP:
 
         comparison = weight_checker(url, "compare", initial_checksums)
         assert comparison.status_code == 200, comparison.text
-        assert comparison.json() == {"match": True, "mismatches": []}
+        assert _matches(comparison, initial_checksums), comparison.text
