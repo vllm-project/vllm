@@ -12,6 +12,7 @@ from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
     get_mixture_of_experts_model,
 )
 
@@ -25,6 +26,22 @@ def _dspark_draft_shares_target_eplb_topology(draft_model_config: ModelConfig) -
     use a smaller routed-expert count and cannot share EPLB state.
     """
     return getattr(draft_model_config.hf_config, "model_type", None) == "deepseek_v4"
+
+
+def draft_model_supports_eplb(
+    speculative_config: Any | None,
+    draft_moe_model: MixtureOfExperts | None,
+) -> bool:
+    """Return whether a draft MoE model should register with EPLB."""
+    if draft_moe_model is None:
+        return False
+    if speculative_config is None or speculative_config.draft_model_config is None:
+        return False
+    if getattr(speculative_config, "method", None) == "dspark":
+        return _dspark_draft_shares_target_eplb_topology(
+            speculative_config.draft_model_config
+        )
+    return True
 
 
 def step_eplb_after(*, is_dummy: bool = False) -> Callable:
@@ -77,7 +94,7 @@ class EPLBController:
 
         draft_model = speculator.model
         draft_moe_model = get_mixture_of_experts_model(draft_model)
-        if draft_moe_model is None:
+        if not draft_model_supports_eplb(speculative_config, draft_moe_model):
             return False
 
         assert not self.parallel_config.enable_elastic_ep, (
@@ -85,12 +102,6 @@ class EPLBController:
         )
         assert speculative_config is not None
         assert speculative_config.draft_model_config is not None
-        if getattr(
-            speculative_config, "method", None
-        ) == "dspark" and not _dspark_draft_shares_target_eplb_topology(
-            speculative_config.draft_model_config
-        ):
-            return False
         assert self.state is not None
         self.state.add_model(
             draft_moe_model,

@@ -210,6 +210,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.eplb_utils import draft_model_supports_eplb
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -5293,20 +5294,9 @@ class GPUModelRunner(
                         drafter_moe_model = get_mixture_of_experts_model(
                             self.drafter.model
                         )
-                        spec_config = self.vllm_config.speculative_config
-                        if (
-                            drafter_moe_model is not None
-                            and spec_config is not None
-                            and spec_config.draft_model_config is not None
-                            # Match the v2 EPLB gate in gpu/eplb_utils.py: only
-                            # DeepSeek-V4 DSpark drafts share the target topology.
-                            and getattr(spec_config, "method", None) == "dspark"
-                            and getattr(
-                                spec_config.draft_model_config.hf_config,
-                                "model_type",
-                                None,
-                            )
-                            != "deepseek_v4"
+                        if not draft_model_supports_eplb(
+                            self.vllm_config.speculative_config,
+                            drafter_moe_model,
                         ):
                             drafter_moe_model = None
 
