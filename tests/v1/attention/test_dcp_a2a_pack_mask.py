@@ -40,6 +40,19 @@ def _pack(out, lse, world_size, h_per_rank, head_dim, seq_lens, query_start_loc)
     return send
 
 
+def _reference_mask(lse, seq_lens, query_start_loc):
+    if seq_lens.shape[0] == 0:
+        lse.fill_(float("-inf"))
+        return
+
+    rows = torch.arange(lse.shape[0], device=lse.device, dtype=query_start_loc.dtype)
+    seq = torch.searchsorted(query_start_loc[1:], rows, right=True).clamp_max(
+        seq_lens.shape[0] - 1
+    )
+    empty = (rows >= query_start_loc[-1]) | (seq_lens[seq] == 0)
+    lse.masked_fill_(empty[:, None], float("-inf"))
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("world_size,h_per_rank", [(8, 2), (8, 16), (4, 4), (2, 1)])
 @pytest.mark.parametrize("tokens_per_req", [1, 2, 3])
@@ -81,7 +94,7 @@ def test_fused_mask_matches_eager(
 
     # Reference: mask eagerly, then pack with masking disabled.
     ref_lse = lse.clone()
-    mask_dcp_empty_shards_(ref_lse, seq_lens, query_start_loc)
+    _reference_mask(ref_lse, seq_lens, query_start_loc)
     expected = _pack(out, ref_lse, world_size, h_per_rank, head_dim, None, None)
 
     # Under test: pack with the mask fused in.
@@ -127,7 +140,7 @@ def test_fused_mask_matches_eager_ragged(dtype, seed):
     lse = torch.randn(num_rows, num_heads, device=device, dtype=torch.float32)
 
     ref_lse = lse.clone()
-    mask_dcp_empty_shards_(ref_lse, seq_lens, query_start_loc)
+    _reference_mask(ref_lse, seq_lens, query_start_loc)
     expected = _pack(out, ref_lse, world_size, h_per_rank, head_dim, None, None)
     actual = _pack(
         out, lse.clone(), world_size, h_per_rank, head_dim, seq_lens, query_start_loc
@@ -154,11 +167,42 @@ def test_mask_disabled_is_unmasked():
     assert torch.isfinite(packed.float()).all()
 
 
-def test_eager_mask_handles_rank_with_no_local_sequences():
+@requires_accelerator
+@pytest.mark.parametrize(
+    "seq_lens_list,query_lens,num_pad_rows",
+    [
+        ([], [], 8),
+        ([16], [1], 0),
+        ([0], [1], 3),
+        ([16, 0, 7, 0], [1, 3, 2, 1], 5),
+        ([0, 0, 0, 0], [2, 1, 4, 3], 0),
+    ],
+)
+def test_mask_matches_reference(seq_lens_list, query_lens, num_pad_rows):
+    """The standalone Triton mask matches the original PyTorch operations."""
+    device = "cuda"
+    query_start_loc = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
+    if query_lens:
+        query_start_loc[1:] = torch.tensor(query_lens).cumsum(0)
+    num_rows = int(query_start_loc[-1]) + num_pad_rows
+
+    query_start_loc = query_start_loc.to(device)
+    seq_lens = torch.tensor(seq_lens_list, device=device, dtype=torch.int32)
+    lse = torch.randn(num_rows, 48, device=device, dtype=torch.float32)
+    expected = lse.clone()
+
+    _reference_mask(expected, seq_lens, query_start_loc)
+    mask_dcp_empty_shards_(lse, seq_lens, query_start_loc)
+
+    assert torch.equal(lse, expected)
+
+
+@requires_accelerator
+def test_mask_handles_rank_with_no_local_sequences():
     """Padded graph rows are all empty when a DCP rank has no sequences."""
-    lse = torch.randn(8, 4, dtype=torch.float32)
-    seq_lens = torch.empty(0, dtype=torch.int32)
-    query_start_loc = torch.tensor([0], dtype=torch.int32)
+    lse = torch.randn(8, 4, device="cuda", dtype=torch.float32)
+    seq_lens = torch.empty(0, device="cuda", dtype=torch.int32)
+    query_start_loc = torch.tensor([0], device="cuda", dtype=torch.int32)
 
     mask_dcp_empty_shards_(lse, seq_lens, query_start_loc)
 
