@@ -539,7 +539,7 @@ def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried, capture_
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("entry", ["broadcast", "pipeline", "residual", "engram"])
 @pytest.mark.parametrize(
-    "mhc_mode", ["disabled", "overlap", "piecewise", "large_batch"]
+    "mhc_mode", ["disabled", "eager", "overlap", "piecewise", "large_batch"]
 )
 def test_deepseek_v41_decoder_mixes_match_torch(
     entry, mhc_mode, monkeypatch, default_vllm_config
@@ -568,7 +568,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         ):
             pytest.skip("SM100 DeepGEMM required for overlap")
         decoder.mhc_stream = torch.cuda.Stream()
-    if mhc_mode in ("piecewise", "large_batch"):
+    if mhc_mode in ("eager", "piecewise", "large_batch"):
 
         def unexpected_overlap(*args, **kwargs):
             pytest.fail("unsupported execution must retain native mHC")
@@ -624,8 +624,27 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     from vllm.forward_context import set_forward_context
 
     mode = CUDAGraphMode.PIECEWISE if mhc_mode == "piecewise" else CUDAGraphMode.NONE
+    overlap_calls = []
+    if mhc_mode == "overlap":
+        from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_pre_delayed_overlap
+
+        def checked_overlap(*args, **kwargs):
+            overlap_calls.append(torch.cuda.is_current_stream_capturing())
+            return mhc_pre_delayed_overlap(*args, **kwargs)
+
+        for module in ("model", "ops.mhc"):
+            monkeypatch.setattr(
+                f"vllm.models.deepseek_v41.nvidia.{module}.mhc_pre_delayed_overlap",
+                checked_overlap,
+            )
     with set_forward_context(None, default_vllm_config, cudagraph_runtime_mode=mode):
         actual = decoder(x, positions, None, **kwargs)
+        if mhc_mode == "overlap":
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = decoder(x, positions, None, **kwargs)
+            graph.replay()
+            assert overlap_calls and all(overlap_calls)
 
     def reference(*args, norm_weight, norm_eps, **kwargs):
         post, res, collapsed, pre = mhc_pre_delayed_torch(*args, **kwargs)
