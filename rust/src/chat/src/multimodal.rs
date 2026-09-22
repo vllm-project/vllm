@@ -52,6 +52,8 @@ pub use self::input::MultimodalInput;
 #[derive(Clone)]
 pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
+    /// Rendered placeholder marker IDs for all resolved modalities.
+    placeholder_token_ids: Vec<u32>,
     image: Option<ModalitySupport>,
     video: Option<ModalitySupport>,
     audio: Option<AudioModalitySupport>,
@@ -413,8 +415,18 @@ impl MultimodalModelInfo {
             MediaConnectorConfig::default(),
         )?);
 
+        let placeholder_token_ids = [
+            image.as_ref().map(|support| support.placeholder.marker_token_id),
+            video.as_ref().map(|support| support.placeholder.marker_token_id),
+            audio.as_ref().map(|support| support.placeholder.marker_token_id),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
         Ok(Some(Self {
             context,
+            placeholder_token_ids,
             image,
             video,
             audio,
@@ -536,19 +548,15 @@ impl MultimodalModelInfo {
             Modality::ImageEmbeds => None,
         }
     }
+
     fn vision_preprocessing_context(
         &self,
         prompt_token_ids: &[u32],
         max_model_len: Option<usize>,
     ) -> VisionPreprocessingContext {
-        let placeholder_ids = [
-            self.image.as_ref().map(|support| support.placeholder.marker_token_id),
-            self.video.as_ref().map(|support| support.placeholder.marker_token_id),
-            self.audio.as_ref().map(|support| support.placeholder.marker_token_id),
-        ];
         let text_prompt_length = prompt_token_ids
             .iter()
-            .filter(|&&token_id| !placeholder_ids.contains(&Some(token_id)))
+            .filter(|token_id| !self.placeholder_token_ids.contains(token_id))
             .count();
         VisionPreprocessingContext {
             model_config: self.context.config.clone(),
