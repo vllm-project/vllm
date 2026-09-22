@@ -1129,10 +1129,14 @@ class VllmConfig:
         if (
             kv_transfer_config is not None
             and kv_transfer_config.is_kv_transfer_instance
+            and not (
+                kv_transfer_config.kv_connector == "MooncakeConnector"
+                and self.aux_output_config.backend == "mooncake"
+            )
         ):
             raise ValueError(
                 "--enable-return-routed-experts is incompatible with KV "
-                "connectors (PD disaggregation and KV cache offload)."
+                "connectors except MooncakeConnector with the mooncake aux backend."
             )
 
     def _verify_kv_transfer_compat(self) -> None:

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -34,6 +34,8 @@ class AuxOutputConnectorMetadata:
     requests: dict[str, int]
     block_hashes: dict[str, PackedBlockHashes]
     finished_requests: tuple[str, ...]
+    # First remote prefill: local KV hit length and P's ordered R3 object keys.
+    remote_prefixes: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -63,9 +65,29 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
+        remote_prefixes = {}
         for request_id in scheduler_output.num_scheduled_tokens:
+            is_new = request_id not in self._sent_hash_counts
             num_sent = self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            stats = request.prefill_stats
+            if (
+                is_new
+                and request.num_preemptions == 0
+                and stats is not None
+                and stats.num_external_cached_tokens
+            ):
+                params = request.kv_transfer_params or {}
+                prefix = params.get("aux_output_prefix")
+                if prefix is None or prefix["block_size"] != self._hash_block_size:
+                    raise ValueError(
+                        "Remote KV reuse requires aux_output_prefix with matching "
+                        "R3 block_size and ordered keys covering the uncropped prompt"
+                    )
+                remote_prefixes[request_id] = (
+                    stats.num_local_cached_tokens,
+                    prefix["keys"],
+                )
             packed = self._pack_new_hashes(request.block_hashes, num_sent)
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
@@ -100,6 +122,7 @@ class AuxOutputSchedulerConnector:
             scheduled_requests,
             block_hashes_by_request,
             finished_requests,
+            remote_prefixes,
         )
 
     def take_output(

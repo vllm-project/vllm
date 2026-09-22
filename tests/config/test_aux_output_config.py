@@ -124,3 +124,9 @@ def test_aux_output_guards_are_inactive_when_capture_is_disabled():
     config.aux_output_config = AuxOutputConfig()
 
     config._verify_aux_output_compatibility()
+
+
+def test_mooncake_pd_requires_remote_aux_backend():
+    config = _config(connector="MooncakeConnector")
+    config.aux_output_config.backend = "mooncake"
+    VllmConfig._verify_aux_output_compatibility(config)
