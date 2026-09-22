@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_SPARSE_INDEXER_FIXED_LOGITS_WIDTH: bool | None = None
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -1086,6 +1087,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # Allocate the sparse MLA indexer prefill logits at a fixed width
+    # (ceil(max_model_len / compress_ratio) columns) instead of the chunk's
+    # current kv length, so every sub-chunk of a long prefill requests the
+    # same size and the caching allocator reuses it. Unset: on for
+    # integrated (unified-memory) GPUs only; "1" / "0" force it on / off.
+    "VLLM_SPARSE_INDEXER_FIXED_LOGITS_WIDTH": lambda: (
+        None
+        if os.getenv("VLLM_SPARSE_INDEXER_FIXED_LOGITS_WIDTH") is None
+        else bool(int(os.environ["VLLM_SPARSE_INDEXER_FIXED_LOGITS_WIDTH"]))
     ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
