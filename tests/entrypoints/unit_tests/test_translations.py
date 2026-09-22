@@ -369,12 +369,34 @@ async def test_pre_validation_rejects_unknown_language():
 
 @pytest.mark.asyncio
 async def test_pre_validation_allows_known_language():
+    # A valid code is resolved by the processor into decoder token ids, which are
+    # forwarded as an explicit token prompt (so the engine renderer does not
+    # re-tokenize the code).
     engine = _engine_with_renderer(_FakeProcessor(known={"deu_Latn"}))
     h = _make_direct_handler(engine)
     req = TranslationRequest(model="nllb", text="Hello", target_language="deu_Latn")
     resp = await h._create_translation_direct(req, None)
     assert isinstance(resp, TranslationResponse)
-    assert engine.captured["prompt"]["decoder_prompt"] == "deu_Latn"
+    assert engine.captured["prompt"]["decoder_prompt"] == {"prompt_token_ids": [42]}
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_bilingual_gets_empty_decoder_prompt():
+    # A bilingual model (MarianMT) resolves any target-language string to an empty
+    # decoder prompt: the target is implied by the model. Forwarding the empty
+    # token list prevents the renderer from leaking the tokenized code into the
+    # decoder.
+    class _MarianProcessor:
+        def create_decoder_prompt(self, prompt, mm_items):
+            return []  # bilingual: target implied, no forced BOS
+
+    engine = _default_engine()
+    engine.renderer = _FakeRenderer(_MarianProcessor())
+    h = _make_direct_handler(engine)
+    req = TranslationRequest(model="opus-mt", text="Hello world", target_language="de")
+    resp = await h._create_translation_direct(req, None)
+    assert isinstance(resp, TranslationResponse)
+    assert engine.captured["prompt"]["decoder_prompt"] == {"prompt_token_ids": []}
 
 
 @pytest.mark.asyncio

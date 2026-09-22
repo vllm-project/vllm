@@ -7,11 +7,13 @@ The endpoint picks one of two strategies per model:
 * **Encoder-decoder MT models (direct-generate).** MarianMT / NLLB take the
   source text as the encoder's single "text" modality and generate directly
   through the engine. Selected when ``model_config.is_encoder_decoder`` is true.
-  The target language is forwarded as the decoder prompt so the model chooses the
-  output language: NLLB/M2M100 resolve the code to a ``forced_bos_token_id``,
-  while bilingual Marian implies the target and ignores it. An unknown code is
-  rejected with a 400 before generation (:meth:`_validate_target_language`). Both
-  a non-streaming response and incremental SSE streaming are supported.
+  The target language is resolved to decoder token ids in the API process via
+  :meth:`_resolve_decoder_prompt` and forwarded directly so the engine renderer
+  does not re-tokenize the code: NLLB/M2M100 normalize an ISO code / name to the
+  checkpoint's tag and resolve it to a ``forced_bos_token_id``, while bilingual
+  Marian implies the target and takes an empty decoder prompt. An unknown code is
+  rejected with a 400 before generation. Both a non-streaming response and
+  incremental SSE streaming are supported.
 * **Decoder-only / instruct models (chat-delegation).** The request is wrapped
   in an instruction prompt and handed to :class:`OpenAIServingChat`, reusing the
   full generation pipeline; the chat response is reshaped into the translation
@@ -160,10 +162,14 @@ class OpenAIServingTextTranslation(BaseServing):
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
-        # Reject an unsupported target language before generation: otherwise the
-        # engine's renderer silently tokenizes an invalid code to subwords and
-        # produces garbage instead of a 400.
-        lang_error = self._validate_target_language(request)
+        # Resolve the target language to decoder token ids in this process. The
+        # engine's renderer tokenizes a decoder-prompt *string* before the model's
+        # create_decoder_prompt hook runs, so forwarding the raw code would both
+        # (a) tokenize an invalid code to subword garbage instead of erroring and
+        # (b) leak the tokenized code into a bilingual model's decoder. Resolving
+        # to ids here (NLLB -> forced-BOS token; MarianMT -> empty) sidesteps both;
+        # an unknown code returns a clean 400.
+        decoder_prompt, lang_error = self._resolve_decoder_prompt(request)
         if lang_error is not None:
             return lang_error
 
@@ -183,16 +189,17 @@ class OpenAIServingTextTranslation(BaseServing):
             ),
         )
 
-        # Source is the encoder's single "text" modality; the target language is
-        # the decoder prompt, which the model's create_decoder_prompt hook turns
-        # into conditioning (forced_bos for NLLB/M2M100, empty for Marian). The
-        # runtime prepends decoder_start_token_id ahead of the hook's output.
+        # Source as the encoder's single "text" modality; decoder_prompt is the
+        # value resolved above -- pre-computed token ids ({"prompt_token_ids":
+        # [...]}) when the processor was available (NLLB -> forced-BOS token;
+        # MarianMT -> empty), else the raw target string as a best-effort
+        # fallback. The runtime prepends decoder_start_token_id ahead of it.
         prompt = {
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {"text": request.text},
             },
-            "decoder_prompt": request.target_language,
+            "decoder_prompt": decoder_prompt,
         }
 
         if request.stream:
@@ -306,41 +313,57 @@ class OpenAIServingTextTranslation(BaseServing):
             yield f"data: {err.model_dump_json(exclude_none=True)}\n\n"
         yield "data: [DONE]\n\n"
 
-    def _validate_target_language(
+    def _resolve_decoder_prompt(
         self, request: TranslationRequest
-    ) -> ErrorResponse | None:
-        """Reject an unsupported target language with a 400 before generation.
+    ) -> tuple[object, ErrorResponse | None]:
+        """Resolve the target language into the decoder prompt.
 
-        Resolves the code through the model's own ``create_decoder_prompt`` hook
-        (the one the engine calls), so an unknown NLLB/M2M100 code becomes a clean
-        400 rather than being silently tokenized into subwords. Returns ``None``
-        (letting the request proceed) whenever the check cannot run: no renderer,
-        no processor, or a bilingual model whose hook accepts anything.
+        Returns ``(decoder_prompt, None)`` on success, or ``(None, error)`` when
+        the target language is unrecognized (a clean 400).
+
+        Calls the model's ``create_decoder_prompt`` hook here, in the API process,
+        to turn the code into decoder token ids (NLLB/M2M100 -> forced-BOS token,
+        after normalizing an ISO code / name to the checkpoint's tag; MarianMT ->
+        ``[]``, target implied) and forwards them as ``{"prompt_token_ids": [...]}``
+        so the engine renderer does not re-tokenize the code. Best-effort: if the
+        renderer / processor / hook is unavailable, falls back to the raw target
+        string and lets the engine be the backstop.
         """
+        fallback = request.target_language
         renderer = getattr(self.engine_client, "renderer", None)
         if renderer is None:
-            return None
+            return fallback, None
         try:
             mm_processor = renderer.get_mm_processor()
         except Exception:
-            return None
+            return fallback, None
         create_decoder_prompt = getattr(mm_processor, "create_decoder_prompt", None)
         if create_decoder_prompt is None:
-            return None
+            return fallback, None
         try:
-            create_decoder_prompt(request.target_language, None)
+            decoder_ids = create_decoder_prompt(request.target_language, None)
         except ValueError as exc:
-            return self.create_error_response(
+            return None, self.create_error_response(
                 str(exc),
                 err_type="BadRequestError",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
         except Exception:
+            # Resolution is best-effort; never fail a request because the
+            # pre-computation itself hit an unexpected error -- let the engine try
+            # with the raw code.
             logger.debug(
-                "Target-language pre-validation skipped (unexpected error).",
+                "Decoder-prompt pre-resolution skipped (unexpected error).",
                 exc_info=True,
             )
-        return None
+            return fallback, None
+        # ``create_decoder_prompt`` returns decoder token ids (possibly empty for
+        # a bilingual model). Forward them as an explicit token prompt so the
+        # renderer passes them through without re-tokenizing. A non-list return
+        # (defensive) is forwarded as-is.
+        if isinstance(decoder_ids, (list, tuple)):
+            return {"prompt_token_ids": list(decoder_ids)}, None
+        return decoder_ids, None
 
     def _to_translation_response(
         self,
