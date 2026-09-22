@@ -534,13 +534,9 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
     def _observe_info(self, info: dict[str, Any], engine_idx: int) -> None:
         """Publish the static config facts of one engine.
 
-        The spec declared the label names in __init__, so this only aligns one
-        payload with them: it reads every declared name out of the payload,
-        which makes the payload order irrelevant. A declared name the payload
-        does not hold gets an empty value, and a payload name the spec did not
-        declare is dropped, because the label names of a live Prometheus
-        metric cannot change. Both gaps mean the spec and the manager disagree,
-        so each one is logged.
+        The spec declares the label names, so a payload only fills them. A
+        declared name that the payload omits gets an empty value. A payload
+        name that the spec did not declare is dropped. Either gap logs once.
 
         Args:
             info: Mapping of label name to label value, as
