@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
+from xgrammar import StructuralTag
 from xgrammar.structural_tag import (
     Format,
     JSONSchemaFormat,
@@ -44,7 +45,6 @@ from vllm.tool_parsers.streaming import (
     extract_required_tool_call_streaming,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
-from xgrammar import StructuralTag
 
 logger = init_logger(__name__)
 

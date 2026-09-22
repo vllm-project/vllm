@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -39,7 +40,6 @@ from vllm.tool_parsers.structural_tag_registry import (
     get_model_structural_tag,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
-from xgrammar import Grammar, StructuralTag
 
 
 @pytest.fixture
