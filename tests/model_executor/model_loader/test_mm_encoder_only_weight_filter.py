@@ -91,11 +91,13 @@ def test_resolve_expands_qwen_nested_and_flat_prefixes():
     assert "model.embed_tokens." in prefixes
     assert "model.norm." in prefixes
     assert "lm_head." in prefixes
-    # Must never broaden to bare model. (Molmo / Phi-4-MM / Muse).
+    # This PR does not expand to bare model. (would overlap vision for
+    # Molmo / Phi-4-MM / Muse); those stay full-load until finer prefixes.
     assert "model." not in prefixes
 
 
-def test_resolve_fail_closed_on_bare_model_attr():
+def test_resolve_skips_filter_for_bare_model_attr():
+    """Bare model. is out of scope for whole-shard skip; resolve returns None."""
     assert resolve_mm_encoder_only_lm_prefixes(["model"]) is None
     assert resolve_mm_encoder_only_lm_prefixes(["model."]) is None
 
@@ -160,7 +162,7 @@ def test_qwen25_flat_index_skips_lm_keeps_visual():
 
 
 def test_molmo_shaped_index_not_filtered_when_deny_disabled():
-    """Bare model. deny is refused; filter must not run with that prefix."""
+    """Bare model. is out of scope this PR; resolve returns None so no filter."""
     assert resolve_mm_encoder_only_lm_prefixes(["model"]) is None
     with tempfile.TemporaryDirectory() as folder:
         files = [
@@ -176,11 +178,12 @@ def test_molmo_shaped_index_not_filtered_when_deny_disabled():
                 "model.transformer.blocks.0.weight": "lm.safetensors",
             },
         )
-        # If someone bypassed resolve and passed bare model., vision would drop.
-        # Callers must use resolve → None and skip calling the filter.
-        dangerous = filter_mm_encoder_only_safetensors_files(
+        # Document why we do not pass bare model. into the filter today:
+        # whole-shard deny would also drop vision. Follow-ups can use finer
+        # HF LM prefixes instead.
+        if_applied_naively = filter_mm_encoder_only_safetensors_files(
             files, folder, SAFE_WEIGHTS_INDEX_NAME, ("model.",)
         )
-        assert dangerous == []  # documents the hazard
-        # Safe path: no filter call → unchanged list.
+        assert if_applied_naively == []
+        # Safe path for this PR: resolve → None → callers leave file list as-is.
         assert files == files

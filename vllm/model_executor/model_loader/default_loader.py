@@ -380,8 +380,8 @@ class DefaultModelLoader(BaseModelLoader):
             self._encoder_only_lm_prefixes = None
             return
 
-        # Map module attrs → HF index deny prefixes. Fail closed on coarse
-        # denies (e.g. bare ``model.``) that would drop vision shards.
+        # Map module attrs → HF index deny prefixes. Coarse denies such as
+        # bare ``model.`` return None (out of scope this PR; full file list).
         self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
             getattr(model, "_language_model_names", None)
         )

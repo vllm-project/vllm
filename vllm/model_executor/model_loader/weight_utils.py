@@ -656,13 +656,18 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
     return hf_weights_files
 
 
-# Deny prefixes that also match vision/tower HF keys for known VLMs
-# (Molmo / Phi-4-MM / Muse Glimmer mark the LM attr as ``model``).
+# Coarse deny prefixes that also match vision HF keys for some VLMs
+# (e.g. Molmo / Phi-4-MM / Muse mark LM as ``model`` while vision is still
+# under ``model.vision_*``). Out of scope for whole-shard skip in this PR —
+# we skip applying the filter rather than under-loading the encoder. Follow-ups
+# can enable these models with non-overlapping LM/vision HF prefixes or
+# key-level filtering.
 _UNSAFE_MM_ENCODER_ONLY_LM_PREFIXES = frozenset({"model."})
 
 # Extra HF index prefixes when the vLLM module attr is ``language_model``.
 # Covers nested Qwen3/LLaVA (``model.language_model.*``) and flat Qwen2.5
-# (``model.layers.*`` + ``visual.*``). Do **not** add bare ``model.``.
+# (``model.layers.*`` + ``visual.*``). Bare ``model.`` is intentionally not
+# added here (see ``_UNSAFE_MM_ENCODER_ONLY_LM_PREFIXES``).
 _HF_LANGUAGE_MODEL_INDEX_PREFIXES = (
     "model.language_model.",
     "model.layers.",
@@ -677,8 +682,11 @@ def resolve_mm_encoder_only_lm_prefixes(
 ) -> tuple[str, ...] | None:
     """Map ``_language_model_names`` to HF-index deny prefixes.
 
-    Returns ``None`` (disable filtering) when a deny would be too coarse and
-    risk dropping vision shards — fail closed.
+    Returns ``None`` to leave the safetensors file list unchanged when a deny
+    would be too coarse for safe whole-shard skipping (e.g. bare ``model.``).
+    That is out of scope for this change; narrower HF prefixes or key-level
+    filtering can cover those models in a follow-up without changing the
+    ``--mm-encoder-only`` + index-filter approach.
     """
     names = tuple(language_model_names or ())
     prefixes = tuple(n if n.endswith(".") else f"{n}." for n in names)
@@ -688,9 +696,10 @@ def resolve_mm_encoder_only_lm_prefixes(
     unsafe = tuple(p for p in prefixes if p in _UNSAFE_MM_ENCODER_ONLY_LM_PREFIXES)
     if unsafe:
         logger.warning_once(
-            "mm-encoder-only shard filter disabled: deny prefix(es) %s are too "
-            "coarse and may drop vision weights (e.g. Molmo/Phi-4-MM). "
-            "Encoder-only load will read the full safetensors file list.",
+            "mm-encoder-only whole-shard filter not applied for deny "
+            "prefix(es) %s (too coarse vs vision keys, e.g. Molmo/Phi-4-MM). "
+            "Encoder-only load keeps the full safetensors file list; "
+            "finer HF prefixes can enable skip later.",
             unsafe,
         )
         return None
