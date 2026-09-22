@@ -9,6 +9,7 @@ model tests exercise the compiled sampler with the checkpoint's vocabulary.
 
 import os
 from functools import partial
+from typing import Any
 
 import pytest
 import torch
@@ -775,3 +776,132 @@ def test_mixed_temperature_distribution_and_logprobs(eager_sampler):
         if temperature > 0:
             frequency = (canvas[row] == 1).float().mean()
             assert abs(frequency - distribution.probs[1]) < 0.03
+
+
+def test_linear_spec_acceptance_and_seed(eager_sampler):
+    """Reject at the first shifted mismatch, retaining exactly causal KV rows."""
+    from vllm.model_executor.models.nemotron_dllm import _compiled_linear_spec_step
+
+    canvas = torch.tensor([[7, 9, 2, 3], [5, 6, 7, 8], [8, 3, 4, 5]])
+    phase = torch.tensor([True, True, True])
+    slots = torch.arange(3)
+    lengths = torch.tensor([4, 4, 2])
+    # First request accepts only its seed, second accepts all, third is
+    # truncated by context capacity (its padded positions must not commit).
+    ar = torch.tensor([[8, 2, 3, 0], [6, 7, 8, 9], [3, 4, 5, 6]])
+    original = canvas.clone()
+    tokens, counts = _compiled_linear_spec_step(ar, slots, lengths, canvas, phase, 100)
+    assert counts.tolist() == [1, 4, 2]
+    assert torch.equal(tokens, original)
+    assert canvas.tolist() == [
+        [8, 100, 100, 100],
+        [9, 100, 100, 100],
+        [4, 100, 100, 100],
+    ]
+    assert not phase.any()
+    # A draft emits nothing, preserves the AR seed, and switches to causal.
+    _, counts = _compiled_linear_spec_step(ar, slots, lengths, canvas, phase, 100)
+    assert counts.tolist() == [0, 0, 0]
+    assert canvas[:, 0].tolist() == [8, 9, 4]
+    assert phase.all()
+
+
+@pytest.mark.parametrize(
+    "params", [{"temperature": 0.5}, {"temperature": 0, "repetition_penalty": 1.1}]
+)
+def test_linear_spec_rejects_unsupported_sampling(params):
+    from types import SimpleNamespace
+    from typing import cast
+
+    from vllm import SamplingParams
+    from vllm.config import DiffusionConfig, ModelConfig
+
+    model_config = SimpleNamespace(
+        is_diffusion=True, architectures=["NemotronLabsDiffusionModel"]
+    )
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="linear_spec"):
+        SamplingParams(**params)._validate_diffusion(
+            cast(ModelConfig, model_config),
+            DiffusionConfig(algorithm="linear_spec", canvas_length=4),
+        )
+
+
+@requires_weights
+@requires_gpu
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_linear_spec_greedy_ar_parity(monkeypatch, enforce_eager):
+    """Batched variable budgets and chunked prefills retain greedy AR tokens."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    from transformers import AutoTokenizer
+
+    from vllm import LLM, SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.inputs import TokensPrompt
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    prompts = [
+        TokensPrompt(
+            prompt_token_ids=tokenizer.apply_chat_template(
+                [{"role": "user", "content": text}],
+                add_generation_prompt=True,
+                return_dict=False,
+            )
+        )
+        for text in [
+            "What is 2 + 2?",
+            "What is 12 times 13? Show your work.",
+            "The following are facts. " * 30 + "What is 3 + 4?",
+        ]
+    ]
+    params = [
+        SamplingParams(temperature=0, max_tokens=n, logprobs=k, ignore_eos=True)
+        for n, k in [(1, 0), (41, 3), (65, 0)]
+    ]
+    results = []
+    for linear in (False, True):
+        kwargs: dict[str, Any] = (
+            {"diffusion_config": {"algorithm": "linear_spec", "canvas_length": 16}}
+            if linear
+            else {"hf_overrides": {"ar_mode": True}}
+        )
+        if not enforce_eager:
+            kwargs["compilation_config"] = {"cudagraph_capture_sizes": [1, 16, 32, 64]}
+        llm = LLM(
+            model=MODEL_PATH,
+            trust_remote_code=True,
+            enforce_eager=enforce_eager,
+            attention_config={"backend": "TRITON_ATTN"},
+            max_model_len=512,
+            max_num_batched_tokens=64,
+            max_num_seqs=4,
+            enable_chunked_prefill=True,
+            gpu_memory_utilization=0.6,
+            **kwargs,
+        )
+        try:
+            outputs = llm.generate(prompts, params)
+            results.append([o.outputs[0] for o in outputs])
+            if linear:
+                # Slot reuse and EOS/stop handling must not reuse a prior seed.
+                stop = results[0][1].token_ids[4]
+                completion = llm.generate(
+                    prompts[1],
+                    SamplingParams(
+                        temperature=0, max_tokens=41, stop_token_ids=[stop], logprobs=0
+                    ),
+                )[0].outputs[0]
+                assert completion.finish_reason == "stop"
+                assert completion.token_ids[-1] == stop
+        finally:
+            llm.llm_engine.engine_core.shutdown()
+            del llm
+            torch._dynamo.reset()
+            cleanup_dist_env_and_memory()
+    for ar, linear in zip(*results):
+        assert list(linear.token_ids) == list(ar.token_ids)
+        assert len(linear.logprobs) == len(linear.token_ids)
+        for token, ar_lp, ls_lp in zip(ar.token_ids, ar.logprobs, linear.logprobs):
+            assert abs(ar_lp[token].logprob - ls_lp[token].logprob) < 0.12

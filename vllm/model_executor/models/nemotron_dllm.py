@@ -482,6 +482,9 @@ class NemotronLabsDiffusionModelState(ModelState):
             if diffusion_config is not None
             else getattr(hf_config, "canvas_length", 32)
         )
+        self.needs_prefill_logits = (
+            diffusion_config is not None and diffusion_config.algorithm == "linear_spec"
+        )
         gen_config = self.model_config.try_get_generation_config()
         # Default to one unmasked token per step (HF steps == gen_length).
         max_denoising_steps = (
@@ -525,6 +528,12 @@ class NemotronLabsDiffusionModelState(ModelState):
         return ("generate",)
 
     def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
+        if self.needs_prefill_logits:
+            return LinearSpecSampler(
+                sampler=sampler,
+                vocab_size=self.model_config.get_vocab_size(),
+                diffusion_states=self.diffusion_states,
+            ), None
         return MaskedDiffusionSampler(
             sampler=sampler,
             vocab_size=self.model_config.get_vocab_size(),
@@ -945,4 +954,177 @@ class MaskedDiffusionSampler:
             num_sampled,
             per_req_nlogits_np,
             logprobs_tensors=logprobs_tensors,
+        )
+
+
+@torch.compile(dynamic=True)
+def _compiled_linear_spec_step(
+    predictions: torch.Tensor,
+    slots: torch.Tensor,
+    valid_lengths: torch.Tensor,
+    canvas: torch.Tensor,
+    is_encoder_phase: torch.Tensor,
+    mask_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Draft in place, or commit a seed plus consecutive shifted AR matches.
+
+    Verification rewrites the draft KV with causal KV. Only the accepted
+    prefix advances the scheduler; rejected positions are overwritten by the
+    next block. The first unaccepted AR prediction seeds that next block.
+    """
+    current = canvas[slots]
+    verifying = is_encoder_phase[slots]
+    matches = current[:, 1:] == predictions[:, :-1]
+    accepted = 1 + matches.to(torch.int32).cumprod(dim=1).sum(dim=1)
+    accepted = torch.minimum(accepted, valid_lengths)
+    num_sampled = torch.where(verifying, accepted, 0).to(torch.int32)
+    sampled = current.to(torch.int32)
+
+    next_seed = predictions.gather(1, (accepted - 1).unsqueeze(1))
+    reset = torch.full_like(current, mask_token_id)
+    reset[:, :1] = next_seed
+    draft = predictions.clone()
+    draft[:, :1] = current[:, :1]
+    canvas[slots] = torch.where(verifying[:, None], reset, draft)
+    is_encoder_phase[slots] = ~verifying
+    return sampled, num_sampled
+
+
+class LinearSpecSampler(MaskedDiffusionSampler):
+    """Greedy diffusion draft / causal verify, matching SGLang LinearSpec.
+
+    A completed prefill stores its next-token prediction as the first seed.
+    Each subsequent block takes two runner steps and emits only the verified
+    prefix. Logprobs come from causal predictions, including the carried seed.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._seed_logits: dict[int, torch.Tensor] = {}
+
+    def add_request(self, req_idx: int, sampling_params: Any) -> None:
+        super().add_request(req_idx, sampling_params)
+        self._seed_logits.pop(req_idx, None)
+
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        input_batch: Any,
+        draft_logits: torch.Tensor | None = None,
+    ) -> SamplerOutput:
+        states = self.diffusion_states
+        num_reqs = input_batch.num_reqs
+        slots_np = input_batch.idx_mapping_np[:num_reqs]
+        nlogits_np = np.diff(input_batch.cu_num_logits_np[: num_reqs + 1])
+        # Prefills also have one logit row to produce their seed. Distinguish
+        # them by prompt progress, including intermediate prefill chunks.
+        prefill = input_batch.is_prefilling_np[:num_reqs]
+        prefill_idx = np.flatnonzero(prefill)
+        decode_idx_np = np.flatnonzero(~prefill)
+        sampled = self._sampled[:num_reqs]
+        counts = self._num_sampled[:num_reqs]
+        sampled.zero_()
+        counts.zero_()
+        logits[:, self.mask_token_id] = -torch.inf
+        predictions = logits.argmax(dim=-1)
+        max_logprobs = self.sampling_states.max_num_logprobs(slots_np)
+
+        for i in prefill_idx:
+            done = (
+                input_batch.num_computed_prefill_tokens_np[i]
+                + input_batch.num_scheduled_tokens[i]
+                >= input_batch.prefill_len_np[i]
+            )
+            if not done:
+                continue
+            slot = int(slots_np[i])
+            row = int(input_batch.cu_num_logits_np[i])
+            states.init_canvas(slot)
+            states.canvas[slot, 0] = predictions[row]
+            states.is_encoder_phase[slot] = False
+            self.req_states.draft_tokens[slot, : self.canvas_length] = states.canvas[
+                slot
+            ]
+            if self.sampling_states.num_logprobs[slot] >= 0:
+                self._seed_logits[slot] = logits[row : row + 1].clone()
+
+        logprobs_tensors = None
+        if len(decode_idx_np):
+            device = logits.device
+            decode_slots_np = slots_np[decode_idx_np]
+            slots = async_tensor_h2d(decode_slots_np.astype(np.int64), device=device)
+            decode_idx = async_tensor_h2d(decode_idx_np.astype(np.int64), device=device)
+            lengths = async_tensor_h2d(
+                nlogits_np[decode_idx_np].astype(np.int64), device=device
+            )
+            starts = async_tensor_h2d(
+                input_batch.cu_num_logits_np[decode_idx_np].astype(np.int64),
+                device=device,
+            )
+            positions = torch.arange(self.canvas_length, device=device)
+            rows = starts[:, None] + positions
+            valid = positions < lengths[:, None]
+            block_predictions = predictions[rows.clamp_max(len(predictions) - 1)]
+            block_predictions = torch.where(
+                valid, block_predictions, self.mask_token_id
+            )
+            block_tokens, accepted = _compiled_linear_spec_step(
+                block_predictions,
+                slots,
+                lengths,
+                states.canvas,
+                states.is_encoder_phase,
+                self.mask_token_id,
+            )
+            sampled[decode_idx] = block_tokens
+            counts[decode_idx] = accepted
+            self.req_states.draft_tokens[slots, : self.canvas_length] = states.canvas[
+                slots
+            ]
+
+            if max_logprobs >= 0:
+                accepted_np = accepted.cpu().numpy()
+                parts = []
+                offsets = []
+                offset = 0
+                decode_row = {int(i): j for j, i in enumerate(decode_idx_np)}
+                for i in range(num_reqs):
+                    offsets.append(offset)
+                    j = decode_row.get(i)
+                    if j is None or accepted_np[j] == 0:
+                        continue
+                    slot = int(slots_np[i])
+                    n = int(accepted_np[j])
+                    row = int(input_batch.cu_num_logits_np[i])
+                    if self.sampling_states.num_logprobs[slot] >= 0:
+                        causal_logits = torch.cat(
+                            [self._seed_logits[slot], logits[row : row + n - 1]]
+                        )
+                        parts.append(
+                            compute_topk_scores(
+                                causal_logits,
+                                max_logprobs,
+                                sampled[i, :n].to(torch.int64),
+                            )
+                        )
+                        self._seed_logits[slot] = logits[row + n - 1 : row + n].clone()
+                        offset += n
+                if parts:
+                    logprobs_tensors = LogprobsTensors(
+                        logprob_token_ids=torch.cat(
+                            [p.logprob_token_ids for p in parts]
+                        ),
+                        logprobs=torch.cat([p.logprobs for p in parts]),
+                        selected_token_ranks=torch.cat(
+                            [p.selected_token_ranks for p in parts]
+                        ),
+                        cu_num_generated_tokens=offsets,
+                    )
+
+        # Prefill rows only initialize seeds: they must never roll back the
+        # prompt. Draft and verify rows use the ordinary diffusion rollback.
+        rollback_logits = nlogits_np.copy()
+        rollback_logits[prefill] = 0
+        return self._build_output(
+            input_batch, sampled, counts, rollback_logits, logprobs_tensors
         )

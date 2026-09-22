@@ -38,7 +38,7 @@ confident positions; `leftmost` reveals that number from left to right.
 The model uses vLLM's diffusion support in Model Runner V2. Triton attention is the default;
 FlashAttention requires FA4. FlashInfer does not support the mixed
 causal/bidirectional attention. This implementation covers
-text-only masked diffusion; linear speculation and vision inputs are not included.
+text-only generation; vision inputs are not included.
 
 ## Autoregressive inference
 
@@ -58,3 +58,34 @@ attention and vLLM's standard scheduler, KV cache, and sampler. Sampling
 parameters such as temperature, top-p, and top-k are set per request. Do not
 pass `diffusion_config` in AR mode; denoising policies and thresholds do not
 apply. The default, without either override, remains block diffusion.
+
+## Linear speculation
+
+Use the diffusion model to draft a block, then verify it with the same model
+under causal attention:
+
+```bash
+vllm serve nvidia/Nemotron-Labs-Diffusion-3B \
+    --max-num-seqs 8 \
+    --diffusion-config '{"algorithm": "linear_spec", "canvas_length": 32}'
+```
+
+For Python, pass `diffusion_config={"algorithm": "linear_spec"}` to `LLM` and
+`SamplingParams(temperature=0)` to `generate`. Server requests default to
+zero temperature in this mode. Nonzero temperatures and sampling penalties
+are rejected.
+
+The algorithm follows SGLang's greedy `LinearSpec`: causal prefill predicts an
+AR seed, a bidirectional pass drafts the remaining positions, and a causal
+pass verifies them. It accepts the seed plus the longest consecutive prefix
+where `draft[i] == ar[i-1]`. The first unaccepted AR prediction seeds the next
+block. Rejected KV positions are rolled back and overwritten. Each block takes
+two forward passes; this does not guarantee a speedup over ordinary AR.
+
+Logprobs, when requested, come from the causal predictions that produced the
+accepted tokens (including the carried seed). Mask token 100 is excluded from
+both draft and verification sampling. Greedy outputs follow the AR verification
+rule; floating-point differences between attention shapes can still change
+close argmax decisions. Denoising thresholds and iteration limits do not apply
+to linear speculation. Use the original diffusion architecture, without
+`ar_mode` or the causal architecture alias.

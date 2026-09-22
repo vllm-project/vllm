@@ -358,7 +358,8 @@ def _warmup_kernels(
         # Warm up sampler and perform a decode step for non-pooling models.
 
         grammar_output = None
-        if model_runner.is_last_pp_rank:
+        if model_runner.is_last_pp_rank and not model_runner.model_config.is_diffusion:
+            # Diffusion samplers do not support structured outputs.
             # Build a GrammarOutput to exercise the structured output bitmask
             # kernel during the prefill step.
             vocab_size = model_runner.model_config.get_vocab_size()

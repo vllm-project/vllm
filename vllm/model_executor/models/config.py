@@ -383,6 +383,11 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 hf_config, "canvas_length", 32
             )
 
+        if vllm_config.diffusion_config.algorithm == "linear_spec":
+            if vllm_config.diffusion_config.temperature not in (None, 0):
+                raise ValueError("Nemotron linear_spec requires temperature=0.")
+            model_config.override_generation_config.setdefault("temperature", 0.0)
+
         # Use the ordinary generation defaults; explicit request temperatures
         # always take precedence over this compatibility setting.
         if vllm_config.diffusion_config.temperature is not None:

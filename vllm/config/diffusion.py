@@ -19,6 +19,11 @@ class DiffusionConfig:
     tokens) with overloaded semantics for block-based generation.
     """
 
+    algorithm: Literal["masked_diffusion", "linear_spec"] = "masked_diffusion"
+    """Nemotron decoding algorithm. ``linear_spec`` uses one bidirectional
+    draft and one causal verification pass per block, accepting a matching
+    prefix. Currently supports greedy sampling only (temperature=0)."""
+
     canvas_length: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Length of the denoising canvas (block).  Also determines the number of
     speculative tokens scheduled per step."""
