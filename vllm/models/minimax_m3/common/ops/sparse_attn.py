@@ -407,18 +407,17 @@ def _gqa_sparse_decode_kernel(
         acc_o.to(o_ptr.dtype.element_ty),
     )
 
-    lse_desc = tl.make_tensor_descriptor(
+    # lse is unit-stride fp32, so a TMA descriptor's base is not 16-byte aligned
+    # (WARP_MISALIGNED_ADDRESS on B200). Store via block ptr instead.
+    lse_ptrs = tl.make_block_ptr(
         base=lse_ptr + pid_c * stride_l_c + pid_b * stride_l_b + pid_h * stride_l_h,
-        shape=[gqa_group_size],
-        strides=[stride_l_h],
-        block_shape=[BLOCK_SIZE_H],
+        shape=(gqa_group_size,),
+        strides=(stride_l_h,),
+        offsets=(0,),
+        block_shape=(BLOCK_SIZE_H,),
+        order=(0,),
     )
-
-    tl.store_tensor_descriptor(
-        lse_desc,
-        [0],
-        lse_i.to(lse_ptr.dtype.element_ty),
-    )
+    tl.store(lse_ptrs, lse_i.to(lse_ptr.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.heuristics(
