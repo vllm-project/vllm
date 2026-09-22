@@ -29,6 +29,20 @@ _FORMAT = (
     "[%(fileinfo)s:%(lineno)d] %(message)s"
 )
 _DATE_FORMAT = "%m-%d %H:%M:%S"
+_JSON_FORMAT = (
+    "%(asctime)s %(levelname)s %(name)s %(processName)s %(process)d %(message)s"
+)
+
+
+class _JSONStreamHandler(logging.StreamHandler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+            write = getattr(self.stream, "_original_write", self.stream.write)
+            write(message + self.terminator)
+            self.flush()
+        except Exception:
+            self.handleError(record)
 
 
 def _use_color() -> bool:
@@ -182,10 +196,12 @@ def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
         configure_logging = envs.VLLM_CONFIGURE_LOGGING
         log_level = envs.VLLM_LOGGING_LEVEL
         log_config_file = envs.VLLM_LOGGING_CONFIG_PATH
+        log_formatter = "text"
     else:
         configure_logging = config.configure_logging
         log_level = config.log_level
         log_config_file = config.pylogging_config_file
+        log_formatter = config.formatter
 
     if not configure_logging and log_config_file:
         raise RuntimeError(
@@ -201,12 +217,23 @@ def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
         # Refresh these values in case env vars have changed.
         vllm_handler["level"] = log_level
         vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
-        vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+        for formatter in logging_config["formatters"].values():
+            formatter["log_level"] = log_level
+
+        if log_formatter == "json":
+            vllm_handler["class"] = "vllm.logger._JSONStreamHandler"
+            logging_config["formatters"] = {
+                "vllm_json": {
+                    "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                    "format": _JSON_FORMAT,
+                }
+            }
+            vllm_handler["formatter"] = "vllm_json"
+        else:
+            vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
 
         vllm_loggers = logging_config["loggers"]["vllm"]
         vllm_loggers["level"] = log_level
-        for formatter in logging_config["formatters"].values():
-            formatter["log_level"] = log_level
 
     if log_config_file:
         if not path.exists(log_config_file):
