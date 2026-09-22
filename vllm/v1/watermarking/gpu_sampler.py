@@ -30,8 +30,8 @@ class GPUWatermarkSampler(Sampler):
         super().__init__(*args, **kwargs)
         self.watermarker = watermarker
         self.deduplicate_contexts = deduplicate_contexts
-        self.enforce = enforce
         self.deduplicate_contexts_max_history = deduplicate_contexts_max_history
+        self.enforce = enforce
         self.watermarking = UvaBackedTensor(
             self.sampling_states.max_num_reqs, dtype=torch.bool
         )
