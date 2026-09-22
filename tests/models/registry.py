@@ -855,6 +855,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "DeepseekOCRForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR",
+        extras={"jina-ocr-v1": "jinaai/jina-ocr-v1"},
     ),
     "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR-2",
@@ -1590,6 +1591,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="eagle618/eagle-deepseek-v3-random",
         trust_remote_code=True,
     ),
+    "EagleDeepSeekOCRMTPModel": _HfExamplesInfo(
+        "jinaai/jina-ocr-v1",
+        speculative_model="jinaai/jina-ocr-v1",
+        trust_remote_code=True,
+    ),
     "EagleLlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Meta-Llama-3-8B-Instruct",
         trust_remote_code=True,
@@ -1708,6 +1714,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
+        trust_remote_code=True,
+    ),
+    "DeepSeekOCRMTPModel": _HfExamplesInfo(
+        "jinaai/jina-ocr-v1",
+        speculative_model="jinaai/jina-ocr-v1",
         trust_remote_code=True,
     ),
     "DeepseekV32MTPModel": _HfExamplesInfo(

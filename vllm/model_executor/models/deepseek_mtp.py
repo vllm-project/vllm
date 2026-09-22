@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
 from collections.abc import Callable, Iterable
+from copy import copy
 
 import torch
 import torch.nn as nn
@@ -46,6 +47,66 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
+
+
+def _get_mtp_block_config(config: PretrainedConfig) -> PretrainedConfig:
+    """Return the decoder config used by an MTP block.
+
+    FastMTP checkpoints can use a dense draft block even when the target model
+    is MoE. Copy the config so constructing the draft does not mutate the target
+    model's decoder settings.
+    """
+    if getattr(config, "mtp_moe", True):
+        return config
+    mtp_config = copy(config)
+    mtp_config.n_routed_experts = None
+    return mtp_config
+
+
+def _map_fast_mtp_weight_name(config: PretrainedConfig, name: str) -> str | None:
+    """Map FastMTP checkpoint names to DeepSeekMTP's layer layout."""
+    if not hasattr(config, "mtp_num_heads"):
+        return name
+    if name.startswith("mtp_module.shared_head."):
+        return None
+
+    start_layer = config.num_hidden_layers
+    num_layers = config.num_nextn_predict_layers
+    for head_idx in range(num_layers):
+        layer_idx = start_layer + head_idx
+        head_prefix = f"mtp_module.heads.{head_idx}."
+        if not name.startswith(head_prefix):
+            continue
+        suffix = name.removeprefix(head_prefix)
+        suffix = suffix.removeprefix("mtp_block.")
+        suffix = suffix.replace("shared_head._norm", "shared_head.norm", 1)
+        suffix = suffix.replace("shared_head._head", "shared_head.head", 1)
+        suffix = suffix.replace("shared_head.local_head", "shared_head.head", 1)
+        return f"model.layers.{layer_idx}.{suffix}"
+
+    first_layer = f"model.layers.{start_layer}"
+    shared_weights = {
+        "lm_head.weight": (
+            "mtp_share_lm_head",
+            f"{first_layer}.shared_head.head.weight",
+        ),
+        "model.norm.weight": (
+            "mtp_share_norm",
+            f"{first_layer}.shared_head.norm.weight",
+        ),
+        "model.embed_tokens.weight": (
+            "mtp_share_embedding_weights",
+            f"{first_layer}.embed_tokens.weight",
+        ),
+    }
+    if name in shared_weights:
+        share_flag, mapped_name = shared_weights[name]
+        return mapped_name if getattr(config, share_flag, True) else name
+    if name == "mtp_embed_tokens.weight" and not getattr(
+        config, "mtp_share_embedding_weights", True
+    ):
+        return f"{first_layer}.embed_tokens.weight"
+    return name
 
 
 class SharedHead(nn.Module):
@@ -101,7 +162,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.mtp_block = DeepseekV2DecoderLayer(
             vllm_config,
             prefix,
-            config=self.config,
+            config=_get_mtp_block_config(self.config),
             topk_indices_buffer=topk_indices_buffer,
         )
 
@@ -297,12 +358,23 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, int | str]] = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
+        if self.config.model_type == "deepseek" or all(
+            getattr(self.config, dim, 0) == 0
+            for dim in ("qk_nope_head_dim", "qk_rope_head_dim")
+        ):
+            stacked_params_mapping.extend(
+                [
+                    ("qkv_proj", "q_proj", "q"),
+                    ("qkv_proj", "k_proj", "k"),
+                    ("qkv_proj", "v_proj", "v"),
+                ]
+            )
 
         # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
         indexer_fused_mapping = [
@@ -329,6 +401,10 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}  # FP8 indexer wk dequant buffer
         for name, loaded_weight in weights:
+            mapped_name = _map_fast_mtp_weight_name(self.config, name)
+            if mapped_name is None:
+                continue
+            name = mapped_name
             if "rotary_emb.inv_freq" in name:
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)

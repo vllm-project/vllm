@@ -638,6 +638,33 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     assert hf_config.architectures == [expected_architecture]
 
 
+@pytest.mark.skip_global_cleanup
+def test_jina_ocr_selects_text_config_for_mtp():
+    from transformers import PretrainedConfig
+
+    text_config = PretrainedConfig(
+        architectures=["DeepseekV2ForCausalLM"],
+        num_hidden_layers=12,
+    )
+    hf_config = PretrainedConfig(
+        architectures=["DeepseekOCRForCausalLM"],
+        text_config=text_config,
+        mtp_num_heads=1,
+        mtp_recursive=True,
+        mtp_moe=False,
+        num_nextn_predict_layers=1,
+    )
+
+    draft_config = SpeculativeConfig.hf_config_override(hf_config)
+
+    assert draft_config is text_config
+    assert draft_config.model_type == "deepseek_mtp"
+    assert draft_config.architectures == ["DeepSeekOCRMTPModel"]
+    assert draft_config.n_predict == 1
+    assert draft_config.mtp_recursive is True
+    assert draft_config.mtp_moe is False
+
+
 def test_v2_model_runner_supports_extract_hidden_states():
     config = VllmConfig()
     config.speculative_config = cast(
