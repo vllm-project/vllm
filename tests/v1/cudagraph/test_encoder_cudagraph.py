@@ -12,7 +12,10 @@ Test organization:
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
+from collections.abc import Hashable
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -116,9 +119,15 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     )
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
+    mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
+    mgr.config = EncoderCudaGraphConfig(
+        modalities=["image"],
+        buffer_keys=[],
+        out_hidden_size=32,
+    )
     return mgr
 
 
@@ -348,6 +357,7 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         per_image_output = token_budget // max_batch_size
         grid_config = [
@@ -426,6 +436,7 @@ def _make_manager_for_gpu(
     mgr.use_dp = False
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
+    mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
@@ -475,7 +486,9 @@ def _make_video_mm_kwargs(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 class TestEncoderCudaGraphCaptureReplay:
     def setup_method(self):
         self.device = torch.device("cuda:0")
@@ -562,6 +575,99 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == n_images
         for out in result:
             assert out.shape == (4, _HIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# E-only capture and output lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
+@pytest.mark.usefixtures("dist_init", "workspace_init")
+@pytest.mark.parametrize("profile_only", [False, True])
+@torch.inference_mode()
+def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only):
+    """The E-only entry captures only the encoder and preserves cached outputs."""
+    from vllm.distributed.ec_transfer.ec_connector.base import (
+        ECConnectorBase,
+        ECConnectorMetadata,
+    )
+    from vllm.v1.worker.gpu.ec_connector import ActiveECConnector
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+    from vllm.v1.worker.workspace import lock_workspace
+
+    device = torch.device("cuda:0")
+    dtype = torch.float16
+    model = SimpleMockViTModel().to(device).half()
+    manager = _make_manager_for_gpu(model, _BUDGETS, _MAX_BATCH, device, dtype)
+    encoder = object.__new__(EncoderRunner)
+    encoder.device = device
+    encoder.cudagraph_manager = manager
+    runner = object.__new__(MMEncoderModelRunner)
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)
+    # No decoder manager is installed: capture must be encoder-only.
+    with patch(
+        "vllm.v1.worker.mm_encoder_model_runner.lock_workspace", wraps=lock_workspace
+    ) as lock:
+        runner.capture_model(profile_only=profile_only)
+        assert lock.call_count == int(not profile_only)
+    assert len(manager.budget_graphs["default"]) == len(_BUDGETS)
+
+    cache: dict[str, torch.Tensor] = {}
+    pending_sends: dict[str, torch.Tensor] = {}
+    connector = MagicMock(spec=ECConnectorBase)
+    connector.is_producer = True
+    connector.is_consumer = False
+    connector.get_finished.return_value = (None, None)
+    connector.save_caches.side_effect = lambda *, encoder_cache, mm_hash: (
+        pending_sends.update({mm_hash: encoder_cache[mm_hash]})
+    )
+    with patch(
+        "vllm.v1.worker.gpu.ec_connector.get_ec_transfer", return_value=connector
+    ):
+        ec = ActiveECConnector(SimpleNamespace(), cache)
+    scheduled = SimpleNamespace(
+        ec_connector_metadata=ECConnectorMetadata(), finished_req_ids=frozenset()
+    )
+    saved_outputs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    # Mixed sizes exercise packing order; 64 is the boundary, 81 falls back.
+    for grids in ([[1, 8, 8], [1, 4, 4]], [[1, 16, 16]], [[1, 18, 18]], [[1, 4, 4]]):
+        inputs = _make_mm_kwargs(grids, device, dtype)
+        expected = model.encoder_eager_forward(inputs).split(
+            [t * (h // 2) * (w // 2) for t, h, w in grids]
+        )
+        with ec.maybe_get_output(scheduled) as ec_output:
+            outputs = manager.execute(inputs)
+            assert outputs is not None
+            cache[str(len(cache))] = outputs[0]
+        assert ec_output.finished_sending is None
+        assert outputs is not None
+        for actual, eager in zip(outputs, expected):
+            torch.testing.assert_close(actual, eager)
+        for previous, snapshot in saved_outputs:
+            torch.testing.assert_close(previous, snapshot, rtol=0, atol=0)
+        saved_outputs.extend((output, output.clone()) for output in outputs)
+    assert manager.graph_hits == 4
+    assert manager.graph_misses == 1
+    assert pending_sends.keys() == cache.keys()
+    connector.get_finished.return_value = (set(cache), None)
+    with ec.maybe_get_output(scheduled) as ec_output:
+        pass
+    assert ec_output.finished_sending == set(cache)
+
+
+def test_eonly_without_encoder_graph_skips_capture():
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+    encoder = object.__new__(EncoderRunner)
+    encoder.cudagraph_manager = None
+    runner = object.__new__(MMEncoderModelRunner)
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)
+    assert runner.capture_model() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +760,7 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         per_item_output = token_budget // max_batch_size
         frames_per_item = max_frames_per_batch // max_batch_size
@@ -758,7 +865,9 @@ _VIDEO_MAX_BATCH = 4
 _VIDEO_MAX_FRAMES = 8  # 2 frames per item at max_batch_size=4
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 class TestEncoderCudaGraphVideoReplay:
     def setup_method(self):
         self.device = torch.device("cuda:0")

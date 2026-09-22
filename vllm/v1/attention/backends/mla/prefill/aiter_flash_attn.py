@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
-    """AITER FlashAttention backend for MLA prefill"""
+    """AITER FlashAttention backend for MLA prefill."""
 
     @staticmethod
     def get_name() -> str:
@@ -106,7 +106,12 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert out is None, (
+            "AiterFlashAttnPrefillBackend does not report supports_out(), so it "
+            "is never given a context-chunk `out` to write into."
+        )
         out, lse = self.flash_attn_varlen_func(
             q=q,
             k=k,

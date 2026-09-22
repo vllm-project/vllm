@@ -3,20 +3,22 @@
 
 
 import asyncio
-import io
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
 import msgspec
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    build_spec_decoding_metrics,
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -24,21 +26,19 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
-    GenerationError,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
-    MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
 )
@@ -46,8 +46,12 @@ from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
-from .mm_serde import decode_mm_kwargs_item
+from .mm_features import (
+    mm_kwargs_from_features,
+    placeholder_ranges_from_engine_input,
+)
 from .protocol import (
     GenerateRequest,
     GenerateResponse,
@@ -112,11 +116,7 @@ class ServingTokens(GenerateBaseServing):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         lora_request = None
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
@@ -138,8 +138,24 @@ class ServingTokens(GenerateBaseServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        if self.force_no_detokenize and sampling_params.stop:
+            # SamplingParams rejects stop with detokenize=False at request
+            # validation, but this server forces detokenize=False afterwards,
+            # so the combination must be rejected here or stop strings are
+            # silently never applied.
+            return self.create_error_response(
+                "stop strings are not supported on a --tokens-only server "
+                "because detokenization is disabled. Check stop strings on "
+                "the coordinator, or use stop_token_ids."
+            )
         try:
-            msgspec.msgpack.encode(sampling_params)
+            msgspec.msgpack.encode(
+                (
+                    sampling_params,
+                    request.kv_transfer_params,
+                    request.ec_transfer_params,
+                )
+            )
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
 
@@ -159,6 +175,8 @@ class ServingTokens(GenerateBaseServing):
                     mm_parser.parse_video(url, uuid)
             mm_data, mm_uuids = await tracker.resolve_items()
             prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+            if request.cache_salt is not None:
+                prompt["cache_salt"] = request.cache_salt
             if mm_data:
                 prompt["multi_modal_data"] = mm_data
             if mm_uuids:
@@ -175,17 +193,9 @@ class ServingTokens(GenerateBaseServing):
                 for modality, ranges in features.mm_placeholders.items()
             }
 
-            # Deserialize tensor data when present; None → cache hit.
-            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
-            if features.kwargs_data is not None:
-                for modality, items in features.kwargs_data.items():
-                    mm_kwargs[modality] = [
-                        decode_mm_kwargs_item(item) if item is not None else None
-                        for item in items
-                    ]
-            else:
-                for modality, hashes in features.mm_hashes.items():
-                    mm_kwargs[modality] = [None] * len(hashes)
+            # Deserialize full tensor data and optional metadata-only data.
+            # Metadata-only items are valid when ec_transfer_params is set.
+            mm_kwargs = mm_kwargs_from_features(features)
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
@@ -202,8 +212,26 @@ class ServingTokens(GenerateBaseServing):
                 skip_mm_cache=True,
             )
 
+        # Offsets are relative to the decoder prompt, so they are not
+        # meaningful for encoder-decoder models.
+        request._response_mm_placeholders = (
+            placeholder_ranges_from_engine_input(engine_input)
+            if request.return_token_ids and not self.model_config.is_encoder_decoder
+            else None
+        )
+
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
+
+        # Pass disaggregated-serving parameters through to the engine.
+        if request.kv_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["kv_transfer_params"] = request.kv_transfer_params
+            sampling_params.extra_args = extra
+        if request.ec_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["ec_transfer_params"] = request.ec_transfer_params
+            sampling_params.extra_args = extra
 
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
@@ -220,8 +248,9 @@ class ServingTokens(GenerateBaseServing):
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
-        if request.stream:
-            sampling_params.output_kind = RequestOutputKind.DELTA
+        sampling_params.output_kind = (
+            RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
+        )
 
         self._log_inputs(
             request_id,
@@ -289,6 +318,8 @@ class ServingTokens(GenerateBaseServing):
         choices: list[GenerateResponseChoice] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
+            self._raise_if_error(output.finish_reason, request_id)
+
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
@@ -303,17 +334,15 @@ class ServingTokens(GenerateBaseServing):
             else:
                 logprobs = None
 
-            # Encode routed_experts for transport. JSON can't carry raw
-            # bytes, so we write the ndarray as a ``.npy`` byte stream
-            # and base64-encode it. ``pybase64`` is ~3x faster than the
-            # stdlib ``base64`` on large payloads thanks to SIMD.
-            # This is the only base64 hop in the pipeline -- the
-            # engine<->API-server link is binary msgpack + zmq.
-            routed_experts_b64 = None
-            if output.routed_experts is not None:
-                buf = io.BytesIO()
-                np.save(buf, output.routed_experts)
-                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            routed_experts_b64 = (
+                numpy2base64(output.routed_experts)
+                if output.routed_experts is not None
+                else None
+            )
+
+            sampling_mask = None
+            if output.sampling_mask is not None:
+                sampling_mask = output.sampling_mask.token_ids
 
             choice_data = GenerateResponseChoice(
                 index=output.index,
@@ -321,6 +350,7 @@ class ServingTokens(GenerateBaseServing):
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
+                sampling_mask=sampling_mask,
             )
 
             choices.append(choice_data)
@@ -347,6 +377,11 @@ class ServingTokens(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
+        per_request_metrics = None
+        if request.sampling_params.n == 1:
+            spec_stats = build_spec_decoding_metrics(final_res)
+            if spec_stats is not None:
+                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
         response = GenerateResponse(
             request_id=request_id,
             created=created_time,
@@ -354,6 +389,11 @@ class ServingTokens(GenerateBaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_ids=(
+                final_res.prompt_token_ids if request.return_token_ids else None
+            ),
+            mm_placeholders=request._response_mm_placeholders,
+            metrics=per_request_metrics,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
@@ -390,8 +430,10 @@ class ServingTokens(GenerateBaseServing):
         num_prompt_tokens = 0
         num_generated_tokens: list[int] = []
         first_iteration = True
+        prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
+        last_res: RequestOutput | None = None
 
         include_usage, include_continuous_usage = should_include_usage(
             request.stream_options, False
@@ -399,9 +441,12 @@ class ServingTokens(GenerateBaseServing):
 
         try:
             async for res in result_generator:
+                last_res = res
                 if first_iteration:
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
+                        if request.return_token_ids:
+                            prompt_token_ids = res.prompt_token_ids
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
@@ -416,7 +461,11 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    if not delta_token_ids:
+                    # Still emit a terminal empty chunk while prompt metadata
+                    # is pending, so zero-token completions deliver it.
+                    if not delta_token_ids and (
+                        finish_reason is None or prompt_token_ids is None
+                    ):
                         continue
 
                     if sampling_params.logprobs is not None:
@@ -430,13 +479,11 @@ class ServingTokens(GenerateBaseServing):
                     else:
                         logprobs = None
 
-                    routed_experts_b64 = None
-                    if output.routed_experts is not None:
-                        buf = io.BytesIO()
-                        np.save(buf, output.routed_experts)
-                        routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
-                            "ascii"
-                        )
+                    routed_experts_b64 = (
+                        numpy2base64(output.routed_experts)
+                        if output.routed_experts is not None
+                        else None
+                    )
 
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
@@ -450,6 +497,10 @@ class ServingTokens(GenerateBaseServing):
                             )
                         ],
                     )
+                    if prompt_token_ids is not None:
+                        chunk.prompt_token_ids = prompt_token_ids
+                        chunk.mm_placeholders = request._response_mm_placeholders
+                        prompt_token_ids = None
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
@@ -457,7 +508,13 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    # Omit fields that are absent from token-bearing chunks.
+                    exclude = {
+                        name
+                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
+                        if getattr(chunk, name) is None
+                    }
+                    yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(
@@ -472,10 +529,18 @@ class ServingTokens(GenerateBaseServing):
                 )
 
             if include_usage:
+                per_request_metrics = None
+                if sampling_params.n == 1:
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        per_request_metrics = PerRequestMetrics(
+                            speculative_decoding=spec_stats
+                        )
                 final_chunk = GenerateStreamResponse(
                     request_id=request_id,
                     choices=[],
                     usage=final_usage_info,
+                    metrics=per_request_metrics,
                 )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 

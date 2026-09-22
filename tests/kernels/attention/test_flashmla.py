@@ -16,6 +16,8 @@ from vllm.v1.attention.ops.flashmla import (
     is_flashmla_dense_supported,
 )
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 def cal_diff(
     x: torch.Tensor, y: torch.Tensor, name: str, use_fp8: bool = False

@@ -29,7 +29,7 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_file_store_init_method
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
@@ -56,10 +56,7 @@ class TestMMRSModel(torch.nn.Module):
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
     def forward(self, hidden_states):
-        """
-        Forward pass implementing the mm + reduce scatter in the FX graph
-
-        """
+        """Forward pass implementing the mm + reduce scatter in the FX graph."""
         # Reshape input
         view = hidden_states.reshape(-1, self.hidden_size)
 
@@ -88,9 +85,7 @@ class TestAGMMModel(torch.nn.Module):
         torch.nn.init.normal_(self.weight, std=0.02)
 
     def forward(self, hidden_states):
-        """
-        Forward pass implementing the mm + all gather in the FX graph
-        """
+        """Forward pass implementing the mm + all gather in the FX graph."""
         # Reshape input
         view = hidden_states.reshape(-1, self.hidden_size)
         all_gather = tensor_model_parallel_all_gather(view, dim=0)
@@ -122,10 +117,7 @@ class _BaseScaledMMModel(torch.nn.Module):
 
 class TestScaledMMRSModel(_BaseScaledMMModel):
     def forward(self, input: torch.Tensor):
-        """
-        Forward pass implementing the scaled_mm + reduce scatter in the FX graph
-
-        """
+        """Forward pass implementing the scaled_mm + reduce scatter in the FX graph."""
         fp8_input = input.to(FP8_DTYPE)
         scale_a = torch.ones(input.shape[0], 1, dtype=torch.float32)
         scaled_mm = torch._scaled_mm(
@@ -147,9 +139,7 @@ class TestScaledMMRSModel(_BaseScaledMMModel):
 
 class TestAGScaledMMModel(_BaseScaledMMModel):
     def forward(self, input: torch.Tensor):
-        """
-        Forward pass implementing the all gather + scaled_mm in the FX graph
-        """
+        """Forward pass implementing the all gather + scaled_mm in the FX graph."""
         # Reshape input
         fp8_input = input.to(FP8_DTYPE)
         all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)
@@ -173,8 +163,7 @@ class TestAGScaledMMModel(_BaseScaledMMModel):
 
 class TestCutlassScaledMMRSModel(_BaseScaledMMModel):
     def forward(self, input: torch.Tensor):
-        """
-        Forward pass implementing the cutlass_scaled_mm + reduce scatter
+        """Forward pass implementing the cutlass_scaled_mm + reduce scatter
         in the FX graph
 
         """
@@ -200,8 +189,7 @@ class TestCutlassScaledMMRSModel(_BaseScaledMMModel):
 
 class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
     def forward(self, input: torch.Tensor):
-        """
-        Forward pass implementing the all gather + cutlass_scaled_mm
+        """Forward pass implementing the all gather + cutlass_scaled_mm
         in the FX graph
         """
         # Reshape input
@@ -266,7 +254,7 @@ def test_async_tp_pass_replace(
     dynamic: bool,
 ):
     num_processes = 2
-    master_port = str(get_open_port())
+    distributed_init_method = get_file_store_init_method()
 
     def run_torch_spawn(fn, nprocs):
         # need to use torch.mp.spawn otherwise will have problems with
@@ -281,7 +269,7 @@ def test_async_tp_pass_replace(
                 hidden_size,
                 dtype,
                 dynamic,
-                master_port,
+                distributed_init_method,
             ),
             nprocs=nprocs,
         )
@@ -314,7 +302,7 @@ def async_tp_pass_on_test_model(
     hidden_size: int,
     dtype: torch.dtype,
     dynamic: bool,
-    master_port: str = "0",
+    distributed_init_method: str,
 ):
     set_random_seed(0)
 
@@ -328,13 +316,16 @@ def async_tp_pass_on_test_model(
             "RANK": str(local_rank),
             "LOCAL_RANK": str(local_rank),
             "WORLD_SIZE": str(world_size),
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": master_port,
         }
     )
 
     # initialize distributed
-    init_distributed_environment()
+    init_distributed_environment(
+        world_size=world_size,
+        rank=local_rank,
+        distributed_init_method=distributed_init_method,
+        local_rank=local_rank,
+    )
 
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()

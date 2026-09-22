@@ -288,7 +288,14 @@ class MixtralModel(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        orig_to_new_substr={
+            # W8A8 compressed-tensors checkpoints name experts gate/up/down;
+            # map to the w1/w3/w2 the FusedMoE loader expects (no-op if native).
+            ".gate_proj.": ".w1.",
+            ".up_proj.": ".w3.",
+            ".down_proj.": ".w2.",
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -403,7 +410,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

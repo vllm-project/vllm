@@ -20,9 +20,8 @@ steps:
   - vllm/model_executor/model_loader/sharded_state_loader.py
   - vllm/model_executor/models/
   - tests/model_executor/model_loader/test_sharded_state_loader.py
-  # Remove VLLM_DISABLE_COMPILE_CACHE=1 once intel/intel-xpu-backend-for-triton#7682 is fixed
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      VLLM_DISABLE_COMPILE_CACHE=1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m "not slow_test"'
+      pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m "not slow_test"'

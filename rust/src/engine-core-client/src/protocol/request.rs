@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
+use crate::protocol::kv_hints::KvHintsEnvelope;
 use crate::protocol::multimodal::MmFeatures;
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::{OpaqueValue, lora};
@@ -60,7 +61,7 @@ impl EngineCoreRequestType {
 ///
 /// Original Python construction point:
 /// <https://github.com/vllm-project/vllm/blob/cec2ec11760f9f3beabd4c90451936078bf91533/vllm/entrypoints/openai/chat_completion/serving.py#L367-L369>
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReasoningParserKwargs {
     /// Effective kwargs visible to the chat template for this request.
     pub chat_template_kwargs: HashMap<String, serde_json::Value>,
@@ -127,6 +128,8 @@ pub struct EngineCoreRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub kv_hints: Option<KvHintsEnvelope>,
 }
 
 impl EngineCoreRequest {
@@ -158,8 +161,11 @@ mod tests {
     use rmpv::Value;
 
     use super::*;
+    use crate::protocol::dtype::TensorDtype;
+    use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
     use crate::protocol::multimodal::{
-        MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
+        MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, MmModality,
+        PlaceholderRange,
     };
     use crate::protocol::sampling::EngineCoreSamplingParams;
     use crate::protocol::tensor::{WireArrayData, WireTensor};
@@ -179,6 +185,16 @@ mod tests {
             arrival_time: 1234.5,
             client_index: 7,
             session_id: Some("session-1".to_string()),
+            kv_hints: Some(KvHintsEnvelope {
+                protocol_version: "0.1".to_string(),
+                message_id: "msg-1".to_string(),
+                actions: vec![KvHintAction {
+                    action_id: "action-1".to_string(),
+                    action_type: "example.action".to_string(),
+                    action_version: "1.0".to_string(),
+                    payload: BTreeMap::from([("key".to_string(), serde_json::json!("value"))]),
+                }],
+            }),
             ..EngineCoreRequest::default()
         };
 
@@ -189,13 +205,14 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 21);
+        assert_eq!(array.len(), 22);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
         assert_eq!(array[10], Value::Nil);
         assert_eq!(array[11], Value::from(7));
         assert_eq!(array[20], Value::from("session-1"));
+        assert!(matches!(&array[21], Value::Map(_)));
     }
 
     #[test]
@@ -212,7 +229,7 @@ mod tests {
                         "inline".to_string(),
                         MmFieldElem {
                             data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
-                                "uint8",
+                                TensorDtype::U8,
                                 vec![inline.len()],
                                 inline,
                             ))),
@@ -225,7 +242,7 @@ mod tests {
                             data: Some(MmKwargValue::List(vec![
                                 MmKwargValue::Int(7),
                                 MmKwargValue::Tensor(WireTensor::from_raw(
-                                    "uint8",
+                                    TensorDtype::U8,
                                     vec![first_aux.len()],
                                     first_aux,
                                 )),
@@ -234,13 +251,13 @@ mod tests {
                         },
                     ),
                 ])),
-                modality: "image".to_string(),
+                modality: MmModality::Image,
                 identifier: "id".to_string(),
                 mm_position: PlaceholderRange {
                     offset: 0,
                     length: second_aux.len(),
                     is_embed: Some(WireTensor::from_raw(
-                        "bool",
+                        TensorDtype::Bool,
                         vec![second_aux.len()],
                         second_aux,
                     )),
