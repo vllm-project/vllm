@@ -21,7 +21,7 @@ from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
-    state.max_model_len = 8192
+    state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
     state.recoverssm = None
 
