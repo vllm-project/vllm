@@ -143,6 +143,22 @@ Enable EPLB with the `--enable-eplb` flag.
 
 When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
 
+### Multimodel EPLB with speculative decoding
+
+When speculative decoding uses a draft model that implements `MixtureOfExperts`
+(for example Qwen3-Next MTP, EAGLE, or DeepSeek DSpark), vLLM registers the
+draft and target in the same `EplbState`. Each model keeps its own expert load
+windows, communicators, and rearrangement maps, but shares the same rearrangement
+step counter across EP ranks.
+
+Target and draft models may have different expert topologies. This is required
+for DeepSeek V4.1 DSpark, where draft layers use `dspark_n_routed_experts`
+while the target backbone uses the full routed-expert count. Each model is
+load-balanced independently.
+
+For every registered model, `(num_routed_experts + num_redundant_experts)` must
+be divisible by the EP world size.
+
 ### EPLB Parameters
 
 Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:

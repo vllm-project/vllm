@@ -41,13 +41,6 @@ def _get_dspark_parallel_config(
     enable_draft_eplb = parallel_config.enable_eplb and dspark_draft_supports_eplb(
         draft_model_config
     )
-    if parallel_config.enable_eplb and not enable_draft_eplb:
-        logger.warning_once(
-            "EPLB is disabled for the DSpark draft model (%s). EPLB remains "
-            "enabled for the target model.",
-            draft_model_config.hf_config.model_type,
-        )
-
     if enable_draft_eplb:
         return replace(
             parallel_config,

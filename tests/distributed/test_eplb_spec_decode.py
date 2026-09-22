@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from tests.utils import large_gpu_mark
-from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.distributed.eplb.eplb_state import EplbState, expert_topologies_differ
 from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
@@ -95,14 +95,27 @@ def _make_dsv4_dspark_hf_config() -> DeepseekV4Config:
         num_hash_layers=0,
         n_shared_experts=1,
         moe_intermediate_size=128,
+        hidden_act="silu",
+        swiglu_limit=10.0,
+        norm_topk_prob=True,
+        topk_method="noaux_tc",
+        routed_scaling_factor=1.5,
+        expert_dtype="fp4",
         hc_mult=1,
         hc_eps=1e-5,
+        hc_sinkhorn_iters=1,
         rms_norm_eps=1e-5,
         dspark_target_layer_ids=[0],
         dspark_markov_rank=8,
         index_topk=4,
         head_dim=64,
         num_attention_heads=4,
+        q_lora_rank=128,
+        o_lora_rank=128,
+        o_groups=4,
+        qk_rope_head_dim=64,
+        sliding_window=128,
+        max_position_embeddings=4096,
         vocab_size=256,
         n_mtp_layers=2,
         enable_confidence_head=False,
@@ -114,12 +127,25 @@ def _make_dsv4_dspark_hf_config() -> DeepseekV4Config:
 def dspark_vllm_config(dist_init):
     hf_config = _make_dsv4_dspark_hf_config()
     model_config = SimpleNamespace(
-        dtype=torch.bfloat16, hf_config=hf_config, model="dspark"
+        dtype=torch.bfloat16,
+        hf_config=hf_config,
+        model="dspark",
+        max_model_len=4096,
     )
     return SimpleNamespace(
         model_config=model_config,
         quant_config=None,
-        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        attention_config=SimpleNamespace(backend=None),
+        cache_config=SimpleNamespace(
+            block_size=16,
+            cache_dtype="auto",
+            swa_bounded_replay=False,
+        ),
+        use_v2_model_runner=False,
+        kernel_config=SimpleNamespace(
+            moe_backend="deep_gemm_mega_moe",
+            enable_jit_warmup=False,
+        ),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
             tensor_parallel_size=1,
@@ -154,33 +180,41 @@ def _make_moe_topology(
     )
 
 
-def test_eplb_state_accepts_matching_dsv4_draft_and_target():
-    state = SimpleNamespace(model_states={})
+def test_expert_topologies_match_for_identical_models():
     draft = _make_moe_topology()
     target = _make_moe_topology()
-    state.model_states["draft"] = SimpleNamespace(model=draft)
-
-    EplbState.validate_ep_configuration(state, target)
+    assert not expert_topologies_differ(draft, target)
 
 
-def test_eplb_state_rejects_mismatched_dsv4_draft_redundant_experts():
-    state = SimpleNamespace(model_states={})
-    draft = _make_moe_topology(num_redundant_experts=0)
-    target = _make_moe_topology(num_redundant_experts=4)
-    state.model_states["draft"] = SimpleNamespace(model=draft)
-
-    with pytest.raises(RuntimeError, match="mismatch"):
-        EplbState.validate_ep_configuration(state, target)
+def test_expert_topologies_differ_for_heterogeneous_models():
+    draft = _make_moe_topology(num_routed_experts=4, num_redundant_experts=0)
+    target = _make_moe_topology(num_routed_experts=8, num_redundant_experts=4)
+    assert expert_topologies_differ(draft, target)
 
 
-def test_dspark_draft_supports_eplb_only_for_dsv4(dspark_vllm_config):
+def test_eplb_validate_accepts_heterogeneous_topologies():
+    from unittest.mock import MagicMock
+
+    parallel_config = MagicMock()
+    parallel_config.enable_eplb = True
+    parallel_config.eplb_config = MagicMock(use_async=False)
+    state = EplbState(parallel_config, torch.device("cpu"))
+    state.model_states["draft"] = SimpleNamespace(
+        model=_make_moe_topology(num_routed_experts=4, num_redundant_experts=0)
+    )
+    state.validate_ep_configuration(
+        _make_moe_topology(num_routed_experts=8, num_redundant_experts=4)
+    )
+
+
+def test_dspark_draft_supports_eplb_for_dsv4_and_dsv41(dspark_vllm_config):
     assert dspark_draft_supports_eplb(
         dspark_vllm_config.speculative_config.draft_model_config
     )
     dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
         "deepseek_v41"
     )
-    assert not dspark_draft_supports_eplb(
+    assert dspark_draft_supports_eplb(
         dspark_vllm_config.speculative_config.draft_model_config
     )
 
@@ -198,12 +232,12 @@ def test_draft_model_supports_eplb_for_dsv4_dspark(dspark_vllm_config):
     )
 
 
-def test_draft_model_supports_eplb_rejects_dsv41_dspark(dspark_vllm_config):
+def test_draft_model_supports_eplb_for_dsv41_dspark(dspark_vllm_config):
     dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
         "deepseek_v41"
     )
     draft = SimpleNamespace()
-    assert not draft_model_supports_eplb(
+    assert draft_model_supports_eplb(
         dspark_vllm_config.speculative_config,
         draft,
     )
@@ -251,10 +285,10 @@ def test_eplb_registers_dspark_draft_model(
     assert speculator.eplb_state is controller.state
 
 
-def test_eplb_skips_dsv41_dspark_registration(
+def test_eplb_registers_dsv41_dspark_with_heterogeneous_topology(
     dspark_vllm_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """V4.1 DSpark drafts use a different expert topology and are not registered."""
+    """V4.1 DSpark MoE drafts register with EPLB despite different topology."""
     FakeEplbState.instances.clear()
     monkeypatch.setattr(
         "vllm.v1.worker.gpu.eplb_utils.EplbState",
@@ -280,9 +314,16 @@ def test_eplb_skips_dsv41_dspark_registration(
         load_dummy_weights=False,
     )
 
-    assert registered is False
+    assert registered is True
     assert controller.state is not None
-    assert controller.state.add_model_calls == []
+    assert controller.state.add_model_calls == [
+        (
+            draft,
+            dspark_vllm_config.speculative_config.draft_model_config,
+            "dspark (draft)",
+        )
+    ]
+    assert speculator.eplb_state is controller.state
 
 
 def test_eplb_skips_dspark_registration_with_dummy_weights(

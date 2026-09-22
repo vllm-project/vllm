@@ -24,6 +24,9 @@ from vllm.models.deepseek_v4.nvidia.model import (
 from vllm.models.deepseek_v4.nvidia.mtp import DeepSeekV4MTP
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.deepseek_v41.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
+from vllm.models.deepseek_v41.nvidia.dspark import (
+    DSparkDeepseekV4ForCausalLM as DSparkDeepseekV41ForCausalLM,
+)
 from vllm.models.deepseek_v41.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
@@ -903,8 +906,10 @@ def v4_dspark_config(dist_init):
         norm_topk_prob=True,
         topk_method="noaux_tc",
         routed_scaling_factor=1.5,
+        expert_dtype="fp4",
         hc_mult=1,
         hc_eps=1e-5,
+        hc_sinkhorn_iters=1,
         rms_norm_eps=1e-5,
         dspark_target_layer_ids=[0],
         dspark_markov_rank=8,
@@ -920,7 +925,6 @@ def v4_dspark_config(dist_init):
         qk_rope_head_dim=16,
         o_groups=4,
         sliding_window=128,
-        hc_sinkhorn_iters=1,
     )
     model_config = SimpleNamespace(
         dtype=torch.bfloat16,
@@ -943,7 +947,11 @@ def v4_dspark_config(dist_init):
             eplb_config=SimpleNamespace(num_redundant_experts=4),
         ),
         attention_config=SimpleNamespace(backend=None),
-        cache_config=SimpleNamespace(block_size=64, cache_dtype="auto"),
+        cache_config=SimpleNamespace(
+            block_size=64,
+            cache_dtype="auto",
+            swa_bounded_replay=False,
+        ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
         compilation_config=SimpleNamespace(static_forward_context={}),
         speculative_config=SimpleNamespace(draft_model_config=model_config),
@@ -974,6 +982,108 @@ def test_dspark_draft_registers_mixture_of_experts(
     assert get_mixture_of_experts_model(draft) is draft
     assert len(draft.moe_layers) == draft.model.num_dspark_layers == 2
     assert draft.num_routed_experts == hf_config.n_routed_experts
+    assert draft.num_redundant_experts == 4
+
+
+@pytest.fixture
+def v41_dspark_config(dist_init):
+    hf_config = DeepseekV41Config(
+        text_config=dict(
+            hidden_size=128,
+            num_hidden_layers=2,
+            n_routed_experts=8,
+            num_experts_per_tok=2,
+            dspark_n_routed_experts=4,
+            dspark_num_experts_per_tok=3,
+            n_shared_experts=1,
+            moe_intermediate_size=128,
+            hidden_act="silu",
+            swiglu_limit=10.0,
+            norm_topk_prob=True,
+            topk_method="noaux_tc",
+            routed_scaling_factor=1.5,
+            hc_mult=1,
+            hc_eps=1e-5,
+            hc_sinkhorn_iters=1,
+            rms_norm_eps=1e-5,
+            dspark_target_layer_ids=[0],
+            dspark_markov_rank=8,
+            index_topk=4,
+            head_dim=64,
+            num_attention_heads=4,
+            q_lora_rank=128,
+            o_lora_rank=128,
+            o_groups=4,
+            qk_rope_head_dim=64,
+            sliding_window=128,
+            expert_dtype="fp4",
+            num_hash_layers=0,
+            rope_theta=10000.0,
+            compress_rope_theta=10000.0,
+            rope_parameters={"rope_type": "default"},
+            max_position_embeddings=4096,
+            vocab_size=256,
+            n_mtp_layers=2,
+            enable_confidence_head=False,
+            compress_ratios=[1, 1],
+        ),
+    )
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        hf_config=hf_config,
+        max_model_len=4096,
+    )
+    return SimpleNamespace(
+        model_config=model_config,
+        quant_config=None,
+        attention_config=SimpleNamespace(backend=None),
+        cache_config=SimpleNamespace(
+            block_size=16,
+            cache_dtype="auto",
+            swa_bounded_replay=False,
+        ),
+        use_v2_model_runner=False,
+        kernel_config=SimpleNamespace(
+            moe_backend="deep_gemm_mega_moe",
+            enable_jit_warmup=False,
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=SimpleNamespace(num_redundant_experts=4),
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        speculative_config=SimpleNamespace(draft_model_config=model_config),
+    )
+
+
+def test_dsv41_dspark_draft_registers_mixture_of_experts(
+    v41_dspark_config, monkeypatch, dist_init
+):
+    """DSV4.1 DSpark MoE drafts expose draft expert counts for EPLB."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("DeepGEMM MegaMoE requires SM100")
+
+    hf_config = v41_dspark_config.model_config.hf_config
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v41.nvidia.dspark.get_current_vllm_config",
+        lambda: v41_dspark_config,
+    )
+
+    with (
+        set_default_torch_dtype(v41_dspark_config.model_config.dtype),
+        torch.device("cuda"),
+    ):
+        draft = DSparkDeepseekV41ForCausalLM(vllm_config=v41_dspark_config)
+
+    assert is_mixture_of_experts(draft)
+    assert get_mixture_of_experts_model(draft) is draft
+    assert len(draft.moe_layers) == draft.model.num_dspark_layers == 2
+    assert draft.num_routed_experts == hf_config.dspark_n_routed_experts
     assert draft.num_redundant_experts == 4
 
 

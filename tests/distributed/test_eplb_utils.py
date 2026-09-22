@@ -5,11 +5,14 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.platforms import current_platform
 
 
 def _make_model_state(
@@ -157,3 +160,49 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+def _make_eplb_state() -> EplbState:
+    parallel_config = MagicMock()
+    parallel_config.enable_eplb = True
+    parallel_config.eplb_config = MagicMock(
+        use_async=False,
+        window_size=4,
+        step_interval=8,
+        num_redundant_experts=0,
+        policy="default",
+        communicator="torch_gloo",
+    )
+    parallel_config.enable_elastic_ep = False
+    parallel_config.num_ubatches = 1
+    return EplbState(parallel_config, torch.device("cpu"))
+
+
+def test_allreduce_list_uses_concat_fast_path_for_matching_shapes(dist_init):
+    state = _make_eplb_state()
+    device = torch.device(current_platform.device_type)
+    tensors = [
+        torch.ones(2, 4, dtype=torch.int32, device=device),
+        torch.ones(3, 4, dtype=torch.int32, device=device),
+    ]
+    result = state._allreduce_list(tensors)
+    assert len(result) == 2
+    assert result[0].shape == (2, 4)
+    assert result[1].shape == (3, 4)
+
+
+def test_allreduce_list_handles_different_num_physical_experts(dist_init):
+    state = _make_eplb_state()
+    device = torch.device(current_platform.device_type)
+    tensors = [
+        torch.ones(2, 4, dtype=torch.int32, device=device),
+        torch.ones(3, 6, dtype=torch.int32, device=device),
+    ]
+    result = state._allreduce_list([t.clone() for t in tensors])
+    assert len(result) == 2
+    assert result[0].shape == (2, 4)
+    assert result[1].shape == (3, 6)
+    if dist.is_initialized():
+        world_size = dist.get_world_size()
+        for tensor in result:
+            assert torch.all(tensor == world_size)

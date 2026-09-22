@@ -65,7 +65,7 @@ def test_dspark_parallel_config_preserves_eplb_for_dsv4():
     assert draft_config.eplb_config is target_config.eplb_config
 
 
-def test_dspark_parallel_config_disables_eplb_for_dsv41():
+def test_dspark_parallel_config_preserves_eplb_for_dsv41():
     target_config = _FakeParallelConfig()
     draft_model_config = _FakeModelConfig(
         hf_config=_FakeHFConfig(model_type="deepseek_v41")
@@ -77,6 +77,6 @@ def test_dspark_parallel_config_disables_eplb_for_dsv41():
         draft_model_config=draft_model_config,
     )
 
-    assert draft_config.enable_eplb is False
-    assert draft_config.eplb_config.num_redundant_experts == 0
-    assert draft_config.eplb_config is not target_config.eplb_config
+    assert draft_config.enable_eplb
+    assert draft_config.eplb_config.num_redundant_experts == 32
+    assert draft_config.eplb_config is target_config.eplb_config
