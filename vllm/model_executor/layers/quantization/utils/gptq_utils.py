@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from copy import deepcopy
-from fractions import Fraction
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -16,16 +15,44 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 
 if TYPE_CHECKING:
-    from ..gptq import GPTQConfig
-    from ..gptq_marlin import GPTQMarlinConfig
+    from ..auto_gptq import AutoGPTQConfig
 else:
-    GPTQConfig = object
-    GPTQMarlinConfig = object
+    AutoGPTQConfig = object
+
+
+def normalize_and_validate_gptq_desc_act(
+    desc_act: bool,
+    group_size: int | None,
+    dynamic: Mapping[str, Any],
+) -> bool:
+    base_desc_act = desc_act
+    if desc_act and group_size == -1:
+        # With one group per output channel, activation ordering is a no-op.
+        desc_act = False
+    if desc_act:
+        raise ValueError(
+            "GPTQ group activation ordering (desc_act=True) is no longer "
+            "supported. Use a checkpoint with static activation ordering "
+            "or desc_act=False."
+        )
+
+    for pattern, overrides in dynamic.items():
+        if pattern.startswith("-:") or not isinstance(overrides, Mapping):
+            continue
+        dynamic_desc_act = overrides.get("desc_act", base_desc_act)
+        dynamic_group_size = overrides.get("group_size", group_size)
+        if dynamic_desc_act and dynamic_group_size != -1:
+            raise ValueError(
+                "GPTQ group activation ordering (desc_act=True) is no longer "
+                f"supported, but is enabled by dynamic rule {pattern!r}. Use "
+                "a checkpoint with static activation ordering or desc_act=False."
+            )
+    return desc_act
 
 
 # Match dynamic rules with module name (prefix) and override quantize
 # config if module (prefix) matches a rule
-def override_config(config: GPTQConfig | GPTQMarlinConfig, prefix: str):
+def override_config(config: AutoGPTQConfig, prefix: str):
     weight_bits = get_dynamic_override(config, prefix, "bits", config.weight_bits)
     if isinstance(weight_bits, int):
         config.weight_bits = weight_bits
@@ -36,31 +63,27 @@ def override_config(config: GPTQConfig | GPTQMarlinConfig, prefix: str):
     if isinstance(desc_act, bool):
         config.desc_act = desc_act
 
-    config.pack_factor = Fraction(32, config.weight_bits)  # packed into int32
-    if config.get_name() == "gptq_marlin":
-        assert isinstance(config, GPTQMarlinConfig)
-        is_sym = get_dynamic_override(config, prefix, "sym", config.is_sym)
-        if isinstance(is_sym, bool):
-            config.is_sym = is_sym
+    if config.desc_act and config.group_size == -1:
+        # Activation ordering is a no-op for channelwise quantization.
+        config.desc_act = False
 
-        if (config.weight_bits, config.is_sym) not in config.TYPE_MAP:
-            raise ValueError(
-                "Unsupported quantization config: "
-                f"bits={config.weight_bits}, sym={config.is_sym}"
-            )
+    config.pack_factor = 32 // config.weight_bits  # packed into int32
+    assert isinstance(config, AutoGPTQConfig)
+    is_sym = get_dynamic_override(config, prefix, "sym", config.is_sym)
+    if isinstance(is_sym, bool):
+        config.is_sym = is_sym
 
-        config.quant_type = config.TYPE_MAP[(config.weight_bits, config.is_sym)]
-    elif config.get_name() == "gptq":
-        assert isinstance(config, GPTQConfig)
-        if config.weight_bits not in [2, 3, 4, 8]:
-            raise ValueError(
-                "Currently, only 2/3/4/8-bit weight quantization is "
-                f"supported for GPTQ, but got {config.weight_bits} bits."
-            )
+    if (config.weight_bits, config.is_sym) not in config.TYPE_MAP:
+        raise ValueError(
+            "Unsupported quantization config: "
+            f"bits={config.weight_bits}, sym={config.is_sym}"
+        )
+
+    config.quant_type = config.TYPE_MAP[(config.weight_bits, config.is_sym)]
 
 
 def get_dynamic_override(
-    config: GPTQConfig | GPTQMarlinConfig,
+    config: AutoGPTQConfig,
     layer_name: str,
     key: str | None = None,
     default_value: int | bool | None = None,
@@ -80,6 +103,20 @@ def get_dynamic_override(
     return default_value
 
 
+def flatten_list(lst: list[Any]) -> list[Any]:
+    output = []
+
+    def _flatten(lst: list[Any]):
+        for i in lst:
+            if isinstance(i, list):
+                _flatten(i)
+            else:
+                output.append(i)
+
+    _flatten(lst)
+    return output
+
+
 def is_layer_gptq_quantized(
     prefix: str,
     quantized_layers: list[str],
@@ -93,6 +130,8 @@ def is_layer_gptq_quantized(
     # Full prefix ["model.layers.0.self_attn.q_proj"]
 
     proj_name = prefix.split(".")[-1]
+
+    quantized_layers = flatten_list(quantized_layers)
 
     # Fused layers like gate_up_proj or qkv_proj will not be fused
     # in the safetensors checkpoint. So, we convert the name
@@ -126,7 +165,7 @@ def is_layer_gptq_quantized(
 
 
 def get_linear_quant_method(
-    config: GPTQConfig | GPTQMarlinConfig,
+    config: AutoGPTQConfig,
     layer: torch.nn.Module,
     prefix: str,
     linear_method_cls: type,

@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Qwen3.5-MoE model configuration"""
+"""Qwen3.5-MoE model configuration."""
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -100,18 +100,11 @@ class Qwen3_5MoeTextConfig(PretrainedConfig):
                 else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-        if hasattr(self, "validate_layer_type"):
-            # Transformers v5
-            kwargs["ignore_keys_at_rope_validation"] = {
-                "mrope_section",
-                "mrope_interleaved",
-            }
-            self.validate_layer_type()
-        else:
-            # Transformers v4
-            from transformers.configuration_utils import layer_type_validation
-
-            layer_type_validation(self.layer_types, self.num_hidden_layers)
+        kwargs["ignore_keys_at_rope_validation"] = {
+            "mrope_section",
+            "mrope_interleaved",
+        }
+        self.validate_layer_type()
 
         # linear attention part
         self.linear_conv_kernel_dim = linear_conv_kernel_dim

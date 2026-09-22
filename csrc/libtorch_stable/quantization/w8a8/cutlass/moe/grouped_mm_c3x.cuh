@@ -7,8 +7,9 @@
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 
 #include <torch/csrc/stable/ops.h>
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
+#include "libtorch_stable/torch_utils.h"
 #include "get_group_starts.cuh"
 
 using namespace cute;
@@ -103,6 +104,8 @@ void cutlass_group_gemm_caller(torch::stable::Tensor& out_tensors,
 
   int num_experts = static_cast<int>(expert_offsets.size(0));
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a_tensors.get_device_index());
   auto stream = get_current_cuda_stream(a_tensors.get_device_index());
 
   auto device = a_tensors.device();

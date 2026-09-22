@@ -109,24 +109,50 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 
 ## Constrained Decoding Behavior
 
-Whether vLLM enforces the tool parameter schema during generation depends on the `tool_choice` mode:
+Structural-tag parsers resolve call obligation, grammar activation, and argument-schema enforcement separately. With structural-tag enforcement enabled:
 
-| `tool_choice` value | Schema-constrained decoding | Behavior |
+| `tool_choice` value | Call obligation | Structural-tag activation |
 | --- | --- | --- |
-| Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
-| `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
-| `"auto"` | No | The model generates freely. A tool-call parser extracts tool calls from the raw text. Arguments may be malformed or not match the schema. |
-| `"none"` | N/A | No tool calls are produced. |
+| Named function | Call the selected function | Always |
+| `"required"` | Produce at least one tool call | Always |
+| `"auto"` | Tool calls are optional | When at least one tool sets `strict: true`, or `--tool-strict-level` is `function` or `parameter` |
+| `"none"` | Tool calling is disabled | Disabled |
 
-When schema conformance matters, prefer `tool_choice="required"` or named function calling over `"auto"`.
+When a structural tag applies, each tool's declared parameter schema is enforced only when that tool sets `strict: true` or the server uses `--tool-strict-level parameter`. Tools with omitted or false `strict` receive broad argument-syntax constraints at levels `auto` and `function`, including for required and named calls.
 
-### Strict Mode (`strict` parameter)
+For parsers using schema-derived JSON constraints, required and named calls continue to enforce the declared parameter schemas.
 
-The [OpenAI API](https://platform.openai.com/docs/guides/function-calling#strict-mode) supports a `strict` field on function definitions. When set to `true`, OpenAI uses constrained decoding to guarantee that tool-call arguments match the function schema, even in `tool_choice="auto"` mode.
+### Strict Mode
 
-vLLM **does not implement** `strict` mode today. The `strict` field is accepted in requests (to avoid breaking clients that set it), but it has no effect on decoding behavior. In auto mode, argument validity depends entirely on the model's output quality and the parser's extraction logic.
+Structural-tag constraints have two layers. The tool-call *envelope* (markup and function name) is constrained whenever a structural tag applies: always for `tool_choice="required"` and named function calling, and for `tool_choice="auto"` once at least one tool sets `strict: true` or the server raises the floor. The *argument schema* of an individual tool is pinned only when that tool sets `strict: true` (or under `--tool-strict-level parameter`); a tool that omits `strict` keeps its arguments unconstrained, even when another tool in the same request is strict. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.
 
-Tracking issues: [#15526](https://github.com/vllm-project/vllm/issues/15526), [#16313](https://github.com/vllm-project/vllm/issues/16313).
+For best compatibility with strict schema enforcement, define tool parameter schemas in the OpenAI strict-schema style:
+
+* Set `additionalProperties` to `false` for each object in `parameters`.
+* Mark all fields in `properties` as required.
+* Represent optional fields by allowing `null`, for example `{"type": ["string", "null"]}`.
+
+vLLM also provides a global toggle via the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable (defaults to `true`). When set to `false`, vLLM does not attach structural tags for tool calling regardless of the per-tool `strict` field. This environment variable only affects structural-tag based tool calling; it does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
+
+```bash
+VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
+```
+
+### Server-Side Strictness Floor
+
+Most OpenAI-compatible clients and agent frameworks never set `strict` on their tools, so with `tool_choice="auto"` the model generates tool calls without any grammar and malformed markup can leak into the response. The `--tool-strict-level` option lets the server operator raise the floor for every request that carries tools, independently of what the client declares:
+
+| Value | Behavior |
+| --- | --- |
+| `auto` (default) | Follow the request's tool choice and per-tool strictness. Required/named choices activate structural tags; `tool_choice="auto"` activates them when at least one tool sets `strict: true`. |
+| `function` | Constrain the tool-call envelope (markup and the function name) for every request with tools, leaving argument contents free unless the client marked the tool `strict: true`. |
+| `parameter` | Additionally pin argument schemas for every tool, as if every tool had `strict: true`. |
+
+```bash
+vllm serve ... --tool-strict-level function
+```
+
+The floor never relaxes a constraint the request would already receive: tools the client marked `strict: true` keep their schemas at every level. With `tool_choice="auto"`, the grammar does not force a tool call; a plain text response stays valid. `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` disables structural tags entirely and takes precedence over this option.
 
 ## Automatic Function Calling
 
@@ -146,7 +172,7 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 !!! note
-    With `tool_choice="auto"`, tool-call arguments are extracted from the model's raw text output by the selected parser. No schema-level constraint is applied during decoding, so arguments may occasionally be malformed or violate the function's parameter schema. See [Constrained Decoding Behavior](#constrained-decoding-behavior) for details.
+    With `tool_choice="auto"`, structural-tag constraints require both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`, or a server-side floor set via `--tool-strict-level`. When these conditions are met and the selected parser supports structural tags, vLLM constrains the tool-call envelope and pins the argument schema of each tool that sets `strict: true` (or of every tool under `--tool-strict-level parameter`). Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
 ### Hermes Models (`hermes`)
 
@@ -156,8 +182,8 @@ All Nous Research Hermes-series models newer than Hermes 2 Pro should be support
 * `NousResearch/Hermes-2-Theta-*`
 * `NousResearch/Hermes-3-*`
 
-_Note that the Hermes 2 **Theta** models are known to have degraded tool call quality and capabilities due to the merge
-step in their creation_.
+*Note that the Hermes 2 **Theta** models are known to have degraded tool call quality and capabilities due to the merge
+step in their creation*.
 
 Flags: `--tool-call-parser hermes`
 
@@ -315,15 +341,6 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
-### MiniMax Models (`minimax_m1`)
-
-Supported models:
-
-* `MiniMaxAi/MiniMax-M1-40k` (use with [examples/tool_chat_template_minimax_m1.jinja](../../examples/tool_chat_template_minimax_m1.jinja))
-* `MiniMaxAi/MiniMax-M1-80k` (use with [examples/tool_chat_template_minimax_m1.jinja](../../examples/tool_chat_template_minimax_m1.jinja))
-
-Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax_m1.jinja`
-
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
@@ -341,7 +358,7 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
 
-### OpenAI OSS Models ('openai`)
+### OpenAI OSS Models (`openai`)
 
 Supported models:
 
@@ -369,15 +386,16 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
-### Cohere Command A Reasoning (`cohere_command3`)
+### Cohere Command (`cohere_command3` / `cohere_command4`)
 
 Supported models:
 
-* [`CohereLabs/command-a-reasoning-08-2025`](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025)
+* [`CohereLabs/command-a-reasoning-08-2025`](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025) (`cohere_command3`)
+* [`CohereLabs/command-a-plus-05-2026`](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16) and [`CohereLabs/North-Mini-Code-1.0`](https://huggingface.co/CohereLabs/North-Mini-Code-1.0) (`cohere_command4`)
 
-Flags: `--tool-call-parser cohere_command3 --reasoning-parser cohere_command3`
+Flags: `--tool-call-parser cohere_command4 --reasoning-parser cohere_command4`.
 
-Note: the Cohere tool parser requires the `cohere_melody` package, which is not installed by default. Before using this parser please install the [cohere_melody](https://pypi.org/project/cohere-melody/) package.
+Note: the Cohere parser requires the `cohere_melody` package, which is not installed by default. Before using this parser please install the [cohere_melody](https://pypi.org/project/cohere-melody/) package.
 
 ### LongCat-Flash-Chat Models (`longcat`)
 
@@ -464,6 +482,17 @@ Supported models:
 
 Flags: `--tool-call-parser gigachat3`
 
+### Apertus Models (`apertus`)
+
+Use the chat template from the examples folder; it fixes several OpenAI compatibility issues: `--chat-template /vllm-workspace/examples/tool_chat_template_apertus.jinja`
+
+Supported models:
+
+* `swiss-ai/Apertus-8B-Instruct-2509`
+* `swiss-ai/Apertus-70B-Instruct-2509`
+
+Flags: `--tool-call-parser apertus`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
@@ -492,6 +521,13 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 !!! warning
     Llama's smaller models frequently fail to emit tool calls in the correct format. Results may vary depending on the model.
+
+## Benchmarking Tool-Calling Performance
+
+To measure serving latency and throughput on realistic tool-calling traffic,
+use the BFCL (Berkeley Function Calling Leaderboard) dataset with
+`vllm bench serve`. See the [BFCL benchmark example](../benchmarking/cli.md#bfcl-tool-calling-benchmark)
+for the full server + client commands.
 
 ## How to Write a Tool Parser Plugin
 

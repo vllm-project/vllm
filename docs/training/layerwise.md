@@ -28,9 +28,9 @@ For more information on implementation, see [Low Level `layerwise` API](#low-lev
 Online quantization refers to when a user provides full precision weights and those weights are quantized on-the-fly as they are loaded into the model. The layerwise reloading system handles this by treating online quantization as a **processing** step, which is then handled in an online way both during first-time load and during reload. A typical online quantization method implementation should look like this:
 
 ```python
-class Fp8OnlineLinearMethod(Fp8LinearMethod):
-    """Online version of Fp8LinearMethod which loads a full precision checkpoint
-    and quantizes weights during loading."""
+class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
+    """Online version of FP8 per-tensor quantization which loads a full
+    precision checkpoint and quantizes weights during loading."""
 
     uses_meta_device: bool = True
 
@@ -58,7 +58,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
 ### High Level Weight Transfer API
 
-The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Layerwise reloading is controlled by the `WeightTransferUpdateInfo.is_checkpoint_format` flag and is set to `True` by default.
+The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) run layerwise reloading automatically inside their `start_weight_update`/`finish_weight_update` lifecycle.
 
 ### Mid Level `reload_weights` API
 

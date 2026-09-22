@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Generate CPU attention dispatch switch cases and kernel instantiations.
-"""
+"""Generate CPU attention dispatch switch cases and kernel instantiations."""
 
 import os
 
@@ -11,7 +9,7 @@ import os
 HEAD_DIMS_32 = [32, 64, 96, 128, 160, 192, 224, 256, 512]
 
 # Head dimensions divisible by 16 but not 32 (VEC16 only)
-HEAD_DIMS_16 = [80, 112]
+HEAD_DIMS_16 = [48, 80, 112]
 
 # ISA types
 ISA_TYPES = {
@@ -20,7 +18,9 @@ ISA_TYPES = {
     "VEC16": 2,
     "NEON": 3,
     "VXE": 4,
-    "VSX": 5,
+    "RVV": 5,
+    "VSX": 6,
+    "AMX_FP8": 7,
 }
 
 # KV cache index: 0 = auto (same as scalar_t), 1 = fp8_e4m3, 2 = fp8_e5m2
@@ -38,13 +38,13 @@ KV_CACHE_CPP_TYPES = {
 }
 
 # ISAs supported for head_dims divisible by 32
-ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16", "VXE", "VSX"]
+ISA_FOR_32 = ["AMX", "AMX_FP8", "NEON", "VEC", "VEC16", "VXE", "RVV", "VSX"]
 
 # ISAs supported for head_dims divisible by 16 only
 ISA_FOR_16 = ["VEC16"]
 
 # ISAs that support FP8 KV cache (x86 AVX2/AVX-512 required)
-ISA_FOR_FP8 = ["AMX", "VEC"]
+ISA_FOR_FP8 = ["AMX_FP8", "AMX", "VEC"]
 
 
 def encode_params(head_dim: int, isa_type: str, kv_cache: str = "auto") -> int:
@@ -63,12 +63,21 @@ def _make_case(
     encoded = encode_params(head_dim, isa, kv_cache)
     actual_isa = isa_override if isa_override else isa
     cpp_type = KV_CACHE_CPP_TYPES[kv_cache]
-    attn_impl = (
-        f"cpu_attention::AttentionImpl<"
-        f"cpu_attention::ISA::{actual_isa}, \\\n"
-        f"                                                       "
+    native_impl = (
+        f"cpu_attention::AttentionImpl<cpu_attention::ISA::{actual_isa}, "
         f"scalar_t, head_dim, {cpp_type}>"
     )
+    if actual_isa == "AMX_FP8":
+        fallback_impl = (
+            f"cpu_attention::AttentionImpl<cpu_attention::ISA::AMX, "
+            f"scalar_t, head_dim, {cpp_type}>"
+        )
+        attn_impl = (
+            "std::conditional_t<std::is_same_v<scalar_t, c10::BFloat16>, "
+            f"{native_impl}, {fallback_impl}>"
+        )
+    else:
+        attn_impl = native_impl
     comment = (
         f"head_dim={head_dim}, isa={isa}"
         if kv_cache == "auto"
@@ -97,7 +106,8 @@ def generate_cases_for_isa_group(isa_list: list[str], include_fp8: bool = False)
         for isa in isa_list:
             if isa not in ISA_FOR_32:
                 continue
-            cases.append(_make_case(head_dim, isa, "auto"))
+            isa_override = "AMX" if isa == "AMX_FP8" else None
+            cases.append(_make_case(head_dim, isa, "auto", isa_override))
 
     # Non-FP8 cases for head_dims divisible by 16 only
     for head_dim in HEAD_DIMS_16:
@@ -111,7 +121,8 @@ def generate_cases_for_isa_group(isa_list: list[str], include_fp8: bool = False)
                 for isa in isa_list:
                     if isa not in ISA_FOR_FP8:
                         continue
-                    cases.append(_make_case(head_dim, isa, fp8_type))
+                    isa_override = "AMX" if isa == "AMX_FP8" and head_dim % 64 else None
+                    cases.append(_make_case(head_dim, isa, fp8_type, isa_override))
 
     return "\n".join(cases)
 
@@ -137,6 +148,10 @@ def generate_header_file() -> str:
 #include "cpu_attn_vec.hpp"
 #include "cpu_attn_vec16.hpp"
 
+#ifdef CPU_CAPABILITY_AMXFP8
+    #include "cpu_attn_amx_fp8.hpp"
+#endif
+
 #ifdef CPU_CAPABILITY_AMXBF16
   #include "cpu_attn_amx.hpp"
 #endif
@@ -147,6 +162,13 @@ def generate_header_file() -> str:
 
 #ifdef __s390x__
   #include "cpu_attn_vxe.hpp"
+#endif
+
+// cpu_attn_rvv.hpp supports VLEN=128 and VLEN=256 via RVVI() macros.
+// Other VLENs and scalar RISC-V builds skip it entirely.
+#if defined(__riscv) && defined(__riscv_v_min_vlen) && \
+    (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
+  #include "cpu_attn_rvv.hpp"
 #endif
 
 #ifdef __powerpc__
@@ -198,7 +220,12 @@ def generate_header_file() -> str:
         )
 
     header += _macro_block(
-        "#if defined(CPU_CAPABILITY_AMXBF16)",
+        "#if defined(CPU_CAPABILITY_AMXFP8)",
+        ["AMX_FP8", "AMX", "VEC", "VEC16"],
+        fp8=True,
+    )
+    header += _macro_block(
+        "#elif defined(CPU_CAPABILITY_AMXBF16)",
         ["AMX", "VEC", "VEC16"],
         fp8=True,
     )
@@ -210,6 +237,20 @@ def generate_header_file() -> str:
     header += _macro_block(
         "#elif defined(__s390x__)",
         ["VXE", "VEC", "VEC16"],
+        fp8=False,
+    )
+    # RISC-V with RVV.  cpu_attn_rvv.hpp supports VLEN=128 and VLEN=256
+    # via RVVI() macros.  Builds with a supported VLEN get
+    # RVV+VEC+VEC16; other RISC-V builds fall back to VEC/VEC16 only.
+    header += _macro_block(
+        "#elif defined(__riscv) && defined(__riscv_v_min_vlen) "
+        "&& (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)",
+        ["RVV", "VEC", "VEC16"],
+        fp8=False,
+    )
+    header += _macro_block(
+        "#elif defined(__riscv)",
+        ["VEC", "VEC16"],
         fp8=False,
     )
     header += _macro_block(
@@ -233,8 +274,8 @@ def generate_header_file() -> str:
         fp8=False,
     )
     header += (
-        "#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / "
-        "__s390x__ / __powerpc__ */\n\n"
+        "#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / __s390x__ /"
+        " __riscv / __powerpc__ */\n\n"
         "#endif  // CPU_ATTN_DISPATCH_GENERATED_H\n"
     )
 

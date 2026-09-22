@@ -42,14 +42,14 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:mamba_mixer]
 @PluggableLayer.register("mamba_mixer")
 class MambaMixer(MambaBase, PluggableLayer):
-    """
-    Compute ∆, A, B, C, and D the state space parameters and compute
+    """Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
     (see Mamba paper [1] Section 3.5.2 "Interpretation of A"
     for why A isn't selective) ∆, B, C are input-dependent
@@ -236,8 +236,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         )
 
     def forward_impl(self, hidden_states: torch.Tensor, output: torch.Tensor):
-        """
-        Run the Mamba-1 SSM pipeline.
+        """Run the Mamba-1 SSM pipeline.
 
         Steps
         -----
@@ -257,7 +256,6 @@ class MambaMixer(MambaBase, PluggableLayer):
         decode tokens), both sets of kernels are executed independently
         and their outputs are concatenated before the final output projection.
         """
-
         forward_context: ForwardContext = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
@@ -268,7 +266,8 @@ class MambaMixer(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, Mamba1AttentionMetadata)
             query_start_loc_p = attn_metadata.query_start_loc_p
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
@@ -361,6 +360,7 @@ class MambaMixer(MambaBase, PluggableLayer):
                 initial_state_idx=block_idx_last_computed_token_p,
                 num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
+                metadata=attn_metadata,
             )
             # 3. State Space Model sequence transformations.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
@@ -476,8 +476,8 @@ class MambaMixer(MambaBase, PluggableLayer):
         )
 
     @property
-    def mamba_type(self) -> str:
-        return "mamba1"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.MAMBA1
 
     def _time_proj_bias(self) -> torch.Tensor | None:
         if hasattr(self.dt_proj, "bias") and self.dt_proj.bias is not None:
@@ -529,17 +529,8 @@ def mamba_mixer(
     self.forward_impl(hidden_states=hidden_states, output=output)
 
 
-def mamba_mixer_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="mamba_mixer",
     op_func=mamba_mixer,
     mutates_args=["output"],
-    fake_impl=mamba_mixer_fake,
 )

@@ -16,6 +16,26 @@ from ..vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
+def clone_preserves_layout(node: fx.Node, original_node: fx.Node) -> bool:
+    node_val = node.meta.get("val")
+    original_val = original_node.meta.get("val")
+    if node_val is None or original_val is None:
+        return True
+
+    try:
+        node_stride = tuple(node_val.stride())
+        original_stride = tuple(original_val.stride())
+        node_storage_offset = node_val.storage_offset()
+        original_storage_offset = original_val.storage_offset()
+    except (AttributeError, RuntimeError):
+        return True
+
+    return (
+        node_stride == original_stride
+        and node_storage_offset == original_storage_offset
+    )
+
+
 def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
     if user.op == "output":
         return False
@@ -50,8 +70,7 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
 
 
 class UnsafeCloneEliminationPass(VllmInductorPass):
-    """
-    This pass removes clone nodes that are no longer needed after vLLM IR lowering.
+    """This pass removes clone nodes that are no longer needed after vLLM IR lowering.
     It uses donated_input_ids to eliminate clones of donated graph inputs, preserving
     contents of non-donated graph inputs.
 
@@ -78,6 +97,15 @@ class UnsafeCloneEliminationPass(VllmInductorPass):
 
             original_node = node.args[0]
             assert isinstance(original_node, fx.Node)
+
+            if not clone_preserves_layout(node, original_node):
+                logger.debug(
+                    "Clone removal not possible, clone changes layout: "
+                    "original_node=%s node=%s",
+                    original_node,
+                    node,
+                )
+                continue
 
             # Clone needs to be preserved if node is getting written to and
             # the old value is used again.

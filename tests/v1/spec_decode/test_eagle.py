@@ -50,6 +50,8 @@ def _create_proposer(
     num_speculative_tokens: int,
     attention_backend: str | None = None,
     parallel_drafting: bool = False,
+    rejection_sample_method: str = "standard",
+    draft_sample_method: str = "greedy",
 ) -> EagleProposer:
     # Method-dependent setup
     if method == "eagle":
@@ -81,6 +83,8 @@ def _create_proposer(
         method=method,
         num_speculative_tokens=num_speculative_tokens,
         parallel_drafting=parallel_drafting,
+        rejection_sample_method=rejection_sample_method,
+        draft_sample_method=draft_sample_method,
     )
     if parallel_drafting:
         # Overwrite pard_token to avoid crash during init
@@ -112,8 +116,7 @@ def _create_proposer(
 
 
 def test_prepare_next_token_ids():
-    """
-    Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
+    """Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
     Each will produce a device tensor of next_token_ids, taking as input
     either the GPU tensor of sampled_token_ids with -1 for rejected tokens,
     or the CPU python list[list[int]] with the rejected tokens removed.
@@ -192,8 +195,7 @@ def test_prepare_next_token_ids():
 
 
 def test_prepare_inputs():
-    """
-    cu_target_query_lens: [0, a, a + b, a + b + c]
+    """cu_target_query_lens: [0, a, a + b, a + b + c]
     num_rejected_tokens: [n1, n2, n3]
     num_tokens_per_req: [a - n1, b - n2, c - n3]
     cu_num_tokens: [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
@@ -282,8 +284,7 @@ def test_prepare_inputs():
 
 
 def test_prepare_inputs_padded():
-    """
-    Input scenario is 3 requests with num_speculative_tokens == 2 and:
+    """Input scenario is 3 requests with num_speculative_tokens == 2 and:
     - Request 1: query_len = 3, rejected = 1
     - Request 2: query_len = 3, rejected = 0
     - Request 3: query_len = 3, rejected = 2
@@ -293,7 +294,6 @@ def test_prepare_inputs_padded():
     Reason: After accounting for rejections, these are the valid token positions
             from the original indices to sample from.
     """
-
     device = torch.device(DEVICE_TYPE)
 
     expected_token_indices_to_sample = torch.tensor(
@@ -346,8 +346,7 @@ def test_prepare_inputs_padded():
 
 
 def test_set_inputs_first_pass_default_eagle():
-    """
-    Test for set_inputs_first_pass without extra input slots (default EAGLE).
+    """Test for set_inputs_first_pass without extra input slots (default EAGLE).
 
     This tests the path where needs_extra_input_slots=False, which is the
     default EAGLE pathway. In this case:
@@ -432,8 +431,7 @@ def test_set_inputs_first_pass_default_eagle():
 
 
 def test_set_inputs_first_pass_draft_model():
-    """
-    Test for set_inputs_first_pass with a draft model (extra input slots,
+    """Test for set_inputs_first_pass with a draft model (extra input slots,
     no shift).
 
     This tests the path where needs_extra_input_slots=True and
@@ -574,8 +572,7 @@ def test_set_inputs_first_pass_draft_model():
 
 
 def test_set_inputs_first_pass_parallel_drafting():
-    """
-    Test for set_inputs_first_pass with parallel drafting (extra input slots,
+    """Test for set_inputs_first_pass with parallel drafting (extra input slots,
     with shift).
 
     This tests the path where needs_extra_input_slots=True and
@@ -965,6 +962,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     proposer.draft_attn_groups = [mock_attn_group]
 
     result = proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
@@ -997,9 +995,112 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     assert torch.equal(result, expected_tokens)
 
 
+@pytest.mark.parametrize(
+    "attn_backend",
+    ["ROCM_ATTN", "TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"],
+)
+def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
+    device = torch.device(DEVICE_TYPE)
+    batch_size = 2
+    seq_lens = [5, 3]
+    total_tokens = sum(seq_lens)
+    num_speculative_tokens = 3
+    vocab_size = 8
+
+    proposer = _create_proposer(
+        "draft_model",
+        num_speculative_tokens,
+        rejection_sample_method="standard",
+        draft_sample_method="probabilistic",
+    )
+    hidden_size = proposer.hidden_size
+    expanded_total_tokens = total_tokens + batch_size
+
+    model_mock = mock.MagicMock()
+    forward_returns = []
+    logits_returns = []
+    for step in range(num_speculative_tokens):
+        token_count = expanded_total_tokens if step == 0 else batch_size
+        forward_returns.append(torch.zeros(token_count, hidden_size, device=device))
+        logits = torch.full((batch_size, vocab_size), -10.0, device=device)
+        logits[0, step + 1] = 5.0
+        logits[1, step + 3] = 4.0
+        logits_returns.append(logits)
+
+    model_mock.side_effect = forward_returns
+    model_mock.compute_logits.side_effect = logits_returns
+    proposer.model = model_mock
+    proposer._draft_attn_layer_names = {"layer.0"}
+
+    def fake_compute_probs(logits, sampling_metadata, use_fp64_gumbel):
+        assert use_fp64_gumbel == proposer.use_fp64_gumbel
+        probs = torch.softmax(logits, dim=-1)
+        return probs.argmax(dim=-1), probs
+
+    monkeypatch.setattr(
+        "vllm.v1.spec_decode.llm_base_proposer.compute_probs_and_sample_next_token",
+        fake_compute_probs,
+    )
+
+    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+
+    attn_metadata_builder_cls, _ = try_get_attention_backend(
+        AttentionBackendEnum[attn_backend]
+    )
+    attn_metadata_builder = attn_metadata_builder_cls(
+        kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=proposer._draft_attn_layer_names,
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
+    proposer.runner = mock.MagicMock()
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
+    mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
+    proposer.draft_attn_groups = [mock_attn_group]
+
+    sampling_metadata = mock.MagicMock()
+    sampling_metadata.all_greedy = False
+    sampling_metadata.temperature = torch.ones(batch_size, device=device)
+
+    result = proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
+        target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
+        target_positions=torch.cat(
+            [
+                torch.arange(seq_lens[0], device=device),
+                torch.arange(seq_lens[1], device=device),
+            ]
+        ),
+        target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
+        next_token_ids=torch.randint(
+            0, vocab_size, (batch_size,), dtype=torch.int32, device=device
+        ),
+        token_indices_to_sample=None,
+        common_attn_metadata=common_attn_metadata,
+        sampling_metadata=sampling_metadata,
+    )
+
+    assert result.shape == (batch_size, num_speculative_tokens)
+
+    draft_probs = proposer.take_last_draft_probs()
+    assert draft_probs is not None
+    assert draft_probs.shape == (batch_size, num_speculative_tokens, vocab_size)
+    for step, expected_logits in enumerate(logits_returns):
+        assert torch.allclose(
+            draft_probs[:, step, :],
+            torch.softmax(expected_logits, dim=-1),
+        )
+
+
 def test_set_inputs_first_pass_dflash():
-    """
-    Test for DFlash set_inputs_first_pass.
+    """Test for DFlash set_inputs_first_pass.
 
     DFlash uses cross-attention: context tokens become K/V and only
     query tokens (bonus + mask) are Q. This tests the DFlash-specific

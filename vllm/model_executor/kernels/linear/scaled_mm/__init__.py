@@ -9,6 +9,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel impo
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
+    CPUFp8PerTensorScaledMMLinearKernel,
+    CPUFP8W8A8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
@@ -39,6 +41,12 @@ from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+    XPUFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
+    ZentorchInt8ScaledMMLinearKernel,
+)
 
 __all__ = [
     "FP8ScaledMMLinearKernel",
@@ -58,6 +66,10 @@ __all__ = [
     "RowWiseTorchFP8ScaledMMLinearKernel",
     "ROCmFP8ScaledMMLinearKernel",
     "TritonInt8ScaledMMLinearKernel",
+    "ZentorchInt8ScaledMMLinearKernel",
     "Fp8BlockScaledMMLinearKernel",
     "CPUFp8BlockScaledMMKernel",
+    "CPUFp8PerTensorScaledMMLinearKernel",
+    "CPUFP8W8A8ScaledMMLinearKernel",
+    "XPUFp8BlockScaledMMKernel",
 ]

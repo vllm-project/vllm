@@ -2,7 +2,9 @@
 
 [**Kthena**](https://github.com/volcano-sh/kthena) is a Kubernetes-native LLM inference platform that transforms how organizations deploy and manage Large Language Models in production. Built with declarative model lifecycle management and intelligent request routing, it provides high performance and enterprise-grade scalability for LLM inference workloads.
 
-This guide shows how to deploy a production-grade, **multi-node vLLM** service on Kubernetes.
+Kthena manages inference workloads through `ModelServing` and provides model-aware request routing through `ModelServer` and `ModelRoute`.
+
+This guide shows how to deploy a **multi-node vLLM** service on Kubernetes using `ModelServing` and expose it through a Kubernetes Service.
 
 We’ll:
 
@@ -18,7 +20,7 @@ You need:
 
 - A Kubernetes cluster with **GPU nodes**.
 - `kubectl` access with cluster-admin or equivalent permissions.
-- **Volcano** installed for gang scheduling.
+- **Volcano 1.14 or later** for the role-level gang scheduling used in this example.
 - **Kthena** installed with the `ModelServing` CRD available.
 - A valid **Hugging Face token** if loading models from Hugging Face Hub.
 
@@ -30,21 +32,22 @@ helm repo update
 helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
 ```
 
-This provides the gang-scheduling and network topology features used by Kthena.
+Volcano provides the gang scheduling used in this example. It is optional for Kthena deployments that do not use Volcano scheduling.
 
 ### 1.2 Install Kthena
 
 ```bash
-helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v0.1.0 --namespace kthena-system --create-namespace
+helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v1.0.0 --namespace kthena-system --create-namespace
 ```
 
 - The `kthena-system` namespace is created.
-- Kthena controllers and CRDs, including `ModelServing`, are installed and healthy.
+- Kthena controllers and CRDs, including `ModelServing`, are installed.
 
 Validate:
 
 ```bash
-kubectl get crd | grep modelserving
+kubectl get pods -n kthena-system
+kubectl get crd modelservings.workload.serving.volcano.sh
 ```
 
 You should see:
@@ -57,43 +60,80 @@ modelservings.workload.serving.volcano.sh   ...
 
 ## 2. The Multi-Node vLLM `ModelServing` Example
 
-Kthena provides an example manifest to deploy a **multi-node vLLM cluster running Llama**. Conceptually this is equivalent to the vLLM production stack Helm deployment, but expressed with `ModelServing`.
+Kthena provides an example manifest to deploy a **multi-node vLLM cluster running Llama**. Each role replica contains an entry pod and its worker pods.
 
 A simplified version of the example (`llama-multinode`) looks like:
 
 - `spec.replicas: 1` – one `ServingGroup` (one logical model deployment).
 - `roles`:
     - `entryTemplate` – defines **leader** pods that run:
-        - vLLM’s **multi-node cluster bootstrap script** (Ray cluster).
+        - vLLM’s **multi-node cluster bootstrap script**.
         - vLLM **OpenAI-compatible API server**.
-    - `workerTemplate` – defines **worker** pods that join the leader’s Ray cluster.
+    - `workerTemplate` – defines **worker** pods to join the leader’s Ray cluster (Ray backend) or to join same distributed process group (multiprocessing backend).
 
 Key points from the example YAML:
 
-- **Image**: `vllm/vllm-openai:latest` (matches upstream vLLM images).
-- **Command** (leader):
+Image: `vllm/vllm-openai:latest` (matches upstream vLLM images).
+Commands:
 
-  ```yaml
-  command:
-    - sh
-    - -c
-    - >
-      bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
-      vllm serve meta-llama/Llama-3.1-405B-Instruct
-        --port 8080
-        --tensor-parallel-size 8
-        --pipeline-parallel-size 2
-  ```
+??? code "Yaml"
+    === "Multiprocessing (default)"
+        Leader:
 
-- **Command** (worker):
+        ```yaml
+        command:
+          - sh
+          - -c
+          - >
+            vllm serve meta-llama/Llama-3.1-405B-Instruct
+              --tensor-parallel-size 8
+              --pipeline-parallel-size 2
+              --nnodes=2
+              --node-rank=0
+              --master-addr=$(ENTRY_ADDRESS)
+              --port 8080
+        ```
 
-  ```yaml
-  command:
-    - sh
-    - -c
-    - >
-      bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)
-  ```
+        Worker:
+
+        ```yaml
+        command:
+          - sh
+          - -c
+          - >
+            vllm serve meta-llama/Llama-3.1-405B-Instruct
+              --tensor-parallel-size 8
+              --pipeline-parallel-size 2
+              --nnodes=2
+              --node-rank=1
+              --master-addr=$(ENTRY_ADDRESS)
+              --headless
+        ```
+
+    === "Ray"
+        Leader:
+
+        ```yaml
+        command:
+          - sh
+          - -c
+          - >
+            bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
+            leader --ray_cluster_size=2;
+            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8
+            --pipeline-parallel-size 2 --distributed-executor-backend ray
+        ```
+
+        Worker:
+
+        ```yaml
+        command:
+          - sh
+          - -c
+          - >
+            bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
+            worker --ray_address=$(ENTRY_ADDRESS)
+        ```
 
 ---
 
@@ -111,96 +151,192 @@ kubectl create secret generic hf-token \
 
 ### 3.2 Apply the `ModelServing`
 
+Save one of the following manifests to `modelserving.yaml`:
+
+??? code "modelserving.yaml"
+    === "Multiprocessing (default)"
+        ```yaml
+        apiVersion: workload.serving.volcano.sh/v1alpha1
+        kind: ModelServing
+        metadata:
+          name: llama-multinode
+          namespace: default
+        spec:
+          schedulerName: volcano
+          replicas: 1  # group replicas
+          template:
+            restartGracePeriodSeconds: 60
+            gangPolicy:
+              minRoleReplicas:
+                llama-405b: 1
+            roles:
+              - name: llama-405b
+                replicas: 2
+                entryTemplate:
+                  spec:
+                    containers:
+                      - name: leader
+                        image: vllm/vllm-openai:latest
+                        env:
+                          - name: HUGGING_FACE_HUB_TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: hf-token
+                                key: HUGGING_FACE_HUB_TOKEN
+                        command:
+                          - sh
+                          - -c
+                          - "vllm serve meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2 --nnodes 2 --node-rank 0 --master-addr $(ENTRY_ADDRESS) --distributed-executor-backend mp --port 8080"
+                        resources:
+                          limits:
+                            nvidia.com/gpu: "8"
+                            memory: 1124Gi
+                            ephemeral-storage: 800Gi
+                          requests:
+                            ephemeral-storage: 800Gi
+                            cpu: 125
+                        ports:
+                          - containerPort: 8080
+                        readinessProbe:
+                          tcpSocket:
+                            port: 8080
+                          initialDelaySeconds: 15
+                          periodSeconds: 10
+                        volumeMounts:
+                          - mountPath: /dev/shm
+                            name: dshm
+                    volumes:
+                    - name: dshm
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 15Gi
+                workerReplicas: 1
+                workerTemplate:
+                  spec:
+                    containers:
+                      - name: worker
+                        image: vllm/vllm-openai:latest
+                        command:
+                          - sh
+                          - -c
+                          - "vllm serve meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2 --nnodes 2 --node-rank 1 --master-addr $(ENTRY_ADDRESS) --distributed-executor-backend mp --headless"
+                        resources:
+                          limits:
+                            nvidia.com/gpu: "8"
+                            memory: 1124Gi
+                            ephemeral-storage: 800Gi
+                          requests:
+                            ephemeral-storage: 800Gi
+                            cpu: 125
+                        env:
+                          - name: HUGGING_FACE_HUB_TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: hf-token
+                                key: HUGGING_FACE_HUB_TOKEN
+                        volumeMounts:
+                          - mountPath: /dev/shm
+                            name: dshm
+                    volumes:
+                    - name: dshm
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 15Gi
+        ```
+
+    === "Ray"
+        ```yaml
+        apiVersion: workload.serving.volcano.sh/v1alpha1
+        kind: ModelServing
+        metadata:
+          name: llama-multinode
+          namespace: default
+        spec:
+          schedulerName: volcano
+          replicas: 1  # group replicas
+          template:
+            restartGracePeriodSeconds: 60
+            gangPolicy:
+              minRoleReplicas:
+                llama-405b: 1
+            roles:
+              - name: llama-405b
+                replicas: 2
+                entryTemplate:
+                  spec:
+                    containers:
+                      - name: leader
+                        image: vllm/vllm-openai:latest
+                        env:
+                          - name: HUGGING_FACE_HUB_TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: hf-token
+                                key: HUGGING_FACE_HUB_TOKEN
+                        command:
+                          - sh
+                          - -c
+                          - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
+                            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray"
+                        resources:
+                          limits:
+                            nvidia.com/gpu: "8"
+                            memory: 1124Gi
+                            ephemeral-storage: 800Gi
+                          requests:
+                            ephemeral-storage: 800Gi
+                            cpu: 125
+                        ports:
+                          - containerPort: 8080
+                        readinessProbe:
+                          tcpSocket:
+                            port: 8080
+                          initialDelaySeconds: 15
+                          periodSeconds: 10
+                        volumeMounts:
+                          - mountPath: /dev/shm
+                            name: dshm
+                    volumes:
+                    - name: dshm
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 15Gi
+                workerReplicas: 1
+                workerTemplate:
+                  spec:
+                    containers:
+                      - name: worker
+                        image: vllm/vllm-openai:latest
+                        command:
+                          - sh
+                          - -c
+                          - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
+                        resources:
+                          limits:
+                            nvidia.com/gpu: "8"
+                            memory: 1124Gi
+                            ephemeral-storage: 800Gi
+                          requests:
+                            ephemeral-storage: 800Gi
+                            cpu: 125
+                        env:
+                          - name: HUGGING_FACE_HUB_TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: hf-token
+                                key: HUGGING_FACE_HUB_TOKEN
+                        volumeMounts:
+                          - mountPath: /dev/shm
+                            name: dshm
+                    volumes:
+                    - name: dshm
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 15Gi
+        ```
+
 ```bash
-cat  <<EOF | kubectl apply -f -
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ModelServing
-metadata:
-  name: llama-multinode
-  namespace: default
-spec:
-  schedulerName: volcano
-  replicas: 1  # group replicas
-  template:
-    restartGracePeriodSeconds: 60
-    gangPolicy:
-      minRoleReplicas:
-        405b: 1
-    roles:
-      - name: 405b
-        replicas: 2
-        entryTemplate:
-          spec:
-            containers:
-              - name: leader
-                image: vllm/vllm-openai:latest
-                env:
-                  - name: HUGGING_FACE_HUB_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: hf-token
-                        key: HUGGING_FACE_HUB_TOKEN
-                command:
-                  - sh
-                  - -c
-                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2; 
-                    vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2"
-                resources:
-                  limits:
-                    nvidia.com/gpu: "8"
-                    memory: 1124Gi
-                    ephemeral-storage: 800Gi
-                  requests:
-                    ephemeral-storage: 800Gi
-                    cpu: 125
-                ports:
-                  - containerPort: 8080
-                readinessProbe:
-                  tcpSocket:
-                    port: 8080
-                  initialDelaySeconds: 15
-                  periodSeconds: 10
-                volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
-        workerReplicas: 1
-        workerTemplate:
-          spec:
-            containers:
-              - name: worker
-                image: vllm/vllm-openai:latest
-                command:
-                  - sh
-                  - -c
-                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
-                resources:
-                  limits:
-                    nvidia.com/gpu: "8"
-                    memory: 1124Gi
-                    ephemeral-storage: 800Gi
-                  requests:
-                    ephemeral-storage: 800Gi
-                    cpu: 125
-                env:
-                  - name: HUGGING_FACE_HUB_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: hf-token
-                        key: HUGGING_FACE_HUB_TOKEN
-                volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm   
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
-EOF
+kubectl apply -f modelserving.yaml
 ```
 
 Kthena will:
@@ -249,24 +385,24 @@ kubectl get pod -owide -l modelserving.volcano.sh/name=llama-multinode
 Example output (from docs):
 
 ```text
-NAMESPACE   NAME                          READY   STATUS    RESTARTS   AGE   IP            NODE           ...
-default     llama-multinode-0-405b-0-0    1/1     Running   0          15m   10.244.0.56   192.168.5.12   ...
-default     llama-multinode-0-405b-0-1    1/1     Running   0          15m   10.244.0.58   192.168.5.43   ...
-default     llama-multinode-0-405b-1-0    1/1     Running   0          15m   10.244.0.57   192.168.5.58   ...
-default     llama-multinode-0-405b-1-1    1/1     Running   0          15m   10.244.0.53   192.168.5.36   ...
+NAMESPACE   NAME                                   READY   STATUS    RESTARTS   AGE   IP            NODE           ...
+default     llama-multinode-0-llama-405b-0-0    1/1     Running   0          15m   10.244.0.56   192.168.5.12   ...
+default     llama-multinode-0-llama-405b-0-1    1/1     Running   0          15m   10.244.0.58   192.168.5.43   ...
+default     llama-multinode-0-llama-405b-1-0    1/1     Running   0          15m   10.244.0.57   192.168.5.58   ...
+default     llama-multinode-0-llama-405b-1-1    1/1     Running   0          15m   10.244.0.53   192.168.5.36   ...
 ```
 
 Pod name pattern:
 
 - `llama-multinode-<group-idx>-<role-name>-<replica-idx>-<ordinal>`.
 
-The first number indicates `ServingGroup`. The second (`405b`) is the `Role`. The remaining indices identify the pod within the role.
+The first index identifies the `ServingGroup`, followed by the role name (`llama-405b`), role replica index, and pod index.
 
 ---
 
-## 6. Accessing the vLLM OpenAI-Compatible API
+## 5. Accessing the vLLM OpenAI-Compatible API
 
-Expose the entry via a Service:
+Save the following Service as `service.yaml` to expose the entry pods:
 
 ```yaml
 apiVersion: v1
@@ -278,7 +414,6 @@ spec:
   selector:
     modelserving.volcano.sh/name: llama-multinode
     modelserving.volcano.sh/entry: "true"
-    # optionally further narrow to leader role if you label it
   ports:
     - name: http
       port: 80
@@ -286,9 +421,10 @@ spec:
   type: ClusterIP
 ```
 
-Port-forward from your local machine:
+Apply the Service, then port-forward from your local machine:
 
 ```bash
+kubectl apply -f service.yaml
 kubectl port-forward svc/llama-multinode-openai 30080:80 -n default
 ```
 
@@ -316,11 +452,12 @@ You should see an OpenAI-style response from vLLM.
 
 ---
 
-## 7. Clean Up
+## 6. Clean Up
 
 To remove the deployment and its resources:
 
 ```bash
+kubectl delete -f service.yaml
 kubectl delete modelserving llama-multinode -n default
 ```
 
@@ -330,3 +467,5 @@ If you’re done with the entire stack:
 helm uninstall kthena -n kthena-system   # or your Kthena release name
 helm uninstall volcano -n volcano-system
 ```
+
+For model-aware routing and prefill-decode disaggregation, see the [Kthena documentation](https://kthena.volcano.sh/docs/user-guide/router-routing).

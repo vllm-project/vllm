@@ -23,8 +23,7 @@ MIN_GPT_OSS_VERSION = "0.0.7"
 
 
 def validate_gpt_oss_install():
-    """
-    Check if the gpt-oss is installed and its version is at least 0.0.7.
+    """Check if the gpt-oss is installed and its version is at least 0.0.7.
     If not, raise an ImportError.
     """
     from importlib.metadata import PackageNotFoundError, version
@@ -151,15 +150,14 @@ class HarmonyPythonTool(Tool):
         return tool_output_msgs
 
     async def get_result_parsable_context(self, context: "ConversationContext") -> Any:
-        """
-        This function converts parsable context types to harmony and
+        """This function converts parsable context types to harmony and
         back so we can use GPTOSS demo python tool
         """
         from vllm.entrypoints.openai.responses.context import ParsableContext
 
         assert isinstance(context, ParsableContext)
 
-        last_msg = context.parser.response_messages[-1]
+        last_msg = context.response_messages[-1]
         args = json.loads(last_msg.arguments)
 
         last_msg_harmony = Message(

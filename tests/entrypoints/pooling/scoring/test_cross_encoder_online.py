@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
-from vllm.platforms import current_platform
 
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "half"
@@ -31,10 +30,6 @@ TEXTS_2 = [
 @pytest.fixture(scope="module")
 def server():
     args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
-
-    # ROCm: Use Flex Attention to support encoder-only self-attention.
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

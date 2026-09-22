@@ -168,8 +168,7 @@ async def test_max_tokens_with_tool_choice_required(
 @pytest.mark.asyncio
 async def test_named_tool_use(client: openai.AsyncOpenAI):
     def get_weather(latitude: float, longitude: float) -> str:
-        """
-        Mock function to simulate getting weather data.
+        """Mock function to simulate getting weather data.
         In a real application, this would call an external weather API.
         """
         return f"Current temperature at ({latitude}, {longitude}) is 20°C."
@@ -325,8 +324,12 @@ async def test_function_calling_with_streaming_expected_arguments(
     "tool_choice",
     ["auto", "required", {"type": "function", "name": "get_current_weather"}],
 )
+@pytest.mark.parametrize(
+    "enable_thinking",
+    [True, False],
+)
 async def test_function_calling_with_streaming_types(
-    client: openai.AsyncOpenAI, model_name: str, tool_choice
+    client: openai.AsyncOpenAI, model_name: str, tool_choice, enable_thinking: bool
 ):
     # this links the "done" type with the "start" type
     # so every "done" type should have a corresponding "start" type
@@ -436,6 +439,7 @@ async def test_function_calling_with_streaming_types(
         input=input_list,
         tools=tools,
         tool_choice=tool_choice,
+        extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
         stream=True,
     )
 

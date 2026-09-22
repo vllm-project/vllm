@@ -6,16 +6,16 @@ from collections.abc import Sequence
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -25,6 +25,8 @@ logger = init_logger(__name__)
 
 
 class DeepSeekV31ToolParser(ToolParser):
+    structural_tag_model = "deepseek_v3_1"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 

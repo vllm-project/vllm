@@ -1,0 +1,159 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+import logging
+from collections.abc import Awaitable, Callable
+from http import HTTPStatus
+from typing import Any
+
+import pydantic
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+
+from vllm.config import ModelConfig
+from vllm.entrypoints.generate.factories import get_generate_invocation_types
+from vllm.entrypoints.pooling.factories import get_pooling_invocation_types
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.serving import BaseServing
+from vllm.entrypoints.serve.instrumentator.basic import base
+from vllm.entrypoints.serve.instrumentator.health import health
+from vllm.entrypoints.serve.utils.api_utils import validate_json_request
+from vllm.tasks import SupportedTask
+
+# TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
+# (requires typing_extensions >= 4.13)
+RequestType = Any
+GetHandlerFn = Callable[[Request], BaseServing | None]
+EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
+
+
+def _snapshot_handler_levels() -> list[tuple[logging.Handler, int]]:
+    """Snapshot handler levels for loggers that may be affected by third-party
+    logging configuration side effects (e.g. model_hosting_container_standards
+    calling configure_root_logger() at import time)."""
+    loggers = [logging.getLogger(), logging.getLogger("vllm")]
+    seen: set[int] = set()
+    snapshot: list[tuple[logging.Handler, int]] = []
+    for logger in loggers:
+        for handler in logger.handlers:
+            if id(handler) not in seen:
+                seen.add(id(handler))
+                snapshot.append((handler, handler.level))
+    return snapshot
+
+
+def _restore_handler_levels(
+    snapshot: list[tuple[logging.Handler, int]],
+) -> None:
+    """Restore handler levels from a snapshot."""
+    for handler, level in snapshot:
+        handler.setLevel(level)
+
+
+def attach_router(
+    app: FastAPI,
+    supported_tasks: tuple["SupportedTask", ...],
+    model_config: ModelConfig | None = None,
+):
+    """Attach the SageMaker hosting endpoints to the API server.
+
+    Handler levels are snapshotted and restored because importing
+    model_hosting_container_standards may reconfigure root logging.
+    """
+    snapshot = _snapshot_handler_levels()
+    try:
+        _attach_router(app, supported_tasks, model_config)
+    finally:
+        _restore_handler_levels(snapshot)
+
+
+def _attach_router(
+    app: FastAPI,
+    supported_tasks: tuple["SupportedTask", ...],
+    model_config: ModelConfig | None = None,
+):
+    """Register the SageMaker hosting routes (/ping, /invocations) on the
+    app."""
+    import model_hosting_container_standards.sagemaker as sagemaker_standards
+
+    router = APIRouter()
+
+    # NOTE: Construct the TypeAdapters only once
+    INVOCATION_TYPES = get_generate_invocation_types(
+        supported_tasks, model_config
+    ) + get_pooling_invocation_types(supported_tasks, model_config)
+
+    INVOCATION_VALIDATORS = [
+        (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
+        for request_type, (get_handler, endpoint) in INVOCATION_TYPES
+    ]
+
+    @router.post("/ping", response_class=Response)
+    @router.get("/ping", response_class=Response)
+    @sagemaker_standards.register_ping_handler
+    async def ping(raw_request: Request) -> Response:
+        """Ping check. Endpoint required for SageMaker."""
+        return await health(raw_request)
+
+    @router.post(
+        "/invocations",
+        dependencies=[Depends(validate_json_request)],
+        responses={
+            HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+            HTTPStatus.UNSUPPORTED_MEDIA_TYPE.value: {"model": ErrorResponse},
+            HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        },
+    )
+    @sagemaker_standards.register_invocation_handler
+    @sagemaker_standards.stateful_session_manager()
+    @sagemaker_standards.inject_adapter_id(adapter_path="model")
+    async def invocations(raw_request: Request):
+        """For SageMaker, routes requests based on the request type."""
+        try:
+            body = await raw_request.json()
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST.value,
+                detail=f"JSON decode error: {e}",
+            ) from e
+
+        valid_endpoints = [
+            (validator, endpoint)
+            for validator, (get_handler, endpoint) in INVOCATION_VALIDATORS
+            if get_handler(raw_request) is not None
+        ]
+
+        for request_validator, endpoint in valid_endpoints:
+            try:
+                request = request_validator.validate_python(body)
+            except pydantic.ValidationError:
+                continue
+
+            return await endpoint(request, raw_request)
+
+        type_names = [
+            t.__name__ if isinstance(t := validator._type, type) else str(t)
+            for validator, _ in valid_endpoints
+        ]
+        msg = f"Cannot find suitable handler for request. Expected one of: {type_names}"
+        res = base(raw_request).create_error_response(message=msg)
+        return JSONResponse(content=res.model_dump(), status_code=res.error.code)
+
+    app.include_router(router)
+
+
+def sagemaker_standards_bootstrap(app: FastAPI) -> FastAPI:
+    """Bootstrap the app with the SageMaker hosting standards.
+
+    Handler levels are restored right after the import because importing
+    model_hosting_container_standards may reconfigure root logging, and
+    bootstrap must run with the original levels.
+    """
+    snapshot = _snapshot_handler_levels()
+    try:
+        import model_hosting_container_standards.sagemaker as sagemaker_standards
+
+        app = sagemaker_standards.bootstrap(app)
+    finally:
+        _restore_handler_levels(snapshot)
+    return app

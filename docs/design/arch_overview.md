@@ -51,9 +51,9 @@ More API details can be found in the [Offline Inference](../api/README.md#offlin
 
 The code for the `LLM` class can be found in [vllm/entrypoints/llm.py](../../vllm/entrypoints/llm.py).
 
-### OpenAI-Compatible API Server
+### Online Serving
 
-The second primary interface to vLLM is via its OpenAI-compatible API server.
+The second primary interface to vLLM is via its online server.
 This server can be started using the `vllm serve` command.
 
 ```bash
@@ -62,21 +62,7 @@ vllm serve <model>
 
 The code for the `vllm` CLI can be found in [vllm/entrypoints/cli/main.py](../../vllm/entrypoints/cli/main.py).
 
-Sometimes you may see the API server entrypoint used directly instead of via the
-`vllm` CLI command. For example:
-
-```bash
-python -m vllm.entrypoints.openai.api_server --model <model>
-```
-
-!!! warning
-
-    `python -m vllm.entrypoints.openai.api_server` is deprecated
-    and may become unsupported in a future release.
-
-That code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py).
-
-More details on the API server can be found in the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) document.
+More details on the API server can be found in the [Online Serving](../serving/online_serving/README.md) document.
 
 ## V1 Process Architecture
 
@@ -88,7 +74,7 @@ The API server process handles HTTP requests (e.g., the OpenAI-compatible API), 
 
 By default, there is **1 API server process**, but when data parallelism is used, the API server count automatically scales to match the data parallel size. This can also be manually configured with the `--api-server-count` flag. Each API server connects to **all** engine cores via ZMQ in a many-to-many topology, enabling any API server to route requests to any engine core. Each API server process uses multiple CPU threads for media loading (controlled by `VLLM_MEDIA_LOADING_THREAD_COUNT`, default 8).
 
-The code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
+The code can be found in [vllm/entrypoints/launchers/api_server](../../vllm/entrypoints/launchers/api_server) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
 
 ### Engine Core Process
 
@@ -178,7 +164,7 @@ incoming requests. The `AsyncLLMEngine` is designed for online serving, where it
 can handle multiple concurrent requests and stream outputs to clients.
 
 The OpenAI-compatible API server uses the `AsyncLLMEngine`. There is also a demo
-API server that serves as a simpler example in [vllm/entrypoints/api_server.py](../../vllm/entrypoints/api_server.py).
+API server that serves as a simpler example in [examples/applications/api_server/server.py](../../examples/applications/api_server/server.py).
 
 The code for `AsyncLLMEngine` can be found in [vllm/engine/async_llm_engine.py](../../vllm/engine/async_llm_engine.py).
 

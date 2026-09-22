@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
@@ -38,6 +39,7 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
     hidden_size: int = 768
     dtype: torch.dtype = torch.float32
@@ -61,15 +63,20 @@ class MockVllmConfig:
 class DummyTokenizer:
     truncation_side: str = "left"
     max_chars_per_token: int = 1
+    # Deliberately outside the range of ids `encode` returns, so a test can
+    # tell a pad token apart from a real one.
+    pad_token_id: int = 99999
 
     def __post_init__(self) -> None:
         self._captured_encode_kwargs: dict = {}
+        self._captured_text_len: int = 0
 
     def decode(self, tokens: list[int]):
         return str(tokens)
 
     def encode(self, text: str, **kwargs):
         self._captured_encode_kwargs = kwargs
+        self._captured_text_len = len(text)
 
         in_length = len(text)
         truncation = kwargs.get("truncation")
@@ -78,6 +85,11 @@ class DummyTokenizer:
             return list(range(min(in_length, max_length)))
 
         return list(range(in_length))
+
+    def __call__(self, text: str, **kwargs):
+        # BaseRenderer._tokenize_prompt calls the tokenizer via __call__ (to
+        # unify the output type), so mirror a real tokenizer's BatchEncoding.
+        return {"input_ids": self.encode(text, **kwargs)}
 
 
 def _build_renderer(
@@ -279,7 +291,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(
@@ -300,7 +312,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(
@@ -321,7 +333,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(
@@ -361,10 +373,141 @@ class TestRenderPrompt:
         assert results[0]["prompt_token_ids"] == tokens
         assert results[0]["prompt"] == "[1, 2, 3, 4]"
 
+    def test_explicit_side_tokenizer_unbounded(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 500)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=4,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 4
+
+        kwargs = renderer.tokenizer._captured_encode_kwargs
+        assert kwargs["truncation"] is False
+
+    def test_explicit_side_left_text(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 5
+        assert results[0]["prompt_token_ids"] == list(range(45, 50))
+
+    def test_explicit_side_right_text(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
+                truncation_side="right",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 5
+        assert results[0]["prompt_token_ids"] == list(range(5))
+
+    def test_padding_with_left_truncation_keeps_the_prompt(self):
+        """Padding must not be truncated away.
+
+        `padding` and `truncate_prompt_tokens`/`truncation_side` are all
+        settable on one pooling request. Padding to the full input length
+        before truncating from the left leaves a prompt made entirely of pad
+        tokens, and the request still succeeds -- so the model embeds nothing
+        but padding.
+        """
+        renderer = _build_renderer(MockModelConfig())
+        pad_id = renderer.tokenizer.pad_token_id
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                pad_prompt_tokens=-1,
+                truncate_prompt_tokens=5,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        token_ids = results[0]["prompt_token_ids"]
+
+        # The sentinel: on a padding-first pipeline every surviving id is a
+        # pad token, so the prompt reaches the model with no content at all.
+        assert set(token_ids) != {pad_id}
+
+        # Transformers semantics: truncate to 5, then pad out to the full
+        # input length.
+        assert token_ids[:5] == list(range(45, 50))
+        assert token_ids[5:] == [pad_id] * 95
+
+    def test_padding_without_truncation_is_unchanged(self):
+        renderer = _build_renderer(MockModelConfig())
+        pad_id = renderer.tokenizer.pad_token_id
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100, pad_prompt_tokens=-1),
+        )
+
+        assert len(results) == 1
+        assert results[0]["prompt_token_ids"] == list(range(50)) + [pad_id] * 50
+
+    def test_explicit_side_text_pretokenization_guard(self):
+        renderer = _build_renderer(MockModelConfig(), max_chars_per_token=1)
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 500)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=4,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 4
+
+        assert renderer.tokenizer._captured_text_len <= 100
+
 
 class TestRenderEmbedPrompt:
     def _create_test_embed_bytes(self, tensor: torch.Tensor) -> bytes:
-        """Helper to create base64-encoded tensor bytes"""
+        """Helper to create base64-encoded tensor bytes."""
         buffer = io.BytesIO()
         torch.save(tensor, buffer)
         buffer.seek(0)

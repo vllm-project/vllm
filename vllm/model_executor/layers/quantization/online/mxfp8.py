@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING
 import torch
 from torch.nn import Module
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-    from vllm.model_executor.layers.fused_moe import FusedMoE
-    from vllm.model_executor.layers.fused_moe.config import (
+    from vllm.model_executor.layers.fused_moe import (
         FusedMoEQuantConfig,
+        RoutedExperts,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
@@ -21,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
-    _Fp8OnlineLinearBase,
+    OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
@@ -34,7 +36,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 
-class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
+class Mxfp8OnlineLinearMethod(OnlineLinearBase):
     """Online MXFP8 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP8 (microscaling
     FP8 with block-32 scales) during weight loading.
@@ -100,8 +102,8 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
     fp8_backend: "Fp8MoeBackend"
     experts_cls: "type[mk.FusedMoEExperts] | None"
 
-    def __init__(self, *, layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
+    def __init__(self, *, moe: FusedMoEConfig):
+        super().__init__(moe)
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 
@@ -161,7 +163,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: "FusedMoE",
+        layer: "RoutedExperts",
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -199,8 +201,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def get_fused_moe_quant_config(
@@ -215,17 +216,20 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         a1_scale = layer.w13_input_scale
         a2_scale = layer.w2_input_scale
 
-        quant_config = make_fp8_moe_quant_config(
+        return make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            w1_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
             block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
-
-        self._maybe_inject_biases(quant_config, layer)
-        return quant_config
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

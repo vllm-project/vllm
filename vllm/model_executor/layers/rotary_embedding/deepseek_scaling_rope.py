@@ -39,8 +39,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         scaling_factor: float,
         dtype: torch.dtype,
         *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
         mscale: float = 1,
@@ -48,15 +46,12 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         init_cache: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
             yarn_get_mscale(self.scaling_factor, float(mscale))
             / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
-            * attn_factor
         )
         self.use_flashinfer = (
             self.enabled()
@@ -96,10 +91,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             self.max_position_embeddings,
         )
         # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (
-            1
-            - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2, dtype=torch.float)
-        ) * self.extrapolation_factor
+        inv_freq_mask = 1 - yarn_linear_ramp_mask(
+            low, high, self.rotary_dim // 2, dtype=torch.float
+        )
         inv_freq = (
             inv_freq_interpolation * (1 - inv_freq_mask)
             + inv_freq_extrapolation * inv_freq_mask
@@ -127,29 +121,52 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-        query_rot = query[..., : self.rotary_dim]
-        key_rot = key[..., : self.rotary_dim]
-        if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim :]
-            key_pass = key[..., self.rotary_dim :]
+        return self.forward_static(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.rotary_dim,
+            self.cos_sin_cache,
+            self.is_neox_style,
+            offsets,
+        )
+
+    @staticmethod
+    def forward_static(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        head_size: int,
+        rotary_dim: int,
+        cos_sin_cache: torch.Tensor,
+        is_neox_style: bool,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """A static implementation of forward()."""
+        assert key is not None
+        query_rot = query[..., :rotary_dim]
+        key_rot = key[..., :rotary_dim]
+        if rotary_dim < head_size:
+            query_pass = query[..., rotary_dim:]
+            key_pass = key[..., rotary_dim:]
 
         cos_sin = cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
         ]
         cos, sin = cos_sin.chunk(2, dim=-1)
-        if self.is_neox_style:
+        if is_neox_style:
             cos = torch.cat((cos, cos), dim=-1).unsqueeze(-2)
             sin = torch.cat((sin, sin), dim=-1).unsqueeze(-2)
         else:
             cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
 
-        rotate_fn = rotate_neox if self.is_neox_style else rotate_gptj
+        rotate_fn = rotate_neox if is_neox_style else rotate_gptj
         query_rot = query_rot * cos + rotate_fn(query_rot) * sin
         key_rot = key_rot * cos + rotate_fn(key_rot) * sin
 
-        if self.rotary_dim < self.head_size:
+        if rotary_dim < head_size:
             query = torch.cat((query_rot, query_pass), dim=-1)
             key = torch.cat((key_rot, key_pass), dim=-1)
         else:
@@ -228,7 +245,7 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(
             self.max_position_embeddings * self.scaling_factor,
-            device=current_platform.device_type,
+            device=inv_freq.device,
             dtype=torch.float32,
         )
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
@@ -246,7 +263,6 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         inverse: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
-
         head_size = query.size(-1)
         query_rot = query[..., -self.rotary_dim :]
         key_rot = key[..., -self.rotary_dim :] if key is not None else None

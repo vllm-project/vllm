@@ -153,8 +153,15 @@ def compute_tile_loop_bounds(
     SLIDING_WINDOW: tl.constexpr,
     USE_MM_PREFIX: tl.constexpr,
     IS_3D: tl.constexpr,
+    USE_CAUSAL: tl.constexpr = True,
+    USE_PER_SEQ_CAUSAL: tl.constexpr = False,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    USE_R_SWA: tl.constexpr = False,
+    MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    MAX_MM_RANGES: tl.constexpr = 0,
+    mm_prefix_range_ptr=None,
+    seq_idx=0,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -163,10 +170,13 @@ def compute_tile_loop_bounds(
 
     1. Longest prefix spanned by any query token in this q-block.
        Clamped to ``seq_len`` (causal) or extended to it when
-       mm_prefix is active (bidirectional ranges can reach past the
-       causal prefix).
+       mm_prefix is active or non-causal sequences need the full
+       sequence.
     2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
-       only tiles that can contain an allowed key under SWA.
+       only tiles that can contain an allowed key under SWA. For non-causal
+       sequences, the window extends in both directions. For Gemma4's
+       window-clamped multimodal prefix mask, the bounds include the union of
+       the base mask and each image range intersecting the query block.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
        (segm_idx + 1) * tiles_per_segment)``.
@@ -179,10 +189,13 @@ def compute_tile_loop_bounds(
         + (BLOCK_M - 1) // num_queries_per_kv
         + 1
     )
-    if USE_MM_PREFIX:
-        # image bidirectional attention ranges require a full range
-        # including q_block padding to make sure doc mask is correct
-        max_seq_prefix_len = tl.maximum(max_seq_prefix_len, seq_len)
+    if USE_MM_PREFIX or USE_R_SWA or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
+        # Read the full sequence but never past seq_len: the causal-style
+        # formula above can overshoot for non-causal sequences, and slots
+        # >= seq_len are unwritten KV (last-block tail) that may hold NaN
+        # (0 * NaN poisons the output). Per-element masking in
+        # compute_kv_seq_mask handles the causal/non-causal boundary.
+        max_seq_prefix_len = seq_len
     else:
         max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
 
@@ -192,8 +205,13 @@ def compute_tile_loop_bounds(
     # Default: keep previous global behavior
     tile_start = 0
     tile_end = num_tiles
-    # TODO(Isotr0py): sliding window pruning with image bidirectional mask
-    if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
+    # Prefix ranges normally override the sliding window, so they require the
+    # complete sequence. Gemma4 instead clamps prefix attention to the left
+    # edge of the sliding window. In that case, the union of possible keys is
+    # bounded by the normal left window and the end of any multimodal range
+    # intersecting this query block.
+    can_prune_sliding = (not USE_R_SWA) and ((not USE_MM_PREFIX) or MM_PREFIX_CLAMP_SW)
+    if SLIDING_WINDOW > 0 and can_prune_sliding:
         # Query rows covered by this Q-block
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
@@ -207,12 +225,45 @@ def compute_tile_loop_bounds(
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
         q_abs = context_len + qpos_lo
         if CHUNK_LOOKBACK > -1:
-            # Chunked attention: align lower bound to the start of the
-            # lookback'th previous chunk.
             first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
         else:
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
-        last_allowed_key = context_len + qpos_hi
+        if USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
+            # Non-causal: keys can be AHEAD of query within the window
+            last_allowed_key = context_len + qpos_hi + SLIDING_WINDOW - 1
+        else:
+            last_allowed_key = context_len + qpos_hi
+        if USE_MM_PREFIX and MM_PREFIX_CLAMP_SW:
+            query_abs_lo = context_len + qpos_lo
+            query_abs_hi = context_len + qpos_hi
+            for i in range(MAX_MM_RANGES):
+                range_start = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
+                )
+                range_end = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
+                )
+                intersects_query_block = (
+                    (range_start < range_end)
+                    & (range_start <= query_abs_hi)
+                    & (range_end >= query_abs_lo)
+                )
+                mm_first_allowed_key = tl.maximum(
+                    range_start, query_abs_lo - SLIDING_WINDOW + 1
+                )
+                first_allowed_key = tl.minimum(
+                    first_allowed_key,
+                    tl.where(
+                        intersects_query_block,
+                        mm_first_allowed_key,
+                        first_allowed_key,
+                    ),
+                )
+                last_allowed_key = tl.maximum(
+                    last_allowed_key,
+                    tl.where(intersects_query_block, range_end, last_allowed_key),
+                )
+        last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
@@ -262,12 +313,20 @@ def compute_kv_seq_mask(
     query_abs_pos,
     seq_offset,
     seq_idx,
+    seq_len,
     mm_prefix_range_ptr,
     SLIDING_WINDOW: tl.constexpr,
     USE_MM_PREFIX: tl.constexpr,
     MAX_MM_RANGES: tl.constexpr,
+    USE_CAUSAL: tl.constexpr = True,
+    USE_PER_SEQ_CAUSAL: tl.constexpr = False,
+    per_seq_causal_ptr=None,
+    rswa_prefix_lens_ptr=None,
+    R_SWA_WINDOW: tl.constexpr = 0,
+    USE_R_SWA: tl.constexpr = False,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    MM_PREFIX_CLAMP_SW: tl.constexpr = False,
 ):
     """Build the KV mask for one tile.
 
@@ -279,9 +338,23 @@ def compute_kv_seq_mask(
     Chunked attention takes precedence over sliding window when both
     are non-default — the launcher zeros ``CHUNK_LOOKBACK`` whenever
     sliding window is disabled.
+
+    When ``USE_PER_SEQ_CAUSAL`` is set, each sequence carries its own
+    causal flag via ``per_seq_causal_ptr``; non-causal sequences use a
+    simple ``key < seq_len`` bound instead.  ``USE_CAUSAL=False``
+    disables causal masking entirely.
     """
-    # Compute attention mask: causal by default (key <= query)
-    seq_mask = seq_offset[None, :] <= query_abs_pos
+    if USE_PER_SEQ_CAUSAL:
+        is_causal = tl.load(per_seq_causal_ptr + seq_idx)
+        seq_mask = tl.where(
+            is_causal,
+            seq_offset[None, :] <= query_abs_pos,
+            seq_offset[None, :] < seq_len,
+        )
+    elif USE_CAUSAL:
+        seq_mask = seq_offset[None, :] <= query_abs_pos
+    else:
+        seq_mask = seq_offset[None, :] < seq_len
 
     # Apply sliding window / chunked attention to base mask
     # BEFORE mm_prefix OR.
@@ -292,11 +365,32 @@ def compute_kv_seq_mask(
             (query_abs_pos // CHUNK_SIZE - seq_offset[None, :] // CHUNK_SIZE)
             <= CHUNK_LOOKBACK
         )
-    elif SLIDING_WINDOW > 0:
-        seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+    elif SLIDING_WINDOW > 0 and not USE_R_SWA:
+        sw_left = (query_abs_pos - seq_offset) < SLIDING_WINDOW
+        if USE_PER_SEQ_CAUSAL:
+            sw_right = (seq_offset[None, :] - query_abs_pos) < SLIDING_WINDOW
+            seq_mask = seq_mask & tl.where(is_causal, sw_left, sw_left & sw_right)
+        elif not USE_CAUSAL:
+            sw_right = (seq_offset[None, :] - query_abs_pos) < SLIDING_WINDOW
+            seq_mask = seq_mask & sw_left & sw_right
+        else:
+            seq_mask = seq_mask & sw_left
+
+    if USE_R_SWA:
+        prefix_len = tl.load(rswa_prefix_lens_ptr + seq_idx)
+        in_prefix = seq_offset[None, :] < prefix_len
+        in_window = (query_abs_pos - seq_offset) < R_SWA_WINDOW
+        seq_mask = seq_mask & (in_prefix | in_window)
 
     # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
-    # Applied AFTER sliding window so mm_prefix ranges override SW restriction.
+    # Default (MM_PREFIX_CLAMP_SW=False): applied AFTER sliding window so
+    # mm_prefix ranges override the SW restriction -> (causal AND SW) OR mm.
+    # Gemma4 (MM_PREFIX_CLAMP_SW=True): the bidirectional image block must stay
+    # within the sliding window, matching HF's (causal OR blockwise) AND
+    # sliding_window. We AND each range with the SW past-bound
+    # (query_abs_pos - seq_offset) < SLIDING_WINDOW (== HF sliding_window_overlay
+    # kv > q - sw; future kv passes trivially). Inert for full-attention layers
+    # (SLIDING_WINDOW <= 0).
     if USE_MM_PREFIX:
         for i in range(MAX_MM_RANGES):
             range_start = tl.load(
@@ -314,7 +408,10 @@ def compute_kv_seq_mask(
                 & (seq_offset[None, :] <= range_end)
                 & is_valid
             )
-            seq_mask |= q_in_range & k_in_range
+            mm_mask = q_in_range & k_in_range
+            if MM_PREFIX_CLAMP_SW and SLIDING_WINDOW > 0:
+                mm_mask = mm_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+            seq_mask |= mm_mask
     return seq_mask
 
 

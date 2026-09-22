@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
@@ -8,16 +10,22 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
-from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.gpu.sample.logits_processor.interface import (
+    LogitsContext,
+    LogitsProcessor,
+    LogitsProcRequestState,
+)
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
-class PenaltiesState:
-    def __init__(self, req_states: RequestState):
+class PenaltiesState(LogitsProcessor):
+    def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
         self.req_states = req_states
-
-        max_num_reqs = req_states.max_num_reqs
-        self.vocab_size = req_states.vocab_size
         self.device = req_states.device
+        max_num_reqs = req_states.max_num_reqs
+        vocab_size = req_states.vocab_size
 
         self.repetition_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
@@ -30,20 +38,17 @@ class PenaltiesState:
 
         # Statistics for penalties.
         self.prompt_bin_mask = torch.zeros(
-            max_num_reqs,
-            cdiv(self.vocab_size, 32),
-            dtype=torch.int32,
-            device=self.device,
+            max_num_reqs, cdiv(vocab_size, 32), dtype=torch.int32, device=self.device
         )
         # TODO(woosuk): This tensor is rarely used but can be very large, taking up
         # GBs of GPU memory. Optimize the memory usage.
         self.output_bin_counts = torch.zeros(
-            max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
+            max_num_reqs, vocab_size, dtype=torch.int32, device=self.device
         )
 
         self._new_penalties_reqs: list[int] = []
 
-    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
         self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
@@ -52,13 +57,12 @@ class PenaltiesState:
         self.use_penalty[req_idx] = do_penalty
         if do_penalty:
             self._new_penalties_reqs.append(req_idx)
+        return do_penalty
 
     def apply_staged_writes(self) -> None:
         if self._new_penalties_reqs:
             idx_mapping = async_tensor_h2d(
-                self._new_penalties_reqs,
-                dtype=torch.int32,
-                device=self.device,
+                self._new_penalties_reqs, dtype=torch.int32, device=self.device
             )
 
             prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]
@@ -78,31 +82,23 @@ class PenaltiesState:
         self.frequency_penalty.copy_to_uva()
         self.presence_penalty.copy_to_uva()
 
-    def apply_penalties(
-        self,
-        logits: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
-        input_ids: torch.Tensor,
-        expanded_local_pos: torch.Tensor,
-        num_speculative_tokens: int,
-    ) -> None:
-        if not np.any(self.use_penalty[idx_mapping_np]):
+    def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
+        if not np.any(self.use_penalty[ctx.idx_mapping_np]):
             # No request uses penalties. Skip the kernel launch.
-            return
+            return logits
 
         apply_penalties(
             logits,
-            expanded_idx_mapping,
-            input_ids,
-            expanded_local_pos,
+            ctx.expanded_idx_mapping,
+            ctx.input_ids,
+            ctx.expanded_local_pos,
             self.repetition_penalty.gpu,
             self.frequency_penalty.gpu,
             self.presence_penalty.gpu,
             self.prompt_bin_mask,
             self.output_bin_counts,
-            num_speculative_tokens,
         )
+        return logits
 
 
 @triton.jit
@@ -121,9 +117,8 @@ def _penalties_kernel(
     output_bin_counts_stride,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
-    MAX_SPEC_LEN: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     rep_penalty = tl.load(repetition_penalty_ptr + req_state_idx)
     freq_penalty = tl.load(frequency_penalty_ptr + req_state_idx)
@@ -149,18 +144,16 @@ def _penalties_kernel(
         other=0,
     )
 
-    # Compute cumulative draft_counts from previous positions in this request
+    # Accumulate draft token counts from previous positions directly into
+    # output_bin_counts (preserves its native tensor layout, avoiding an
+    # expensive shared-memory layout conversion after the loop).
     pos = tl.load(expanded_local_pos_ptr + token_idx)
     start_idx = token_idx - pos
-    draft_counts = tl.zeros((BLOCK_SIZE,), dtype=tl.int32)
-    for prev_pos in tl.static_range(MAX_SPEC_LEN):
-        if prev_pos < pos:
-            prev_token = tl.load(token_ids_ptr + start_idx + prev_pos + 1)
-            token_match = block == prev_token
-            draft_counts = draft_counts + token_match.to(tl.int32)
-
-    # Total counts = base output counts + cumulative draft counts
-    output_bin_counts = base_output_counts + draft_counts
+    output_bin_counts = base_output_counts
+    for prev_pos in tl.range(pos):
+        prev_token = tl.load(token_ids_ptr + start_idx + prev_pos + 1)
+        token_match = block == prev_token
+        output_bin_counts = output_bin_counts + token_match.to(tl.int32)
     output_bin_mask = output_bin_counts > 0
 
     # Apply repetition penalties.
@@ -198,7 +191,6 @@ def apply_penalties(
     presence_penalty: torch.Tensor,
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
-    num_speculative_tokens: int,
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
@@ -218,7 +210,6 @@ def apply_penalties(
         output_bin_counts.stride(0),
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
-        MAX_SPEC_LEN=num_speculative_tokens,
     )
 
 
@@ -283,8 +274,10 @@ def bincount(
     output_bin_counts: torch.Tensor,
     max_prefill_len: int,
 ) -> None:
-    prompt_bin_mask[expanded_idx_mapping] = 0
-    output_bin_counts[expanded_idx_mapping] = 0
+    # Use index_fill_ instead of `tensor[idx] = 0` to avoid sync.
+    idx_long = expanded_idx_mapping.long()
+    prompt_bin_mask.index_fill_(0, idx_long, 0)
+    output_bin_counts.index_fill_(0, idx_long, 0)
     num_tokens = expanded_idx_mapping.shape[0]
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)

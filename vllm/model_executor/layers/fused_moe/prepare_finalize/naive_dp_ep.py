@@ -17,7 +17,7 @@ def _quantize_and_setup_dispatch(
     a1: torch.Tensor,
     quant_config: FusedMoEQuantConfig,
     defer_input_quant: bool = False,
-) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
+) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor | None]:
     # Defer input quantization to the MoE kernel.
     if defer_input_quant:
         a1q = a1
@@ -33,7 +33,7 @@ def _quantize_and_setup_dispatch(
         # which makes the scales tensor different shape than
         # the hidden states, breaking the A2A kernel. So, we
         # delay the swizzling until after the A2A.
-        a1q, a1q_scale = a1q, a1q_scale = moe_kernel_quantize_input(
+        a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
             input_sf,
             quant_dtype=quant_config.quant_dtype,
@@ -49,7 +49,7 @@ def _quantize_and_setup_dispatch(
     skip_gather_scales = a1q_scale is None or a1q_scale.ndim == 0
     scales = None if skip_gather_scales else [a1q_scale]
 
-    return a1q, scales
+    return a1q, scales, a1q_scale
 
 
 def _unwrap_scale_and_prepare_for_moe(
@@ -69,8 +69,7 @@ def _unwrap_scale_and_prepare_for_moe(
 
 
 class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
+    """Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
 
     Uses Torch AR/RS or AR for dispatch/combine operations, applied
     to the topk weights and ids.
@@ -121,16 +120,16 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         """Quantize and Dispatch Topk Weights and Topk Ids."""
-
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
-            # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        a1q, scales = _quantize_and_setup_dispatch(a1, quant_config, defer_input_quant)
+        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+            a1, quant_config, defer_input_quant
+        )
 
         # When LoRA is active, dispatch the per-token LoRA id along with
         # hidden_states so every rank receives the correct mapping for the
@@ -165,7 +164,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         if extra_tensors is None:
             assert len(res) == 3
             a1q, topk_weights, topk_ids = res
-            a1q_scale = None
+            a1q_scale = a1q_scale_orig
         else:
             assert len(res) == 4
             a1q, topk_weights, topk_ids, gathered_extras = res
@@ -179,7 +178,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                     gathered_extras, quant_config
                 )
             else:
-                a1q_scale = None
+                a1q_scale = a1q_scale_orig
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -209,8 +208,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
 
 
 class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
-    """
-    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
+    """Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
 
     Uses Torch AR/RS or AR for dispatch/combine operations, applied
     to the router logits (the MoE kernel runs the router internally).
@@ -249,8 +247,9 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         defer_input_quant: bool = False,
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
-
-        a1q, scales = _quantize_and_setup_dispatch(a1, quant_config, defer_input_quant)
+        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+            a1, quant_config, defer_input_quant
+        )
 
         res = get_ep_group().dispatch_router_logits(
             a1q,
@@ -262,7 +261,7 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         if scales is None:
             assert len(res) == 2
             a1q, router_logits = res
-            a1q_scale = None
+            a1q_scale = a1q_scale_orig
         else:
             assert len(res) == 3
             a1q, router_logits, scales = res

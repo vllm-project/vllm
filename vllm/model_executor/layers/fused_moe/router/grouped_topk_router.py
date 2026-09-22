@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from functools import partial
 
 import torch
@@ -9,12 +8,13 @@ from vllm import _custom_ops as ops
 from vllm import envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
@@ -91,7 +91,7 @@ def grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
-        and current_platform.is_cuda()
+        and (current_platform.is_cuda() or current_platform.is_xpu())
         and num_expert_group <= 32
         and topk <= 32
         and e_score_correction_bias is not None
@@ -251,7 +251,6 @@ class GroupedTopKRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         num_expert_group: int,
         topk_group: int,
         renormalize: bool = True,
@@ -259,15 +258,13 @@ class GroupedTopKRouter(BaseRouter):
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         num_fused_shared_experts: int = 0,
-        enable_eplb: bool = False,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        eplb_state: EplbLayerState | None = None,
+        skip_padding: bool = False,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
-            indices_type_getter=indices_type_getter,
         )
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
@@ -276,6 +273,7 @@ class GroupedTopKRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.e_score_correction_bias = e_score_correction_bias
         self.num_fused_shared_experts = num_fused_shared_experts
+        self.skip_padding = skip_padding
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -285,6 +283,7 @@ class GroupedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=self.num_expert_group,
             has_e_score_bias=self.e_score_correction_bias is not None,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _compute_routing(
@@ -349,5 +348,16 @@ class GroupedTopKRouter(BaseRouter):
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.e_score_correction_bias,
         )
+
+        if (
+            self.skip_padding
+            and envs.VLLM_MOE_SKIP_PADDING
+            and is_forward_context_available()
+        ):
+            is_padding = get_forward_context().is_padding
+            if is_padding is not None:
+                is_padding = is_padding[: topk_ids.shape[0]].unsqueeze(1)
+                topk_weights = topk_weights.masked_fill(is_padding, 0)
+                topk_ids = topk_ids.masked_fill(is_padding, -1)
 
         return topk_weights, topk_ids

@@ -9,13 +9,19 @@ import vllm.config
 import vllm.ir.ops
 import vllm.plugins
 from tests.compile.backend import TestBackend
+from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
     FUSED_OPS,
     FusedRMSQuantKey,
     RMSNormQuantFusionPass,
+)
+from vllm.compilation.passes.fx_utils import find_auto_fn_maybe
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
 )
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -40,7 +46,7 @@ from vllm.model_executor.kernels.linear import (
     TritonFp8BlockScaledMMKernel,
     _KernelT,
 )
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -99,8 +105,6 @@ KERNEL_GROUPSHAPE_COMBINATIONS = (
 
 # For Aiter tests we toggle use_aiter_quant_op
 AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # Per-token with ROCmFP8ScaledMMLinearKernel
-    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR, False),
     # Per-token with RowWiseTorchFP8ScaledMMLinearKernel
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
@@ -197,8 +201,6 @@ class TestModel(torch.nn.Module):
             # Blockwise path
             if self.use_aiter_fusion and self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_group_quant_op()]
-            if self.use_aiter_fusion:
-                return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
         else:
             if self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_per_token_quant_op()]
@@ -246,6 +248,31 @@ class TestModel(torch.nn.Module):
             torch.ops.vllm_ir.rms_norm,
             torch.ops.vllm_ir.fused_add_rms_norm.default,
         ]
+
+
+class AddRMSNormNvfp4Model(torch.nn.Module):
+    def __init__(self, hidden_size: int, eps: float):
+        super().__init__()
+        self.norm = RMSNorm(hidden_size, eps)
+        self.activation_scale = torch.rand((1, 1), dtype=torch.float32)
+
+        weight = torch.rand((hidden_size, hidden_size))
+        self.weight, self.weight_scale, weight_global_scale = quant_nvfp4_tensor(weight)
+        self.alpha = (1 / (weight_global_scale * self.activation_scale)).reshape(1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = residual = torch.relu(x)
+        x, residual = self.norm(x, residual)
+        x, block_scale = scaled_fp4_quant(x, self.activation_scale)
+        x = cutlass_scaled_fp4_mm(
+            x,
+            self.weight,
+            block_scale,
+            self.weight_scale,
+            self.alpha,
+            out_dtype=torch.get_default_dtype(),
+        )
+        return x, residual
 
 
 def _run_fusion_test(
@@ -375,12 +402,88 @@ def test_fusion_rmsnorm_quant(
             use_aiter_fusion=False,
             use_aiter_quant=False,
         )
+        if any(
+            type(layer.kernel) is not force_kernel for layer in model.fp8_linear_layers
+        ):
+            pytest.skip(f"{force_kernel.__name__} is not supported on this platform")
 
         backend, _ = _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
         backend.check_before_ops(
             model.ops_in_model_before_partial(), fully_replaced=False
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize(
+    ("num_tokens", "hidden_size"),
+    [(1, 256), (32, 1024), (257, 4096)],
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_fusion_add_rmsnorm_nvfp4_quant(
+    dtype: torch.dtype, eps: float, num_tokens: int, hidden_size: int
+):
+    fused_op = getattr(
+        torch.ops.vllm,
+        "flashinfer_fused_add_rms_norm_nvfp4_quant",
+        None,
+    )
+    if not current_platform.has_device_capability(100) or fused_op is None:
+        pytest.skip("FlashInfer add-RMSNorm NVFP4 fusion is not available")
+    assert fused_op is not None
+    fused_op_default = fused_op.default
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(
+                fuse_norm_quant=True,
+                eliminate_noops=True,
+            ),
+        ),
+    )
+
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        fused_backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+            FixFunctionalizationPass(vllm_config),
+        )
+        unfused_backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            PostCleanupPass(vllm_config),
+            FixFunctionalizationPass(vllm_config),
+        )
+
+        model = AddRMSNormNvfp4Model(hidden_size=hidden_size, eps=eps)
+        x = torch.rand(num_tokens, hidden_size)
+        torch._dynamo.mark_dynamic(x, 0)
+
+        result_fused = torch.compile(model, backend=fused_backend)(x)
+        result_unfused = torch.compile(model, backend=unfused_backend)(x)
+
+        torch.testing.assert_close(result_fused, result_unfused, atol=2e-1, rtol=2e-1)
+        assert fusion_pass.matched_count == 1
+        fused_backend.check_before_ops([torch.ops._C.scaled_fp4_quant.out])
+        fused_backend.check_after_ops([fused_op_default])
+        assert (
+            find_auto_fn_maybe(
+                fused_backend.graph_post_pass.nodes,
+                fused_op_default,
+            )
+            is None
         )
 
 
@@ -441,3 +544,242 @@ def test_aiter_fusion_rmsnorm_quant(
         _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
+
+
+class TestGatedModel(torch.nn.Module):
+    """Model that uses RMSNormGated + reshape + group FP8 quant + linear.
+
+    Mimics GatedDeltaNetAttention's output projection path where:
+    - RMSNormGated operates on per-head tensors (N*H, D)
+    - Output is reshaped to (N, H*D) before group quantization + linear
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_dim: int,
+        eps: float,
+        force_kernel: type[_KernelT],
+        group_shape: GroupShape,
+        dtype: torch.dtype,
+        use_aiter_quant: bool = True,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        hidden_dim = num_heads * head_dim
+
+        self.norm = RMSNormGated(
+            head_dim,
+            eps=eps,
+            group_size=None,
+            norm_before_gate=True,
+        )
+
+        self.activation_quant_key = create_fp8_quant_key(
+            static=False, group_shape=group_shape
+        )
+        self.weight_quant_key = create_fp8_quant_key(
+            static=True, group_shape=GroupShape(group_shape.col, group_shape.col)
+        )
+
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_dim, hidden_dim),
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            force_kernel=force_kernel,
+            transpose_weights=True,
+            input_dtype=dtype,
+        )
+        self.fp8_linear.kernel.quant_fp8.use_aiter = use_aiter_quant
+
+    def forward(self, x, z):
+        num_heads = self.num_heads
+        head_dim = self.head_dim
+        hidden_dim = num_heads * head_dim
+        x = torch.relu(x)
+        z = torch.relu(z)
+        x_heads = x.reshape(-1, num_heads, head_dim).reshape(-1, head_dim)
+        z_heads = z.reshape(-1, num_heads, head_dim).reshape(-1, head_dim)
+        normed = self.norm(x_heads, z_heads)
+        merged = normed.reshape(-1, hidden_dim)
+        out = self.fp8_linear(merged)
+        return out
+
+    def ops_in_model_after(self):
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            AiterRMSNormGatedFp8GroupQuantPattern,
+        )
+
+        return [AiterRMSNormGatedFp8GroupQuantPattern.FUSED_OP]
+
+
+class _MockGDNLayer:
+    """Minimal mock to populate static_forward_context for pass discovery.
+
+    Uses __class__ assignment to pass isinstance checks against
+    GatedDeltaNetAttention without requiring a full config-based init.
+    """
+
+    def __init__(self, num_v_heads: int, head_v_dim: int, tp_size: int = 1):
+        self.num_v_heads = num_v_heads
+        self.head_v_dim = head_v_dim
+        self.tp_size = tp_size
+
+        from vllm.model_executor.layers.mamba.gdn.base import (
+            GatedDeltaNetAttention,
+        )
+
+        self.__class__ = GatedDeltaNetAttention
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("num_heads", [2])
+@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("num_tokens", [8])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.skipif(
+    (not current_platform.is_rocm() or not IS_AITER_FOUND),
+    reason="Only test on ROCm with aiter package installed",
+)
+def test_aiter_fusion_rmsnorm_gated_quant(
+    dtype: torch.dtype,
+    num_heads: int,
+    head_dim: int,
+    num_tokens: int,
+    eps: float,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    group_shape = GroupShape(1, 128)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["-rms_norm", "-silu_and_mul", "-quant_fp8"],
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            RocmAiterRMSNormQuantFusionPass,
+        )
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        # Register a mock GDN layer so the pass discovers num_heads/head_dim
+        mock_gdn = _MockGDNLayer(num_v_heads=num_heads, head_v_dim=head_dim, tp_size=1)
+        vllm_config.compilation_config.static_forward_context["mock_gdn_layer"] = (
+            mock_gdn
+        )
+
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
+
+        model = TestGatedModel(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            eps=eps,
+            force_kernel=AiterFp8BlockScaledMMKernel,
+            group_shape=group_shape,
+            dtype=dtype,
+            use_aiter_quant=True,
+        )
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        backend2 = TestBackend(noop_pass, cleanup_pass)
+
+        hidden_dim = num_heads * head_dim
+        x = torch.rand(num_tokens, hidden_dim)
+        z = torch.rand(num_tokens, hidden_dim)
+        torch._dynamo.mark_dynamic(x, 0)
+        torch._dynamo.mark_dynamic(z, 0)
+
+        model_fused = torch.compile(model, backend=backend)
+        result_fused = model_fused(x, z)
+
+        model_unfused = torch.compile(model, backend=backend2)
+        result_unfused = model_unfused(x, z)
+
+        torch.testing.assert_close(result_fused, result_unfused, atol=1e-2, rtol=1e-2)
+
+        assert fusion_pass.matched_count == 1
+        backend.check_after_ops(model.ops_in_model_after())
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("num_heads", [2])
+@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("num_tokens", [8])
+@pytest.mark.parametrize("eps", [1e-6])
+@pytest.mark.skipif(
+    (not current_platform.is_rocm() or not IS_AITER_FOUND),
+    reason="Only test on ROCm with aiter package installed",
+)
+def test_aiter_fusion_rmsnorm_gated_quant_no_gdn_layers(
+    dtype: torch.dtype,
+    num_heads: int,
+    head_dim: int,
+    num_tokens: int,
+    eps: float,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify that without GDN layers in static_forward_context,
+    the gated pattern is not registered and no matches occur."""
+    group_shape = GroupShape(1, 128)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["-rms_norm", "-silu_and_mul", "-quant_fp8"],
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            RocmAiterRMSNormQuantFusionPass,
+        )
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        # No mock GDN layer registered -- pass should not register gated pattern
+        fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
+
+        model = TestGatedModel(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            eps=eps,
+            force_kernel=AiterFp8BlockScaledMMKernel,
+            group_shape=group_shape,
+            dtype=dtype,
+            use_aiter_quant=True,
+        )
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+
+        hidden_dim = num_heads * head_dim
+        x = torch.rand(num_tokens, hidden_dim)
+        z = torch.rand(num_tokens, hidden_dim)
+        torch._dynamo.mark_dynamic(x, 0)
+        torch._dynamo.mark_dynamic(z, 0)
+
+        model_fused = torch.compile(model, backend=backend)
+        model_fused(x, z)
+
+        assert fusion_pass.matched_count == 0
