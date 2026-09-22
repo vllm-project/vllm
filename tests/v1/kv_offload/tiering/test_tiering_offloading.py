@@ -11,7 +11,7 @@ These tests verify:
 """
 
 from collections.abc import Iterable
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -111,6 +111,10 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
                 labelnames=("tier",),
             )
         }
+
+    @classmethod
+    def config_info_keys(cls, extra_config):
+        return ("path",)
 
     def config_info(self):
         return {"path": f"/mnt/{self.tier_type}"}
@@ -1539,3 +1543,56 @@ def test_tiering_manager_prefixes_the_config_info_of_every_secondary_tier():
         "tier1_test_metrics_path": "/mnt/test_metrics",
         "tier2_test_metrics_path": "/mnt/test_metrics",
     }
+
+
+def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
+    """The spec declares the info label names in the API-server process, and
+    the manager fills the values in the engine process. A drift between the two
+    empties every declared label and drops every filled value, so this pins
+    both sides to the same literal names."""
+    tier_configs = [{"type": "test_metrics"}, {"type": "test_metrics"}]
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5, mmap_region=mock_region
+        ),
+        secondary_tiers=[
+            MetricsSecondaryTierManager(
+                offloading_spec=_MOCK_OFFLOADING_SPEC,
+                primary_kv_view=mock_region.create_kv_memoryview(),
+                tier_type=tier_config["type"],
+            )
+            for tier_config in tier_configs
+        ],
+    )
+
+    with patch.object(
+        SecondaryTierFactory,
+        "get_tier_class",
+        return_value=MetricsSecondaryTierManager,
+    ):
+        keys = TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+    assert keys == ("tier1_test_metrics_path", "tier2_test_metrics_path")
+    assert keys == tuple(manager.config_info())
+
+
+def test_tiering_spec_passes_each_tier_its_own_config():
+    """A tier reads its own parameters out of its own config dict, not out of
+    the instance-wide kv_connector_extra_config. A tier that names a label
+    after one of its own keys declares nothing from the wrong dict."""
+    seen: list[dict] = []
+
+    class _RecordingTier(MetricsSecondaryTierManager):
+        @classmethod
+        def config_info_keys(cls, extra_config):
+            seen.append(extra_config)
+            return ()
+
+    tier_configs = [{"type": "test_metrics", "root_dir": "/mnt/a"}]
+    with patch.object(
+        SecondaryTierFactory, "get_tier_class", return_value=_RecordingTier
+    ):
+        TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+    assert seen == tier_configs

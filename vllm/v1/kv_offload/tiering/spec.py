@@ -70,7 +70,11 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
+from vllm.v1.kv_offload.tiering.base import (
+    SecondaryTierManager,
+    TieringOffloadingMetrics,
+    config_info_prefix,
+)
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -239,13 +243,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ),
             labelnames=("tier",),
         )
-        secondary_tier_configs = extra_config.get("secondary_tiers", [])
-        if not isinstance(secondary_tier_configs, list):
-            raise ValueError("secondary_tiers must be a list of tier configurations")
 
-        for tier_config in secondary_tier_configs:
-            assert isinstance(tier_config, dict)
-            tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
+        for tier_config, tier_cls in cls._get_secondary_tiers(extra_config):
             metrics.update(tier_cls.build_metric_definitions(tier_config))
 
         metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
@@ -426,6 +425,53 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             )
 
         return self._manager
+
+    @classmethod
+    @override
+    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the primary tier label names, then every secondary tier name.
+
+        The prefix mirrors TieringOffloadingManager.config_info(), which fills
+        the values in the engine process, so the two sides declare and fill the
+        same names. The primary tier passes through unprefixed.
+        """
+        keys = super().config_info_keys(extra_config)  # primary tier keys
+        for tier_idx, (tier_config, tier_cls) in enumerate(
+            cls._get_secondary_tiers(extra_config)
+        ):
+            prefix = config_info_prefix(tier_idx, tier_config["type"])
+            keys += tuple(
+                prefix + key for key in tier_cls.config_info_keys(tier_config)
+            )
+        return keys
+
+    @classmethod
+    def _get_secondary_tiers(
+        cls, extra_config: dict[str, Any]
+    ) -> list[tuple[dict[str, Any], type[SecondaryTierManager]]]:
+        """Resolve every configured secondary tier to its manager class.
+
+        Args:
+            extra_config: kv_connector_extra_config of this instance.
+
+        Returns:
+            One (tier config, tier class) pair for each secondary tier, in
+            configuration order. That order sets the tier index.
+
+        Raises:
+            ValueError: If secondary_tiers is not a list.
+
+        """
+        secondary_tier_configs = extra_config.get("secondary_tiers", [])
+        if not isinstance(secondary_tier_configs, list):
+            raise ValueError("secondary_tiers must be a list of tier configurations")
+
+        tiers = []
+        for tier_config in secondary_tier_configs:
+            assert isinstance(tier_config, dict)
+            tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
+            tiers.append((tier_config, tier_cls))
+        return tiers
 
     @override
     def _uses_shared_region(self) -> bool:
