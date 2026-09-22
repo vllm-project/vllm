@@ -310,7 +310,7 @@ def _get_static_sequence_length(
     if (
         uniform_sequence_length is not None
         and uniform_sequence_length > 1
-        and head_sequences <= 96
+        and head_sequences <= 192
     ):
         return uniform_sequence_length
     return 0
@@ -323,7 +323,7 @@ def _select_kda_launch_config(
     static_sequence_length: int,
     has_multi_token_sequence: bool,
 ) -> tuple[int, int, int]:
-    if static_sequence_length and head_sequences <= 96:
+    if static_sequence_length:
         BV = 4 if head_sequences <= 24 else 8
         if static_sequence_length == 1:
             num_stages = 2
@@ -342,7 +342,7 @@ def _select_kda_launch_config(
             return 4, 1, 4 if has_multi_token_sequence else 2
         if has_multi_token_sequence and head_sequences <= 48:
             return 8, 1, 4
-        if has_multi_token_sequence and head_sequences <= 96:
+        if has_multi_token_sequence:
             return 8, 1, 2
         return 32, 4, 2
 
