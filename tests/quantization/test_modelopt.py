@@ -685,6 +685,19 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
     assert method is sentinel  # bespoke builder wins over the generic path
 
 
+def _expected_auto_w4a16_kernel() -> type:
+    """Default W4A16 NVFP4 kernel: FlashInfer CuTe-DSL on SM100/103 when
+    available, Marlin everywhere else (see ``init_nvfp4_linear_kernel``)."""
+    capability = current_platform.get_device_capability()
+    compute_capability = capability.to_int() if capability is not None else None
+    cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
+        compute_capability
+    )
+    if compute_capability in (100, 103) and cutedsl_ok:
+        return FlashInferCuteDslNvFp4W4A16LinearKernel
+    return MarlinNvFp4LinearKernel
+
+
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [
