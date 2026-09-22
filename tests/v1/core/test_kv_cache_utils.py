@@ -3084,16 +3084,32 @@ def _grouping_config():
     )
 
 
-def test_single_layer_bucket_does_not_force_per_layer_groups():
-    # A lone drafter layer used to force one group per layer (41 groups).
+@pytest.mark.parametrize(
+    "num_full,num_sw,num_draft_sw,expected_group_size",
+    [
+        # A lone drafter layer must not force one group per layer.
+        (10, 30, 1, 2),
+        # gpt-oss + eagle: pad sw 12 -> 13 rather than full 13 -> 24.
+        (13, 12, 0, 13),
+        # Gemma3-27B: pad sliding window rather than full attention.
+        (10, 52, 0, 10),
+        # MiMo + MTP: no full attention padding, few groups.
+        (9, 39, 5, 9),
+    ],
+)
+def test_hybrid_group_size_selection(
+    num_full, num_sw, num_draft_sw, expected_group_size
+):
     specs = {
-        **{f"full.{i}": new_kv_cache_spec() for i in range(10)},
-        **{f"sw.{i}": new_sliding_window_spec() for i in range(30)},
-        "draft.0": new_sliding_window_spec(sliding_window=1024),
+        **{f"full.{i}": new_kv_cache_spec() for i in range(num_full)},
+        **{f"sw.{i}": new_sliding_window_spec() for i in range(num_sw)},
+        **{
+            f"draft.{i}": new_sliding_window_spec(sliding_window=1024)
+            for i in range(num_draft_sw)
+        },
     }
     groups = get_kv_cache_groups(_grouping_config(), specs)
-    assert len(groups) == 21
-    assert max(len(group.layer_names) for group in groups) == 2
+    assert max(len(group.layer_names) for group in groups) == expected_group_size
 
 
 def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
