@@ -342,63 +342,6 @@ def _rocm_fp4_cache_views(
     return values, scales
 
 
-@triton.jit(do_not_specialize=["ROWS", "REQUESTS", "QUERY_OFFSET", "SEARCH_STEPS"])
-def _rocm_fp4_prefill_windows_kernel(
-    query_starts,
-    row_starts,
-    row_ends,
-    row_to_batch,
-    local_starts,
-    local_ends,
-    ROWS,
-    REQUESTS,
-    QUERY_OFFSET,
-    SEARCH_STEPS,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    valid = row < ROWS
-    query = row + QUERY_OFFSET
-    lo = tl.full((BLOCK,), 0, tl.int32)
-    hi = tl.full((BLOCK,), 0, tl.int32) + REQUESTS
-    for _ in range(SEARCH_STEPS):
-        mid = (lo + hi) // 2
-        end = tl.load(query_starts + tl.minimum(mid + 1, REQUESTS))
-        right = (mid < REQUESTS) & (end <= query)
-        lo = tl.where(right, mid + 1, lo)
-        hi = tl.where(right, hi, mid)
-    real_end = tl.load(query_starts + REQUESTS)
-    start = tl.load(row_starts + row, mask=valid, other=0)
-    end = tl.load(row_ends + row, mask=valid, other=0)
-    tl.store(row_to_batch + row, tl.minimum(lo, REQUESTS - 1), mask=valid)
-    tl.store(local_starts + row, 0, mask=valid)
-    tl.store(
-        local_ends + row,
-        tl.where(query < real_end, tl.maximum(end - start, 0), 0),
-        mask=valid,
-    )
-
-
-def _rocm_fp4_prefill_windows(chunk):
-    assert chunk.query_start_loc is not None
-    rows = chunk.token_end - chunk.token_start
-    windows = torch.empty((3, rows), dtype=torch.int32, device=chunk.block_table.device)
-    row_to_batch, starts, ends = windows.unbind(0)
-    if rows:
-        _rocm_fp4_prefill_windows_kernel[(triton.cdiv(rows, 256),)](
-            chunk.query_start_loc,
-            chunk.cu_seqlen_ks,
-            chunk.cu_seqlen_ke,
-            row_to_batch,
-            starts,
-            ends,
-            rows,
-            chunk.num_reqs,
-            chunk.query_slice_start,
-            (chunk.num_reqs + 1).bit_length(),
-            BLOCK=256,
-        )
-    return row_to_batch, starts, ends
 
 
 def _rocm_fp4_sparse_attn_indexer(
@@ -433,7 +376,10 @@ def _rocm_fp4_sparse_attn_indexer(
         for chunk in metadata.prefill.chunks:
             if chunk.local_total_seq_lens == 0 or chunk.token_start == chunk.token_end:
                 continue
-            row_to_batch, starts, ends = _rocm_fp4_prefill_windows(chunk)
+            assert chunk.fp4_windows is not None
+            assert chunk.fp4_cta_info is not None
+            assert chunk.fp4_total_ctas is not None
+            row_to_batch, starts, ends = chunk.fp4_windows
             rows = slice(chunk.token_start, chunk.token_end)
             logits = flydsl_pa_mqa_logits_fp4_prefill(
                 q_quant[rows],
@@ -445,10 +391,12 @@ def _rocm_fp4_sparse_attn_indexer(
                 row_to_batch,
                 starts,
                 ends,
-                min(max_model_len, chunk.local_total_seq_lens),
+                min(max_model_len, chunk.logits_width),
                 block_k=block_k,
                 kv_block_size=block_size,
                 parallel_unit_num=max(512, chunk.token_end - chunk.token_start),
+                cta_info=chunk.fp4_cta_info,
+                n_ctas=chunk.fp4_total_ctas,
             )
             ops.top_k_per_row_prefill(
                 logits,
