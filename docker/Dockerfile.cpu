@@ -330,9 +330,12 @@ WORKDIR /vllm-workspace
 COPY requirements/test/cpu.txt requirements/test/cpu.txt
 
 # cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop
-# packages unavailable on aarch64 (decord, terratorch) for arm builds.
+# packages unavailable on aarch64 (decord, terratorch) for arm builds. Also
+# drop the generic PyPI triton pulled in transitively (via xgrammar) on x86
+# builds, so it doesn't clobber the triton-cpu wheel from requirements/cpu.txt.
 RUN case "$(uname -m)" in \
     aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
+    x86_64) sed -i '/^triton==/d' requirements/test/cpu.txt ;; \
     esac
 
 # pytrec-eval-terrier bundles pre-C23 trec_eval sources. GCC 15 defaults to C23;
@@ -385,17 +388,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
-# requirements/test/cpu.txt pulls in a generic PyPI triton (via xgrammar)
-# that clobbers the triton-cpu wheel from requirements/cpu.txt; reinstall
-# cpu.txt to restore it.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        uv pip install -r requirements/cpu.txt \
-            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
-    else \
-        uv pip install -r requirements/cpu.txt --torch-backend cpu; \
-    fi
-
 ENTRYPOINT ["bash"]
 
 ######################### TEST IMAGE #########################
@@ -437,9 +429,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install "$(realpath dist/*.whl)[audio]"
-
-# triton-cpu is already installed via requirements/cpu.txt (base-common-pydeps);
-# this stage never installs requirements/test/cpu.txt, so nothing overwrites it.
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"
