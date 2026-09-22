@@ -30,6 +30,27 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
+- label: ":amd: (MI300) LM Eval Small Models Harness"
+  key: amd-lm-eval-small-models-harness
+  dind: false
+  device: mi300_1
+  timeout_in_minutes: 35
+  depends_on:
+  - image-build-amd
+  working_dir: /vllm-workspace/.buildkite/lm-eval-harness
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - .buildkite/lm-eval-harness/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
+
 - label: ":nvidia: (H200 MIG 35GB) LM Eval Watermarking"
   device: h200_35gb
   key: lm-eval-watermarking
@@ -45,6 +66,28 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval Watermarking"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 45
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/
+      - vllm/config/watermarking.py
+      - vllm/sampling_params.py
+      - vllm/v1/watermarking/
+      - vllm/v1/worker/gpu/
+      - vllm/platforms/rocm.py
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
 
 # - label: LM Eval Large Models (4xA100)
 #   key: lm-eval-large-models-4xa100
@@ -100,7 +143,7 @@ steps:
       label: ":amd: (MI355) LM Eval Small Models Distributed"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 45
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -115,6 +158,24 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
+
+- label: ":nvidia: (B200) LM Eval HiSparse Nightly"
+  key: lm-eval-hisparse-nightly-4xb200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/attention/backends/mla/
+  - vllm/model_executor/layers/attention/sparse_mla_attention.py
+  - vllm/v1/worker/gpu/
+  - csrc/libtorch_stable/hisparse_kernels.cu
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-hisparse.txt
 
 - label: ":nvidia: (B200) LM Eval PCP"
   key: lm-eval-pcp-4xb200
@@ -164,6 +225,33 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval Watermark Feature Combination"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 60
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/
+      - vllm/config/speculative.py
+      - vllm/config/vllm.py
+      - vllm/config/watermarking.py
+      - vllm/sampling_params.py
+      - vllm/model_executor/models/qwen3_dspark.py
+      - vllm/model_executor/models/qwen3_dflash.py
+      - vllm/model_executor/warmup/
+      - vllm/v1/watermarking/
+      - vllm/v1/worker/gpu/
+      - vllm/platforms/rocm.py
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
 
 - label: ":nvidia: (B200) LM Eval Spec Decode"
   key: lm-eval-spec-decode-4xb200
@@ -255,26 +343,66 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
 
-- label: ":nvidia: (H200) LM Eval Large Models"
-  key: lm-eval-large-models-8xh200
-  timeout_in_minutes: 50
+- label: ":nvidia: (H200) LM Eval DeepSeek R1 TP"
+  key: lm-eval-deepseek-r1-tp-8xh200
+  timeout_in_minutes: 35
   device: h200
   optional: true
   num_devices: 8
   commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
-  mirror:
-    amd:
-      label: ":amd: (MI300) LM Eval Large Models"
-      dind: false
-      device: mi300_8
-      timeout_in_minutes: 40
-      depends_on:
-      - image-build-amd
-      commands:
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-r1-tp.txt
+
+- label: ":nvidia: (H200) LM Eval DeepSeek R1 DP"
+  key: lm-eval-deepseek-r1-dp-8xh200
+  timeout_in_minutes: 35
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-r1-dp.txt
+
+- label: ":nvidia: (H200) LM Eval DeepSeek V3.2 TP"
+  key: lm-eval-deepseek-v32-tp-8xh200
+  timeout_in_minutes: 35
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-v32-tp.txt
+
+- label: ":nvidia: (H200) LM Eval DeepSeek V3.2 DP"
+  key: lm-eval-deepseek-v32-dp-8xh200
+  timeout_in_minutes: 35
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-v32-dp.txt
+
+- label: ":nvidia: (H200) LM Eval Nemotron 3 Super"
+  key: lm-eval-nemotron-3-super-8xh200
+  timeout_in_minutes: 35
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-nemotron-3-super.txt
+
+- label: ":amd: (MI300) LM Eval Large Models"
+  key: amd-lm-eval-large-models
+  dind: false
+  device: mi300_8
+  optional: true
+  timeout_in_minutes: 65
+  depends_on:
+  - image-build-amd
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+  source_file_dependencies:
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) MoE Refactor Integration TEMPORARY"
   key: moe-refactor-integration-test-h100-temporary
@@ -287,7 +415,27 @@ steps:
     # build 83851): shards ~12.4/13.6/12.4/14.5m of eval time. New configs must
     # be added to exactly one config-h100-shard-*.txt.
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt
-  
+  mirror:
+    amd:
+      label: ":amd: (MI355) MoE Refactor Integration Shard %N"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 105
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - tests/evals/gsm8k/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/_aiter_ops.py
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-rocm-shard-$$BUILDKITE_PARALLEL_JOB.txt
+
 - label: ":nvidia: (B200) MoE Refactor Integration TEMPORARY Shard %N"
   key: moe-refactor-integration-test-b200-temporary
   device: b200-k8s
@@ -305,47 +453,67 @@ steps:
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
 
-- label: ":nvidia: (A100) LM Eval Humming FP16 TEMPORARY Shard %N"
-  key: lm-eval-humming-f16-a100
+- label: ":nvidia: (L4) LM Eval Humming TEMPORARY"
+  key: lm-eval-humming-l4
+  optional: true
+  timeout_in_minutes: 90
+  device: l4
+  num_devices: 1
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/configs/humming/
+  - requirements/cuda.txt
+  - vllm/utils/humming.py
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-l4.txt
+
+- label: ":nvidia: (A100) LM Eval Humming Default TEMPORARY Shard %N"
+  key: lm-eval-humming-a100-default
+  optional: true
   timeout_in_minutes: 75
   device: a100
-  optional: true
   num_devices: 1
   parallelism: 3
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/quantization/utils/humming/
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
-- label: ":nvidia: (A100) LM Eval Humming Activation INT8 TEMPORARY"
-  key: lm-eval-humming-act-a100
+- label: ":nvidia: (A100) LM Eval Humming Activation INT8 TEMPORARY Shard %N"
+  key: lm-eval-humming-a100-act
+  optional: true
   timeout_in_minutes: 45
   device: a100
-  optional: true
   num_devices: 1
+  parallelism: 2
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/quantization/utils/humming/
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-act-int8-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
-- label: ":nvidia: (H100) LM Eval Humming FP16 TEMPORARY Shard %N"
-  key: lm-eval-humming-f16-h100
+- label: ":nvidia: (H100) LM Eval Humming Default TEMPORARY Shard %N"
+  key: lm-eval-humming-h100-default
+  optional: true
   timeout_in_minutes: 70
   device: h100
-  optional: true
   num_devices: 1
   parallelism: 3
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/quantization/utils/humming/
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
@@ -353,14 +521,14 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
 - label: ":nvidia: (H100) LM Eval Humming Activation FP8/INT8 TEMPORARY"
-  key: lm-eval-humming-act-h100
+  key: lm-eval-humming-h100-act
+  optional: true
   timeout_in_minutes: 70
   device: h100
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/quantization/utils/humming/
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
@@ -368,15 +536,35 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
   # - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
 
-- label: ":nvidia: (B200) LM Eval Humming FP16 TEMPORARY"
-  key: lm-eval-humming-f16-b200
+- label: ":nvidia: (H100) LM Eval Humming DeepEP TEMPORARY"
+  key: lm-eval-humming-h100-deepep
+  optional: true
+  timeout_in_minutes: 60
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/configs/humming/
+  - requirements/cuda.txt
+  - vllm/utils/humming.py
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/kernels/linear/
+  - vllm/distributed/
+  - csrc/moe/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-deepep.txt
+
+- label: ":nvidia: (B200) LM Eval Humming Default TEMPORARY"
+  key: lm-eval-humming-b200-default
+  optional: true
   timeout_in_minutes: 50
   device: b200-k8s
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/quantization/utils/humming/
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
@@ -384,14 +572,14 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
 
 - label: ":nvidia: (B200) LM Eval Humming Activation FP8/INT8 TEMPORARY"
-  key: lm-eval-humming-act-b200
+  key: lm-eval-humming-b200-act
+  optional: true
   timeout_in_minutes: 50
   device: b200-k8s
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/quantization/utils/humming/
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
@@ -399,9 +587,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
 
-- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant KV Cache"
-  key: lm-eval-turboquant-kv-cache
-  timeout_in_minutes: 55
+- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant k8v4"
+  key: lm-eval-turboquant-k8v4
+  timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/turboquant/
@@ -409,7 +597,43 @@ steps:
   - vllm/v1/attention/ops/triton_turboquant_decode.py
   - vllm/v1/attention/ops/triton_turboquant_store.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k8v4.txt
+
+- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t4nc"
+  key: lm-eval-turboquant-t4nc
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t4nc.txt
+
+- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant k3v4nc"
+  key: lm-eval-turboquant-k3v4nc
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v4nc.txt
+
+- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t3nc"
+  key: lm-eval-turboquant-t3nc
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc.txt
 
 - label: ":nvidia: (H100) GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
@@ -496,6 +720,29 @@ steps:
   commands:
     - uv pip install --system 'evalscope==1.10.0'
     - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-h200.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 105
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/libtorch_stable/gdn/
+      - tests/evals/qwen4_exp/
+      - vllm/model_executor/layers/mamba/
+      - vllm/models/qwen4_exp/
+      - vllm/transformers_utils/configs/qwen4_exp.py
+      - vllm/v1/attention/backends/short_conv_attn.py
+      - vllm/platforms/rocm.py
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      commands:
+      - uv pip install --system 'evalscope==1.10.0'
+      - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-rocm.txt
 
 - label: ":nvidia: (DGX) Spark GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-spark

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
+import numpy as np
 import pytest
 import torch
-from packaging.version import Version
 from PIL import Image
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -28,7 +29,6 @@ def test_jina_vl_processing_order() -> None:
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
-        cache=cache,
     )
 
     placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -39,6 +39,7 @@ def test_jina_vl_processing_order() -> None:
         return processor(
             placeholder * len(images),
             mm_items=processor.info.parse_mm_data({"image": images}),
+            cache=cache,
         )
 
     query = process([query_image])
@@ -133,12 +134,6 @@ def test_processor_override(
     kwargs_on_init: bool,
 ):
     """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
-    if (
-        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
-        and "size" in mm_processor_kwargs
-    ):
-        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
-
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
@@ -184,12 +179,6 @@ def test_get_image_size_with_most_features(
     model_id: str,
     mm_processor_kwargs: dict[str, object],
 ):
-    if (
-        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
-        and "size" in mm_processor_kwargs
-    ):
-        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
-
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs,
@@ -222,6 +211,35 @@ def test_get_image_size_with_most_features(
         assert tokens < max_tokens
 
 
+def _build_qwen2_5_vl_video_mm_data(num_frames: int, fps: float) -> dict[str, Any]:
+    video = np.zeros((num_frames, 56, 56, 3), dtype=np.uint8)
+    metadata = {
+        "fps": fps,
+        "duration": num_frames / fps,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    return {"video": [(video, metadata)]}
+
+
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2.5-VL-3B-Instruct"])
+def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 0, "video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    temporal_patch_size = (
+        processor.info.get_hf_processor().video_processor.temporal_patch_size
+    )
+
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    for fps in (1.0, 30.0):
+        mm_data = _build_qwen2_5_vl_video_mm_data(num_frames=32, fps=fps)
+        processed = processor(prompt, mm_items=processor.info.parse_mm_data(mm_data))
+        spg = processed["mm_kwargs"]["video"][0].get_data()["second_per_grid_ts"]
+        assert float(spg) == pytest.approx(temporal_patch_size / fps, rel=2e-2)
+
+
 @pytest.mark.parametrize(
     "model_id", ["Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct"]
 )
@@ -232,7 +250,6 @@ def test_mm_device_do_normalize(
     num_imgs: int,
 ):
     """Ensure that enable mm_device_do_normalize yields the correct result."""
-
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": num_imgs},

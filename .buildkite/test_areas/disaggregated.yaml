@@ -16,9 +16,9 @@ steps:
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Distributed NixlConnector PD accuracy"
+      label: ":amd: (MI355) Distributed NixlConnector PD accuracy"
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 60
       depends_on:
         - image-build-amd
@@ -71,9 +71,9 @@ steps:
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) DP EP Distributed NixlConnector PD accuracy"
+      label: ":amd: (MI355) DP EP Distributed NixlConnector PD accuracy"
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 40
       depends_on:
         - image-build-amd
@@ -130,7 +130,7 @@ steps:
       label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy"
       dind: false
       device: mi300_4
-      timeout_in_minutes: 55
+      timeout_in_minutes: 60
       depends_on:
         - image-build-amd
       source_file_dependencies:
@@ -221,9 +221,9 @@ steps:
     - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) NixlConnector PD + Spec Decode acceptance"
+      label: ":amd: (MI355) NixlConnector PD + Spec Decode acceptance"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
         - image-build-amd
@@ -287,7 +287,7 @@ steps:
     PREFILL_BLOCK_SIZE: "256"
     DECODE_BLOCK_SIZE: "256"
     MODEL_NAMES: "deepseek-ai/DeepSeek-V4-Flash"
-    VLLM_ENGINE_READY_TIMEOUT_S: "900"
+    VLLM_ENGINE_READY_TIMEOUT_S: "1800"
     VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8"
     # The V4 indexer only supports block-outermost layouts; let it pick.
     PREFILLER_KV_LAYOUT: ""
@@ -311,7 +311,31 @@ steps:
     PREFILLER_TP_SIZE: "2"
     DECODER_TP_SIZE: "2"
     MODEL_NAMES: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    # Keep TP=2 prefill and TP=1 decode above both hybrid page-size minima.
+    PREFILL_BLOCK_SIZE: "2048"
+    DECODE_BLOCK_SIZE: "2048"
     VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--mamba-cache-mode align,--max-model-len 32768"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+  mirror:
+    amd:
+      label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 105
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/models/kimi_k3/
+      - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+      - tests/v1/kv_connector/nixl_integration/
+      - requirements/kv_connectors_rocm.txt
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh

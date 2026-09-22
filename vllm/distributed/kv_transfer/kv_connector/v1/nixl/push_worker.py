@@ -83,6 +83,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     # Distinguishes push from pull in the NIXL compatibility hash.
     _TRANSFER_MODE: str = "push"
 
+    _supports_pp_hma = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -363,6 +365,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
                 req_id,
             )
+            self.xfer_stats.record_failed_notification()
             self._failed_recv_reqs.put(req_id)
             return
         for rank, agent_name in agents.items():
@@ -375,6 +378,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     error=e,
                     remote_rank=rank,
                 )
+                self.xfer_stats.record_failed_notification()
+                # Earlier registrations may still trigger WRITEs into D's blocks.
+                # Keep the receive pending until those writes are finished.
         logger.debug(
             "Sent PUSH_REG for %s to engine %s (%dB)", req_id, engine_id, len(notif_msg)
         )
@@ -530,7 +536,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         local_region_groups = self.region_group_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        if groups_differ and not self._transfer_layer_group_ids:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"
