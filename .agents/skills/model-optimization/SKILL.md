@@ -22,20 +22,20 @@ pick a cell, say which one, and state it in the PR description.
 
 ## Performance goal matrix
 
-Each cell is a separate goal. `X` means the combination is not applicable.
+Each cell is a separate goal. Name the one you are targeting.
 
 | Parallelism | Decode: 1 req, 50K KV | Decode: 128 reqs, 50-70K KV | Prefill: 1 req, 8K | Prefill: 4 reqs, 2K | Decode-prefill mixed |
 | --- | --- | --- | --- | --- | --- |
 | TP | | | | | |
 | TP + EP | | | | | |
 | DP + EP | | | | | |
-| DCP | | | X | X | |
-| PCP + EP | X | X | | | X |
+| DCP | | | | | |
+| PCP + EP | | | | | |
 
-DCP shards KV across ranks for decode, so the prefill-only columns do not apply.
-PCP shards context during prefill, so the decode and mixed columns do not apply.
-See [context parallel deployment](../../../docs/serving/context_parallel_deployment.md)
-for how DCP and PCP are configured.
+DCP shards KV across ranks for decode and PCP shards context during prefill, so
+each is normally paired with the regime it serves. See
+[context parallel deployment](../../../docs/serving/context_parallel_deployment.md)
+for how both are configured.
 
 The two decode columns pull in opposite directions: 1 request at 50K KV is
 latency- and memory-bandwidth-bound, while 128 requests at 50-70K KV is
