@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseBackend,
 )
@@ -83,6 +84,12 @@ def rope_carrying_model(monkeypatch):
 
 def test_supported_head_sizes_include_512():
     assert FlashMLASparseBackend.get_supported_head_sizes() == [576, 512]
+
+
+def test_flash_attn_sparse_accepts_manager_blocks():
+    (supported,) = FlashAttnMLASparseBackend.get_supported_kernel_block_sizes()
+    assert isinstance(supported, MultipleOf)
+    assert supported.base == 64
 
 
 @pytest.mark.parametrize("backend", [FlashMLASparseBackend, FlashAttnMLASparseBackend])
