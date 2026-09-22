@@ -227,10 +227,15 @@ def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_aiter_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     """Enable MLA RoPE+KV-cache cat fusion via AITER fused kernel."""
-    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms import current_platform
 
     if not enable_rope_kvcache_mla_fusion(cfg):
         return False
+    if not current_platform.is_rocm():
+        return True
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
     return (
         rocm_aiter_ops.is_mla_enabled() and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
     )
