@@ -301,7 +301,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         )
         self.gemm_rs_ar = None
         if run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
@@ -631,7 +631,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             attn_out = _gate_sigmoid_mul(attn_out, gate)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(attn_out):
-            return self.gemm_rs_ar(attn_out, self.o_proj.weight)
+            return self.gemm_rs_ar.apply(attn_out, self.o_proj)
 
         return self.o_proj(attn_out)[0]
 

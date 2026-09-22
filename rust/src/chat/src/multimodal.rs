@@ -26,7 +26,7 @@ use llm_multimodal::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
-use tracing::warn;
+use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
 use vllm_text::Prompt;
@@ -43,10 +43,13 @@ mod input;
 mod item;
 mod preprocessed;
 mod tensor;
+mod timing;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
+use self::timing::MM_STAGE_TARGET;
+pub use self::timing::{mm_request_span, mm_timing_layer};
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -562,7 +565,10 @@ pub(crate) async fn finalize_rendered_prompt(
             .map_err(|error| multimodal!("{error}"))?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
-    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
+    let prepared = info
+        .prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype)
+        .instrument(mm_request_span(&request.request_id))
+        .await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
 }
@@ -753,10 +759,27 @@ impl MultimodalModelInfo {
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
     ) -> Result<MmFeatures> {
-        let media_parts_len = media_parts.len();
-        if media_parts_len == 0 {
+        if media_parts.is_empty() {
             return Ok(Vec::new());
         }
+        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype).await
+    }
+
+    /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
+    /// span aggregated per request by the `vllm-tracing` timing layer.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocessor_total")
+    )]
+    async fn prepare_multimodal_timed(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+        prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
+    ) -> Result<MmFeatures> {
+        let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
         let fetched = self.fetch_media(media_parts).await?;
 
@@ -816,6 +839,12 @@ impl MultimodalModelInfo {
 
     /// Fetch all connector-backed media parts and split them per modality,
     /// preserving their request-order UUID metadata.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "media_fetch")
+    )]
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
         for part in media_parts {
