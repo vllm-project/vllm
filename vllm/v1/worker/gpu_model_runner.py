@@ -3146,6 +3146,7 @@ class GPUModelRunner(
                     if (
                         self.encoder_cudagraph_manager is not None
                         and self.encoder_cudagraph_manager.supports_modality(modality)
+                        and "image_embeds" not in mm_kwargs_batch
                     ):
                         cudagraph_output = self.encoder_cudagraph_manager.execute(
                             mm_kwargs_batch,
