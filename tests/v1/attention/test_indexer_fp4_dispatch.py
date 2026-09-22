@@ -64,6 +64,118 @@ def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
     assert scorer.call_args.kwargs["cta_info"] is cta_info
     assert scorer.call_args.kwargs["total_ctas"] == 512
 
+def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch):
+    import torch
+
+    from vllm.model_executor.layers import sparse_attn_indexer as sparse
+
+    scorer = Mock(return_value=torch.zeros((3, 192), dtype=torch.float32))
+    decode_module = ModuleType("aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4")
+    decode_module.flydsl_pa_mqa_logits_fp4 = Mock()
+    prefill_module = ModuleType(
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill"
+    )
+    prefill_module.flydsl_pa_mqa_logits_fp4_prefill = scorer
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4",
+        decode_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill",
+        prefill_module,
+    )
+    topk = Mock()
+    monkeypatch.setattr(sparse.ops, "top_k_per_row_prefill", topk)
+
+    row_to_batch = torch.tensor([0, 1, 1], dtype=torch.int32)
+    starts = torch.zeros(3, dtype=torch.int32)
+    ends = torch.tensor([128, 160, 192], dtype=torch.int32)
+    cta_info = torch.zeros((512, 6), dtype=torch.int32)
+    chunk = SimpleNamespace(
+        local_total_seq_lens=320,
+        token_start=0,
+        token_end=3,
+        block_table=torch.zeros((2, 4), dtype=torch.int32),
+        logits_width=192,
+        fp4_windows=(row_to_batch, starts, ends),
+        fp4_cta_info=cta_info,
+        fp4_total_ctas=512,
+    )
+    metadata = SimpleNamespace(
+        num_prefills=2,
+        num_decodes=0,
+        num_decode_tokens=0,
+        prefill=SimpleNamespace(chunks=[chunk]),
+        decode=None,
+    )
+
+    sparse._rocm_fp4_sparse_attn_indexer(
+        torch.zeros((4, 64, 68), dtype=torch.uint8),
+        torch.zeros((3, 64, 64), dtype=torch.uint8),
+        torch.zeros((3, 1, 4, 16, 4), dtype=torch.uint8),
+        torch.zeros((3, 64), dtype=torch.float32),
+        128,
+        4096,
+        8,
+        torch.empty((3, 8), dtype=torch.int32),
+        metadata,
+    )
+
+    assert scorer.call_args.args[6] is row_to_batch
+    assert scorer.call_args.args[7] is starts
+    assert scorer.call_args.args[8] is ends
+    assert scorer.call_args.args[9] == 192
+    assert scorer.call_args.kwargs["cta_info"] is cta_info
+    assert scorer.call_args.kwargs["n_ctas"] == 512
+    assert topk.call_args.args[2] is ends
+
+
+def test_fp4_prefill_planner_uses_max_width_and_ignores_gather_workspace():
+    import torch
+
+    seq_lens = torch.tensor([300, 200, 100])
+    query_lens = torch.tensor([10, 20, 30])
+    max_logits_bytes = 300 * 60 * 4
+
+    fp4_chunks = (
+        indexer.DeepseekV32IndexerMetadataBuilder._split_fp4_indexer_prefill_chunks(
+            seq_lens, query_lens, max_logits_bytes
+        )
+    )
+    gathered_chunks = (
+        indexer.DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
+            seq_lens,
+            query_lens,
+            workspace_size=300,
+            max_logits_bytes=max_logits_bytes,
+        )
+    )
+
+    assert fp4_chunks == [(slice(0, 3), slice(0, 60))]
+    assert gathered_chunks == [
+        (slice(0, 1), slice(0, 10)),
+        (slice(1, 3), slice(0, 50)),
+    ]
+
+
+def test_fp4_prefill_planner_splits_large_request_only_by_logits_budget():
+    import torch
+
+    split_fp4 = (
+        indexer.DeepseekV32IndexerMetadataBuilder._split_fp4_indexer_prefill_chunks
+    )
+    chunks = split_fp4(
+        torch.tensor([1024]),
+        torch.tensor([1000]),
+        max_logits_bytes=1024 * 100 * 4,
+    )
+
+    assert chunks == [
+        (slice(0, 1), slice(start, start + 100)) for start in range(0, 1000, 100)
+    ]
+
 
 def _config(dtype=None, *, dcp=1, pcp=1):
     attention = (

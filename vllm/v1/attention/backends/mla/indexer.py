@@ -84,7 +84,12 @@ def aiter_mxfp4_available() -> bool:
                 function = getattr(module, prefix + name + suffix)
                 if not required.issubset(inspect.signature(function).parameters):
                     return False
-        return True
+        prefill_params = inspect.signature(
+            prefill.flydsl_pa_mqa_logits_fp4_prefill
+        ).parameters
+        return {"cta_info", "n_ctas"}.issubset(prefill_params) and callable(
+            getattr(prefill, "compute_prefill_schedule", None)
+        )
     except (ImportError, AttributeError, TypeError, ValueError):
         return False
 
@@ -112,8 +117,8 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         if not aiter_mxfp4_available():
             logger.warning(
                 "indexer_kv_dtype='mxfp4' was requested, but the installed "
-                "AITER build lacks stride-capable FlyDSL FP4 kernels; "
-                "falling back to the fp8 indexer."
+                "AITER build lacks the required stride/rebase or prefill "
+                "schedule ABI; falling back to the fp8 indexer."
             )
             return False
         return True
@@ -420,8 +425,74 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
-    query_start_loc: torch.Tensor | None = None
-    query_slice_start: int = 0
+    logits_width: int = 0
+    fp4_windows: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    fp4_cta_info: torch.Tensor | None = None
+    fp4_total_ctas: int | None = None
+
+
+@triton.jit(do_not_specialize=["ROWS", "REQUESTS", "QUERY_OFFSET", "SEARCH_STEPS"])
+def _build_rocm_fp4_prefill_windows_kernel(
+    query_starts,
+    row_starts,
+    row_ends,
+    row_to_batch,
+    local_starts,
+    local_ends,
+    ROWS,
+    REQUESTS,
+    QUERY_OFFSET,
+    SEARCH_STEPS,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = row < ROWS
+    query = row + QUERY_OFFSET
+    lo = tl.full((BLOCK,), 0, tl.int32)
+    hi = tl.full((BLOCK,), 0, tl.int32) + REQUESTS
+    for _ in range(SEARCH_STEPS):
+        mid = (lo + hi) // 2
+        end = tl.load(query_starts + tl.minimum(mid + 1, REQUESTS))
+        right = (mid < REQUESTS) & (end <= query)
+        lo = tl.where(right, mid + 1, lo)
+        hi = tl.where(right, hi, mid)
+    real_end = tl.load(query_starts + REQUESTS)
+    start = tl.load(row_starts + row, mask=valid, other=0)
+    end = tl.load(row_ends + row, mask=valid, other=0)
+    tl.store(row_to_batch + row, tl.minimum(lo, REQUESTS - 1), mask=valid)
+    tl.store(local_starts + row, 0, mask=valid)
+    tl.store(
+        local_ends + row,
+        tl.where(query < real_end, tl.maximum(end - start, 0), 0),
+        mask=valid,
+    )
+
+
+def _build_rocm_fp4_prefill_windows(
+    query_start_loc: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    rows: int,
+    num_reqs: int,
+    query_offset: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    windows = torch.empty((3, rows), dtype=torch.int32, device=query_start_loc.device)
+    row_to_batch, starts, ends = windows.unbind(0)
+    if rows:
+        _build_rocm_fp4_prefill_windows_kernel[(triton.cdiv(rows, 256),)](
+            query_start_loc,
+            row_starts,
+            row_ends,
+            row_to_batch,
+            starts,
+            ends,
+            rows,
+            num_reqs,
+            query_offset,
+            (num_reqs + 1).bit_length(),
+            BLOCK=256,
+        )
+    return row_to_batch, starts, ends
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -839,6 +910,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             else 0
         )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
+        self.use_rocm_fp4 = current_platform.is_rocm() and self.indexer_uses_fp4
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -922,15 +994,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 f"(compress_ratio={self.compress_ratio})."
             )
 
-        if (
-            current_platform.is_rocm()
-            and self.indexer_uses_fp4
-            and (self.compress_ratio != 4 or self.kv_cache_spec.num_states != 64)
+        if self.use_rocm_fp4 and (
+            self.compress_ratio != 4 or self.kv_cache_spec.num_states != 64
         ):
             raise ValueError("ROCm MXFP4 indexer requires C4 and 64-token pages")
 
         self.fp4_cta_info_buffer: torch.Tensor | None = None
-        if current_platform.is_rocm() and self.indexer_uses_fp4:
+        if self.use_rocm_fp4:
             compilation_config = self.vllm_config.compilation_config
             max_decode_tokens = max(
                 scheduler_config.max_num_batched_tokens,
@@ -1227,6 +1297,45 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 chunks.append((req_slice, slice(q_off, q_off + sub_m)))
 
         return chunks
+    @staticmethod
+    def _split_fp4_indexer_prefill_chunks(
+        compressed_seq_lens_cpu: torch.Tensor,
+        prefill_query_lens_cpu: torch.Tensor,
+        max_logits_bytes: int,
+        request_offset: int = 0,
+    ) -> list[tuple[slice, slice]]:
+        """Plan direct-paged FP4 chunks by rows times maximum request width."""
+        chunks: list[tuple[slice, slice]] = []
+        max_logits_elems = max_logits_bytes // 4
+        end = 0
+
+        while end < len(compressed_seq_lens_cpu):
+            start, chunk_m, chunk_width = end, 0, 0
+            while end < len(compressed_seq_lens_cpu):
+                q = int(prefill_query_lens_cpu[end].item())
+                width = int(compressed_seq_lens_cpu[end].item())
+                new_m = chunk_m + q
+                new_width = max(chunk_width, width)
+                if new_m * new_width > max_logits_elems:
+                    break
+                chunk_m, chunk_width = new_m, new_width
+                end += 1
+
+            if end == start:
+                chunk_m = int(prefill_query_lens_cpu[end].item())
+                chunk_width = int(compressed_seq_lens_cpu[end].item())
+                end += 1
+
+            req_slice = slice(start + request_offset, end + request_offset)
+            max_q = (
+                max(1, max_logits_elems // chunk_width)
+                if chunk_width > 0
+                else max(1, chunk_m)
+            )
+            for q_off in range(0, chunk_m, max_q):
+                chunks.append((req_slice, slice(q_off, min(q_off + max_q, chunk_m))))
+
+        return chunks
 
     def build(
         self,
@@ -1307,7 +1416,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             req_idx = None
             shard_rows = None
-            if self.use_pcp and self.dcp_world_size > 1:
+            if self.use_rocm_fp4:
+                chunk_specs = self._split_fp4_indexer_prefill_chunks(
+                    compressed_seq_lens_cpu[num_decodes:],
+                    prefill_query_lens_cpu,
+                    max_logits_bytes,
+                    request_offset=num_decodes,
+                )
+            elif self.use_pcp and self.dcp_world_size > 1:
                 # The gathered KV must be packed identically on every PCP rank:
                 # chunk by request from its DCP shard rows, which every rank
                 # holds. A dummy batch bypasses the PCP manager and has one
@@ -1368,6 +1484,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     dcp_world_size=self.dcp_world_size,
                     cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                     pcp_plan=pcp_plan,
+                    logits_width=(
+                        int(compressed_seq_lens_cpu[req_slice].max().item())
+                        if self.use_rocm_fp4
+                        else 0
+                    ),
+                    build_fp4_schedule=self.use_rocm_fp4,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -1626,6 +1748,8 @@ def build_prefill_chunk_metadata(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     pcp_plan: PCPGlobalChunkPlan | None = None,
+    logits_width: int = 0,
+    build_fp4_schedule: bool = False,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     if pcp_plan is not None:
         total_seq_lens = pcp_plan.total
@@ -1725,6 +1849,30 @@ def build_prefill_chunk_metadata(
         skip_kv_gather = skip_kv_gather or qs_start > 0
     else:
         token_end = query_start_loc_cpu[end_idx].item()
+    fp4_windows = None
+    fp4_cta_info = None
+    fp4_total_ctas = None
+    if build_fp4_schedule and output_query_len:
+        assert logits_width > 0
+        fp4_windows = _build_rocm_fp4_prefill_windows(
+            query_start_loc,
+            cu_seq_len_ks,
+            cu_seq_len_ke,
+            output_query_len,
+            num_reqs,
+            qs_start,
+        )
+        from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
+            compute_prefill_schedule,
+        )
+
+        parallel_unit_num = max(512, output_query_len)
+        _, fp4_cta_info, fp4_total_ctas = compute_prefill_schedule(
+            *fp4_windows,
+            block_k=256,
+            parallel_unit_num=parallel_unit_num,
+            max_seq_len=logits_width,
+        )
 
     return DeepseekV32IndexerPrefillChunkMetadata(
         pcp_deinterleave_idx=pcp_deinterleave_idx,
@@ -1741,8 +1889,10 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
-        query_start_loc=query_start_loc,
-        query_slice_start=qs_start,
+        logits_width=logits_width,
+        fp4_windows=fp4_windows,
+        fp4_cta_info=fp4_cta_info,
+        fp4_total_ctas=fp4_total_ctas,
     )
 
 
