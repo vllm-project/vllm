@@ -167,6 +167,8 @@ def _log_gdn_backend_decision(
             head_k_dim,
         )
         return
+    elif current_platform.is_xpu():
+        return
 
     chosen = {
         "flashinfer": "FlashInfer",
@@ -399,6 +401,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        self.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
@@ -523,6 +526,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.gdn_decode_kernel = "triton"
         elif current_platform.is_cpu():
             self.gdn_decode_kernel = "CPU"
+        elif current_platform.is_xpu():
+            self.gdn_decode_kernel = "XPU"
 
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
@@ -847,13 +852,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
         """
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output, _ = self.out_proj(core_attn_out)
+        output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
     def forward_hip(
@@ -1007,15 +1007,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        out, _ = self.out_proj(core_attn_out)
-        return out
+        return self._output_projection(core_attn_out, z)
 
     def forward_cpu(
         self,
@@ -1058,14 +1050,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             _encode_layer_name(self.prefix),
         )
 
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        out, _ = self.out_proj(core_attn_out)
-        return out
+        return self._output_projection(core_attn_out, z)
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
@@ -1206,9 +1191,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         """ROCm AITER fast path: conv1d + recurrent attention from packed
         qkvz/ba layout.
 
-        For decode-only (no spec, no prefill) interleaved-GQA layouts,
-        dispatches directly to ``_forward_core_decode_aiter``. Otherwise unpacks
-        the packed layout and falls through to ``_forward_core``.
+        For decode-only (no spec, no prefill) batches, dispatches directly to
+        ``_forward_core_decode_aiter``. Otherwise unpacks the packed layout and
+        falls through to ``_forward_core``.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
@@ -1231,12 +1216,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
-        # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
-        # GQA layout. Qwen3.5 uses a non-interleaved q/k/v/z layout and must use
-        # the generic path below to split/rearrange inputs correctly.
         if (
-            self.gqa_interleaved_layout
-            and attn_metadata.spec_sequence_masks is None
+            attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
@@ -1625,6 +1606,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     : attn_metadata.num_actual_tokens
                 ],
                 validate_data=True,
+                qkvz_layout=self.qkvz_layout,
             )
         )
 

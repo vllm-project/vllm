@@ -823,7 +823,6 @@ class SamplingParams(
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
-        self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
@@ -993,13 +992,6 @@ class SamplingParams(
                 value=invalid_token_ids,
             )
 
-    def _validate_logits_processors(self, model_config: ModelConfig) -> None:
-        from vllm.v1.sample.logits_processor import (
-            validate_logits_processors_parameters,
-        )
-
-        validate_logits_processors_parameters(model_config.logits_processors, self)
-
     def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids
         if allowed_token_ids is None:
@@ -1151,6 +1143,18 @@ class SamplingParams(
         if self.structured_outputs.regex and "\x00" in self.structured_outputs.regex:
             raise VLLMValidationError(
                 "structured_outputs.regex must not contain a NUL character ('\\x00')"
+            )
+        # Note(arpera):
+        # We do NOT check here structured output regex on emptiness because
+        # empty regex is indeed compiles to a valid grammar as well as
+        # whitespace-only regexps, for instance, regex="\n" or regex=" "
+        # are valid patterns and we MUST process them.
+        if (
+            isinstance(self.structured_outputs.structural_tag, str)
+            and self.structured_outputs.structural_tag.strip() == ""
+        ):
+            raise VLLMValidationError(
+                "structured_outputs.structural_tag cannot be an empty string"
             )
 
         from vllm.v1.structured_output.backend_guidance import (
