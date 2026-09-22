@@ -14,6 +14,10 @@ if not torch.cuda.is_available():
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+from vllm.v1.worker.gpu.sample.logits_processor import (
+    LogitsContext,
+    LogitsProcRequestState,
+)
 from vllm.v1.worker.gpu.states import RequestState
 
 DEVICE = torch.device("cuda")
@@ -47,7 +51,7 @@ def _make_state(bad_words_token_ids: list[list[int]]) -> tuple[BadWordsState, in
     req_states.apply_staged_writes()
 
     req_idx = req_states.req_id_to_index["req"]
-    state = BadWordsState(req_states)
+    state = BadWordsState(None, LogitsProcRequestState.from_request_state(req_states))
     state.add_request(req_idx, SamplingParams(_bad_words_token_ids=bad_words_token_ids))
     state.apply_staged_writes()
     return state, req_idx
@@ -61,14 +65,53 @@ def _apply(bad_words_token_ids: list[list[int]]) -> torch.Tensor:
     expanded_idx_mapping = torch.tensor(
         [req_idx] * num_logits, dtype=torch.int32, device=DEVICE
     )
-    state.apply_bad_words(
+    state.apply(
         logits,
-        expanded_idx_mapping,
-        idx_mapping_np,
-        torch.tensor(INPUT_IDS, dtype=torch.int32, device=DEVICE),
-        torch.tensor(LOCAL_POS, dtype=torch.int32, device=DEVICE),
+        LogitsContext(
+            expanded_idx_mapping=expanded_idx_mapping,
+            idx_mapping=torch.tensor([req_idx], dtype=torch.int32, device=DEVICE),
+            idx_mapping_np=idx_mapping_np,
+            expanded_local_pos=torch.tensor(
+                LOCAL_POS, dtype=torch.int32, device=DEVICE
+            ),
+            input_ids=torch.tensor(INPUT_IDS, dtype=torch.int32, device=DEVICE),
+            pos=torch.zeros(num_logits, dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(1, num_logits, dtype=np.int64),
+        ),
     )
     return logits.cpu()
+
+
+def test_v2_bad_words_slot_reuse_clears_state():
+    """A slot recycled from a bad-words request must not keep masking.
+
+    There is no removal hook by design; safety comes from add_request()
+    overwriting the slot's state unconditionally.
+    """
+    state, req_idx = _make_state([[10, 11, 60]])
+    state.add_request(req_idx, SamplingParams())
+    state.apply_staged_writes()
+    assert int(state.num_bad_words.np[req_idx]) == 0
+
+    num_logits = len(INPUT_IDS)
+    idx_mapping = torch.tensor([req_idx], dtype=torch.int32, device=DEVICE)
+    out = state.apply(
+        torch.zeros((num_logits, VOCAB_SIZE), device=DEVICE),
+        LogitsContext(
+            expanded_idx_mapping=torch.tensor(
+                [req_idx] * num_logits, dtype=torch.int32, device=DEVICE
+            ),
+            idx_mapping=idx_mapping,
+            idx_mapping_np=np.array([req_idx], dtype=np.intp),
+            expanded_local_pos=torch.tensor(
+                LOCAL_POS, dtype=torch.int32, device=DEVICE
+            ),
+            input_ids=torch.tensor(INPUT_IDS, dtype=torch.int32, device=DEVICE),
+            pos=torch.zeros(num_logits, dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(1, num_logits, dtype=np.int64),
+        ),
+    )
+    assert not torch.isinf(out).any()
 
 
 def test_v2_bad_words_prefix_inside_draft_tokens():
