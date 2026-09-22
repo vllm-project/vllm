@@ -115,18 +115,25 @@ def test_aiter_flydsl_dispatch_arguments(monkeypatch: pytest.MonkeyPatch):
     beta = torch.empty_like(g)
     initial_state = torch.empty(2, 4, 128, 128, dtype=torch.float32)
     cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
-    prefill_metadata = object()
+    aiter_prefill_metadata = object()
     expected_o = torch.empty_like(v)
     captured = {}
 
-    def fake_aiter(**kwargs):
+    def fake_opt_vk(**kwargs):
         captured.update(kwargs)
         return expected_o, initial_state
 
-    monkeypatch.setattr(
-        qwen_gdn_linear_attn,
-        "_aiter_flydsl_chunk_gated_delta_rule",
-        fake_aiter,
+    # Patch AITER's own entry point rather than an intermediate wrapper, so the
+    # assertions below cover the kwargs rocm_aiter_ops actually spells out.
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.linear_attention_prefill_kernels",
+        SimpleNamespace(gdn_prepare_flydsl_supported=lambda k, v: True),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.triton.gated_delta_net",
+        SimpleNamespace(chunk_gated_delta_rule_opt_vk=fake_opt_vk),
     )
     output, final_state = ChunkGatedDeltaRule.forward_aiter_flydsl(
         None,
@@ -139,7 +146,7 @@ def test_aiter_flydsl_dispatch_arguments(monkeypatch: pytest.MonkeyPatch):
         output_final_state=True,
         cu_seqlens=cu_seqlens,
         use_qk_l2norm_in_kernel=False,
-        prefill_metadata=prefill_metadata,
+        aiter_prefill_metadata=aiter_prefill_metadata,
     )
 
     assert output is expected_o
@@ -147,7 +154,7 @@ def test_aiter_flydsl_dispatch_arguments(monkeypatch: pytest.MonkeyPatch):
     assert captured["use_chunk_flydsl"] is True
     assert captured["use_prepare_flydsl"] is True
     assert captured["state_dtype"] is torch.float32
-    assert captured["prefill_metadata"] is prefill_metadata
+    assert captured["prefill_metadata"] is aiter_prefill_metadata
     assert captured["inplace_final_state"] is False
     assert captured["use_qk_l2norm_in_kernel"] is False
 
@@ -334,7 +341,7 @@ def test_aiter_flydsl_prefill_matches_triton_reference():
     flydsl_out, flydsl_state = ChunkGatedDeltaRule.forward_aiter_flydsl(
         None,
         initial_state=initial_state.clone(),
-        prefill_metadata=rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
+        aiter_prefill_metadata=rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
             seq_lens, cu_seqlens=cu_seqlens
         ),
         **shared,
