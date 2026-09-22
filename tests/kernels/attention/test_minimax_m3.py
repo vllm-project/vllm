@@ -2621,19 +2621,23 @@ def test_decode_sparse_attention_ignores_invalid_topk(
     request_topk.fill_(invalid_block)
     request_topk[..., TOPK // 2] = 0
 
-    expected = _reference_sparse_attn(
+    # A valid-only run isolates sentinel handling from BF16-vs-FP32 rounding.
+    # Include block 0 exactly once; replacing sentinels with 0 would duplicate
+    # its contribution. The general correctness test covers reference accuracy.
+    valid_topk = torch.zeros(
+        (NUM_KV_HEADS, q.shape[0], 1), device="cuda", dtype=torch.int32
+    )
+    expected = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode(
         q,
         kv_cache,
-        topk_idx,
+        valid_topk,
         clean_block_table,
-        torch.full(
-            (seq_lens.numel(),),
-            decode_query_len,
-            device="cuda",
-            dtype=torch.int32,
-        ),
         seq_lens,
-        seq_lens - decode_query_len,
+        NUM_KV_HEADS,
+        SM_SCALE,
+        expected,
+        decode_query_len,
     )
     actual = torch.empty_like(q)
 
@@ -2665,9 +2669,7 @@ def test_decode_sparse_attention_ignores_invalid_topk(
     current_platform.synchronize()
 
     assert torch.isfinite(actual).all()
-    error = (actual.float() - expected.float()).abs()
-    assert error.mean().item() < 2.5e-4
-    assert error.max().item() < 1.7e-2
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_decode_wrong_layout_breaks_parity():
