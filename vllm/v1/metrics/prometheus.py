@@ -13,6 +13,31 @@ logger = init_logger(__name__)
 # Global temporary directory for prometheus multiprocessing
 _prometheus_multiproc_dir: tempfile.TemporaryDirectory | None = None
 
+# Collectors created by PrometheusStatLogger.  This must be tracked by
+# collector object rather than metric name: the default registry also contains
+# frontend-owned vLLM metrics whose lifetime is independent of the engine.
+_prometheus_stat_logger_collectors: set[object] = set()
+
+
+class PrometheusStatLoggerRegistry:
+    """Register collectors with ``REGISTRY`` and record logger ownership."""
+
+    def register(self, collector: object) -> None:
+        REGISTRY.register(collector)
+        _prometheus_stat_logger_collectors.add(collector)
+
+
+def unregister_prometheus_stat_logger_metrics() -> None:
+    """Unregister collectors created by a previous PrometheusStatLogger."""
+    for collector in list(_prometheus_stat_logger_collectors):
+        try:
+            REGISTRY.unregister(collector)
+        except KeyError:
+            # ``unregister_vllm_metrics`` is intentionally broader and may
+            # have already removed this collector during test cleanup.
+            pass
+    _prometheus_stat_logger_collectors.clear()
+
 
 def setup_multiprocess_prometheus():
     """Set up prometheus multiprocessing directory if not already configured."""

@@ -149,16 +149,18 @@ class KVConnectorProm:
         vllm_config: VllmConfig,
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
+        metric_types: dict[type[PromMetric], type[PromMetricT]] | None = None,
     ):
         self.prom_metrics: KVConnectorPromMetrics | None = None
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config and kv_transfer_config.kv_connector:
             connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
-            metric_types = {
-                Gauge: self._gauge_cls,
-                Counter: self._counter_cls,
-                Histogram: self._histogram_cls,
-            }
+            if metric_types is None:
+                metric_types = {
+                    Gauge: self._gauge_cls,
+                    Counter: self._counter_cls,
+                    Histogram: self._histogram_cls,
+                }
             self.prom_metrics = connector_cls.build_prom_metrics(
                 vllm_config,
                 metric_types,

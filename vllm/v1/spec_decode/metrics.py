@@ -203,7 +203,10 @@ class SpecDecodingProm:
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
         is_diffusion: bool = False,
+        counter_cls: type[prometheus_client.Counter] | None = None,
     ):
+        if counter_cls is not None:
+            self._counter_cls = counter_cls
         # Diffusion (dLLM) models reuse the spec-decode counters but expose them
         # under diffusion-native names; the per-position acceptance vector does
         # not apply, so it is omitted.

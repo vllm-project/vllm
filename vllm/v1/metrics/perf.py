@@ -1760,7 +1760,10 @@ class PerfMetricsProm:
         vllm_config: VllmConfig,
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
+        counter_cls: type[prometheus_client.Counter] | None = None,
     ):
+        if counter_cls is not None:
+            self._counter_cls = counter_cls
         counter_flops = self._counter_cls(
             name="vllm:estimated_flops_per_gpu_total",
             documentation=(
