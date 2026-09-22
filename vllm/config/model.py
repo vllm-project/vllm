@@ -38,11 +38,11 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
     is_rope_parameters_nested,
+    mrope_num_dims,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
     uses_mrope,
-    uses_xdrope_dim,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
@@ -152,6 +152,7 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
+    - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
     - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
       with Kimi K3's Python XTML encoding instead of a Jinja template.
     - "cohere" uses the standard HF tokenizer but renders the chat template
@@ -246,8 +247,6 @@ class ModelConfig:
 
     NOTE: This disables both `torch.compile` and CUDA graphs, and is
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
-    enable_return_routed_experts: bool = False
-    """Whether to return routed experts."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
@@ -341,6 +340,9 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_preserve_parameter_names: list[str] = field(default_factory=list)
+    """Parameter-name globs to preserve across level-2 sleep.
+    The sender must omit these parameters; loaders must preserve their storage."""
     sleep_mode_backend: str = "cumem"
     """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
@@ -417,8 +419,7 @@ class ModelConfig:
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -705,6 +706,8 @@ class ModelConfig:
                 "DeepseekV4ForConditionalGeneration",
             ):
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch == "DeepseekV41ForCausalLM":
+                self.tokenizer_mode = "deepseek_v41"
             elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
                 self.tokenizer_mode = "inkling"
 
@@ -865,6 +868,80 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
 
+    def _supports_multimodal_inputs(self) -> bool:
+        """Checks if the model supports multimodal inputs.
+        Returns True if the model is multimodal with any non-zero supported
+        modalities, otherwise returns False, effectively running in
+        text-only mode.
+        """
+        if not self.is_multimodal_model:
+            return False
+
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        mm_config = self.get_multimodal_config()
+        try:
+            info = MULTIMODAL_REGISTRY.get_processing_info(self)
+        except ValueError:
+            # Speculative drafters for multimodal targets (e.g. Qwen3_5MTP,
+            # Exaone4_5_MTP, MiMoV2OmniMTP) declare `SupportsMultiModal` so
+            # that they can consume the embeddings merged by the target model,
+            # but they never run a multi-modal processor of their own. Running
+            # in text-only mode is the expected outcome for them, not a
+            # misconfiguration worth warning about.
+            if self.runner_type != "draft":
+                logger.warning_once(
+                    "Model %s is treated as multimodal but has no registered "
+                    "multimodal processor; running in text-only mode.",
+                    self.model,
+                )
+            return False
+
+        # Check if all supported modalities have limit == 0
+        if all(
+            mm_config.get_limit_per_prompt(modality) == 0
+            for modality in info.supported_mm_limits
+        ):
+            # If enable_mm_embeds is True, we still need MM infrastructure
+            # to process pre-computed embeddings even though encoder won't run
+            if mm_config.enable_mm_embeds:
+                return True
+
+            logger.info_once(
+                "All limits of multimodal modalities supported by the model "
+                "are set to 0, running in text-only mode."
+            )
+            return False
+
+        return True
+
+    def _cached_supports_multimodal_inputs(self) -> bool:
+        cache = getattr(self, "_supports_multimodal_inputs_cache", None)
+        if cache is None:
+            self._supports_multimodal_inputs_cache = cache = {}
+
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            mm_cache_key = None
+        else:
+            limits_per_prompt = {
+                modality: mm_config.get_limit_per_prompt(modality)
+                for modality in mm_config.limit_per_prompt
+            }
+            mm_cache_key = (
+                mm_config.language_model_only,
+                tuple(limits_per_prompt.items()),
+                mm_config.enable_mm_embeds,
+            )
+
+        cache_key = (self.is_multimodal_model, self.runner_type, mm_cache_key)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        supports_mm = self._supports_multimodal_inputs()
+        cache[cache_key] = supports_mm
+        return supports_mm
+
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
 
@@ -881,24 +958,18 @@ class ModelConfig:
         vision modality is still enabled (e.g. ``image=0`` but video allowed).
         The deep-copied cache preserves the top-level decision instead.
         """
-        cached = getattr(self, "_supports_multimodal_inputs_cached", None)
-        if cached is not None:
-            return cached
-
         if self.multimodal_config is None:
             # Early call before multimodal init — do not clear mm_prefix yet.
             return True
 
-        from vllm.multimodal import MULTIMODAL_REGISTRY
-
-        supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(self)
-        self._supports_multimodal_inputs_cached = supports_mm
+        supports_mm = self._cached_supports_multimodal_inputs()
         if not supports_mm:
             logger.info_once(
                 "Disabled mm_prefix attention mode because multimodal inputs "
                 "are configuration-disabled. Attention backends without "
                 "mm_prefix support may now be selected."
             )
+
         return supports_mm
 
     def get_model_arch_config(self) -> ModelArchitectureConfig:
@@ -935,7 +1006,7 @@ class ModelConfig:
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
-        """Called after __post_init__"""
+        """Called after __post_init__."""
         if not isinstance(self.tokenizer, str):
             raise ValueError(
                 f"tokenizer must be a string, got "
@@ -1080,8 +1151,8 @@ class ModelConfig:
         Args:
             model: Model name or path
             tokenizer: Tokenizer name or path
-        """
 
+        """
         # Skip if model_weights is already set (model already pulled)
         if self.model_weights:
             return
@@ -1659,9 +1730,7 @@ class ModelConfig:
             raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int:
-        """
-        Returns the mamba chunk size if it exists
-        """
+        """Returns the mamba chunk size if it exists."""
         # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:
@@ -1676,11 +1745,11 @@ class ModelConfig:
         return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:
-        """
-        Get the multimodal configuration of the model.
+        """Get the multimodal configuration of the model.
 
         Raises:
             ValueError: If the model is not multimodal.
+
         """
         if self.multimodal_config is None:
             raise ValueError("The model is not multimodal.")
@@ -1688,8 +1757,7 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        """
-        This method attempts to retrieve the non-default values of the
+        """This method attempts to retrieve the non-default values of the
         generation config for this model.
 
         The generation config can contain information about special tokens, as
@@ -1698,6 +1766,7 @@ class ModelConfig:
 
         Returns:
             A dictionary containing the non-default generation config.
+
         """
         if self.generation_config in {"auto", "vllm"}:
             config = try_get_generation_config(
@@ -1723,8 +1792,7 @@ class ModelConfig:
         return config.to_diff_dict()
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
-        """
-        This method returns a dictionary containing the non-default sampling
+        """This method returns a dictionary containing the non-default sampling
         parameters with `override_generation_config` applied.
 
         The default sampling parameters are:
@@ -1736,6 +1804,7 @@ class ModelConfig:
 
         Returns:
             A dictionary containing the non-default sampling parameters.
+
         """
         src = self.generation_config
 
@@ -1850,12 +1919,8 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
-    def uses_xdrope_dim(self) -> int:
-        return uses_xdrope_dim(self.hf_config)
-
-    @property
-    def uses_xdrope(self) -> bool:
-        return self.uses_xdrope_dim > 0
+    def mrope_num_dims(self) -> int:
+        return mrope_num_dims(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -1866,13 +1931,16 @@ class ModelConfig:
         return self._model_info.supports_multimodal_raw_input_only
 
     @property
+    def supports_multimodal_inputs(self) -> bool:
+        return self._cached_supports_multimodal_inputs()
+
+    @property
     def requires_raw_input_tokens(self) -> bool:
         return self._model_info.requires_raw_input_tokens
 
     @property
     def score_type(self) -> ScoreType:
-        """
-        Scoring API handles score/rerank for:
+        """Scoring API handles score/rerank for:
 
         - "classify" task (score_type: cross-encoder models)
         - "embed" task (score_type: bi-encoder models)
@@ -1965,8 +2033,7 @@ class ModelConfig:
 
     @property
     def head_dtype(self) -> torch.dtype:
-        """
-        "head" refers to the last Linear layer(s) of an LLM,
+        """The "head" refers to the last Linear layer(s) of an LLM,
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
@@ -1977,7 +2044,6 @@ class ModelConfig:
           fp32, which is required for RL training-inference consistency
           (the trainer computes logits in fp32).
         """
-
         head_dtype = _get_head_dtype(
             config=self.hf_config, dtype=self.dtype, runner_type=self.runner_type
         )
@@ -2175,8 +2241,7 @@ class ModelConfig:
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
-    """
-    If the input is a non-empty list, the first model_name in
+    """If the input is a non-empty list, the first model_name in
     `served_model_name` is taken.
     If the input is a non-empty string, it is used directly.
     For cases where the input is either an empty string or an
@@ -2449,6 +2514,13 @@ def _get_and_verify_max_len(
     rope_parameters = getattr(hf_config, "rope_parameters", None)
     if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
+    if rope_parameters is not None:
+        # Layers without RoPE do not contribute to context length scaling.
+        rope_parameters = {
+            layer_type: rp
+            for layer_type, rp in rope_parameters.items()
+            if rp is not None
+        }
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
@@ -2459,13 +2531,20 @@ def _get_and_verify_max_len(
             # loading HF config
             rope_type = rp["rope_type"]
 
-            if rope_type not in ("su", "longrope", "llama3"):
+            # YaRN variants leave max_position_embeddings already scaled, as
+            # Transformers' _compute_yarn_parameters assumes, so `factor` must
+            # not be applied to it again.
+            if rope_type not in (
+                "su",
+                "longrope",
+                "llama3",
+                "yarn",
+                "deepseek_yarn",
+                "deepseek_llama_scaling",
+            ):
                 # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
                 # NOTE: This assumes all layer types have the same scaling factor.
                 scaling_factor = rp.get("factor", scaling_factor)
-
-                if rope_type == "yarn":
-                    derived_max_model_len = rp["original_max_position_embeddings"]
         if scaling_factor is None:
             # Fallback the factor to 1.0 if a user assigned `null`
             logger.warning_once(
