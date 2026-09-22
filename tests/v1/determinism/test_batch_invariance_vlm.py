@@ -59,15 +59,22 @@ def _assert_batch_invariant(llm: LLM, inputs: list[dict], sampling) -> None:
         _extract_step_logprobs(llm.generate([inp], sampling, use_tqdm=False)[0])
         for inp in inputs
     ]
-    bsN = [_extract_step_logprobs(out) for out in llm.generate(inputs, sampling)]
+    bsN_outputs = llm.generate(inputs, sampling, use_tqdm=False)
+    assert len(bs1) == len(inputs)
+    assert len(bsN_outputs) == len(inputs)
+    bsN = [_extract_step_logprobs(out) for out in bsN_outputs]
 
     failures = []
     for i, ((lp1, t1), (lpN, tN)) in enumerate(zip(bs1, bsN)):
         if lp1 is None or lpN is None:
-            pytest.skip(
-                "Logits are not available on RequestOutput; "
-                "enable logprobs return to run this test."
+            failures.append(f"req {i}: selected-token logprobs are unavailable")
+            continue
+        if len(t1) != sampling.max_tokens or len(tN) != sampling.max_tokens:
+            failures.append(
+                f"req {i}: expected {sampling.max_tokens} tokens, "
+                f"got bs1={len(t1)} bsN={len(tN)}"
             )
+            continue
         if t1 != tN:
             failures.append(f"req {i}: token mismatch bs1={t1} bsN={tN}")
         elif not torch.equal(lp1, lpN):
@@ -84,16 +91,43 @@ def _assert_batch_invariant(llm: LLM, inputs: list[dict], sampling) -> None:
 @skip_if_not_cuda
 @pytest.mark.parametrize("input_type", ["image", "video"])
 @pytest.mark.parametrize("mm_encoder_attn_backend", ["FLASH_ATTN", "TORCH_SDPA"])
-def test_vlm_batch_invariance_bs1_vs_bsN(input_type: str, mm_encoder_attn_backend: str):
+def test_vlm_batch_invariance_bs1_vs_bsN(
+    input_type: str,
+    mm_encoder_attn_backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    _run_vlm_batch_invariance(input_type, mm_encoder_attn_backend, enforce_eager=True)
+
+
+@skip_if_not_cuda
+def test_vlm_batch_invariance_default_execution(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    _run_vlm_batch_invariance("image", "FLASH_ATTN", enforce_eager=False)
+
+
+def _run_vlm_batch_invariance(
+    input_type: str, mm_encoder_attn_backend: str, enforce_eager: bool
+) -> None:
     inputs = _make_inputs(input_type, num_reqs=4)
-    sampling = SamplingParams(temperature=0.0, max_tokens=8, seed=1234, logprobs=5)
+    sampling = SamplingParams(
+        temperature=0.0,
+        max_tokens=8,
+        seed=1234,
+        ignore_eos=True,
+        logprobs=5,
+    )
 
     llm = LLM(
         model=VLM_TEST_MODEL,
         dtype="bfloat16",
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
         max_num_seqs=16,
+        max_model_len=4096,
+        max_num_batched_tokens=2048,
         gpu_memory_utilization=0.85,
+        enable_prefix_caching=False,
+        mm_processor_cache_gb=0,
         mm_encoder_attn_backend=mm_encoder_attn_backend,
     )
     try:

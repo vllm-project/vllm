@@ -168,6 +168,7 @@ def _run_sparse_backend_vs_sdpa(
     )
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
@@ -175,6 +176,7 @@ def _run_sparse_backend_vs_sdpa(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: num_heads, model_config
@@ -287,7 +289,7 @@ def _run_sparse_backend_vs_sdpa(
     causal_reference = torch.cat(causal_reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
-    vllm_config.model_config.hf_config.index_topk = topk_tokens
+    vllm_config.model_config.hf_text_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, block_size, device, arange_block_indices=True
@@ -602,3 +604,154 @@ def test_dspark_noncausal_differs_from_causal(
         f"non-causal backend output matches the causal reference "
         f"(max abs diff={causal_err}); future-pointing indices are not attended to"
     )
+
+
+@pytest.mark.parametrize("context_len", [20, 128, 900])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("num_heads", [16, 64])
+def test_dsv41_flashinfer_dspark_window_matches_reference(
+    context_len, dtype, num_heads, monkeypatch
+):
+    """Draft queries see the full block without treating padded slots as keys."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("DSV4 TRTLLM sparse attention requires SM100")
+    from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+        DeepseekSparseSWAFlashInferMetadataBuilder,
+        DeepseekV4FlashInferMLAAttention,
+    )
+    from vllm.models.deepseek_v41.sparse_mla import (
+        DeepseekV41SparseSWAMetadataBuilder,
+    )
+
+    torch.manual_seed(123)
+    device = "cuda"
+    query_lens = [5, 3]
+    context_lens = [context_len, context_len + 137]
+    num_real_tokens, num_tokens, head_dim = 8, 9, 512
+    cache = torch.randn(32, 128, head_dim, device=device, dtype=torch.bfloat16).to(
+        dtype
+    )
+    query = torch.randn(
+        num_tokens, num_heads, head_dim, device=device, dtype=torch.bfloat16
+    ).to(dtype)
+    indices = torch.full((num_tokens, 256), -1, device=device, dtype=torch.int32)
+    visible_indices = []
+    visible_lens = []
+    for req, (context, query_len) in enumerate(zip(context_lens, query_lens)):
+        visible = (
+            torch.arange(max(context - 128, 0), context + query_len, device=device)
+            + req * 16 * 128
+        )
+        visible_indices.extend([visible] * query_len)
+        visible_lens.extend([visible.numel()] * query_len)
+    for token, visible in enumerate(visible_indices):
+        indices[token, : visible.numel()] = visible.to(torch.int32)
+    query_start_loc = torch.tensor([0, 5, 8, 9], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_decodes=3,
+        num_prefills=0,
+        num_decode_tokens=num_tokens,
+        num_prefill_tokens=0,
+        seq_lens=torch.tensor(
+            [context_lens[0] + 5, context_lens[1] + 3, 1],
+            device=device,
+            dtype=torch.int32,
+        ),
+        query_start_loc=query_start_loc.to(device),
+        query_start_loc_cpu=query_start_loc,
+        token_to_req_indices=torch.tensor(
+            [0] * 5 + [1] * 3 + [2], device=device, dtype=torch.int32
+        ),
+        decode_swa_indices=indices,
+        decode_swa_width=256,
+        decode_swa_lens=torch.tensor(
+            visible_lens + [0], device=device, dtype=torch.int32
+        ),
+        block_table=torch.arange(48, device=device, dtype=torch.int32).view(3, -1),
+        block_size=128,
+        replay_start=torch.zeros(3, device=device, dtype=torch.int32),
+        flashinfer_sparse_index_cache={},
+        max_decode_query_len=5,
+    )
+
+    # Exercise FlashInfer preparation without constructing a model/config.
+    def init_parent(builder):
+        builder._max_tokens = num_tokens
+        builder.device = device
+        builder.window_size = 128
+
+    monkeypatch.setattr(DeepseekV41SparseSWAMetadataBuilder, "__init__", init_parent)
+    monkeypatch.setattr(
+        DeepseekV41SparseSWAMetadataBuilder,
+        "build",
+        lambda *args: metadata,
+    )
+    builder = DeepseekSparseSWAFlashInferMetadataBuilder()
+    common_metadata = SimpleNamespace(causal=False)
+    builder.build(0, common_metadata)
+    prepared = (
+        metadata.flashinfer_decode_topk_lens,
+        metadata.flashinfer_decode_seq_lens,
+    )
+    attention = SimpleNamespace(
+        kv_cache_torch_dtype=dtype,
+        window_size=128,
+        compress_ratio=0,
+        topk_indices_buffer=torch.empty(
+            num_tokens, 0, device=device, dtype=torch.int32
+        ),
+        scale=1 / math.sqrt(head_dim),
+        _flashinfer_fp8_bmm1_scale=1 / math.sqrt(head_dim),
+        _flashinfer_fp8_bmm2_scale=1.0,
+        attn_sink=None,
+    )
+    attention._build_sparse_index_metadata = MethodType(
+        DeepseekV4FlashInferMLAAttention._build_sparse_index_metadata, attention
+    )
+    output = torch.empty_like(query, dtype=torch.bfloat16)
+
+    def forward():
+        metadata.flashinfer_sparse_index_cache.clear()
+        DeepseekV4FlashInferMLAAttention._forward(
+            attention, query, None, cache, metadata, None, True, output
+        )
+
+    def check_output():
+        references = []
+        for token, visible in enumerate(visible_indices):
+            keys = cache.flatten(0, 1)[visible].float()
+            weights = torch.softmax(
+                query[token].float() @ keys.T / math.sqrt(head_dim), -1
+            )
+            references.append(weights @ keys)
+        atol = 0.01 if dtype == torch.bfloat16 else 0.05
+        torch.testing.assert_close(
+            output[:num_real_tokens].float(),
+            torch.stack(references),
+            atol=atol,
+            rtol=0.05,
+        )
+
+    forward()
+    check_output()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward()
+    # Replay must consume the current inputs, including KV written since capture.
+    query.copy_(torch.randn_like(query, dtype=torch.bfloat16).to(dtype))
+    cache.copy_(torch.randn_like(cache, dtype=torch.bfloat16).to(dtype))
+    # A new step changes visibility as well as Q/KV, without recapturing.
+    metadata.seq_lens.sub_(1)
+    metadata.decode_swa_lens[:num_real_tokens].sub_(1)
+    for token, visible in enumerate(visible_indices):
+        indices[token, visible.numel() - 1] = -1
+        visible_indices[token] = visible[:-1]
+    builder.build(0, common_metadata)
+    assert metadata.flashinfer_decode_topk_lens.data_ptr() == prepared[0].data_ptr()
+    assert metadata.flashinfer_decode_seq_lens.data_ptr() == prepared[1].data_ptr()
+    torch.testing.assert_close(prepared[0], metadata.decode_swa_lens.clamp_min(128))
+    torch.testing.assert_close(
+        prepared[1], metadata.seq_lens[metadata.token_to_req_indices.long()]
+    )
+    graph.replay()
+    check_output()

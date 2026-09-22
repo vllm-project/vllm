@@ -43,8 +43,7 @@ def run_acceptance_length_eval(
     chat_template_kwargs: dict[str, Any],
     use_mrv2: bool,
 ):
-    """
-    E2E acceptance-rate validation for speculative decoding.
+    """E2E acceptance-rate validation for speculative decoding.
 
     Drives one or more datasets (keyed in ``expected_acceptance_lengths``)
     through the spec decode engine and asserts the mean acceptance length
