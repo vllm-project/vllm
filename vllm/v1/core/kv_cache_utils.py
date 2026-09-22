@@ -1552,6 +1552,17 @@ def _get_kv_cache_groups_uniform_page_size(
         # layers while accommodating speculative decoding drafters that add
         # extra layers to one attention type.
         group_size = max_num_layers
+    else:
+        # Padding full-attention groups costs memory for the entire context.
+        full_layer_counts = [
+            len(layers)
+            for layers, specs in zip(layer_buckets, spec_buckets)
+            if isinstance(specs[0], FullAttentionSpec)
+        ]
+        if full_layer_counts:
+            group_size = _largest_divisor_at_most(
+                math.gcd(*full_layer_counts), group_size
+            )
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size
