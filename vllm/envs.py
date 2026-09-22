@@ -139,7 +139,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
-    VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["a16w4", "a8w4", "a4w4"] = "a4w4"
+    VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -431,31 +431,6 @@ def env_with_choices(
         return value
 
     return _get_validated_env
-
-
-_AITER_MOE_SITUV2_CHOICES = ("a16w4", "a8w4", "a4w4")
-_AITER_MOE_SITUV2_AUTO = "a4w4"
-
-
-def _aiter_moe_situv2_activation() -> str:
-    """Resolve VLLM_ROCM_USE_AITER_MOE_SITUV2 to a SiTUv2 activation dtype.
-
-    Unset, empty or "auto" picks the default (a4w4). Accepts the
-    a16w4/a8w4/a4w4 names and the legacy boolean form (1 -> a4w4,
-    0 -> a16w4).
-    """
-    value = os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2")
-    norm = (value or "").strip().lower()
-    if norm in ("", "auto", "true", "1"):
-        return _AITER_MOE_SITUV2_AUTO
-    if norm in ("false", "0"):
-        return "a16w4"
-    if norm not in _AITER_MOE_SITUV2_CHOICES:
-        raise ValueError(
-            f"Invalid value '{value}' for VLLM_ROCM_USE_AITER_MOE_SITUV2. "
-            f"Valid options: {list(_AITER_MOE_SITUV2_CHOICES)}, auto, 0 or 1."
-        )
-    return norm
 
 
 def env_list_with_choices(
@@ -1294,17 +1269,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
-    # Activation dtype for the K3 SiTU MXFP4 MoE on the FlyDSL SiTUv2 path.
-    # Each value selects a different FlyDSL kernel family and tuned config
-    # (kimik3_{a16w4,a8w4,a4w4}_tuned_fmoe.csv):
-    #   a4w4 (default / "auto"): fp4 activations, fastest (AITER_SITUV2_A4W4=1)
-    #   a8w4: fp8 activations, gate/up interleaved (AITER_SITUV2_A8W4=1)
-    #   a16w4: bf16 activations, most accurate
-    # vLLM mirrors the choice into the AITER_SITUV2_* env at init. "1"/"0"
-    # keep their old meaning (a4w4 / a16w4).
-    # Needs AITER >= v0.1.20 (ROCm/aiter#4463) for the a4w4 dispatch flag
-    # and tuned kimik3_a4w4_*_fmoe.csv rows; otherwise FlyDSL uses heuristics.
-    "VLLM_ROCM_USE_AITER_MOE_SITUV2": _aiter_moe_situv2_activation,
+    # Activation dtype for the Kimi-K3 SiTU MXFP4 MoE (AITER FlyDSL SiTUv2):
+    # auto (= a4w4), a4w4, a8w4 or a16w4. Legacy 1/0 mean a4w4/a16w4.
+    "VLLM_ROCM_USE_AITER_MOE_SITUV2": env_with_choices(
+        "VLLM_ROCM_USE_AITER_MOE_SITUV2",
+        "auto",
+        ["auto", "a4w4", "a8w4", "a16w4", "0", "1"],
+        case_sensitive=False,
+    ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
     #       for large batches
