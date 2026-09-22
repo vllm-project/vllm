@@ -6,6 +6,10 @@ import numpy as np
 import torch
 
 from vllm.config.model import LogprobsMode
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -13,10 +17,90 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 
 
+class CompactPromptLogprobs:
+    """Model-owned components for the compact prompt-logprobs path."""
+
+    def __init__(
+        self,
+        logits_processor: LogitsProcessor,
+        lm_head: VocabParallelEmbedding,
+    ) -> None:
+        self._logits_processor = logits_processor
+        self._lm_head = lm_head
+
+    def compute(
+        self,
+        hidden_states: torch.Tensor,
+        target_token_ids: torch.Tensor,
+        num_logprobs: int,
+    ) -> LogprobsTensors:
+        """Compute one prompt chunk without materializing full logits."""
+        token_ids, logprobs, ranks = self._logits_processor.get_prompt_logprobs(
+            self._lm_head,
+            hidden_states,
+            target_token_ids,
+            num_logprobs,
+        )
+        return LogprobsTensors(
+            logprob_token_ids=token_ids,
+            logprobs=logprobs,
+            selected_token_ranks=ranks,
+        )
+
+    def warmup(self) -> None:
+        """Compile compact prompt-logprobs kernels."""
+        self._logits_processor.warmup_prompt_logprobs(self._lm_head)
+
+
+def init_compact_prompt_logprobs(
+    model: torch.nn.Module,
+    hidden_dtype: torch.dtype,
+    logprobs_mode: LogprobsMode,
+) -> CompactPromptLogprobs:
+    """Resolve and validate model components used by the compact path."""
+    if logprobs_mode != "raw_logprobs":
+        raise RuntimeError(
+            "VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS requires raw_logprobs mode"
+        )
+
+    # Multimodal wrappers expose their text decoder through this protocol.
+    language_model = (
+        model.get_language_model() if hasattr(model, "get_language_model") else model
+    )
+    logits_processor: LogitsProcessor | None = getattr(
+        language_model, "logits_processor", None
+    )
+    lm_head: VocabParallelEmbedding | None = getattr(language_model, "lm_head", None)
+    if (
+        logits_processor is None
+        or lm_head is None
+        or not hasattr(logits_processor, "validate_prompt_logprobs")
+    ):
+        raise RuntimeError(
+            "VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS requires a model with "
+            "a standard LM head and LogitsProcessor"
+        )
+
+    try:
+        logits_processor.validate_prompt_logprobs(lm_head, hidden_dtype)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise RuntimeError(
+            f"VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS is unsupported by this model: {exc}"
+        ) from exc
+
+    return CompactPromptLogprobs(logits_processor, lm_head)
+
+
 class PromptLogprobsWorker:
-    def __init__(self, max_num_reqs: int, logprobs_mode: LogprobsMode = "raw_logprobs"):
+    def __init__(
+        self,
+        max_num_reqs: int,
+        logprobs_mode: LogprobsMode = "raw_logprobs",
+        compact_prompt_logprobs: CompactPromptLogprobs | None = None,
+    ) -> None:
         self.max_num_reqs = max_num_reqs
         self.logprobs_mode = logprobs_mode
+        self._compact_prompt_logprobs = compact_prompt_logprobs
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -85,6 +169,9 @@ class PromptLogprobsWorker:
                 logits_fn,
                 max_num_prompt_logprobs,
                 self.logprobs_mode,
+                self._compact_prompt_logprobs.compute
+                if self._compact_prompt_logprobs is not None
+                else None,
             )
         )
 
@@ -202,7 +289,20 @@ def compute_prompt_logprobs_with_chunking(
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
+    compact_prompt_logprobs_fn: (
+        Callable[[torch.Tensor, torch.Tensor, int], LogprobsTensors] | None
+    ) = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if compact_prompt_logprobs_fn is not None:
+        if logprobs_mode != "raw_logprobs":
+            raise ValueError(
+                "compact prompt logprobs require logprobs_mode='raw_logprobs'"
+            )
+        if not 0 <= num_prompt_logprobs <= 32:
+            # All rows in a batch share one K. Fall back for the whole batch
+            # when any request needs semantics unsupported by the compact path.
+            compact_prompt_logprobs_fn = None
+
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
     CHUNK_SIZE = 1024
@@ -213,19 +313,28 @@ def compute_prompt_logprobs_with_chunking(
     prompt_token_ids = prompt_token_ids.to(torch.int64)
     for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
         end_idx = start_idx + CHUNK_SIZE
-        # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-        requested_num = (
-            prompt_logits.shape[-1]
-            if num_prompt_logprobs == -1
-            else num_prompt_logprobs
-        )
-        result = compute_topk_scores(
-            prompt_logits,
-            requested_num,
-            prompt_token_ids[start_idx:end_idx],
-            logits_mode=logits_mode,
-        )
+        chunk_hidden_states = prompt_hidden_states[start_idx:end_idx]
+        chunk_token_ids = prompt_token_ids[start_idx:end_idx]
+        if compact_prompt_logprobs_fn is not None:
+            result = compact_prompt_logprobs_fn(
+                chunk_hidden_states,
+                chunk_token_ids,
+                num_prompt_logprobs,
+            )
+        else:
+            # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
+            prompt_logits = logits_fn(chunk_hidden_states)
+            requested_num = (
+                prompt_logits.shape[-1]
+                if num_prompt_logprobs == -1
+                else num_prompt_logprobs
+            )
+            result = compute_topk_scores(
+                prompt_logits,
+                requested_num,
+                chunk_token_ids,
+                logits_mode=logits_mode,
+            )
         token_ids.append(result.logprob_token_ids)
         scores.append(result.logprobs)
         ranks.append(result.selected_token_ranks)

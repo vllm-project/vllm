@@ -155,6 +155,18 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
         module.autotune_kda_qkvg(model)
 
 
+def _warmup_compact_prompt_logprobs(worker: "Worker") -> None:
+    """Compile the opt-in MRV2 prompt-logprobs kernels before serving."""
+    if not worker.use_v2_model_runner:
+        return
+
+    compact_prompt_logprobs = getattr(
+        worker.model_runner, "compact_prompt_logprobs", None
+    )
+    if compact_prompt_logprobs is not None:
+        compact_prompt_logprobs.warmup()
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -187,6 +199,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             time.perf_counter() - jit_warmup_start,
         )
 
+    _warmup_compact_prompt_logprobs(worker)
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
     mamba_triton_warmup(worker.model_runner)
