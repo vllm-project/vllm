@@ -44,6 +44,10 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         return [64]
 
     @staticmethod
+    def get_kernel_page_rows() -> int:
+        return 1
+
+    @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_MLA_SPARSE"
 

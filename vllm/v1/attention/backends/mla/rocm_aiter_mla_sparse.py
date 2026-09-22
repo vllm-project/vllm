@@ -35,6 +35,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
@@ -105,6 +106,7 @@ def _convert_req_index_to_global_index_kernel(
     # shapes (compile-time where possible)
     max_num_blocks_per_req: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    BLOCK_STRIDE_ROWS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     # strides (in elements)
     bt_stride0,
@@ -146,9 +148,11 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block, other=0)
 
-    # # If token == -1 OR block_id OOB, output 0; else base * BLOCK_SIZE + offset
+    # Invalid slots map to zero; valid slots use the physical block stride.
     out_val = tl.where(
-        is_invalid_tok | (~valid_block), 0, base * BLOCK_SIZE + inblock_off
+        is_invalid_tok | (~valid_block),
+        0,
+        base * BLOCK_STRIDE_ROWS + inblock_off,
     )
     out_ptr_ij = out_ptr + seq_start + indice_id
     out_ptr_ij_mask = (seq_start + indice_id) < seq_end
@@ -163,13 +167,15 @@ def triton_convert_req_index_to_global_index(
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     cu_seqlens: torch.Tensor,  # int32 [num_tokens + 1]
     paged_kv_indices: torch.Tensor,  # int32 [num_tokens * topk] out_buffer
+    *,
     BLOCK_SIZE: int = 64,
+    BLOCK_STRIDE_ROWS: int,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
 ):
     """out[token_id, indice_id] =
         block_table[req_id[token_id],
-            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
+            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_STRIDE_ROWS
         + token_indices[token_id, indice_id] % BLOCK_SIZE
 
     Only when token_indices[token_id, indice_id] == -1 do we output -1.
@@ -209,6 +215,7 @@ def triton_convert_req_index_to_global_index(
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
+        BLOCK_STRIDE_ROWS,
         BLOCK_N,
         # strides
         bt_stride0,
@@ -333,6 +340,10 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         return [1, MultipleOf(16)]
 
     @staticmethod
+    def get_kernel_page_rows() -> int:
+        return 1
+
+    @staticmethod
     def get_name() -> str:
         return "ROCM_AITER_MLA_SPARSE"
 
@@ -358,8 +369,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        # Global index conversion assumes contiguous pages within each layer.
-        return (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC)
+        return (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -1051,6 +1061,10 @@ class ROCMAiterMLASparseImpl(
             self.topk_indices_buffer[:num_actual_toks], attn_metadata.topk_tokens
         )
 
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
+
         triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
@@ -1058,17 +1072,18 @@ class ROCMAiterMLASparseImpl(
             attn_metadata.paged_kv_indptr,
             attn_metadata.paged_kv_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
         # write the latent and rope to kv cache
         if fp8_attention:
-            kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
+            kv_rows = kv_rows.view(current_platform.fp8_dtype())
             if q.dtype != current_platform.fp8_dtype():
                 original_q_shape = q.shape
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
                 q = q.view(original_q_shape)
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
         return self._forward_mla(
-            layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata
+            layer, mla_padded_q, kv_rows.unsqueeze(1), attn_metadata
         )

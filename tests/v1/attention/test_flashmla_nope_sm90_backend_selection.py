@@ -20,6 +20,9 @@ import pytest
 import torch
 
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+    FlashAttnMLASparseBackend,
+)
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
@@ -80,6 +83,11 @@ def rope_carrying_model(monkeypatch):
 
 def test_supported_head_sizes_include_512():
     assert FlashMLASparseBackend.get_supported_head_sizes() == [576, 512]
+
+
+@pytest.mark.parametrize("backend", [FlashMLASparseBackend, FlashAttnMLASparseBackend])
+def test_flat_sparse_mla_cache_stride_is_row_aligned(backend):
+    assert backend.get_kernel_page_rows() == 1
 
 
 def test_quantized_ds_mla_formats_are_the_envelope_set():

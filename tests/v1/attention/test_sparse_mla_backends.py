@@ -876,6 +876,24 @@ def test_flashinfer_sparse_mla_packed_stride(
     )
 
 
+def test_flashmla_sparse_packed_stride(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+):
+    _run_sparse_backend_decode_correctness(
+        FlashMLASparseBackend,
+        BatchSpec(seq_lens=[100], query_lens=[1]),
+        "auto",
+        1,
+        64,
+        1.0,
+        1.0,
+        block_stride_rows=96,
+        spread_sparse_indices=True,
+    )
+
+
 def _triton_convert_reference_impl(
     req_ids: torch.Tensor,
     block_table: torch.Tensor,
