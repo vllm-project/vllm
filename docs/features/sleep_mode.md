@@ -76,7 +76,8 @@ llm.wake_up(tags=["kv_cache"])
 
 #### Retaining frozen weights during RLHF updates
 
-Set `weight_transfer_config.frozen_weight_names` to runtime parameter-name glob
+Set `sleep_preserve_parameter_names` (CLI: `--sleep-preserve-parameter-names`)
+to runtime parameter-name glob
 patterns for weights that stay frozen during training. Each pattern must match
 `model.named_parameters()`; checkpoint names and `requires_grad` are not used.
 

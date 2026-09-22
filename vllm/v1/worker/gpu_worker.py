@@ -246,8 +246,7 @@ class Worker(WorkerBase):
         return self._sleep_mode_backend
 
     def _save_sleep_parameters(self, model: nn.Module) -> None:
-        transfer_config = self.vllm_config.weight_transfer_config
-        patterns = transfer_config.frozen_weight_names if transfer_config else []
+        patterns = self.model_config.sleep_preserve_parameter_names
         if not patterns:
             self._sleep_saved_parameters = {}
             return
