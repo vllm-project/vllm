@@ -259,7 +259,10 @@ def _launch_sparse_decode_reduce(
     part_l: torch.Tensor,
     part_acc: torch.Tensor,
     adaptive_splits: bool,
+    positions: torch.Tensor | None = None,
+    cos_sin_cache: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Run the reduce kernel, with the inverse-RoPE epilogue if given positions."""
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     num_queries, num_splits, num_heads = part_m.shape
@@ -275,6 +278,8 @@ def _launch_sparse_decode_reduce(
         part_acc,
         attn_sink,
         out,
+        positions,
+        cos_sin_cache,
         out.stride(0),
         out.stride(1),
         part_m.stride(0),
@@ -282,6 +287,7 @@ def _launch_sparse_decode_reduce(
         part_acc.stride(0),
         part_acc.stride(1),
         part_acc.stride(2),
+        cos_sin_cache.stride(0) if cos_sin_cache is not None else 0,
         num_heads,
         HAS_ATTN_SINK=False,
         ADAPTIVE_SPLITS=adaptive_splits,
@@ -289,6 +295,9 @@ def _launch_sparse_decode_reduce(
         BLOCK_H=1,
         NUM_SPLITS=num_splits,
         SPLITS_PAD=1 << (num_splits - 1).bit_length(),
+        FUSE_INV_ROPE=positions is not None,
+        NOPE=NOPE_HEAD_DIM,
+        HALF=ROPE_HEAD_DIM // 2,
         num_warps=4,
     )
     return out
@@ -1006,6 +1015,46 @@ def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> No
 
     assert torch.isfinite(actual).all()
     assert torch.equal(actual, torch.full_like(actual, 2))
+
+
+@requires_gfx950
+@pytest.mark.parametrize("adaptive_splits", [False, True])
+@torch.inference_mode()
+def test_sparse_attn_decode_reduce_inverse_rope_epilogue(adaptive_splits: bool) -> None:
+    """FUSE_INV_ROPE must land where the standalone rotation would.
+
+    The epilogue rotates a whole [H, nope + rope] row with one expression by
+    feeding cos=1/sin=0 to the NoPE lanes, which only holds if the pair split
+    lands on ``nope_head_dim // 2``; the NoPE lanes therefore have to come
+    back untouched, not merely close.
+    """
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
+
+    device = torch.device("cuda")
+    torch.manual_seed(7)
+    num_queries, num_splits, num_heads, max_pos = 5, 4, 8, 64
+    shape = (num_queries, num_splits, num_heads)
+    part_m = torch.randn(shape, dtype=torch.float32, device=device)
+    part_l = torch.rand(shape, dtype=torch.float32, device=device) + 0.5
+    part_acc = torch.randn((*shape, HEAD_DIM), dtype=torch.float32, device=device)
+    positions = torch.randint(
+        0, max_pos, (num_queries,), dtype=torch.int64, device=device
+    )
+    angle = torch.randn(max_pos, ROPE_HEAD_DIM // 2, device=device)
+    cos_sin_cache = torch.cat((angle.cos(), angle.sin()), dim=-1).contiguous()
+
+    unfused = _launch_sparse_decode_reduce(part_m, part_l, part_acc, adaptive_splits)
+    expected = _fused_inverse_rope_gptj(
+        unfused, positions, cos_sin_cache, ROPE_HEAD_DIM
+    )
+    actual = _launch_sparse_decode_reduce(
+        part_m, part_l, part_acc, adaptive_splits, positions, cos_sin_cache
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    assert torch.equal(actual[..., :NOPE_HEAD_DIM], unfused[..., :NOPE_HEAD_DIM])
+    # An epilogue that quietly did nothing would satisfy everything above.
+    assert not torch.equal(actual[..., NOPE_HEAD_DIM:], unfused[..., NOPE_HEAD_DIM:])
 
 
 @requires_gfx950
