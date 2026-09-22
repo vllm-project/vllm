@@ -301,8 +301,18 @@ class EngineClient(ABC):
         """Batched weight update for RL training."""
         raise NotImplementedError
 
-    async def finish_weight_update(self, weight_version: str | None = None) -> None:
-        """Finish the weight update and set its version if provided."""
+    async def finish_weight_update(
+        self, weight_version: str | None = None, checksum: bool = False
+    ) -> dict[str, str] | None:
+        """Finish the weight update and set its version if provided.
+
+        Args:
+            weight_version: Version to record for the committed weights.
+            checksum: Whether to return this engine's weight digests.
+
+        Returns:
+            Rank-qualified weight digests when requested, otherwise None.
+        """
         raise NotImplementedError
 
     async def update_weight_version(self, new_version: str) -> None:

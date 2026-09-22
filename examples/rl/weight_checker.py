@@ -180,6 +180,25 @@ def check_replicas(extra_urls: list[str], bundle: dict[str, str]) -> None:
     print(f"All {len(extra_urls) + 1} replicas hold the same weights.")
 
 
+def collect_update_digests(base_url: str, weight_version: str) -> dict[str, str]:
+    """Finish a weight update and get this instance's digests back.
+
+    The `checksum` option rides on the finish call, so the digests arrive with
+    the commit rather than from a separate `checksum` that would hash every
+    weight a second time.
+    """
+    finished = post(
+        base_url,
+        "/finish_weight_update",
+        json={"weight_version": weight_version, "checksum": True},
+    )
+    digests = finished.get("checksums")
+    if not digests:
+        raise RuntimeError("finish_weight_update returned no digests")
+    print(f"collected {len(digests)} digests for {weight_version}")
+    return digests
+
+
 if __name__ == "__main__":
     args = parse_args()
     base_url = args.base_url.rstrip("/")

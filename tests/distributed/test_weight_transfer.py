@@ -1217,8 +1217,59 @@ class TestTrainerClients:
         assert update_req.update_info == {"names": ["w"]}
 
         client.finish_weight_update("step-42")
-        handle.finish_weight_update.remote.assert_called_once_with()
+        handle.finish_weight_update.remote.assert_called_once_with(checksum=False)
         handle.update_weight_version.remote.assert_called_once_with("step-42")
+
+    def test_ray_client_asks_for_checksums_per_actor(self, monkeypatch):
+        """The option rides on the finish call, which every actor must receive."""
+        import ray
+
+        monkeypatch.setattr(ray, "get", lambda refs: [{"dp0:tp0:w": "a"}])
+        handle = MagicMock()
+        client = RayVLLMWeightSyncClient(handle)
+
+        assert client.finish_weight_update(checksum=True) == {"dp0:tp0:w": "a"}
+        handle.finish_weight_update.remote.assert_called_once_with(checksum=True)
+
+    def test_http_client_sends_the_checksum_option(self, monkeypatch):
+        """The option is a body field on the finish call, not on the update."""
+        captured = {}
+        replies: list[dict] = [
+            {"message": "Weight update finished", "checksums": {"dp0:tp0:w": "a"}},
+            {"message": "Weight update finished"},
+        ]
+
+        def fake_post(self, path, json=None):
+            captured["path"] = path
+            captured["json"] = json
+            return replies.pop(0)
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+
+        # Without the option the body stays what it always was, so a server
+        # that predates the option sees no change.
+        assert client.finish_weight_update("step-42") is None
+        assert captured["json"] == {"weight_version": "step-42"}
+
+        assert client.finish_weight_update(checksum=True) == {"dp0:tp0:w": "a"}
+        assert captured["path"] == "finish_weight_update"
+        assert captured["json"] == {"checksum": True}
+
+    def test_finish_tolerates_a_response_without_checksums(self, monkeypatch):
+        """A server that was not asked, or predates the option, omits the key."""
+        monkeypatch.setattr(
+            HTTPVLLMWeightSyncClient,
+            "_post",
+            lambda self, path, json=None: {"message": "Weight update finished"},
+        )
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        assert client.finish_weight_update(checksum=True) is None
+
+        monkeypatch.setattr(
+            HTTPVLLMWeightSyncClient, "_post", lambda self, path, json=None: None
+        )
+        assert client.finish_weight_update() is None
 
     def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
         """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""

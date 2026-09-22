@@ -199,6 +199,59 @@ def test_finish_without_start_raises():
         Worker.finish_weight_update(worker)
 
 
+def test_finish_hashes_nothing_by_default():
+    """Hashing every weight copies each one to the host, so it is opt-in."""
+    worker = _make_worker(_RecordingEngine())
+    calls: list[int] = []
+    worker.compute_weight_checksums = lambda: calls.append(1) or {}
+
+    Worker.start_weight_update(worker)
+    assert Worker.finish_weight_update(worker) is None
+    assert calls == []
+    # The rest of the teardown still happens.
+    assert worker.weight_transfer_engine.finished is True
+    assert worker.weight_transfer_engine.reset_count == 1
+
+
+def test_finish_returns_checksums_when_asked():
+    worker = _make_worker(_RecordingEngine())
+    digests = {"dp0:pp0:pcp0:tp0:ep0:w": "a"}
+    worker.compute_weight_checksums = lambda: digests
+
+    Worker.start_weight_update(worker)
+    assert Worker.finish_weight_update(worker, checksum=True) == digests
+
+
+def test_finish_takes_the_snapshot_after_the_engine_committed():
+    """A digest of a half-applied chunk would be worse than none."""
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    order: list[str] = []
+    engine.finish_weight_update = lambda: order.append("engine")
+    worker.compute_weight_checksums = lambda: order.append("hash") or {}
+
+    Worker.start_weight_update(worker)
+    Worker.finish_weight_update(worker, checksum=True)
+
+    # The transfer engine commits first, so the digests describe what landed.
+    assert order == ["engine", "hash"]
+
+
+def test_asking_for_checksums_does_not_leak_into_the_next_session():
+    """The option is per finish, so it needs no session state to clear."""
+    worker = _make_worker(_RecordingEngine())
+    calls: list[int] = []
+    worker.compute_weight_checksums = lambda: calls.append(1) or {}
+
+    Worker.start_weight_update(worker)
+    assert Worker.finish_weight_update(worker, checksum=True) == {}
+    assert calls == [1]
+
+    Worker.start_weight_update(worker)
+    assert Worker.finish_weight_update(worker) is None
+    assert calls == [1]
+
+
 def test_update_resets_active_on_error():
     engine = _RecordingEngine(raise_on_update=True)
     worker = _make_worker(engine)
