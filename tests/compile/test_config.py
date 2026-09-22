@@ -70,6 +70,8 @@ def test_get_raw_stream_patch():
         assert get_raw_stream is _cuda_getCurrentRawStream
 
 
+# Inductor can initialize CUDA even for CPU inputs.
+@pytest.mark.forked
 @pytest.mark.parametrize("use_v2", [False, True])
 def test_e8m0_custom_op_fullgraph(use_v2, use_fresh_inductor_cache):
     """E8M0 inputs must not prevent mutable custom-op decomposition."""
