@@ -60,7 +60,8 @@ behaviors are inactive and the metrics below are unchanged.
 ### The `priority` label
 
 In priority mode, every finished-request metric (for example
-`vllm:e2e_request_latency_seconds`, `vllm:request_queue_time_seconds`,
+`vllm:e2e_request_latency_seconds`, `vllm:time_to_first_token_seconds`,
+`vllm:request_queue_time_seconds`,
 `vllm:request_success`, and the other per-request histograms) gains a
 `priority` label so latency and throughput can be broken down per priority
 tier.

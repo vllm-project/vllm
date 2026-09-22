@@ -50,6 +50,7 @@ def _make_finished_request_stats(priority: int = 0):
     req_stats.first_token_ts = 0.5
     req_stats.last_token_ts = 5.0
     req_stats.num_generation_tokens = 10
+    req_stats.first_token_latency = 0.5
     iteration_stats.update_from_finished_request(
         finish_reason=FinishReason.STOP,
         request_id="test-req",
@@ -188,6 +189,7 @@ def test_priority_all_finished_metrics_have_label(logger_priority):
         "vllm:request_params_max_tokens",
         "vllm:request_num_preemptions",
         "vllm:request_success",
+        "vllm:time_to_first_token_seconds",
     ]
     for name in finished_metric_names:
         samples = _collect_samples(name)

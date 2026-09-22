@@ -257,6 +257,7 @@ class FinishedRequestStats:
     is_corrupted: bool = False
     num_cached_tokens: int = 0
     priority: int = 0
+    first_token_latency: float = 0.0
 
 
 @dataclass
@@ -580,6 +581,7 @@ class IterationStats:
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
             priority=priority,
+            first_token_latency=req_stats.first_token_latency,
         )
         self.finished_requests.append(finished_req)
 

@@ -922,10 +922,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
             buckets=time_to_first_token_buckets,
-            labelnames=labelnames,
+            labelnames=finished_labelnames,
         )
-        self.histogram_time_to_first_token = create_metric_per_engine(
-            histogram_time_to_first_token, per_engine_labelvalues
+        self.histogram_time_to_first_token = _finished_metric(
+            histogram_time_to_first_token
         )
 
         histogram_inter_token_latency = self._histogram_cls(
@@ -1270,8 +1270,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
         for n_param in iteration_stats.n_params_iter:
             self.histogram_n_request[engine_idx].observe(n_param)
-        for ttft in iteration_stats.time_to_first_tokens_iter:
-            self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
 
@@ -1327,6 +1325,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self._finished_child(
                 self.histogram_request_time_per_output_token, engine_idx, priority
             ).observe(fr.mean_time_per_output_token)
+            if fr.first_token_latency > 0:
+                self._finished_child(
+                    self.histogram_time_to_first_token, engine_idx, priority
+                ).observe(fr.first_token_latency)
             if fr.max_tokens_param:
                 self._finished_child(
                     self.histogram_max_tokens_request, engine_idx, priority
