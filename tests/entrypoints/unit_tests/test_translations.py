@@ -190,10 +190,11 @@ async def test_direct_generate_dispatch_prompt_and_response():
     assert resp.translated_text == "Hallo Welt"  # stripped
     assert resp.id.startswith("transl-")
     assert resp.target_language == "de"
-    # Source -> encoder "text" modality; empty decoder prompt (bilingual Marian).
+    # Source -> encoder "text" modality; target language -> decoder prompt for
+    # the model's own conditioning hook.
     prompt = engine.captured["prompt"]
     assert prompt["encoder_prompt"]["multi_modal_data"]["text"] == "Hello world"
-    assert prompt["decoder_prompt"] == ""
+    assert prompt["decoder_prompt"] == "de"
     assert engine.captured["sampling_params"].temperature == 0.0  # greedy
     # Usage counts encoder-prompt + completion tokens.
     assert (resp.usage.prompt_tokens, resp.usage.completion_tokens) == (4, 3)
@@ -254,6 +255,98 @@ async def test_decoder_only_uses_chat_delegation():
     assert isinstance(resp, TranslationResponse)
     assert "chat" in called  # went through chat delegation, not direct generate
     assert resp.translated_text == "Hallo Welt"
+
+
+# --------------------------------------------------------------------------- #
+# Target-language conditioning (encoder-decoder direct path)
+# --------------------------------------------------------------------------- #
+class _FakeProcessor:
+    """Stub multimodal processor exposing ``create_decoder_prompt``.
+
+    Mimics NLLB/M2M100: an unknown target code raises ``ValueError``; a known
+    code resolves to a single forced-BOS token id.
+    """
+
+    def __init__(self, known):
+        self._known = set(known)
+
+    def create_decoder_prompt(self, prompt, mm_items):
+        if prompt not in self._known:
+            raise ValueError(f"Unsupported target language: {prompt!r}")
+        return [42]
+
+
+class _FakeRenderer:
+    def __init__(self, processor):
+        self._processor = processor
+
+    def get_mm_processor(self):
+        return self._processor
+
+
+def _engine_with_renderer(processor):
+    engine = _default_engine()
+    engine.renderer = _FakeRenderer(processor)
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_forwards_target_language_code():
+    engine = _default_engine()
+    h = _make_direct_handler(engine)
+    req = TranslationRequest(model="nllb", text="Hello", target_language="deu_Latn")
+    await h._create_translation_direct(req, None)
+    assert engine.captured["prompt"]["decoder_prompt"] == "deu_Latn"
+
+
+@pytest.mark.asyncio
+async def test_pre_validation_rejects_unknown_language():
+    engine = _engine_with_renderer(_FakeProcessor(known={"deu_Latn"}))
+    h = _make_direct_handler(engine)
+    req = TranslationRequest(model="nllb", text="Hello", target_language="xxx_Zzzz")
+    resp = await h._create_translation_direct(req, None)
+    assert isinstance(resp, ErrorResponse)
+    assert resp.error.code == 400
+    # Rejected before generation -- the engine was never asked to generate.
+    assert "prompt" not in engine.captured
+
+
+@pytest.mark.asyncio
+async def test_pre_validation_allows_known_language():
+    engine = _engine_with_renderer(_FakeProcessor(known={"deu_Latn"}))
+    h = _make_direct_handler(engine)
+    req = TranslationRequest(model="nllb", text="Hello", target_language="deu_Latn")
+    resp = await h._create_translation_direct(req, None)
+    assert isinstance(resp, TranslationResponse)
+    assert engine.captured["prompt"]["decoder_prompt"] == "deu_Latn"
+
+
+@pytest.mark.asyncio
+async def test_pre_validation_skipped_without_renderer():
+    # A model without a renderer/processor (e.g. bilingual MarianMT) proceeds
+    # to generation; the target code is passed through unvalidated.
+    engine = _default_engine()  # no ``renderer`` attribute
+    h = _make_direct_handler(engine)
+    req = TranslationRequest(model="opus-mt", text="Hello", target_language="anything")
+    resp = await h._create_translation_direct(req, None)
+    assert isinstance(resp, TranslationResponse)
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_maps_value_error_to_400():
+    class _RaisingEngine:
+        def __init__(self):
+            self.captured = {}
+
+        async def generate(self, prompt, sampling_params, request_id, **kwargs):
+            raise ValueError("Unsupported target language: 'xx'")
+            yield  # pragma: no cover - makes this an async generator
+
+    h = _make_direct_handler(_RaisingEngine())
+    req = TranslationRequest(model="nllb", text="Hello", target_language="xx")
+    resp = await h._create_translation_direct(req, None)
+    assert isinstance(resp, ErrorResponse)
+    assert resp.error.code == 400
 
 
 # --------------------------------------------------------------------------- #

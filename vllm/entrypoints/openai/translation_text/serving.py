@@ -7,8 +7,10 @@ The endpoint picks one of two strategies per model:
 * **Encoder-decoder MT models (direct-generate).** MarianMT / NLLB take the
   source text as the encoder's single "text" modality and generate directly
   through the engine. Selected when ``model_config.is_encoder_decoder`` is true.
-  The decoder prompt is left empty here (correct for bilingual Marian, whose
-  target language is implied); many-to-many conditioning is layered on top.
+  The target language is forwarded as the decoder prompt so the model chooses the
+  output language: NLLB/M2M100 resolve the code to a ``forced_bos_token_id``,
+  while bilingual Marian implies the target and ignores it. An unknown code is
+  rejected with a 400 before generation (:meth:`_validate_target_language`).
 * **Decoder-only / instruct models (chat-delegation).** The request is wrapped
   in an instruction prompt and handed to :class:`OpenAIServingChat`, reusing the
   full generation pipeline; the chat response is reshaped into the translation
@@ -161,6 +163,13 @@ class OpenAIServingTextTranslation(BaseServing):
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
+        # Reject an unsupported target language before generation: otherwise the
+        # engine's renderer silently tokenizes an invalid code to subwords and
+        # produces garbage instead of a 400.
+        lang_error = self._validate_target_language(request)
+        if lang_error is not None:
+            return lang_error
+
         request_id = self._base_request_id(raw_request) or f"transl-{time.time()}"
         # Greedy by default: best translation quality, and matches the parity tests.
         sampling_params = SamplingParams(
@@ -170,14 +179,16 @@ class OpenAIServingTextTranslation(BaseServing):
             seed=request.seed,
         )
 
-        # Source is the encoder's single "text" modality; empty decoder prompt
-        # (the runtime prepends decoder_start_token_id).
+        # Source is the encoder's single "text" modality; the target language is
+        # the decoder prompt, which the model's create_decoder_prompt hook turns
+        # into conditioning (forced_bos for NLLB/M2M100, empty for Marian). The
+        # runtime prepends decoder_start_token_id ahead of the hook's output.
         prompt = {
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {"text": request.text},
             },
-            "decoder_prompt": "",
+            "decoder_prompt": request.target_language,
         }
 
         try:
@@ -185,6 +196,14 @@ class OpenAIServingTextTranslation(BaseServing):
             final_res = None
             async for res in generator:
                 final_res = res
+        except ValueError as exc:
+            # Backstop: the model's create_decoder_prompt hook rejected the
+            # target language (pre-validation above covers the common case).
+            return self.create_error_response(
+                str(exc),
+                err_type="BadRequestError",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Error during encoder-decoder translation")
             return self.create_error_response(
@@ -222,6 +241,42 @@ class OpenAIServingTextTranslation(BaseServing):
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             ),
         )
+
+    def _validate_target_language(
+        self, request: TranslationRequest
+    ) -> ErrorResponse | None:
+        """Reject an unsupported target language with a 400 before generation.
+
+        Resolves the code through the model's own ``create_decoder_prompt`` hook
+        (the one the engine calls), so an unknown NLLB/M2M100 code becomes a clean
+        400 rather than being silently tokenized into subwords. Returns ``None``
+        (letting the request proceed) whenever the check cannot run: no renderer,
+        no processor, or a bilingual model whose hook accepts anything.
+        """
+        renderer = getattr(self.engine_client, "renderer", None)
+        if renderer is None:
+            return None
+        try:
+            mm_processor = renderer.get_mm_processor()
+        except Exception:
+            return None
+        create_decoder_prompt = getattr(mm_processor, "create_decoder_prompt", None)
+        if create_decoder_prompt is None:
+            return None
+        try:
+            create_decoder_prompt(request.target_language, None)
+        except ValueError as exc:
+            return self.create_error_response(
+                str(exc),
+                err_type="BadRequestError",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        except Exception:
+            logger.debug(
+                "Target-language pre-validation skipped (unexpected error).",
+                exc_info=True,
+            )
+        return None
 
     def _to_translation_response(
         self,
