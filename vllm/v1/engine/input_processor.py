@@ -397,6 +397,13 @@ class InputProcessor:
                 sampling_params.max_tokens = (
                     self.model_config.max_model_len - prompt_len
                 )
+                # min_tokens is not checked while max_tokens is unset.
+                if sampling_params.min_tokens > sampling_params.max_tokens:
+                    raise VLLMValidationError(
+                        f"min_tokens must be less than or equal to "
+                        f"max_tokens={sampling_params.max_tokens}, got "
+                        f"{sampling_params.min_tokens}."
+                    )
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
