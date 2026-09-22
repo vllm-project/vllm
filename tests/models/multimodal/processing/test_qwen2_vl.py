@@ -24,7 +24,6 @@ def test_jina_vl_processing_order() -> None:
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
-        cache=cache,
     )
 
     placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -35,6 +34,7 @@ def test_jina_vl_processing_order() -> None:
         return processor(
             placeholder * len(images),
             mm_items=processor.info.parse_mm_data({"image": images}),
+            cache=cache,
         )
 
     query = process([query_image])
