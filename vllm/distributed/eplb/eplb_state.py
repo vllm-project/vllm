@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Expert parallelism load balancer (EPLB) metrics and states.
+"""Expert parallelism load balancer (EPLB) metrics and states.
 
 # Glossary
 
@@ -74,9 +73,7 @@ def _compute_eplb_load_stats(
 
 @dataclass
 class EplbStats:
-    """
-    Model stats used in EPLB rebalancing algorithm.
-    """
+    """Model stats used in EPLB rebalancing algorithm."""
 
     global_expert_load_window: torch.Tensor
     """
@@ -121,6 +118,8 @@ class EplbModelState:
      [0, 2, 0, 1, 0, 3]]
     ```
     """
+    physical_to_logical_map_buffer: torch.Tensor
+    """Maximum-capacity buffer backing ``physical_to_logical_map``."""
     logical_to_physical_map: torch.Tensor
     """
     Mapping from logical experts to physical experts.
@@ -168,6 +167,8 @@ class EplbModelState:
 
     Shape: (num_moe_layers, num_physical_experts)
     """
+    expert_load_pass_buffer: torch.Tensor
+    """Maximum-capacity buffer backing ``expert_load_pass``."""
     expert_load_window: torch.Tensor
     """
     A sliding window of expert load.
@@ -202,9 +203,9 @@ class EplbModelState:
     """
     EPLB stats for the model.
     """
-    cuda_device_index: int | None
+    device_index: int | None
     """
-    CUDA device index for the async EPLB worker thread.
+    Device index for the async EPLB worker thread.
     """
     communicator: EplbCommunicator
     """
@@ -229,9 +230,7 @@ class EplbModelState:
 
 
 class EplbState:
-    """
-    EplbState of each expert parallel model. Key is the model config hash.
-    """
+    """EplbState of each expert parallel model. Key is the model config hash."""
 
     def __init__(self, parallel_config: ParallelConfig, device: torch.device):
         self.parallel_config = parallel_config
@@ -287,28 +286,28 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
-        self.cuda_device_index: int | None = None
+        self.device_index: int | None = None
         """
-        CUDA device index for the async EPLB worker thread.
+        Device index for the async EPLB worker thread.
         """
-        if self.device.type == "cuda":
-            self.cuda_device_index = self.device.index
-            if self.cuda_device_index is None and torch.cuda.is_available():
-                self.cuda_device_index = torch.accelerator.current_device_index()
+        if self.device.type in ("cuda", "xpu"):
+            self.device_index = self.device.index
+            if self.device_index is None and torch.accelerator.is_available():
+                self.device_index = torch.accelerator.current_device_index()
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
         num_routed_experts: int,
         num_redundant_experts: int,
     ) -> Sequence[int]:
-        """
-        Build an initial expert arrangement using the following structure:
+        """Build an initial expert arrangement using the following structure:
         [original routed experts, redundant experts]
 
         Returns:
             physical_to_logical_map (Sequence[int]): A list of integers,
                 where each integer is the index of the logical expert
                 that the corresponding physical expert maps to.
+
         """
         global_physical_to_logical_map = list(range(num_routed_experts))
         global_physical_to_logical_map += [
@@ -317,8 +316,7 @@ class EplbState:
         return global_physical_to_logical_map
 
     def validate_ep_configuration(self, new_model: MixtureOfExperts):
-        """
-        Validate that the expert parallel configuration of
+        """Validate that the expert parallel configuration of
         the new model is the same as the existing models.
         """
         if len(self.model_states) > 0:
@@ -357,9 +355,7 @@ class EplbState:
         model: MixtureOfExperts,
         model_config: ModelConfig,
     ):
-        """
-        Build the initial EPLB state.
-        """
+        """Build the initial EPLB state."""
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
 
@@ -373,6 +369,19 @@ class EplbState:
             physical_to_logical_map_list,
             device=self.device,
         )
+        physical_expert_capacity = model.num_physical_experts
+        if self.parallel_config.enable_elastic_ep:
+            physical_expert_capacity = (
+                model.num_local_physical_experts
+                * self.parallel_config.elastic_ep_max_dp_size
+                * get_ep_group().world_size
+                // self.parallel_config.data_parallel_size
+            )
+            physical_to_logical_map = torch.nn.functional.pad(
+                physical_to_logical_map,
+                (0, physical_expert_capacity - model.num_physical_experts),
+                value=-1,
+            )
         # Assuming 8 GPUs per node, this supports up to
         # (1023 + 1) / 8 = 128 nodes for now.
         # TODO(rui): make this configurable
@@ -407,6 +416,10 @@ class EplbState:
             )
             .contiguous()
         )
+        physical_to_logical_map_buffer = physical_to_logical_map
+        physical_to_logical_map = physical_to_logical_map_buffer[
+            :, : model.num_physical_experts
+        ]
         logical_to_physical_map = (
             logical_to_physical_map.unsqueeze(0)
             .expand(
@@ -425,11 +438,12 @@ class EplbState:
             .contiguous()
         )
 
-        expert_load_pass = torch.zeros(
-            (model.num_moe_layers, model.num_physical_experts),
+        expert_load_pass_buffer = torch.zeros(
+            (model.num_moe_layers, physical_expert_capacity),
             dtype=torch.int32,
             device=self.device,
         )
+        expert_load_pass = expert_load_pass_buffer[:, : model.num_physical_experts]
         self.expert_load_window_size = self.parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (
@@ -460,7 +474,7 @@ class EplbState:
         ]
 
         model.set_eplb_state(
-            expert_load_pass,
+            expert_load_pass_buffer,
             logical_to_physical_map,
             logical_replica_count,
         )
@@ -479,16 +493,18 @@ class EplbState:
 
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
+            physical_to_logical_map_buffer=physical_to_logical_map_buffer,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
             expert_load_pass=expert_load_pass,
+            expert_load_pass_buffer=expert_load_pass_buffer,
             expert_load_window=expert_load_window,
             model_name=model_config.model,
             model=model,
             expert_buffer=expert_buffer,
             rebalanced=False,
             eplb_stats=None,
-            cuda_device_index=self.cuda_device_index,
+            device_index=self.device_index,
             communicator=communicator,
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
@@ -510,6 +526,7 @@ class EplbState:
             ubatch_slices: When DBO is active, a list of
                 ``UBatchSlice`` objects describing each micro-batch's
                 token range.  When ``None``, only ``tensors[0]`` is filled.
+
         """
         model_state = self.model_states.get(compute_hash_cached(model_config))
         if model_state is None or model_state.num_unpadded_tokens_tensors is None:
@@ -532,8 +549,7 @@ class EplbState:
         is_profile: bool = False,
         log_stats: bool = False,
     ) -> None:
-        """
-        Step the EPLB state.
+        """Step the EPLB state.
 
         Args:
             is_dummy (bool): If `True`, this is a dummy step and the load
@@ -550,6 +566,7 @@ class EplbState:
             - `avg_tokens`: The average load across ranks.
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
+
         """
         ep_group = get_ep_group().device_group
         if is_profile:
@@ -728,8 +745,7 @@ class EplbState:
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
-        """
-        Rearrange the experts according to the current load.
+        """Rearrange the experts according to the current load.
 
         Args:
             is_profile (bool): If `True`, perform a dummy rearrangement.
@@ -737,8 +753,8 @@ class EplbState:
                 no memory movement will be performed. Default is False.
             rank_mapping (dict[int, int] | None): The rank mapping
                 when scaling is done in EEP.
-        """
 
+        """
         ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()
 
@@ -747,8 +763,8 @@ class EplbState:
         is_main_rank = ep_rank == 0
         if is_main_rank:
             if not self.is_async or is_profile:
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
+                start_event = torch.Event(enable_timing=True)
+                end_event = torch.Event(enable_timing=True)
                 start_event.record()
             logger.info(
                 "Rearranging experts %s %s...",
@@ -1009,9 +1025,7 @@ class EplbState:
         return int(flag.item()) == device_group.size()
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
-        """
-        All-reduce a list of tensors.
-        """
+        """All-reduce a list of tensors."""
         ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
             all_reduce(tensor_list[0], group=ep_group)
@@ -1036,8 +1050,7 @@ class EplbState:
         return all_reduce_list
 
     def _sync_load_pass(self) -> list[torch.Tensor]:
-        """
-        Sync the expert load pass across all ranks for log stats.
+        """Sync the expert load pass across all ranks for log stats.
         Doesn't update the expert load pass in eplb_model_state.
         """
         load_pass_list = []
@@ -1075,10 +1088,14 @@ class EplbState:
         expanded_physical_to_logical: torch.Tensor,
     ) -> None:
         eplb_model_state = self.model_states[model_config.compute_hash()]
-        eplb_model_state.physical_to_logical_map.copy_(expanded_physical_to_logical)
+        eplb_model_state.physical_to_logical_map_buffer.copy_(
+            expanded_physical_to_logical
+        )
+        eplb_model_state.expert_load_pass.zero_()
+        physical_to_logical_map = eplb_model_state.physical_to_logical_map
 
         (logical_to_physical_map_cpu, logical_replica_count_cpu) = compute_logical_maps(
-            expanded_physical_to_logical.cpu(),
+            physical_to_logical_map.cpu(),
             eplb_model_state.model.num_logical_experts,
         )
 
@@ -1096,6 +1113,33 @@ class EplbState:
 
         eplb_model_state.logical_to_physical_map.copy_(logical_to_physical_map)
         eplb_model_state.logical_replica_count.copy_(logical_replica_count)
+
+    def reconfigure_physical_expert_slots(
+        self,
+        model_config: ModelConfig,
+        num_physical_experts: int,
+    ) -> None:
+        """Replace physical_to_logical_map and expert_load_pass with views
+        covering the new active size.
+        """
+        model_state = self.model_states[model_config.compute_hash()]
+        old_num_physical_experts = model_state.model.num_physical_experts
+        first_slot, last_slot = sorted((old_num_physical_experts, num_physical_experts))
+        physical_to_logical_map_buffer = model_state.physical_to_logical_map_buffer
+        expert_load_pass_buffer = model_state.expert_load_pass_buffer
+        assert last_slot <= physical_to_logical_map_buffer.shape[1]
+        expert_slots = slice(first_slot, last_slot)
+        physical_to_logical_map_buffer[:, expert_slots].fill_(-1)
+        expert_load_pass_buffer[:, expert_slots].zero_()
+        model_state.physical_to_logical_map = physical_to_logical_map_buffer[
+            :, :num_physical_experts
+        ]
+        model_state.expert_load_pass = expert_load_pass_buffer[:, :num_physical_experts]
+
+        pad_size = num_physical_experts - model_state.expert_load_window.shape[-1]
+        model_state.expert_load_window = torch.nn.functional.pad(
+            model_state.expert_load_window, (0, pad_size)
+        )
 
     def create_communicator(
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
@@ -1195,8 +1239,7 @@ def compute_logical_maps(
     physical_to_logical_map: torch.Tensor,
     num_logical_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Derive logical_to_physical_map and logical_replica_count from
+    """Derive logical_to_physical_map and logical_replica_count from
     physical_to_logical_map.
 
     Args:
@@ -1209,6 +1252,7 @@ def compute_logical_maps(
             physical slots per logical expert; -1 where unused
         logical_replica_count: [num_layers, num_logical_experts], number of
             physical replicas per logical expert
+
     """
     device = physical_to_logical_map.device
     assert physical_to_logical_map.device.type == "cpu"
@@ -1284,13 +1328,11 @@ def _commit_eplb_maps_for_layer(
     new_physical_to_logical_map: torch.Tensor,
     layer: int,
 ) -> None:
-    """
-    Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
+    """Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
     when running async EPLB. Copies all of the new_* maps into model_state. After this
     function completes, the new mappings will become the current mappings and will be
     visible to the model.
     """
-
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map[layer]
@@ -1321,26 +1363,23 @@ def _commit_eplb_maps(
     model_state: EplbModelState,
     new_physical_to_logical_map: torch.Tensor,
 ) -> None:
-    """
-    Copies all of the new_* maps into model_state. After this function completes,
+    """Copies all of the new_* maps into model_state. After this function completes,
     the new mappings will become the current mappings and will be visible to the
     model.
     """
-
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map
 
     if PIN_MEMORY and src.is_cpu:
         src = src.new_empty(src.shape, pin_memory=True).copy_(src)
-    # Rare Case: When the number of physical experts has changed, discard the old
-    # physical to logical expert map and use the new one. This only happens when the
-    # number of GPUs available to vLLM changes while vLLM is running. Otherwise copy the
-    # new map into the old one.
+    # When the number of physical experts changes, refresh the active map view to
+    # cover the new size before copying it.
     if src.shape[1] != dst.shape[1]:
-        model_state.physical_to_logical_map = src.to(dst.device, non_blocking=True)
-    else:
-        dst.copy_(src, non_blocking=True)
+        dst = model_state.physical_to_logical_map_buffer[:, : src.shape[1]]
+        assert dst.shape == src.shape
+        model_state.physical_to_logical_map = dst
+    dst.copy_(src, non_blocking=True)
 
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
