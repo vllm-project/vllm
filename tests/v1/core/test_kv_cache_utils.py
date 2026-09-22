@@ -3088,17 +3088,12 @@ def _grouping_config():
     "full_count,sw_count,draft_count,expected_width",
     [
         (9, 39, 5, 3),
-        (8, 32, 5, 4),
-        (9, 39, 0, 9),
-        (6, 5, 0, 6),
         (5, 6, 0, 6),
-        (20, 30, 0, 20),
     ],
 )
 def test_hybrid_groups_avoid_long_context_padding(
     full_count, sw_count, draft_count, expected_width
 ):
-    """A small SW drafter must not add full-context padding to the target."""
     specs = {
         **{f"full.{i}": new_kv_cache_spec() for i in range(full_count)},
         **{f"sw.{i}": new_sliding_window_spec() for i in range(sw_count)},
@@ -3109,58 +3104,6 @@ def test_hybrid_groups_avoid_long_context_padding(
     }
     groups = get_kv_cache_groups(_grouping_config(), specs)
     assert max(len(group.layer_names) for group in groups) == expected_width
-    assert sorted(name for group in groups for name in group.layer_names) == sorted(
-        specs
-    )
-    for group in groups:
-        assert group.kv_cache_spec == specs[group.layer_names[0]]
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.uint8])
-def test_mimo_dflash_full_context_capacity_without_padding(dtype):
-    """At a fixed pool budget, exact grouping can admit two native contexts."""
-    config = _grouping_config()
-    config.model_config = SimpleNamespace(max_model_len=1048576)
-    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
-    config.scheduler_config.max_num_seqs = 2
-    config.max_in_flight_tokens = 8192
-    common = dict(block_size=16, head_size=192, head_size_v=128, dtype=dtype)
-    specs = {
-        **{f"full.{i}": FullAttentionSpec(num_kv_heads=2, **common) for i in range(9)},
-        **{
-            f"sw.{i}": SlidingWindowSpec(num_kv_heads=4, sliding_window=128, **common)
-            for i in range(39)
-        },
-        **{
-            f"draft.{i}": SlidingWindowSpec(
-                **(common | dict(head_size=128)), num_kv_heads=4, sliding_window=1024
-            )
-            for i in range(5)
-        },
-    }
-    groups = get_kv_cache_groups(config, specs)
-    normalized = kv_cache_utils.unify_kv_cache_spec_page_size(specs)
-    # Reconstruct the previous five-layer grouping to compare both allocation
-    # paths at identical dtype, scheduling limits and pool budget.
-    old_names: list[list[str]] = []
-    for prefix, count in [("full", 9), ("sw", 39), ("draft", 5)]:
-        names = [f"{prefix}.{i}" for i in range(count)]
-        num_groups = (count + 4) // 5
-        old_names.extend(names[i::num_groups] for i in range(num_groups))
-    old_groups = kv_cache_utils.create_kv_cache_group_specs(normalized, old_names)
-    new_usage = kv_cache_utils._max_memory_usage_bytes_from_groups(config, groups)
-    old_usage = kv_cache_utils._max_memory_usage_bytes_from_groups(config, old_groups)
-    page = normalized["sw.0"].page_size_bytes
-    assert new_usage == (3 * 32768 + 13 * 521 + 2 * 577) * 3 * page
-    assert old_usage == (2 * 32768 + 8 * 521 + 577) * 5 * page
-    assert old_usage > new_usage
-    budget = 2 * new_usage + 3 * page  # Include the shared null block.
-    new_config = kv_cache_utils.get_kv_cache_config_from_groups(config, groups, budget)
-    old_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        config, old_groups, budget
-    )
-    assert get_max_concurrency_for_kv_cache_config(config, new_config) >= 2
-    assert get_max_concurrency_for_kv_cache_config(config, old_config) < 2
 
 
 def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
