@@ -30,10 +30,10 @@ from vllm.distributed.aux_output_connector.routed_experts import (
     publish_routed_experts,
     routed_experts_keys,
 )
+from vllm.distributed.aux_output_connector.shm import ShmBlockObjectStore
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
-    BlockObjectStore,
     BlockObjectStoreError,
 )
 from vllm.distributed.aux_output_connector.worker import (
@@ -233,13 +233,13 @@ def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
 def test_mooncake_string_stop_delivers_keys_before_engine_abort(remote_store):
     """API-side termination must retain R3 from every accepted step."""
     from tokenizers import Tokenizer, models
-    from transformers import PreTrainedTokenizerFast
+    from transformers import TokenizersBackend
 
     from vllm.sampling_params import SamplingParams
     from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
     from vllm.v1.engine.output_processor import OutputProcessor
 
-    tokenizer = PreTrainedTokenizerFast(
+    tokenizer = TokenizersBackend(
         tokenizer_object=Tokenizer(
             models.WordLevel({"hello": 0, "!": 1, "[UNK]": 2}, unk_token="[UNK]")
         )
@@ -857,7 +857,7 @@ def _make_store(
     max_bytes: int = 1 << 20,
     object_nbytes: int = 4,
 ):
-    return BlockObjectStore(
+    return ShmBlockObjectStore(
         max_bytes=max_bytes,
         object_nbytes=object_nbytes,
     )

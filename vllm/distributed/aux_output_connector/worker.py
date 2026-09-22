@@ -24,9 +24,9 @@ from vllm.distributed.aux_output_connector.routed_experts import (
     publish_routed_experts,
     routed_experts_keys,
 )
+from vllm.distributed.aux_output_connector.shm import ShmBlockObjectStore
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
-    BlockObjectStore,
 )
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -126,7 +126,7 @@ class AuxOutputWorkerConnector:
             kv_cache_config, vllm_config
         )
         block_nbytes = hash_block_size * prod(shape_per_token) * dtype.itemsize
-        store: BlockObjectStore | MooncakeBlockObjectStore
+        store: ShmBlockObjectStore | MooncakeBlockObjectStore
         if self._return_keys:
             from vllm.distributed.aux_output_connector.mooncake import (
                 create_mooncake_block_store,
@@ -140,7 +140,7 @@ class AuxOutputWorkerConnector:
                 max_bytes = (
                     kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
                 )
-            store = BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes)
+            store = ShmBlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes)
         self._store = BackgroundBlockObjectStore(
             store,
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
