@@ -9,6 +9,11 @@ Here we break down the requirements in 2 steps:
 
 Step 2 is necessary for multi-node deployment.
 
+For NVSHMEM 3.5.19 and later, the DeepEP build script applies the temporary
+[legacy RC QP fix](https://github.com/deepseek-ai/DeepEP/pull/696) to the pinned
+DeepEP source. Earlier NVSHMEM versions keep the original layout. The vendored
+patch can be removed once the DeepEP pin includes the upstream fix.
+
 All scripts accept a positional argument as workspace path for staging the build, defaulting to `$(pwd)/ep_kernels_workspace`.
 
 ## NCCL version requirement (CUDA 13+)
