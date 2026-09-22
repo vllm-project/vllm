@@ -748,7 +748,11 @@ class Scheduler(SchedulerInterface):
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
+                            key=lambda r: (
+                                r.priority,
+                                -min(r.num_preemptions, 3),
+                                r.arrival_time,
+                            ),
                         )
                     else:
                         preempted_req = self.running[-1]
