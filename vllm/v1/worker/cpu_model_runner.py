@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import sys
 from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
@@ -91,28 +90,20 @@ class CPUModelRunner(GPUModelRunner):
         spec_decode_utils._copy_and_expand_eagle_inputs.kernel = (
             cpu_tl.copy_and_expand_eagle_inputs_kernel
         )
-        spec_decode_utils.copy_and_expand_dflash_inputs_kernel = (
+        spec_decode_utils._copy_and_expand_dflash_inputs.kernel = (
             cpu_tl.copy_and_expand_dflash_inputs_kernel
         )
-        dflash_module = sys.modules.get("vllm.v1.spec_decode.dflash")
-        if dflash_module is not None:
-            dflash_kernel_name = "copy_and_expand_dflash_inputs_kernel"
-            setattr(
-                dflash_module,
-                dflash_kernel_name,
-                cpu_tl.copy_and_expand_dflash_inputs_kernel,
-            )
-        spec_decode_utils.eagle_step_slot_mapping_metadata_kernel = (
+        spec_decode_utils._eagle_step_slot_mapping_metadata.kernel = (
             cpu_tl.eagle_step_slot_mapping_metadata_kernel
         )
-        vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel = (
+        vllm.v1.sample.rejection_sampler._rejection_greedy_sample.kernel = (
             cpu_tl.rejection_greedy_sample_kernel
         )
-        vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel = (
+        vllm.v1.sample.rejection_sampler._rejection_random_sample.kernel = (
             cpu_tl.rejection_random_sample_kernel
         )
-        vllm.v1.sample.rejection_sampler.expand_kernel = cpu_tl.expand_kernel
-        vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel = (
+        vllm.v1.sample.rejection_sampler._expand.kernel = cpu_tl.expand_kernel
+        vllm.v1.sample.rejection_sampler._sample_recovered_tokens.kernel = (
             cpu_tl.sample_recovered_tokens_kernel
         )
 
