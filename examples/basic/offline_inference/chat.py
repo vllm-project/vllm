@@ -24,17 +24,17 @@ def create_parser():
 
 
 def main(args: dict):
-    # Pop arguments not used by LLM
-    max_tokens = args.pop("max_tokens")
-    temperature = args.pop("temperature")
-    top_p = args.pop("top_p")
-    top_k = args.pop("top_k")
-    chat_template_path = args.pop("chat_template_path")
+    # Pop arguments not used by LLM (use None if not present)
+    max_tokens = args.pop("max_tokens", None)
+    temperature = args.pop("temperature", None)
+    top_p = args.pop("top_p", None)
+    top_k = args.pop("top_k", None)
+    chat_template_path = args.pop("chat_template_path", None)
 
     # Create an LLM
     llm = LLM(**args)
 
-    # Create sampling params object
+    # Create sampling params object and update with CLI values (if provided)
     sampling_params = llm.get_default_sampling_params()
     if max_tokens is not None:
         sampling_params.max_tokens = max_tokens
