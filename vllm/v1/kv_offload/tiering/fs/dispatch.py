@@ -6,7 +6,6 @@ from __future__ import annotations
 import ctypes
 import dataclasses
 import enum
-import math
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -141,17 +140,12 @@ class SJFBucketQueue(JobQueue):
     def _get_bucket_id(self, job_id: JobId, num_tasks: int):
         assert num_tasks != 0
         mbytes = max(1, num_tasks * self._block_size)
-        return min(self.num_buckets - 1, int(math.floor(math.log2(mbytes))))
+        return min(self.num_buckets - 1, mbytes.bit_length() - 1)
 
     def _get_sjf_bucket(self):
         x = self.mask.value
         assert x != 0
-        # ~v inverts the bits.
-        # + 1 completes the two's complement.
-        # & ones (0xFFFFFFFF) forces it to stay within 32-bit unsigned bounds.
-        ones = (1 << self.num_buckets) - 1
-        pow2 = x & ((~x + 1) & ones)
-        return pow2.bit_length() - 1
+        return (x & -x).bit_length() - 1
 
     def put(self, job_id: JobId, num_tasks: int):
         bid = self._get_bucket_id(job_id, num_tasks)
@@ -171,7 +165,7 @@ class SJFBucketQueue(JobQueue):
     def clear(self):
         for x in self.q:
             x.clear()
-        self.mask = ctypes.c_uint32(0x00000000)
+        self.mask.value = 0
 
     def maybe_has_work(self):
         return self.mask.value != 0
@@ -214,7 +208,7 @@ class LoadQueue(JobQueue):
         if jid is None:
             return None
 
-        self.pp = 1 if self.pp == 0 else 0
+        self.pp ^= 1
         self.jobs.remove(jid)
         return jid
 
@@ -275,11 +269,9 @@ class WorkDispatcher:
         self._locality = locality
         self._load_job_q = load_job_q
         self._store_job_q = store_job_q
-        self._n_read_threads = n_read_threads
-        self._n_write_threads = n_write_threads
         self._n_write_excl_threads = n_write_excl_threads
 
-        _rw_threads = self._n_read_threads + self._n_write_threads
+        _rw_threads = n_read_threads + n_write_threads
         if self._locality == Locality.LOCAL:
             # Assume local SSD
             self._n_read_batch_threads = n_read_threads or _rw_threads
@@ -375,28 +367,23 @@ class WorkDispatcher:
             self._load_q.appendleft(remainder)
         return stolen.unpack()
 
+    def _pop(self, work_q: deque, job_q: JobQueue):
+        """Populate work_q from job_q if empty, then pop and unpack one item."""
+        self._maybe_populate_work_q(work_q, job_q)
+        return work_q.popleft().unpack() if work_q else None
+
     def fetch_work(self, mode: ThreadMode):
         if mode is ThreadMode.READ:
-            self._maybe_populate_work_q(self._load_q, self._load_job_q)
-            if self._load_q:
-                return self._load_q.popleft().unpack()
-            self._maybe_populate_work_q(self._store_q, self._store_job_q)
-            if self._store_q:
-                return self._store_q.popleft().unpack()
-            return None
+            return self._pop(self._load_q, self._load_job_q) or self._pop(
+                self._store_q, self._store_job_q
+            )
         elif mode is ThreadMode.WRITE:
-            self._maybe_populate_work_q(self._store_q, self._store_job_q)
-            if self._store_q:
-                return self._store_q.popleft().unpack()
+            if (item := self._pop(self._store_q, self._store_job_q)) is not None:
+                return item
             self._maybe_populate_work_q(self._load_q, self._load_job_q)
-            if self._load_q:
-                return self._steal_from_load_q()
-            return None
+            return self._steal_from_load_q() if self._load_q else None
         else:  # WRITE_EXCL
-            self._maybe_populate_work_q(self._store_q, self._store_job_q)
-            if self._store_q:
-                return self._store_q.popleft().unpack()
-            return None
+            return self._pop(self._store_q, self._store_job_q)
 
     def clear(
         self,
