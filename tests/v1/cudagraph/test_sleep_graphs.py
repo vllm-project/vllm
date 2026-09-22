@@ -6,8 +6,6 @@ import json
 import os
 import time
 
-import pytest
-
 from vllm import LLM, SamplingParams
 
 
@@ -44,14 +42,12 @@ def _graph_snapshot(worker):
     }
 
 
-@pytest.mark.parametrize("reclaim", [False, True])
-def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch, reclaim):
+def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch):
     """Exercise real graphs, partial wake and outputs through the public API."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # The local test probe is a callable RPC, never exposed by the server API.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_SLEEP_DISCARD_GRAPHS", "1")
-    monkeypatch.setenv("VLLM_SLEEP_RECLAIM_GRAPH_MEMORY", str(int(reclaim)))
     model = os.environ.get("SLEEP_GRAPH_TEST_MODEL", "Qwen/Qwen3-0.6B")
     llm = LLM(
         model=model,
@@ -96,9 +92,6 @@ def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch, reclaim
             asleep = snapshot()
             assert asleep["graphs"] == 0
             assert asleep["free_bytes"] > before["free_bytes"]
-            if reclaim:
-                # This interval leaves weights and KV mapped throughout.
-                assert asleep["before_suspend_free_bytes"] > before["free_bytes"]
             llm.sleep(level=1)
             tags = ["weights", "kv_cache"]
             if iteration % 2:
@@ -131,7 +124,6 @@ def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch, reclaim
                 + json.dumps(
                     {
                         "model": model,
-                        "reclaim": reclaim,
                         "iteration": iteration,
                         "timestamp": time.time(),
                         "sleep_s": sleep_s,

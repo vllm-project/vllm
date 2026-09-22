@@ -4,19 +4,13 @@
 
 import os
 import sys
-import time
 from typing import TYPE_CHECKING
-
-import torch
 
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode
-from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-logger = init_logger(__name__)
 
 
 def validate_graph_sleep(config: "VllmConfig") -> None:
@@ -65,32 +59,3 @@ def validate_graph_sleep(config: "VllmConfig") -> None:
             "Additional offloaders, adapters, transfers and checkpointing "
             "are not supported."
         )
-
-
-def reclaim_graph_memory() -> dict[str, int | float]:
-    """Request driver cache reclamation; OOM alone is not proof of release.
-
-    This driver-dependent experiment runs before allocator suspend, with no
-    active graphs owned by this runner. It has no driver-provided time bound.
-    """
-    from cuda.bindings import driver
-
-    before, total = torch.accelerator.get_memory_info()
-    start = time.perf_counter()
-    result, pointer = driver.cuMemAlloc(total)
-    if result == driver.CUresult.CUDA_SUCCESS:
-        (free_result,) = driver.cuMemFree(pointer)
-        if free_result != driver.CUresult.CUDA_SUCCESS:
-            raise RuntimeError(f"Graph reclaim free failed: {free_result}")
-        logger.warning("Graph reclaim allocation unexpectedly succeeded")
-    elif result != driver.CUresult.CUDA_ERROR_OUT_OF_MEMORY:
-        raise RuntimeError(f"Graph reclaim failed: {result}")
-    after, _ = torch.accelerator.get_memory_info()
-    observation = {
-        "driver_result": int(result),
-        "allocated": int(result == driver.CUresult.CUDA_SUCCESS),
-        "observed_freed_bytes": after - before,
-        "elapsed_s": time.perf_counter() - start,
-    }
-    logger.info("Graph reclaim observation: %s", observation)
-    return observation

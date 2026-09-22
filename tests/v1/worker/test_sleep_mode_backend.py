@@ -18,33 +18,45 @@ from vllm.device_allocator.sleep_mode_backend import (
 )
 
 
-def test_graph_reclaim_oom_does_not_claim_physical_release(monkeypatch):
-    """An OOM is expected, but it is not evidence of recovered bytes."""
+@pytest.mark.parametrize("operation", ["workspace_clear", "driver_allocation"])
+def test_graph_discard_preserves_workspaces_and_avoids_driver_pressure(
+    monkeypatch, operation
+):
+    """Graph destruction must not clear unrelated workspaces or force an OOM."""
+    from types import SimpleNamespace
+
     driver = pytest.importorskip("cuda.bindings.driver")
-    from vllm.v1.worker.gpu.sleep_graphs import reclaim_graph_memory
+    from vllm.v1.worker.gpu_worker import Worker
 
-    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (1024, 4096))
-    monkeypatch.setattr(
-        driver, "cuMemAlloc", lambda size: (driver.CUresult.CUDA_ERROR_OUT_OF_MEMORY, 0)
+    worker = object.__new__(Worker)
+    worker.model_runner = MagicMock()
+    worker._sleep_mode_backend = MagicMock()
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_nccl_comm_suspend=False)
     )
-    result = reclaim_graph_memory()
-    assert result["driver_result"] == 2
-    assert result["allocated"] == 0
-    assert result["observed_freed_bytes"] == 0
-
-
-def test_graph_reclaim_propagates_unexpected_driver_error(monkeypatch):
-    driver = pytest.importorskip("cuda.bindings.driver")
-    from vllm.v1.worker.gpu.sleep_graphs import reclaim_graph_memory
-
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    # A stale deployment setting must not re-enable the removed operation.
+    monkeypatch.setenv("VLLM_SLEEP_RECLAIM_GRAPH_MEMORY", "1")
+    monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
     monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (1024, 4096))
+    monkeypatch.setattr("torch.accelerator.empty_cache", lambda: None)
+    workspace_clear = MagicMock()
     monkeypatch.setattr(
-        driver,
-        "cuMemAlloc",
-        lambda size: (driver.CUresult.CUDA_ERROR_INVALID_CONTEXT, 0),
+        "torch._C._cuda_clearCublasWorkspaces", workspace_clear, raising=False
     )
-    with pytest.raises(RuntimeError, match="Graph reclaim failed"):
-        reclaim_graph_memory()
+    driver_allocation = MagicMock(
+        return_value=(driver.CUresult.CUDA_ERROR_OUT_OF_MEMORY, 0)
+    )
+    monkeypatch.setattr(driver, "cuMemAlloc", driver_allocation)
+
+    worker.sleep(level=1)
+
+    worker.model_runner.cudagraph_manager.discard_full_graphs.assert_called_once()
+    worker._sleep_mode_backend.suspend.assert_called_once_with(1)
+    if operation == "workspace_clear":
+        workspace_clear.assert_not_called()
+    else:
+        driver_allocation.assert_not_called()
 
 
 @pytest.mark.parametrize("unsupported", [None, "tp", "compile", "inproc", "checkpoint"])
