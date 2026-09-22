@@ -1426,6 +1426,144 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
         return _replacement
 
 
+class AiterAllreduceFusedRMSNormPerTokenQuantFP8Pattern(
+    BasePattern, VllmPatternReplacement
+):
+    """Fuse AllReduce + RMSNorm + per-token FP8 quant into a single AITER
+    custom op.
+
+    Targets the dominant post-attention / post-MLP path:
+    ``all_reduce -> rms_norm -> per_token_fp8_quant``. Returns the
+    FP8 quant output, and the per-token scale.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.FUSED_AR_RMS_QUANT_OP = (
+            rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_op()
+        )
+        self.quant_dtype = current_platform.fp8_dtype()
+        self.quant_matcher = MatcherQuantFP8(
+            QuantKey(
+                dtype=self.quant_dtype,
+                scale=ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN),
+                symmetric=True,
+            ),
+            match_rocm_aiter=True,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # input, weight; per-token has no group-size multiple constraint.
+        return [self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+            quant, scale = self.quant_matcher(rms)
+            return quant, scale
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            residual = torch.zeros_like(input)
+            result = self.FUSED_AR_RMS_QUANT_OP(
+                input_=input,
+                residual=residual,
+                weight=weight.to(input.dtype),
+                epsilon=self.epsilon,
+            )
+            # quant_out, scale_out (residual unused on the no-add path)
+            return result[0], result[2]
+
+        return _replacement
+
+
+class AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern(
+    BasePattern, VllmPatternReplacement
+):
+    """``fused_add`` variant of ``AiterAllreduceFusedRMSNormPerTokenQuantFP8Pattern``.
+
+    Targets the dominant post-attention / post-MLP path:
+    ``all_reduce -> fused_add_rms_norm -> per_token_fp8_quant``. Returns the
+    FP8 quant output, the residual carry-over, and the per-token scale.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.FUSED_AR_RMS_QUANT_OP = (
+            rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_op()
+        )
+        self.quant_dtype = current_platform.fp8_dtype()
+        self.quant_matcher = MatcherQuantFP8(
+            QuantKey(
+                dtype=self.quant_dtype,
+                scale=ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN),
+                symmetric=True,
+            ),
+            match_rocm_aiter=True,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # residual, input, weight
+        return [self.empty(5, 16), self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            residual: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
+            quant, scale = self.quant_matcher(rms)
+            return quant, scale, residual_out
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            residual: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result = self.FUSED_AR_RMS_QUANT_OP(
+                input_=input,
+                residual=residual,
+                weight=weight.to(input.dtype),
+                epsilon=self.epsilon,
+            )
+            # quant_out, scale_out, residual_out
+            return result[0], result[2], result[1]
+
+        return _replacement
+
+
 class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     BasePattern, VllmPatternReplacement
 ):
@@ -1602,6 +1740,14 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 "FP8 quant fusion."
             )
 
+        supports_per_token_quant = ca_comm.supports_per_token_quant
+        if not supports_per_token_quant:
+            logger.warning_once(
+                "AITER AR+RMS+per-token-FP8-quant fusion disabled: aiter "
+                "build is missing 'custom_fused_ar_rms_quant'. Upgrade aiter "
+                "to enable the trailing per-token FP8 quant fusion."
+            )
+
         for epsilon in [1e-5, 1e-6]:
             # Quant-fused variants must register first so the pattern matcher
             # tries them before the AR+RMS-only variants. Otherwise the
@@ -1626,6 +1772,24 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 )
                 self.register(
                     AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                    )
+                )
+
+            # Per-token quant variants -- must precede the AR+RMS-only patterns
+            # below so the larger (quant-inclusive) subgraph wins the match.
+            if supports_per_token_quant:
+                self.register(
+                    AiterAllreduceFusedRMSNormPerTokenQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                    )
+                )
+                self.register(
+                    AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern(
                         epsilon,
                         self.model_dtype,
                         self.device,

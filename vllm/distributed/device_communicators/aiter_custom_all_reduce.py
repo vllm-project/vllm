@@ -139,3 +139,23 @@ class AiterCustomAllreduce:
     @property
     def supports_per_group_quant(self) -> bool:
         return self.build_supports_per_group_quant()
+
+    @staticmethod
+    def build_supports_per_token_quant() -> bool:
+        """True if the running AITER build exposes the per-token AR+RMS+quant
+        kernel.
+
+        The pattern registration in ``RocmAiterAllReduceFusionPass`` keys off
+        this so vLLM degrades to the AR+RMS-only fusion (plus a standalone
+        per-token quant) when run against an older aiter that lacks the
+        per-token launcher.
+        """
+        from aiter.dist.device_communicators.custom_all_reduce import (
+            CustomAllreduce as _AiterCustomAllreduce,
+        )
+
+        return hasattr(_AiterCustomAllreduce, "custom_fused_ar_rms_quant")
+
+    @property
+    def supports_per_token_quant(self) -> bool:
+        return self.build_supports_per_token_quant()
