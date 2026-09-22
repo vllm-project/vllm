@@ -216,20 +216,20 @@ pub fn calculate_metrics(
     (metrics, actual_output_lens)
 }
 
-fn mean(data: &[f64]) -> f64 {
+pub(crate) fn mean(data: &[f64]) -> f64 {
     if data.is_empty() {
         return 0.0;
     }
     data.iter().sum::<f64>() / data.len() as f64
 }
 
-fn sort_clone(data: &[f64]) -> Vec<f64> {
+pub(crate) fn sort_clone(data: &[f64]) -> Vec<f64> {
     let mut sorted = data.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     sorted
 }
 
-fn median_sorted(sorted: &[f64]) -> f64 {
+pub(crate) fn median_sorted(sorted: &[f64]) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
@@ -241,7 +241,7 @@ fn median_sorted(sorted: &[f64]) -> f64 {
     }
 }
 
-fn std_dev(data: &[f64]) -> f64 {
+pub(crate) fn std_dev(data: &[f64]) -> f64 {
     if data.is_empty() {
         return 0.0;
     }
@@ -250,7 +250,7 @@ fn std_dev(data: &[f64]) -> f64 {
     variance.sqrt()
 }
 
-fn percentile_sorted(sorted_data: &[f64], p: f64) -> f64 {
+pub(crate) fn percentile_sorted(sorted_data: &[f64], p: f64) -> f64 {
     if sorted_data.is_empty() {
         return 0.0;
     }
