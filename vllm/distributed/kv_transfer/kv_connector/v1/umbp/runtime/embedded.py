@@ -32,6 +32,7 @@ from ..data import (
     KVLayoutDescriptor,
     RankTopology,
     TransferJobState,
+    TransferJobStatus,
 )
 from .base import (
     IUMBPRuntime,
@@ -217,6 +218,15 @@ class EmbeddedWorkerHandle(UMBPWorkerHandle):
 
     def wait(self, job: TransferJobState) -> TransferJobState:
         return job
+
+    def poll(self, job: TransferJobState) -> TransferJobState | None:
+        if job.status in (
+            TransferJobStatus.COMPLETED,
+            TransferJobStatus.FAILED,
+            TransferJobStatus.CANCELLED,
+        ):
+            return job
+        return None
 
     def publish(self, job: TransferJobState) -> None:
         if job.status.value != "completed":
@@ -562,7 +572,21 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             job.complete()
             return job
         keys, _, pointers, sizes, offsets = self._range_args(plans)
+        started_at = time.monotonic()
+        logger.debug(
+            "MORI UMBP range load started request=%s plans=%d ranges=%d bytes=%d",
+            plans[0].request_id,
+            len(plans),
+            sum(len(plan_sizes) for plan_sizes in sizes),
+            sum(sum(plan_sizes) for plan_sizes in sizes),
+        )
         results = self.client.batch_get_ranges_into_ptr(keys, pointers, sizes, offsets)
+        logger.debug(
+            "MORI UMBP range load returned request=%s plans=%d elapsed=%.3fs",
+            plans[0].request_id,
+            len(plans),
+            time.monotonic() - started_at,
+        )
         completed = [plan.key for plan, ok in zip(plans, results, strict=True) if ok]
         failed = [plan.key for plan, ok in zip(plans, results, strict=True) if not ok]
         if completed:
@@ -646,6 +670,25 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 "MORI UMBP transfer timed out",
             )
             return job
+        except Exception as exc:
+            job.fail([plan.key for plan in job.plans], str(exc))
+            return job
+
+    def poll(self, job: TransferJobState) -> TransferJobState | None:
+        future = self._futures.get(id(job))
+        if future is None:
+            if job.status in (
+                TransferJobStatus.COMPLETED,
+                TransferJobStatus.FAILED,
+                TransferJobStatus.CANCELLED,
+            ):
+                return job
+            return None
+        if not future.done():
+            return None
+        self._futures.pop(id(job), None)
+        try:
+            return future.result()
         except Exception as exc:
             job.fail([plan.key for plan in job.plans], str(exc))
             return job
