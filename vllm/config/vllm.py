@@ -1129,10 +1129,11 @@ class VllmConfig:
         if (
             kv_transfer_config is not None
             and kv_transfer_config.is_kv_transfer_instance
+            and kv_transfer_config.kv_role != "kv_both"
         ):
             raise ValueError(
-                "--enable-return-routed-experts is incompatible with KV "
-                "connectors (PD disaggregation and KV cache offload)."
+                "--enable-return-routed-experts with KV transfer requires "
+                "kv_role=kv_both; PD disaggregation is not supported."
             )
 
     def _verify_kv_transfer_compat(self) -> None:
