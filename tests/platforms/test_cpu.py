@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
 from vllm.platforms.cpu import CpuPlatform
 
 
@@ -192,20 +193,33 @@ def test_cpu_accelerated_gdn_dtype_policy(
     ],
 )
 def test_cpu_conv_state_layout_selection(
+    monkeypatch: pytest.MonkeyPatch,
     connector: str,
     extra_config: dict | None,
     explicit_layout: str | None,
     avx512_bf16_supported: bool,
-    expected_layout: str,
+    expected_layout: str | None,
 ) -> None:
-    from vllm.platforms.cpu import _get_cpu_conv_state_layout
-
-    assert (
-        _get_cpu_conv_state_layout(
-            explicit_layout=explicit_layout,
-            connector=connector,
-            extra_config=extra_config,
-            avx512_bf16_supported=avx512_bf16_supported,
-        )
-        == expected_layout
+    layout_env = "VLLM_SSM_CONV_STATE_LAYOUT"
+    monkeypatch.setattr(
+        "torch.cpu._is_avx512_bf16_supported",
+        lambda: avx512_bf16_supported,
     )
+
+    kv_transfer_config = KVTransferConfig(
+        kv_connector=connector,
+        kv_connector_extra_config=extra_config or {},
+        kv_role="kv_both",
+    )
+    config = _cpu_config(
+        CacheConfig(mamba_ssm_cache_dtype="float32"),
+        model_type="qwen3_5",
+        resolved_dtype="float32",
+    )
+    config.kv_transfer_config = kv_transfer_config
+    monkeypatch.delenv(layout_env, raising=False)
+    if explicit_layout is not None:
+        monkeypatch.setenv(layout_env, explicit_layout)
+
+    CpuPlatform.check_and_update_config(config)
+    assert os.environ.get(layout_env) == expected_layout

@@ -6,7 +6,7 @@ import os
 import platform
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -93,45 +93,6 @@ def get_max_threads(pid=0):
         return os.cpu_count()
     else:
         raise NotImplementedError("Unsupported OS")
-
-
-_NIXL_CONNECTOR_NAMES = frozenset(
-    ("NixlConnector", "NixlPullConnector", "NixlPushConnector")
-)
-
-
-def _uses_nixl_connector(
-    connector: str | None, extra_config: dict[str, Any] | None
-) -> bool:
-    if connector in _NIXL_CONNECTOR_NAMES:
-        return True
-    if connector != "MultiConnector":
-        return False
-
-    if not extra_config:
-        return False
-    return any(
-        _uses_nixl_connector(
-            child.get("kv_connector"),
-            child.get("kv_connector_extra_config", {}),
-        )
-        for child in extra_config.get("connectors", [])
-    )
-
-
-def _get_cpu_conv_state_layout(
-    explicit_layout: str | None,
-    connector: str | None,
-    extra_config: dict[str, Any] | None,
-    avx512_bf16_supported: bool,
-) -> str | None:
-    if explicit_layout is not None:
-        return explicit_layout
-    if _uses_nixl_connector(connector, extra_config):
-        return "DS"
-    if avx512_bf16_supported:
-        return "SD"
-    return None
 
 
 class CpuPlatform(Platform):
@@ -436,18 +397,23 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
-        # NIXL's Mamba descriptors require DS conv state storage. The CPU
-        # convolution kernel accepts DS directly, so select it before cache
-        # shapes are created. An explicit layout always wins.
-        kv_transfer_config = vllm_config.kv_transfer_config
-        conv_state_layout = _get_cpu_conv_state_layout(
-            explicit_layout=os.getenv("VLLM_SSM_CONV_STATE_LAYOUT"),
-            connector=getattr(kv_transfer_config, "kv_connector", None),
-            extra_config=getattr(kv_transfer_config, "kv_connector_extra_config", None),
-            avx512_bf16_supported=torch.cpu._is_avx512_bf16_supported(),
-        )
-        if conv_state_layout is not None:
-            os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = conv_state_layout
+        # NIXL's Mamba descriptors require DS conv state storage. Select it
+        # before cache shapes are created, while preserving an explicit layout.
+        conv_state_layout_env = "VLLM_SSM_CONV_STATE_LAYOUT"
+        if conv_state_layout_env not in os.environ:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            uses_nixl = kv_transfer_config is not None and any(
+                kv_transfer_config.has_connector(name)
+                for name in (
+                    "NixlConnector",
+                    "NixlPullConnector",
+                    "NixlPushConnector",
+                )
+            )
+            if uses_nixl:
+                os.environ[conv_state_layout_env] = "DS"
+            elif torch.cpu._is_avx512_bf16_supported():
+                os.environ[conv_state_layout_env] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         cpu_architecture = Platform.get_cpu_architecture()

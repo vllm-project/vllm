@@ -493,11 +493,10 @@ class NixlBaseConnectorWorker:
                 is_conv_state_dim_first,
             )
 
-            if not is_conv_state_dim_first():
-                raise ValueError(
-                    "Mamba NIXL transfer requires DS conv state layout. "
-                    "Remove VLLM_SSM_CONV_STATE_LAYOUT=SD or set it to DS."
-                )
+            assert is_conv_state_dim_first(), (
+                "3-read Mamba conv transfer requires DS conv state layout. "
+                "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
+            )
             mamba_spec = next(
                 spec
                 for spec in self._layer_specs.values()
