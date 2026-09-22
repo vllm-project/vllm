@@ -66,7 +66,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if self.weight_block_size is not None:
             self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
             assert not self.is_static_input_scheme
-            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
+            # Activations are grouped along the K (contraction) dim:
+            # block_k = weight_block_size[1].
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[1])
             self.weight_quant_key = create_fp8_quant_key(
                 static=True, group_shape=GroupShape(*self.weight_block_size)
             )
