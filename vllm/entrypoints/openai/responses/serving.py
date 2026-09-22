@@ -863,6 +863,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tokenizer,
                 parser=context.response_parser,
             )
+
             if request.enable_response_messages:
                 input_messages = context.input_messages
                 output_messages = context.output_messages

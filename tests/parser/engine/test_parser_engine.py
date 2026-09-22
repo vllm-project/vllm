@@ -969,11 +969,13 @@ def test_parser_engine_classifies_reasoning_content_and_control_tokens():
         _make_delegating_request(),
         model_output_token_ids=token_ids,
     )
-    assert parser.classify_token_phases(token_ids) == TokenPhaseCounts(
+    counts = parser.classify_token_phases(token_ids)
+    assert counts == TokenPhaseCounts(
         reasoning=2,
         content=1,
         unclassified=1,
     )
+    assert counts.reasoning == parser.count_reasoning_tokens(token_ids)
 
 
 def test_delegating_engine_adapter_does_not_provisionally_count_reasoning_as_content():

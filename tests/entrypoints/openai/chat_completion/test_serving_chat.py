@@ -601,6 +601,7 @@ def _build_serving_chat(
     reasoning_parser: str = "",
     tool_parser: str | None = None,
     enable_auto_tools: bool = False,
+    enable_per_request_output_token_metrics: bool = False,
 ) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
@@ -619,6 +620,9 @@ def _build_serving_chat(
         reasoning_parser=reasoning_parser,
         tool_parser=tool_parser,
         enable_auto_tools=enable_auto_tools,
+        enable_per_request_output_token_metrics=(
+            enable_per_request_output_token_metrics
+        ),
     )
 
     return serving_chat
@@ -633,7 +637,7 @@ def _build_minimal_metrics_serving_chat(
     serving.response_role = "assistant"
     serving.parser_cls = None
     serving.enable_auto_tools = False
-    serving._include_reasoning_tokens_details = False
+    serving._include_reasoning_tokens_details = enable_per_request_output_token_metrics
     serving.enable_prompt_tokens_details = False
     serving.enable_log_outputs = False
     serving.enable_log_deltas = False
@@ -792,7 +796,6 @@ async def test_chat_output_token_metrics_use_engine_delta_timestamps():
         enable_per_request_metrics=False,
         enable_per_request_output_token_metrics=True,
     )
-    serving._include_reasoning_tokens_details = True
     parser = MagicMock()
     parser.parse_delta.return_value = DeltaMessage()
     parser.parse.return_value = ("reasoning", "answer", None)
@@ -907,6 +910,11 @@ async def test_chat_streaming_includes_output_token_metrics():
     assert len(metrics) == 1
     assert metrics[0]["output_token_metrics"]["reasoning"]["token_count"] == 1
     assert metrics[0]["output_token_metrics"]["content"]["token_count"] == 1
+    usage_chunks = [chunk["usage"] for chunk in chunks if chunk.get("usage")]
+    assert (
+        metrics[0]["output_token_metrics"]["reasoning"]["token_count"]
+        == usage_chunks[-1]["completion_tokens_details"]["reasoning_tokens"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1661,6 +1669,19 @@ class TestServingChatWithHarmony:
         )
         assert chat.parser_cls is HarmonyParser
         return chat
+
+    def test_output_token_metrics_include_reasoning_usage_without_parser_flag(
+        self, mock_engine
+    ):
+        chat = _build_serving_chat(
+            mock_engine,
+            tool_parser="openai",
+            enable_auto_tools=True,
+            enable_per_request_output_token_metrics=True,
+        )
+
+        assert chat.parser_cls is HarmonyParser
+        assert chat._include_reasoning_tokens_details
 
     def mock_request_output_from_req_and_token_ids(
         self, req: ChatCompletionRequest, token_ids: list[int], finished: bool = False

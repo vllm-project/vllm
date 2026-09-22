@@ -1612,7 +1612,7 @@ async def test_parsable_context_omits_unattributable_category_timing():
 
 
 @pytest.mark.asyncio
-async def test_responses_streaming_metrics_only_on_completed_event():
+async def test_responses_streaming_adds_metrics_to_completed_event():
     serving = _make_serving_instance(enable_per_request_metrics=True)
     request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
     context = _make_simple_context_with_output(
@@ -1632,8 +1632,6 @@ async def test_responses_streaming_metrics_only_on_completed_event():
         )
     ]
 
-    for event in events[:-1]:
-        assert "metrics" not in event.response.model_dump(mode="json")
     assert isinstance(events[-1], ResponseCompletedEvent)
     assert events[-1].response.metrics is not None
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
@@ -1694,6 +1692,10 @@ async def test_responses_streaming_records_output_token_metrics():
     assert output_metrics is not None
     assert output_metrics.reasoning.time_to_first_token_ms == pytest.approx(500.0)
     assert output_metrics.content.time_to_first_token_ms == pytest.approx(1500.0)
+    assert (
+        output_metrics.reasoning.token_count
+        == completed.response.usage.output_tokens_details.reasoning_tokens
+    )
     assert all(
         "metrics" not in event.response.model_dump(mode="json")
         for event in events[:-1]

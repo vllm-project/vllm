@@ -159,7 +159,9 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_log_deltas = enable_log_deltas
 
         self.enable_auto_tools: bool = enable_auto_tools
-        self._include_reasoning_tokens_details = bool(reasoning_parser)
+        self._include_reasoning_tokens_details = bool(
+            reasoning_parser or enable_per_request_output_token_metrics
+        )
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,

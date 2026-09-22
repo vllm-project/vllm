@@ -202,9 +202,13 @@ are aggregated, so their generation interval includes time between segments.
 `reasoning.token_count` uses the same parser count as the endpoint's existing
 reasoning-token usage field. It therefore equals
 `usage.output_tokens_details.reasoning_tokens` for Responses and
-`usage.completion_tokens_details.reasoning_tokens` for Chat Completions. For
-Harmony, this follows the existing usage convention in which analysis and
-addressed commentary or tool-call tokens count as reasoning. `content.token_count`
+`usage.completion_tokens_details.reasoning_tokens` for Chat Completions; the
+output-token-metrics option includes this Chat Completions usage detail even
+when no reasoning parser was specified separately. This is actual usage, not
+the configured `thinking_token_budget`: for models supporting that budget, it
+is a maximum and actual reasoning usage can be lower. For Harmony, the count
+follows the existing usage convention in which analysis and addressed
+commentary or tool-call tokens count as reasoning. `content.token_count`
 represents final-answer payload tokens. Remaining boundary, framing, and other
 parser-control tokens are reported by `unclassified_token_count`. For every
 classified response, the category counts reconcile to the existing total
