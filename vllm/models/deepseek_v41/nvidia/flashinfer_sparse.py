@@ -200,8 +200,11 @@ class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBui
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
     ) -> "DeepseekSparseSWAMetadata":
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata = super().build(
+            common_prefix_len, common_attn_metadata, fast_build, replay_start
+        )
         num_tokens = metadata.num_decode_tokens
         if not common_attn_metadata.causal and num_tokens > 0:
             assert metadata.decode_swa_lens is not None
@@ -245,7 +248,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             positions,
             self.rotary_emb.cos_sin_cache,
             self.wo_a,
-            self.wo_b,
+            self._wo_b_proj,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -375,6 +378,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         assert swa_metadata.token_to_req_indices is not None
         assert swa_metadata.decode_swa_indices is not None
         assert swa_metadata.block_table is not None
+        assert swa_metadata.replay_start is not None
 
         decode_swa_indices = swa_metadata.decode_swa_indices.reshape(
             num_decode_tokens, swa_metadata.decode_swa_width
@@ -454,6 +458,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 decode_is_valid_token=decode_is_valid_token,
                 swa_block_span=swa_block_span,
                 compressed_block_span=compressed_block_span,
+                replay_start=swa_metadata.replay_start[:num_reqs],
             )
             if swa_only:
                 swa_metadata.flashinfer_sparse_index_cache["swa_only"] = (
@@ -622,7 +627,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             positions,
             self.rotary_emb.cos_sin_cache,
             self.wo_a,
-            self.wo_b,
+            self._wo_b_proj,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
