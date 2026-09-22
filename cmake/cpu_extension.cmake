@@ -173,6 +173,18 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         set(AMX_FP8_SUPPORTED FALSE)
         message(STATUS "AMX-FP8 disabled by ENABLE_AMX_FP8=OFF")
     endif()
+
+    # AVX10.2 arrived in GCC 15, so the target attribute, the fp8 convert
+    # intrinsics and __builtin_cpu_supports("avx10.2") are all hard errors on
+    # the 12.3+ the backend otherwise supports. Probe instead of assuming.
+    check_cxx_compiler_flag("-mavx10.2" COMPILER_SUPPORTS_AVX10_2_FLAG)
+    if (COMPILER_SUPPORTS_AVX10_2_FLAG)
+        add_compile_definitions(VLLM_CPU_HAS_AVX10_2=1)
+    else()
+        add_compile_definitions(VLLM_CPU_HAS_AVX10_2=0)
+        message(STATUS "AVX10.2 paths disabled: compiler does not support -mavx10.2 (compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+    endif()
+
     list(APPEND CXX_COMPILE_FLAGS_AVX2
         "-mavx2")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
