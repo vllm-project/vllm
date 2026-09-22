@@ -234,7 +234,12 @@ class ConsumerReservationManager:
                 if record.state is ConsumerReservationState.READY:
                     return True, False
                 if record.writer_id:
-                    return False, False
+                    # A follower shares its writer's buffer and is published
+                    # when the writer completes. Completing it directly is a
+                    # no-op, not an error: the producer cannot tell that its
+                    # reservation became a follower of a concurrent duplicate
+                    # push of the same content.
+                    return True, False
                 if record.state in _WRITER_OWNED_STATES:
                     self._publish_followers(record)
                 if record.state in _DEFERRED_STATES:
