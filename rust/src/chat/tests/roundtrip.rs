@@ -142,7 +142,7 @@ impl RoundtripCase {
     }
 
     /// MiMo V2.6 uses bare reasoning and Qwen Coder tool tags.
-    fn mimo_v26_flash() -> Self {
+    fn mimo_v26() -> Self {
         Self {
             model_id: "XiaomiMiMo/MiMo-V2.6-Flash-RL",
             assistant_stop_suffix: "<|im_end|>",
@@ -408,7 +408,7 @@ macro_rules! roundtrip_tests {
 roundtrip_tests! {
     qwen3 => [reasoning_and_content, tool_call_mix],
     qwen35 => [reasoning_and_content, tool_call_mix],
-    mimo_v26_flash => [reasoning_and_content, tool_call_mix],
+    mimo_v26 => [reasoning_and_content, tool_call_mix],
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     minimax_m3 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
