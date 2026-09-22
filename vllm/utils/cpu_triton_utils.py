@@ -119,7 +119,7 @@ def _eagle_prepare_next_token_padded_kernel_impl(
 def _eagle_step_slot_mapping_metadata_kernel_impl(
     positions,
     block_table,
-    stride,
+    block_table_stride,
     seq_lens,
     out_clamped_positions,
     out_slot_mapping,
@@ -405,7 +405,7 @@ def _rejection_random_sample_kernel_impl(
 
 def _expand_kernel_impl(
     output,
-    input_val,
+    input,
     cu_num_tokens,
     replace_from,
     replace_to,
@@ -413,7 +413,7 @@ def _expand_kernel_impl(
 ):
     torch.ops._C.expand_kernel_impl(
         _ensure_int64(output),
-        _ensure_int64(input_val),
+        _ensure_int64(input),
         _ensure_int64(cu_num_tokens),
         replace_from,
         replace_to,
