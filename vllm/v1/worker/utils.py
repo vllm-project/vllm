@@ -275,6 +275,8 @@ class AttentionGroup:
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
+        from vllm.v1.worker.workspace import use_workspace_ubatch_id
+
         if kernel_block_size is None:
             kv_cache_spec_builder = self.kv_cache_spec
         elif (
@@ -297,16 +299,17 @@ class AttentionGroup:
             builder_kwargs["block_table_width"] = get_block_table_width(
                 max_num_blocks, self.kv_cache_spec.block_size, kernel_block_size
             )
-        self.metadata_builders = [
-            builder_cls(
-                kv_cache_spec_builder,
-                self.layer_names,
-                vllm_config,
-                device,
-                **builder_kwargs,
-            )
-            for _ in range(num_metadata_builders)
-        ]
+        self.metadata_builders = []
+        for ubatch_id in range(num_metadata_builders):
+            with use_workspace_ubatch_id(ubatch_id):
+                builder = builder_cls(
+                    kv_cache_spec_builder,
+                    self.layer_names,
+                    vllm_config,
+                    device,
+                    **builder_kwargs,
+                )
+            self.metadata_builders.append(builder)
         if kernel_block_size is not None:
             for builder in self.metadata_builders:
                 builder.set_kernel_block_size(kernel_block_size)
