@@ -6,6 +6,8 @@ The zentorch ops are mocked with reference implementations when zentorch is not
 installed, so the layout and dispatch contracts are covered in CI.
 """
 
+import dataclasses
+
 import pytest
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
@@ -312,6 +314,39 @@ def test_can_implement_requires_zen_cpu(monkeypatch):
     ok, reason = ZentorchWNA16LinearKernel.can_implement(_make_config())
     assert not ok
     assert reason is not None
+
+
+def test_can_implement_accepts_shapes_cpuwna16_rejects(monkeypatch):
+    """CPUWNA16's N/K % 32 rule is a oneDNN packing constraint zentorch lacks."""
+    from vllm.model_executor.kernels.linear.mixed_precision.cpu import (
+        CPUWNA16LinearKernel,
+    )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mixed_precision.zentorch."
+        "current_platform.is_zen_cpu",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mixed_precision.cpu."
+        "current_platform.is_cpu",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mixed_precision.zentorch.has_zentorch_op",
+        lambda ops: True,
+    )
+
+    unaligned = dataclasses.replace(
+        _make_config(), partition_weight_shape=(IN_FEATURES, OUT_FEATURES - 16)
+    )
+    assert unaligned.partition_weight_shape[1] % 32 != 0
+
+    ok, _ = CPUWNA16LinearKernel.can_implement(unaligned)
+    assert not ok, "the parent is expected to turn this shape away"
+
+    ok, reason = ZentorchWNA16LinearKernel.can_implement(unaligned)
+    assert ok, reason
 
 
 # ---------------------------------------------------------------------------

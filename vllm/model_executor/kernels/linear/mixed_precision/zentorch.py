@@ -15,7 +15,7 @@ from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
-from .cpu import CPUWNA16LinearKernel
+from .cpu import _CPUWNA16_SUPPORTED_QUANT_TYPES, CPUWNA16LinearKernel
 from .MPLinearKernel import MPLinearLayerConfig
 
 logger = init_logger(__name__)
@@ -40,12 +40,25 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        ok, reason = super().can_implement(c)
-        if not ok:
-            return ok, reason
-
         if not current_platform.is_zen_cpu():
             return False, "ZentorchWNA16 requires an AMD Zen CPU."
+
+        # Not super(): its N/K multiple-of-32 rule is a oneDNN packing
+        # constraint the zentorch repack does not share.
+        if c.weight_type not in _CPUWNA16_SUPPORTED_QUANT_TYPES:
+            return (
+                False,
+                f"Quant type ({c.weight_type}) not supported by "
+                "CPUWNA16, supported types are: "
+                f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}",
+            )
+
+        if c.group_size != -1 and c.group_size % 2 != 0:
+            return (
+                False,
+                f"Group size ({c.group_size}) not supported by "
+                "CPUWNA16, supported group sizes are multiples of 2",
+            )
 
         if not has_zentorch_op(["zentorch_woq_repack_weight", "zentorch_woq_linear"]):
             return (
