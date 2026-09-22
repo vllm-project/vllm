@@ -285,6 +285,23 @@ def _ck_gemm_shape_is_tuned(
         return False
 
 
+@functools.cache
+def _blockscale_bpreshuffle_tuned_shapes(
+    csv_path: str, gfx: str, cu_num: int
+) -> frozenset[tuple[int, int]]:
+    import pandas as pd
+
+    try:
+        df = pd.read_csv(csv_path).drop_duplicates()
+        df = df[
+            (df["gfx"].astype(str) == str(gfx))
+            & (df["cu_num"].astype(int) == int(cu_num))
+        ]
+        return frozenset(zip(df["N"].astype(int), df["K"].astype(int)))
+    except Exception:
+        return frozenset()
+
+
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
     ROCm AITER package is supported and enabled on gfx9 archs.
@@ -4454,6 +4471,20 @@ class rocm_aiter_ops:
     @functools.cache
     def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
         return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
+
+    @staticmethod
+    def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
+        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
+        if not current_platform.is_rocm():
+            return False
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        configs = aiter_gemm_a8w8_ops.AITER_CONFIGS
+        return (n, k) in _blockscale_bpreshuffle_tuned_shapes(
+            configs.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE,
+            aiter_gemm_a8w8_ops.get_gfx(),
+            aiter_gemm_a8w8_ops.get_cu_num(),
+        )
 
     @staticmethod
     def shuffle_weight(
