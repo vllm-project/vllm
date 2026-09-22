@@ -59,7 +59,7 @@ across nodes) cannot be combined with data parallelism:
 
 With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
 starts a draft daemon group that caches the draft model. It uses its own cache
-key, Unix sockets (``*_draft0.sock``) and rendezvous port
+key, Unix sockets (``*_draft.sock``) and rendezvous port
 (``--weight-cache-draft-master-port``, default ``--weight-cache-master-port +
 1``), so each process serves exactly one model role. Other draft types are not
 cached and keep loading from disk in the engine.
@@ -78,7 +78,6 @@ from collections.abc import Callable
 import torch
 
 from vllm.config import (
-    ModelConfig,
     ParallelConfig,
     VllmConfig,
     replace,
@@ -96,17 +95,19 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
     WeightCacheUnavailableError,
-    caches_draft_model,
     check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
-    export_model_attrs,
-    format_daemon_role,
     get_current_device_uuid,
     get_socket_path,
     recv_msg,
     send_msg,
     verify_peer_is_owner,
+)
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    export_model_attrs,
+    format_daemon_role,
+    is_draft_model_cacheable,
 )
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -162,36 +163,6 @@ def export_entries(
     return entries, aliases
 
 
-def get_daemon_model(
-    vllm_config: VllmConfig, model_config: ModelConfig | None = None
-) -> torch.nn.Module:
-    """Load the daemon's model, composed from the configured loader.
-
-    Runs the quantization check after model creation but before the slow
-    weight load, so an unsupported method fails fast. Online quantization
-    always fails the check, so load_model's finalize step for it is
-    unnecessary here.
-    """
-    if model_config is None:
-        model_config = vllm_config.model_config
-    load_config = vllm_config.load_config
-    loader = get_model_loader(load_config)
-    device_config = vllm_config.device_config
-    target_device = torch.device(
-        device_config.device if load_config.device is None else load_config.device
-    )
-    # Attention backends may take workspace at construction, like in the
-    # engine's worker init.
-    init_workspace_manager(target_device)
-    with set_default_torch_dtype(model_config.dtype):
-        with target_device:
-            model = loader.create_model(vllm_config, model_config)
-        check_ipc_quant_support(model)
-        loader.load_weights(model, model_config)
-        process_weights_after_loading(model, model_config, target_device)
-    return model.eval()
-
-
 class WeightCacheDaemon:
     """Per-GPU process that loads one TP shard and serves CUDA IPC handles."""
 
@@ -202,9 +173,7 @@ class WeightCacheDaemon:
         local_rank: int,
         distributed_init_method: str,
         socket_dir: str | None = None,
-        is_draft_model: bool = False,
-        draft_model_idx: int | None = None,
-        model_config: ModelConfig | None = None,
+        is_draft: bool = False,
         dp_rank: int = 0,
     ):
         parallel_config = vllm_config.parallel_config
@@ -220,7 +189,12 @@ class WeightCacheDaemon:
         self.vllm_config = vllm_config
         # A draft daemon builds the draft with the target's VllmConfig, like
         # the engine does; only the ModelConfig differs.
-        self.model_config = model_config or vllm_config.model_config
+        if is_draft:
+            spec = vllm_config.speculative_config
+            assert spec is not None and spec.draft_model_config is not None
+            self.model_config = spec.draft_model_config
+        else:
+            self.model_config = vllm_config.model_config
         self.tp_rank = tp_rank
         self.dp_rank = dp_rank
         self.tp_size = parallel_config.tensor_parallel_size
@@ -230,9 +204,8 @@ class WeightCacheDaemon:
         self.local_rank = local_rank
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
-        self.is_draft_model = is_draft_model
-        self.draft_model_idx = draft_model_idx
-        self.role = "draft" if is_draft_model else "target"
+        self.is_draft = is_draft
+        self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
@@ -242,8 +215,7 @@ class WeightCacheDaemon:
             tp_rank=tp_rank,
             dp_size=self.dp_size,
             dp_rank=dp_rank,
-            is_draft_model=is_draft_model,
-            draft_model_idx=draft_model_idx,
+            is_draft=is_draft,
         )
 
     def load_model(self) -> None:
@@ -260,12 +232,39 @@ class WeightCacheDaemon:
         )
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, 1)
-            self.model = get_daemon_model(self.vllm_config, self.model_config)
+            self.model = self.get_model()
         logger.info(
             "Weight cache %s daemon rank %d loaded model",
             self.role,
             self.global_rank,
         )
+
+    def get_model(self) -> torch.nn.Module:
+        """Load the daemon's model, composed from the configured loader.
+
+        Runs the quantization check after model creation but before the slow
+        weight load, so an unsupported method fails fast. Online quantization
+        always fails the check, so load_model's finalize step for it is
+        unnecessary here.
+        """
+        vllm_config = self.vllm_config
+        model_config = self.model_config
+        load_config = vllm_config.load_config
+        loader = get_model_loader(load_config)
+        device_config = vllm_config.device_config
+        target_device = torch.device(
+            device_config.device if load_config.device is None else load_config.device
+        )
+        # Attention backends may take workspace at construction, like in the
+        # engine's worker init.
+        init_workspace_manager(target_device)
+        with set_default_torch_dtype(model_config.dtype):
+            with target_device:
+                model = loader.create_model(vllm_config, model_config)
+            check_ipc_quant_support(model)
+            loader.load_weights(model, model_config)
+            process_weights_after_loading(model, model_config, target_device)
+        return model.eval()
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
         """Serve requests until terminated.
@@ -346,8 +345,7 @@ class WeightCacheDaemon:
         return get_socket_path(
             get_current_device_uuid(),
             self.socket_dir,
-            is_draft_model=self.is_draft_model,
-            draft_model_idx=self.draft_model_idx,
+            is_draft=self.is_draft,
         )
 
     def _handle_connection(self, conn: socket.socket) -> None:
@@ -411,9 +409,7 @@ def _run_daemon(
     distributed_init_method: str,
     socket_dir: str | None,
     ready_queue: "multiprocessing.Queue[tuple[str, int]]",
-    is_draft_model: bool = False,
-    draft_model_idx: int | None = None,
-    model_config: ModelConfig | None = None,
+    is_draft: bool = False,
     dp_rank: int = 0,
 ) -> None:
     daemon = WeightCacheDaemon(
@@ -422,9 +418,7 @@ def _run_daemon(
         local_rank,
         distributed_init_method,
         socket_dir,
-        is_draft_model,
-        draft_model_idx,
-        model_config,
+        is_draft,
         dp_rank,
     )
     daemon.load_model()
@@ -453,42 +447,12 @@ def plan_local_ranks(parallel_config: ParallelConfig) -> list[tuple[int, int, in
     ]
 
 
-def get_draft_daemon_config(
-    vllm_config: VllmConfig,
-) -> tuple[VllmConfig, ModelConfig] | None:
-    """Configs for the draft daemon group, or None when the draft is not cached.
-
-    Mirrors how the engine loads a draft: the target's VllmConfig with the
-    speculative kernel overrides, plus the draft's ModelConfig passed
-    separately, because draft classes read the target from
-    ``vllm_config.model_config``.
-    """
-    speculative_config = vllm_config.speculative_config
-    if not caches_draft_model(speculative_config):
+def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:
+    """VllmConfig for the draft daemon group"""
+    if not is_draft_model_cacheable(vllm_config.speculative_config):
         return None
-    if speculative_config.moe_backend is not None:
-        vllm_config = replace(
-            vllm_config,
-            kernel_config=replace(
-                vllm_config.kernel_config, moe_backend=speculative_config.moe_backend
-            ),
-        )
-    if speculative_config.attention_backend is not None:
-        vllm_config = replace(
-            vllm_config,
-            attention_config=replace(
-                vllm_config.attention_config,
-                backend=speculative_config.attention_backend,
-            ),
-        )
-    if speculative_config.kv_cache_dtype is not None:
-        vllm_config = replace(
-            vllm_config,
-            cache_config=replace(
-                vllm_config.cache_config, cache_dtype=speculative_config.kv_cache_dtype
-            ),
-        )
-    return vllm_config, speculative_config.draft_model_config
+    assert vllm_config.speculative_config is not None
+    return vllm_config.speculative_config.apply_draft_overrides(vllm_config)
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
@@ -585,18 +549,15 @@ def main() -> None:
     master_port = args.weight_cache_master_port or get_open_port()
     distributed_init_method = get_distributed_init_method(master_addr, master_port)
 
-    # (is_draft_model, draft_model_idx, config, rendezvous) per daemon group.
-    # (is_draft_model, draft_model_idx, vllm_config, model_config, rendezvous)
-    # per daemon group; model_config is None for the target.
-    groups: list[tuple[bool, int | None, VllmConfig, ModelConfig | None, str]] = [
-        (False, None, vllm_config, None, distributed_init_method)
+    # (is_draft, vllm_config, rendezvous) per daemon group.
+    groups: list[tuple[bool, VllmConfig, str]] = [
+        (False, vllm_config, distributed_init_method)
     ]
-    draft = get_draft_daemon_config(vllm_config)
-    if draft is not None:
-        draft_vllm_config, draft_model_config = draft
-        draft_master_port = args.weight_cache_draft_master_port
-        if draft_master_port is None:
-            draft_master_port = master_port + 1 if nnodes > 1 else get_open_port()
+    draft_vllm_config = get_draft_daemon_config(vllm_config)
+    if draft_vllm_config is not None:
+        draft_master_port = args.weight_cache_draft_master_port or (
+            master_port + 1 if nnodes > 1 else get_open_port()
+        )
         if draft_master_port == master_port:
             raise ValueError(
                 "--weight-cache-draft-master-port must differ from "
@@ -605,9 +566,7 @@ def main() -> None:
         groups.append(
             (
                 True,
-                0,
                 draft_vllm_config,
-                draft_model_config,
                 get_distributed_init_method(master_addr, draft_master_port),
             )
         )
@@ -616,9 +575,8 @@ def main() -> None:
     ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
     procs = []
     expected_ready: set[tuple[str, int]] = set()
-    for is_draft_model, draft_model_idx, config, model_config, init_method in groups:
-        role = "draft" if is_draft_model else "target"
-        suffix = format_daemon_role(is_draft_model, draft_model_idx)
+    for is_draft, config, init_method in groups:
+        role = format_daemon_role(is_draft)
         # Local index == device index.
         for local_rank, dp_rank, tp_rank in placements:
             global_rank = dp_rank * tp_size + tp_rank
@@ -633,12 +591,10 @@ def main() -> None:
                         init_method,
                         args.weight_cache_socket_dir,
                         ready_queue,
-                        is_draft_model,
-                        draft_model_idx,
-                        model_config,
+                        is_draft,
                         dp_rank,
                     ),
-                    name=f"vllm-weight-cache-{role}{suffix}-{global_rank}",
+                    name=f"vllm-weight-cache-{role}-{global_rank}",
                 )
             )
     for proc in procs:
