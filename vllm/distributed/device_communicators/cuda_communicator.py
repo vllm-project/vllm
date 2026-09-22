@@ -559,11 +559,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead we
         allocate once per ``(role, shape, dtype)``, register once, and reuse.
 
-        Safe for serial (eager) sequence parallelism: each collective's result
-        is consumed on the same stream before the next same-role collective
-        reuses the buffer. Distinct roles (e.g. ``rs_in`` vs ``ag_out``, both
-        full-size) get distinct buffers so a reduce-scatter input copy never
-        clobbers a still-live all-gather output.
+        These buffers are internal scratch. Returning one would let a later
+        collective with the same cache key overwrite an earlier live result.
+        Distinct roles (e.g. ``rs_in`` vs ``ag_out``, both full-size) get
+        distinct buffers so a reduce-scatter input copy never clobbers a
+        still-live all-gather output.
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             nccl_symm_mem_context,
@@ -616,7 +616,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             symm_input.copy_(input_tensor)
 
         pynccl_comm.reduce_scatter(symm_output, symm_input)
-        return symm_output
+        return symm_output.clone()
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""
@@ -815,7 +815,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "ag_out", out_size, input_.dtype, input_.device
         )
         pynccl_comm.all_gather(symm_output, input_)
-        return symm_output
+        return symm_output.clone()
 
     def _all_gather_batched_symm_mem(
         self, inputs: list[torch.Tensor]
