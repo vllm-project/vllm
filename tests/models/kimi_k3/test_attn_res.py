@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import importlib.metadata
+import os
 
 import pytest
 import torch
@@ -15,6 +17,33 @@ HIDDEN_SIZE = 7168
 MAX_BLOCKS = 8
 EPS = 1e-5
 attn_res_module = importlib.import_module("vllm.models.kimi_k3.nvidia.ops.attn_res")
+
+
+def _rocm_major_version() -> int | None:
+    # ROCm 10+ ships as the `rocm` pip SDK; older releases install to /opt/rocm.
+    try:
+        return int(importlib.metadata.version("rocm").split(".")[0])
+    except (importlib.metadata.PackageNotFoundError, ValueError):
+        pass
+    rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+    version_file = os.path.join(rocm_path, ".info", "version")
+    try:
+        with open(version_file) as f:
+            return int(f.read().split(".")[0])
+    except (OSError, ValueError):
+        return None
+
+
+# The Triton bundled with ROCm < 10 (3.7.x) crashes in the AMD
+# CanonicalizePointers pass on the kernel's tl.where over pointer tensors. Only
+# the num_blocks > 0 loop contains it. ROCm serves AttnRes from
+# vllm/models/kimi_k3/amd/ops/attn_res.py instead, so nothing real is lost.
+_OLD_ROCM = current_platform.is_rocm() and (_rocm_major_version() or 0) < 10
+
+
+def _skip_on_old_rocm(num_blocks: int) -> None:
+    if _OLD_ROCM and num_blocks > 0:
+        pytest.skip("Triton on ROCm < 10 cannot compile this kernel's pointer select")
 
 
 def _randn_with_row_padding(*shape: int, padding: int = 0) -> torch.Tensor:
@@ -79,6 +108,7 @@ def test_attn_res(
 ):
     if backend == "nvidia" and not current_platform.is_device_capability_family(100):
         pytest.skip("NVIDIA AttnRes requires the SM100 family")
+    _skip_on_old_rocm(num_blocks)
 
     prefix = _randn_with_row_padding(num_tokens, HIDDEN_SIZE, padding=row_padding)
     delta = (
@@ -133,6 +163,7 @@ def test_attn_res(
 
 @pytest.mark.parametrize("num_blocks", range(MAX_BLOCKS + 1))
 def test_attn_res_block_counts(num_blocks: int):
+    _skip_on_old_rocm(num_blocks)
     prefix = torch.randn(1, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
     blocks = torch.randn(
         1, MAX_BLOCKS, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
@@ -169,6 +200,7 @@ def test_attn_res_block_counts(num_blocks: int):
 
 
 def test_attn_res_without_output_norm():
+    _skip_on_old_rocm(MAX_BLOCKS)
     prefix = torch.randn(7, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
     delta = torch.randn_like(prefix)
     blocks = torch.randn(
