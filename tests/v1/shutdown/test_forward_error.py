@@ -41,14 +41,14 @@ def evil_forward(self, *args, **kwargs):
 
 
 @pytest.fixture
-def rocm_evil_forward(rocm_sitecustomize_factory):
+def rocm_evil_forward(spawn_sitecustomize_factory):
     lines = [
         "from vllm.distributed import get_tensor_model_parallel_rank",
         "from vllm.model_executor.models.llama import LlamaForCausalLM",
         inspect.getsource(evil_forward),
         f"LlamaForCausalLM.forward = {evil_forward.__name__}",
     ]
-    rocm_sitecustomize_factory(lines)
+    spawn_sitecustomize_factory(lines)
 
 
 @pytest.mark.asyncio

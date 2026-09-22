@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 
 
 @pytest.fixture
-def rocm_sitecustomize_factory(monkeypatch, tmp_path: Path):
+def spawn_sitecustomize_factory(monkeypatch, tmp_path: Path):
     """Return a function that installs a given sitecustomize payload.
 
     Both ROCm and XPU force the `spawn` multiprocessing start method (see
