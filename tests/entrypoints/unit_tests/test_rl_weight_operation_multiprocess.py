@@ -44,6 +44,15 @@ with metrics.record(operation):
     time.sleep(hold_seconds)
 """
 
+# Each test uses its own operation labels, so a recorder left behind by an
+# earlier test can never inflate a later test's series.
+OP_AGGREGATE = "probe_aggregate"
+OP_SEPARATE_A = "probe_separate_a"
+OP_SEPARATE_B = "probe_separate_b"
+OP_STALE_ALIVE = "probe_stale_alive"
+OP_STALE_DEAD = "probe_stale_dead"
+OP_LAZY = "probe_lazy"
+
 
 def _child_env(multiproc_dir: str) -> dict[str, str]:
     pythonpath = os.pathsep.join(
@@ -74,6 +83,9 @@ def _spawn_recorder(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        # Own process group so cleanup cannot leave a recorder alive holding an
+        # mmap file that would inflate a later test.
+        start_new_session=True,
     )
     deadline = time.monotonic() + READY_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -84,18 +96,26 @@ def _spawn_recorder(
                 f"recorder child for {operation!r} exited early: {proc.returncode}"
             )
         time.sleep(0.1)
-    proc.kill()
+    _stop_recorder(proc)
     raise AssertionError(f"recorder child for {operation!r} never became ready")
 
 
 def _stop_recorder(proc: subprocess.Popen) -> int:
+    import signal
+
     pid = proc.pid
     if proc.poll() is None:
-        proc.terminate()
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
         proc.wait(timeout=30)
     return pid
 
@@ -122,8 +142,8 @@ def test_multiprocess_aggregates_operations_duration_and_in_flight(
     tmp_path, monkeypatch
 ):
     multiproc_dir = str(tmp_path)
-    update_a, _ = _spawn_recorder(multiproc_dir, "update", "a")
-    update_b, _ = _spawn_recorder(multiproc_dir, "update", "b")
+    update_a, _ = _spawn_recorder(multiproc_dir, OP_AGGREGATE, "a")
+    update_b, _ = _spawn_recorder(multiproc_dir, OP_AGGREGATE, "b")
     try:
         text = _scrape(monkeypatch, multiproc_dir)
     finally:
@@ -132,43 +152,30 @@ def test_multiprocess_aggregates_operations_duration_and_in_flight(
 
     # Two processes each recorded one operation: counters and histogram counts
     # sum, and livesum makes the held gauges add up.
-    assert (
-        _sample(
-            text, PREFIX + "operations_total", 'operation="update",status="success"'
-        )
-        == 2
-    )
-    assert (
-        _sample(text, PREFIX + "operation_duration_seconds_count", 'operation="update"')
-        == 2
-    )
-    assert _sample(text, PREFIX + "operations_in_flight", 'operation="update"') == 2
+    labels = f'operation="{OP_AGGREGATE}"'
+    assert _sample(text, PREFIX + "operations_total", f'{labels},status="success"') == 2
+    assert _sample(text, PREFIX + "operation_duration_seconds_count", labels) == 2
+    assert _sample(text, PREFIX + "operations_in_flight", labels) == 2
 
 
 def test_different_operations_stay_separate_across_processes(tmp_path, monkeypatch):
     multiproc_dir = str(tmp_path)
-    update, _ = _spawn_recorder(multiproc_dir, "update", "u")
-    finish, _ = _spawn_recorder(multiproc_dir, "finish", "f")
+    first, _ = _spawn_recorder(multiproc_dir, OP_SEPARATE_A, "u")
+    second, _ = _spawn_recorder(multiproc_dir, OP_SEPARATE_B, "f")
     try:
         text = _scrape(monkeypatch, multiproc_dir)
     finally:
-        _stop_recorder(update)
-        _stop_recorder(finish)
+        _stop_recorder(first)
+        _stop_recorder(second)
 
-    assert (
-        _sample(
-            text, PREFIX + "operations_total", 'operation="update",status="success"'
+    label_a = f'operation="{OP_SEPARATE_A}"'
+    label_b = f'operation="{OP_SEPARATE_B}"'
+    for labels in (label_a, label_b):
+        assert (
+            _sample(text, PREFIX + "operations_total", f'{labels},status="success"')
+            == 1
         )
-        == 1
-    )
-    assert (
-        _sample(
-            text, PREFIX + "operations_total", 'operation="finish",status="success"'
-        )
-        == 1
-    )
-    assert _sample(text, PREFIX + "operations_in_flight", 'operation="update"') == 1
-    assert _sample(text, PREFIX + "operations_in_flight", 'operation="finish"') == 1
+        assert _sample(text, PREFIX + "operations_in_flight", labels) == 1
     # The operation label is what separates them; summing is not meaningful.
     assert _sample(text, PREFIX + "operations_total", 'status="success"') is None
 
@@ -177,13 +184,16 @@ def test_mark_process_dead_clears_stale_in_flight(tmp_path, monkeypatch):
     from prometheus_client import multiprocess
 
     multiproc_dir = str(tmp_path)
-    alive, _ = _spawn_recorder(multiproc_dir, "update", "alive")
-    dead, _ = _spawn_recorder(multiproc_dir, "finish", "dead")
+    alive, _ = _spawn_recorder(multiproc_dir, OP_STALE_ALIVE, "alive")
+    dead, _ = _spawn_recorder(multiproc_dir, OP_STALE_DEAD, "dead")
     dead_pid = _stop_recorder(dead)
     try:
         before = _scrape(monkeypatch, multiproc_dir)
         assert (
-            _sample(before, PREFIX + "operations_in_flight", 'operation="finish"') == 1
+            _sample(
+                before, PREFIX + "operations_in_flight", f'operation="{OP_STALE_DEAD}"'
+            )
+            == 1
         )
 
         multiprocess.mark_process_dead(dead_pid, multiproc_dir)
@@ -191,12 +201,17 @@ def test_mark_process_dead_clears_stale_in_flight(tmp_path, monkeypatch):
         after = _scrape(monkeypatch, multiproc_dir)
         # The dead process's held gauge is gone instead of lingering forever.
         assert (
-            _sample(after, PREFIX + "operations_in_flight", 'operation="finish"')
+            _sample(
+                after, PREFIX + "operations_in_flight", f'operation="{OP_STALE_DEAD}"'
+            )
             is None
         )
         # The live process is unaffected.
         assert (
-            _sample(after, PREFIX + "operations_in_flight", 'operation="update"') == 1
+            _sample(
+                after, PREFIX + "operations_in_flight", f'operation="{OP_STALE_ALIVE}"'
+            )
+            == 1
         )
     finally:
         _stop_recorder(alive)
@@ -208,7 +223,7 @@ def test_metrics_are_created_lazily_after_multiprocess_setup(tmp_path):
     code = (
         "from vllm.entrypoints.serve.dev.rlhf import metrics;"
         "print('before', metrics._metrics is not None);"
-        "metrics.weight_operation_metrics();"
+        f"metrics.weight_operation_metrics().in_flight.labels(operation='{OP_LAZY}').inc();"
         "print('after', metrics._metrics is not None)"
     )
     out = subprocess.run(
