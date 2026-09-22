@@ -62,7 +62,6 @@ class DeepseekV4CPUCompressor(DeepseekCompressor):
         state_metadata = attn_metadata[self.state_cache.prefix]
         assert isinstance(state_metadata, CompressorMetadata)
         token_to_req_indices = state_metadata.token_to_req_indices
-        assert token_to_req_indices is not None
         slot_mapping = state_metadata.slot_mapping
         num_actual = slot_mapping.shape[0]
         block_table = state_metadata.block_table

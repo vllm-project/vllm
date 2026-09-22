@@ -9,9 +9,9 @@ import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonJitKey
 from vllm.models.deepseek_v4.compressor import (
-    _BUILD_C128_RING_METADATA_KERNEL,
     CompressorMetadataBuilder,
     CompressorStateCache,
+    _build_c128_ring_metadata,
     _c128_ring_capacity,
     build_c128_ring_metadata,
 )
@@ -106,14 +106,14 @@ def test_c128_metadata_warmup_has_one_shape_independent_key(monkeypatch) -> None
     monkeypatch.setattr(
         jit_warmup_triton_helper, "_triton_key_deriver", fake_key_deriver
     )
-    kernel = _BUILD_C128_RING_METADATA_KERNEL.kernel
+    kernel = _build_c128_ring_metadata.kernel
     kernel_fn = getattr(kernel, "func", kernel)
     monkeypatch.setitem(
-        _BUILD_C128_RING_METADATA_KERNEL.__dict__,
+        _build_c128_ring_metadata.__dict__,
         "_kernel_arg_names",
         tuple(inspect.signature(kernel_fn).parameters),
     )
-    keys = _BUILD_C128_RING_METADATA_KERNEL.get_warmup_keys(capacity=256)
+    keys = _build_c128_ring_metadata.get_warmup_keys(capacity=256)
 
     assert len(keys) == 1
     assert prepared[0]["CAPACITY"] == 256
@@ -143,7 +143,7 @@ def test_c128_model_registers_ring_metadata_warmup_only_on_cuda(
         ),
     )
     monkeypatch.setattr(
-        compressor._BUILD_C128_RING_METADATA_KERNEL,
+        compressor._build_c128_ring_metadata,
         "register_warmup",
         lambda **kwargs: registered.append(kwargs),
     )
@@ -183,13 +183,13 @@ def test_c128_model_registers_ring_metadata_warmup_only_on_cuda(
     assert registered == expected
 
 
-def test_only_circular_c128_builds_no_boundary_fast_path_metadata(monkeypatch) -> None:
+def test_only_circular_c128_allocates_ring_metadata_buffers(monkeypatch) -> None:
     from vllm.models.deepseek_v4 import compressor
 
     monkeypatch.setattr(compressor.current_platform, "is_cuda", lambda: True)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=128,
+            max_num_batched_tokens=127,
             async_scheduling=False,
         ),
         speculative_config=None,
@@ -214,13 +214,30 @@ def test_only_circular_c128_builds_no_boundary_fast_path_metadata(monkeypatch) -
             positions=torch.arange(127),
         )
         common._token_to_req_indices_cache = torch.zeros(127, dtype=torch.int32)
-        return builder.build(0, common)
+        return builder, builder.build(0, common)
 
     circular = _state_cache(128).get_kv_cache_spec(_config())
-    assert build(circular).c128_boundary is False
+    circular_builder, circular_metadata = build(circular)
+    assert circular_builder.slot_mapping_buffer is not None
+    assert circular_builder.tail_slot_mapping_buffer is not None
+    assert circular_builder.slot_mapping_buffer.shape == (127,)
+    assert circular_builder.tail_slot_mapping_buffer.shape == (127,)
+    assert circular_builder.slot_mapping_buffer.data_ptr() % 16 == 0
+    assert circular_builder.tail_slot_mapping_buffer.data_ptr() % 16 == 0
+    assert circular_metadata.c128_boundary is False
 
     c4 = _state_cache(4).get_kv_cache_spec(_config())
-    assert build(c4).c128_boundary is None
+    c4_builder, c4_metadata = build(c4)
+    assert c4_builder.slot_mapping_buffer is None
+    assert c4_builder.tail_slot_mapping_buffer is None
+    assert c4_metadata.c128_boundary is None
+
+    monkeypatch.setattr(compressor.current_platform, "is_cuda", lambda: False)
+    paged_c128 = _state_cache(128).get_kv_cache_spec(_config())
+    paged_c128_builder, paged_c128_metadata = build(paged_c128)
+    assert paged_c128_builder.slot_mapping_buffer is None
+    assert paged_c128_builder.tail_slot_mapping_buffer is None
+    assert paged_c128_metadata.c128_boundary is None
 
 
 def test_c128_ring_mapping_and_tail_for_nonuniform_batch() -> None:
