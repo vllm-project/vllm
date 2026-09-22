@@ -7,6 +7,8 @@ from typing import cast
 
 import torch
 
+from vllm import envs
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -25,6 +27,7 @@ from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -37,9 +40,53 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+
+def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
+    """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
+
+    E8M0 is an unsigned exponent-only scale format with bias 127. A finite
+    encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
+    ``0xFF`` is reserved for NaN. This is the vendor-neutral OCP encoding used
+    by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
+    Microscaling Formats (MX) Specification, section 5.4.1:
+    https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+
+    Loaders may preserve the encoded byte as ``float8_e8m0fnu``/``uint8``,
+    or decode it to a floating-point power of two. Floating-point inputs are
+    accepted only when the original E8M0 byte can be recovered losslessly.
+    This function does not quantize or round arbitrary scales.
+    """
+    if scale.dtype == torch.float8_e8m0fnu:
+        # Reinterpret the native E8M0 storage. ``to(uint8)`` would perform a
+        # numeric conversion instead of preserving the encoded exponent byte.
+        return scale.view(torch.uint8).contiguous()
+    if scale.dtype == torch.uint8:
+        # The checkpoint loader already exposed the E8M0 wire representation.
+        return scale.contiguous()
+    if not scale.dtype.is_floating_point:
+        return None
+
+    scale_f32 = scale.detach().float()
+    if not bool(torch.isfinite(scale_f32).all()) or bool((scale_f32 <= 0).any()):
+        return None
+
+    # With no mantissa, E8M0 can represent only exact powers of two. Rebuild
+    # the value before encoding so this adapter never silently quantizes a
+    # general floating-point checkpoint scale.
+    exponent = torch.round(torch.log2(scale_f32))
+    if not torch.equal(torch.exp2(exponent), scale_f32):
+        return None
+
+    encoded = exponent.to(torch.int32) + 127
+    # 0xFF is NaN in OCP E8M0, not a finite exponent.
+    if int(encoded.min()) < 0 or int(encoded.max()) > 254:
+        return None
+    return encoded.to(torch.uint8).contiguous()
 
 
 def _trust_dsv4_extra_cache_nan_free(
@@ -60,21 +107,6 @@ def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
     return indptr
-
-
-def weight_already_preshuffled(linear: torch.nn.Module) -> bool:
-    """True when the linear's kernel already B-preshuffled ``weight``.
-
-    The hand-shuffles below (fused_wqa_wkv, wo_b, gate_up_proj) must be skipped
-    for those, since shuffle_weight is a permutation rather than an involution.
-    """
-    return any(
-        getattr(getattr(method, "fp8_linear", None), "preshuffles_weight", False)
-        for method in (
-            getattr(linear, "quant_method", None),
-            getattr(linear, "scheme", None),
-        )
-    )
 
 
 def apply_pre_quantized_block_scaled_mm(
@@ -416,6 +448,20 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
 
 
 class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            # All per-token metadata is built from device query boundaries into
+            # persistent buffers, so adaptive verification can replay varlen
+            # FULL decode graphs after reallocating drafts across requests.
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
@@ -483,6 +529,20 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            # SWA indices, lengths, and token-to-request mappings are built from
+            # device boundaries into persistent buffers, so adaptive verification
+            # can replay varlen FULL decode graphs safely.
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     # Keep fused multi-step decode disabled until update_draft_decode_metadata()
     # also refreshes the ROCm-specific ragged SWA indices and indptrs.
     supports_draft_decode_metadata_update = False
@@ -510,11 +570,13 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
     ) -> DeepseekV4ROCMAiterSparseSWAMetadata:
         base = super().build(
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
             fast_build=fast_build,
+            replay_start=replay_start,
         )
 
         ragged_indices = None
@@ -568,19 +630,26 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        self._wo_a_fp8_weight: torch.Tensor | None = None
+        self._wo_a_e8m0_scale: torch.Tensor | None = None
+        self._wo_a_cos_cache: torch.Tensor | None = None
+        self._wo_a_sin_cache: torch.Tensor | None = None
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
 
         if self.indexer is None:
-            # Only enable multi-stream overlap for CSA layer now.
-            self.aux_stream_list = None
+            # Dense layers have no compressor work to overlap; HCA layers
+            # (compressor, no indexer) keep the streams for the dual-stream
+            # fork below.
+            if self.compressor is None:
+                self.aux_stream_list = None
         else:
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
 
-    def _enable_csa_multi_stream(self) -> bool:
-        """All CSA multi-stream gates: env var, streams, and capture region.
+    def _enable_multi_stream_overlap(self) -> bool:
+        """ROCm multi-stream gates: streams and capture region.
 
         Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
         the attention inputs on the owning stream. Forking side streams
@@ -588,7 +657,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         this overlap on ROCm (event waits can hang), so multi-stream only
         runs where the fork/join becomes static graph edges: inside capture,
         or with non-dict metadata (full cudagraph or the profile run), which
-        has no eager breaks.
+        has no eager breaks. Covers both the HCA and CSA forks.
         """
         attn_metadata = get_forward_context().attn_metadata
         return self.aux_stream_list is not None and (
@@ -639,7 +708,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             device=hidden_states.device,
         )
 
-        if self._enable_csa_multi_stream():
+        if self._enable_multi_stream_overlap():
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
             self._prepare_and_attn_fn(
@@ -673,7 +742,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         o_padded: torch.Tensor,
     ) -> None:
-        """Run the ROCm CSA fork/join inside the graph capture boundary."""
+        """Run the ROCm fork/join (HCA or CSA) inside the capture boundary."""
         aux_streams = self.aux_stream_list
         # The sequential pipeline disables aux_stream_list before calling
         # back with real projection inputs; aux_streams is None ends that
@@ -699,13 +768,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         # Re-check: forward's gate ran inside a captured segment that
         # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not self._enable_csa_multi_stream():
+        if not self._enable_multi_stream_overlap():
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
         indexer = self.indexer
         compressor = self.compressor
-        assert indexer is not None and compressor is not None
+        assert compressor is not None
 
         def default_chain():
             qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
@@ -725,6 +794,24 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             compressor(score, positions, self.rotary_emb)
 
+        if indexer is None:
+            # HCA dual-stream: the main compressor runs on aux stream 0 while
+            # the default stream produces q and inserts KV into the SWA cache.
+            # Both branches only read hidden_states, so the join merely has to
+            # precede the sparse attention that consumes the compressed KV.
+            (q, _qr_out, _qr_scale_out, kv_out), _ = execute_in_parallel(
+                default_chain,
+                [main_compressor_chain],
+                self.ln_events[0],
+                [self.ln_events[1]],
+                aux_streams[:1],
+                enable=True,
+            )
+            self._sparse_indexer_and_attn(
+                hidden_states, None, None, None, q, kv_out, positions, o_padded
+            )
+            return
+
         def indexer_compressor_chain() -> None:
             score = torch.mm(
                 hidden_states,
@@ -733,6 +820,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             indexer.compressor(score, positions, self.indexer_rotary_emb)
 
+        # CSA three-stream: the main and indexer compressors run on aux
+        # streams 0 and 1 while the default stream produces q and inserts KV
+        # into the SWA cache. Every branch only reads hidden_states plus its
+        # own state, so the join merely has to precede the indexer op and the
+        # sparse attention, which consume the compressed KV caches.
         (q, qr_out, qr_scale_out, kv_out), _ = execute_in_parallel(
             default_chain,
             [main_compressor_chain, indexer_compressor_chain],
@@ -792,17 +884,103 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 return None
             if ws.dtype == torch.float8_e8m0fnu:
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
-            # Skip if the linear's kernel already shuffled it.
-            if not weight_already_preshuffled(linear):
-                replace_parameter(
-                    linear,
-                    "weight",
-                    rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-                )
+            # Shuffle the weight in place (single weight, no unshuffled copy).
+            replace_parameter(
+                linear,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
             return ws
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
         self._wo_b_scale = _prep(self.wo_b)
+        if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
+            self._prepare_fp8_wo_a()
+
+    def _prepare_fp8_wo_a(self) -> None:
+        try:
+            from aiter.ops.batched_gemm_op_a8w8 import (
+                batched_gemm_a8w8_mxscale as mxscale_op,
+            )
+            from aiter.ops.inverse_rope_group_quant import (
+                inverse_rope_group_quant as inverse_quant_op,
+            )
+        except ImportError:
+            logger.warning_once(
+                "The DeepSeek V4 FP8 WO_A path requires AITER >= 0.1.20; "
+                "falling back to BF16 WO_A."
+            )
+            return
+        del mxscale_op, inverse_quant_op
+
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            get_fp8_block_weight_scale,
+            is_fp8,
+        )
+
+        weight = getattr(self.wo_a, "weight", None)
+        scale = get_fp8_block_weight_scale(self.wo_a)
+        if scale is None:
+            # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
+            # historical ``_inv`` suffix.
+            scale = getattr(self.wo_a, "weight_scale", None)
+        if weight is None or scale is None:
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs a block-scaled FP8 wo_a weight; "
+                "the layer exposes no weight/weight scale. Falling back to "
+                "BF16 WO_A."
+            )
+            return
+        if weight.dim() != 2 or scale.dim() != 2 or not is_fp8(weight.dtype):
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs a 2-D FP8 wo_a weight with a 2-D "
+                "block scale, got weight %s%s and scale %s. Falling back to "
+                "BF16 WO_A.",
+                weight.dtype,
+                tuple(weight.shape),
+                tuple(scale.shape),
+            )
+            return
+
+        groups = self.n_local_groups
+        out_per_group = self.o_lora_rank
+        out_features, in_features = weight.shape
+        if (
+            out_features != groups * out_per_group
+            or out_per_group % 128 != 0
+            or in_features % 128 != 0
+            or scale.shape != (out_features // 128, in_features // 128)
+        ):
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A needs group-128 blocks for %d groups of "
+                "%d outputs, got weight %s and scale %s. Falling back to BF16 "
+                "WO_A.",
+                groups,
+                out_per_group,
+                tuple(weight.shape),
+                tuple(scale.shape),
+            )
+            return
+
+        e8m0_scale = _wo_a_block_scale_to_e8m0(scale)
+        if e8m0_scale is None:
+            logger.warning_once(
+                "DeepSeek V4 FP8 WO_A could not losslessly encode the %s wo_a "
+                "block scale as OCP E8M0. Falling back to BF16 WO_A.",
+                scale.dtype,
+            )
+            return
+
+        self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
+        self._wo_a_e8m0_scale = e8m0_scale.view(
+            groups, out_per_group // 128, in_features // 128
+        )
+        cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
+        if cache is None:
+            cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
+        cos_cache, sin_cache = cache.chunk(2, dim=-1)
+        self._wo_a_cos_cache = cos_cache.contiguous()
+        self._wo_a_sin_cache = sin_cache.contiguous()
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
@@ -896,26 +1074,16 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     @functools.cached_property
-    def _wq_b_act_scale_transpose(self) -> bool | None:
-        """Activation-scale byte order every wq_b consumer agrees on, else None.
-
-        None means "do not take the fused norm+quant path". Otherwise the value
-        is the ``transpose_scale`` the producer must pass so that the scale it
-        writes matches what the selected GEMM reads.
+    def _wq_b_uses_aiter_block_scaled(self) -> bool:
+        """True when both wq_b GEMMs run the aiter block-scaled fp8 kernel.
 
         Cached: the linear kernels and the aiter env gates are fixed once
         the model is built, so this is evaluated at the first forward
         only.
 
-        Two conditions, both necessary:
-
-        * The fused norm+quant path is only valid if the quant and GEMM it
-          replaces are exactly the aiter ones; otherwise fall back to the
-          shared path.
-        * One qr_scale feeds both self.wq_b and self.indexer.wq_b, which have
-          different (N, K) and so can resolve to kernels wanting opposite byte
-          orders. A single producer cannot serve both, so refuse the fast path
-          when they disagree rather than guessing.
+        The fused norm+quant path is only valid if the quant and GEMM it
+        replaces are exactly the aiter ones; otherwise fall back to the
+        shared path.
         """
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.model_executor.kernels.linear.scaled_mm import (
@@ -923,31 +1091,16 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
         if not rocm_aiter_ops.is_linear_fp8_enabled():
-            return None
+            return False
 
         linears = [self.wq_b]
         if self.indexer is not None:
             linears.append(self.indexer.wq_b)
-        layouts: set[bool] = set()
         for linear in linears:
             kernel = getattr(getattr(linear, "quant_method", None), "fp8_linear", None)
             if not isinstance(kernel, Fp8BlockScaledMMLinearKernel):
-                return None
-            layouts.add(bool(getattr(kernel, "wants_transposed_act_scale", False)))
-        if len(layouts) != 1:
-            logger.warning_once(
-                "DeepSeek-V4 wq_b consumers disagree on activation-scale layout; "
-                "disabling the fused q/kv norm+quant path.",
-                scope="global",
-            )
-            return None
-        transpose_scale = layouts.pop()
-        logger.debug_once(
-            "DeepSeek-V4 wq_b: emitting %s-major activation scales",
-            "column" if transpose_scale else "row",
-            scope="global",
-        )
-        return transpose_scale
+                return False
+        return True
 
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
@@ -964,12 +1117,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         when the aiter linear path is not active.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        transpose_scale = self._wq_b_act_scale_transpose
         if not (
             qr.dim() == 2
             and qr.shape[0] > 0
             and self.q_lora_rank % 128 == 0
-            and transpose_scale is not None
+            and self._wq_b_uses_aiter_block_scaled
         ):
             return super()._split_qkv_and_norm(qr_kv)
 
@@ -983,22 +1135,48 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             kv_weight=self.kv_norm.weight.data,
             kv_epsilon=self.eps,
             group_size=128,
-            # Emit the byte order the wq_b GEMMs read.
-            transpose_scale=transpose_scale,
+            transpose_scale=False,
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
-        z = rocm_inv_rope_einsum(
-            self.rotary_emb,
-            o,
-            positions,
-            self.rope_head_dim,
-            self.n_local_groups,
-            self.o_lora_rank,
-            self.wo_a,
-        )
-        zf = z.flatten(1)
+        if self._wo_a_fp8_weight is not None:
+            from aiter.ops.batched_gemm_op_a8w8 import (
+                batched_gemm_a8w8_mxscale,
+            )
+            from aiter.ops.inverse_rope_group_quant import (
+                inverse_rope_group_quant,
+            )
+
+            assert self._wo_a_cos_cache is not None
+            assert self._wo_a_sin_cache is not None
+            o_fp8, o_scale = inverse_rope_group_quant(
+                o.view(o.shape[0], self.n_local_heads, self.head_dim),
+                positions.to(torch.int64),
+                self._wo_a_cos_cache,
+                self._wo_a_sin_cache,
+                num_groups=self.n_local_groups,
+                quant_group_size=128,
+            )
+            assert self._wo_a_e8m0_scale is not None
+            zf = batched_gemm_a8w8_mxscale(
+                o_fp8,
+                self._wo_a_fp8_weight,
+                o_scale,
+                self._wo_a_e8m0_scale,
+                dtype=o.dtype,
+            ).flatten(1)
+        else:
+            # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
+            z = rocm_inv_rope_einsum(
+                self.rotary_emb,
+                o,
+                positions,
+                self.rope_head_dim,
+                self.n_local_groups,
+                self.o_lora_rank,
+                self.wo_a,
+            )
+            zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
             return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
         return self.wo_b(zf)
