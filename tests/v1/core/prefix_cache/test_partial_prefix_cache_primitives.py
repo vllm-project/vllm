@@ -150,6 +150,9 @@ def test_cache_partial_block_kv_cache_events():
     )
     assert stored_event.token_ids == req.all_token_ids[hash_block_size:]
     assert stored_event.block_size == 4
+    assert stored_event.skipped_parent_block_hash is None
+    assert stored_event.skipped_token_ids == req.all_token_ids[:hash_block_size]
+    assert stored_event.skipped_extra_keys == [None]
     assert stored_event.group_idx == kv_cache_group_id
     assert stored_event.session_id == "agent-session-partial"
 
@@ -171,6 +174,68 @@ def test_cache_partial_block_kv_cache_events():
     assert isinstance(removed_event, BlockRemoved)
     assert removed_event.block_hashes == stored_event.block_hashes
     assert removed_event.group_idx == kv_cache_group_id
+
+
+def test_cache_partial_block_event_includes_skipped_ancestry():
+    hash_block_size = 2
+    block_size = 8
+    kv_cache_group_id = 2
+    req = make_request(
+        "req_partial_skipped_ancestry",
+        prompt_token_ids=list(range(14)),
+        hash_block_size=hash_block_size,
+        hash_fn=sha256,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    blocks = pool.get_new_blocks(2)
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=kv_cache_group_id,
+    )
+    pool.take_events()
+
+    pool.cache_partial_block(
+        request=req,
+        block=blocks[1],
+        num_tokens=len(req.all_token_ids),
+        kv_cache_group_id=kv_cache_group_id,
+        block_size=block_size,
+    )
+
+    [stored_event] = pool.take_events()
+    assert isinstance(stored_event, BlockStored)
+    assert stored_event.parent_block_hash == kv_cache_utils.maybe_convert_block_hash(
+        boundary_hash(req, hash_block_size, 12)
+    )
+    assert stored_event.block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(boundary_hash(req, hash_block_size, 14))
+    ]
+    assert stored_event.token_ids == req.all_token_ids[12:14]
+    assert stored_event.block_size == hash_block_size
+    assert (
+        stored_event.skipped_parent_block_hash
+        == kv_cache_utils.maybe_convert_block_hash(
+            boundary_hash(req, hash_block_size, 8)
+        )
+    )
+    assert stored_event.skipped_token_ids == req.all_token_ids[8:12]
+    assert stored_event.skipped_extra_keys == [None, None]
+    assert (
+        pool.get_cached_block(
+            boundary_hash(req, hash_block_size, 12), [kv_cache_group_id]
+        )
+        is None
+    )
 
 
 def test_partial_block_replacement_emits_remove_then_store_events():

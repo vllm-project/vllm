@@ -411,9 +411,8 @@ class BlockPool:
     ) -> BlockStored:
         """Build a ``BlockStored`` KV event for ``request``.
 
-        Shared by ``cache_full_blocks`` (newly cached blocks) and
-        ``emit_cached_block_events`` (prefix-cache-reused blocks) so both emit
-        identical event shapes for downstream consumers.
+        Shared by full, partial, and prefix-cache-reused block reporting so
+        each path emits the same event shape for downstream consumers.
         """
         return BlockStored(
             block_hashes=block_hashes,
@@ -428,8 +427,7 @@ class BlockPool:
             skipped_token_ids=request.all_token_ids[
                 skipped_start_token_idx:skipped_end_token_idx
             ]
-            if skipped_start_token_idx is not None
-            and skipped_end_token_idx is not None
+            if skipped_start_token_idx is not None and skipped_end_token_idx is not None
             else None,
             skipped_extra_keys=skipped_extra_keys,
             group_idx=kv_cache_group_id,
@@ -590,22 +588,44 @@ class BlockPool:
             extra_keys, _ = generate_block_hash_extra_keys(
                 request, block_start, block_end, curr_mm_idx
             )
+            partial_block_start = num_tokens // block_size * block_size
+            if partial_block_start < block_start:
+                skipped_parent_block_hash = (
+                    maybe_convert_block_hash(
+                        request.block_hashes[
+                            partial_block_start // self.hash_block_size - 1
+                        ]
+                    )
+                    if partial_block_start > 0
+                    else None
+                )
+                skipped_start_token_idx = partial_block_start
+                skipped_end_token_idx = block_start
+                skipped_extra_keys = self._generate_block_extra_keys(
+                    request,
+                    partial_block_start // self.hash_block_size,
+                    block_start // self.hash_block_size,
+                    self.hash_block_size,
+                )
+            else:
+                skipped_parent_block_hash = None
+                skipped_start_token_idx = None
+                skipped_end_token_idx = None
+                skipped_extra_keys = None
             self.kv_event_queue.append(
-                BlockStored(
+                self._build_block_stored_event(
+                    request,
                     block_hashes=[maybe_convert_block_hash(block_hash)],
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.all_token_ids[block_start:block_end],
-                    block_size=block_end - block_start,
-                    lora_id=request.lora_request.adapter_id
-                    if request.lora_request
-                    else None,
-                    medium=MEDIUM_GPU,
-                    lora_name=request.lora_request.name
-                    if request.lora_request
-                    else None,
-                    extra_keys=[extra_keys],
-                    group_idx=kv_cache_group_id,
-                    session_id=request.session_id,
+                    start_token_idx=block_start,
+                    end_token_idx=block_end,
+                    block_size=self.hash_block_size,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=[extra_keys],
+                    skipped_parent_block_hash=skipped_parent_block_hash,
+                    skipped_start_token_idx=skipped_start_token_idx,
+                    skipped_end_token_idx=skipped_end_token_idx,
+                    skipped_extra_keys=skipped_extra_keys,
                 )
             )
         return block_hash_with_group_id
