@@ -917,7 +917,7 @@ def _patch_inductor_fallback_allow_list() -> None:
 _patch_inductor_fallback_allow_list()
 
 
-def _patch_inductor_pattern_matcher() -> None:
+def _apply_inductor_pattern_matcher_patch() -> None:
     """Allow custom ops and functionalization wrappers with unsupported dtypes."""
     from torch._inductor import pattern_matcher
     from torch._inductor.lowering import fallback_node_due_to_unsupported_type
@@ -930,6 +930,37 @@ def _patch_inductor_pattern_matcher() -> None:
         )
 
     pattern_matcher.fallback_node_due_to_unsupported_type = fallback_for_builtin
+
+
+def _patch_inductor_pattern_matcher() -> None:
+    """Apply the backport when Inductor imports its pattern matcher."""
+    import sys
+
+    target_name = "torch._inductor.pattern_matcher"
+    if target_name in sys.modules:
+        _apply_inductor_pattern_matcher_patch()
+        return
+
+    import importlib.abc
+
+    class _PatternMatcherPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != target_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                _apply_inductor_pattern_matcher_patch()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _PatternMatcherPatchFinder())
 
 
 # Remove once the minimum supported torch includes
