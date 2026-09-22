@@ -17,11 +17,11 @@ class AuxOutputConfig:
     """Capture and return routed-experts auxiliary outputs."""
 
     backend: Literal["shm", "mooncake"] = "shm"
-    """Block storage backend. Mooncake uses ``MOONCAKE_CONFIG_PATH``."""
+    """Mooncake uses ``VLLM_AUX_OUTPUT_MOONCAKE_CONFIG_PATH``."""
 
     max_bytes: int | None = Field(default=None, gt=0)
     """SHM capacity, or ``None`` to derive it from the KV cache capacity.
-    Mooncake capacity is configured separately in ``MOONCAKE_CONFIG_PATH``;
+    Mooncake capacity uses ``VLLM_AUX_OUTPUT_MOONCAKE_CONFIG_PATH``;
     size it for the workload and the time consumers need to retrieve outputs.
     """
 

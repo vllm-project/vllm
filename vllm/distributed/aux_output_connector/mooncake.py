@@ -153,7 +153,11 @@ def create_mooncake_block_store(
     # Pool capacity is user-sized, not derived from the GPU KV cache. Each
     # embedded client contributes its configured segment, including the
     # EngineCore publisher. See docs/features/aux_output_mooncake.md.
-    config = MooncakeStoreConfig.load_from_config()
+    config = MooncakeStoreConfig.load_from_config(
+        "VLLM_AUX_OUTPUT_MOONCAKE_CONFIG_PATH"
+    )
+    if config.enable_offload:
+        raise ValueError("AuxOutput does not support the KV enable_offload policy")
     store = MooncakeDistributedStore()
     try:
         setup_mooncake_store(
