@@ -39,6 +39,7 @@ def make_groups(
 
     Returns:
         The groups, each with a distinct single layer name.
+
     """
     return tuple(
         OffloadingGroupConfig(

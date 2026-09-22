@@ -23,7 +23,11 @@ from vllm.v1.kv_offload.base import (
     get_offload_group_idx,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig, OffloadingGroupConfig
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.common import (
+    CPULoadStoreSpec,
+    CPUOffloadingInfo,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
@@ -81,6 +85,7 @@ def _capacity_tokens_at_max_len(
     Returns:
         The token count, or None when max_model_len is 0 and the caller
         therefore did not know the longest request.
+
     """
     tokens_per_chunk = {blocks_per_chunk * group.tokens_per_block for group in groups}
     if max_model_len <= 0 or not tokens_per_chunk or min(tokens_per_chunk) <= 0:
@@ -107,38 +112,27 @@ def _build_config_info(
     Args:
         num_chunks: Chunk slots in the tier. Chunks, not GPU blocks.
         kv_bytes_per_chunk: Page-aligned bytes of one chunk, or None from a
-            caller that does not report it. With num_chunks it gives the exact
-            size of the tier in bytes, the only capacity that holds for every
-            model shape.
-        config: The offloading configuration, which supplies the group shapes
-            and max_model_len.
+            caller that does not report it.
+        config: The offloading configuration, which gives the group shapes and
+            max_model_len.
 
     Returns:
-        One label for each fact. A fact the caller did not report reads "None".
-        A reported 0 keeps its number, because it names an empty tier.
+        One label for each field of CPUOffloadingInfo, which documents the
+        fields and the name agreement with CPUOffloadingSpec.
+
     """
     blocks_per_chunk = config.cache.blocks_per_chunk
-    capacity_tokens = _capacity_tokens_at_max_len(
-        config.groups,
-        blocks_per_chunk,
-        num_chunks,
-        config.model.max_model_len,
-    )
-    return {
-        "cpu_num_chunks": num_chunks,
-        # The CPU-slot to GPU-block conversion factor.
-        "cpu_blocks_per_chunk": blocks_per_chunk,
-        # None, not 0: a caller that reports no chunk size must not read as an
-        # empty tier.
-        "cpu_kv_bytes_per_chunk": (
-            "None" if kv_bytes_per_chunk is None else kv_bytes_per_chunk
+    return CPUOffloadingInfo(
+        num_chunks=num_chunks,
+        blocks_per_chunk=blocks_per_chunk,
+        kv_bytes_per_chunk=kv_bytes_per_chunk,
+        capacity_tokens_at_max_len=_capacity_tokens_at_max_len(
+            config.groups,
+            blocks_per_chunk,
+            num_chunks,
+            config.model.max_model_len,
         ),
-        # Upper bound on the KV tokens the tier holds, over the request lengths
-        # up to max_model_len.
-        "cpu_capacity_tokens_at_max_len": (
-            "None" if capacity_tokens is None else capacity_tokens
-        ),
-    }
+    ).as_config_info()
 
 
 class CPUOffloadingManager(OffloadingManager):

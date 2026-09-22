@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_offload.test_factory import _make_offloading_config
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -1550,13 +1551,16 @@ def test_tiering_manager_prefixes_the_config_info_of_every_secondary_tier():
 def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     """The spec declares the info label names in the API-server process, and
     the manager fills the values in the engine process. A drift between the two
-    empties every declared label and drops every filled value, so this pins
-    both sides to the same literal names."""
+    empties every declared label and drops every filled value, so this pins the
+    names on both sides. The primary tier passes its own names through
+    unprefixed, so they come first and without a prefix."""
     tier_configs = [{"type": "test_metrics"}, {"type": "test_metrics"}]
     mock_region = _mock_mmap_region(5)
     manager = TieringOffloadingManager(
         primary_tier=CPUPrimaryTierOffloadingManager(
-            num_chunks=5, mmap_region=mock_region
+            num_chunks=5,
+            mmap_region=mock_region,
+            config=_make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
         ),
         secondary_tiers=[
             MetricsSecondaryTierManager(
@@ -1575,7 +1579,14 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     ):
         keys = TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
 
-    assert keys == ("tier1_test_metrics_path", "tier2_test_metrics_path")
+    assert keys == (
+        "cpu_num_chunks",
+        "cpu_blocks_per_chunk",
+        "cpu_kv_bytes_per_chunk",
+        "cpu_capacity_tokens_at_max_len",
+        "tier1_test_metrics_path",
+        "tier2_test_metrics_path",
+    )
     assert keys == tuple(manager.config_info())
 
 
