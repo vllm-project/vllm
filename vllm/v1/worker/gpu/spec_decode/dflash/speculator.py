@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -20,6 +21,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    CudaGraphManager,
+)
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -79,9 +84,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         self.sample_from_anchor = False
 
-        # Context positions for the K/V precompute. Populated by
-        # prepare_dflash_inputs, and processed by the model's
-        # precompute_and_store_context_kv method. NOT captured by CUDA graphs.
+        # Context positions for the K/V precompute, populated by prepare_dflash_inputs.
         self.context_positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
@@ -107,6 +110,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         ).repeat(self.max_num_reqs)
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
+        self.decode_cudagraph_manager: CudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
 
     @property
@@ -145,6 +149,19 @@ class DFlashSpeculator(DraftModelSpeculator):
             decode_query_len=self.num_query_per_req,
         )
 
+        if (
+            getattr(self.model, "supports_captured_draft_step", False)
+            and self.query_cudagraph_manager.needs_capture()
+            and self.pcp_manager is None
+            and self.block_tables.cp_size == 1
+        ):
+            self.decode_cudagraph_manager = CudaGraphManager(
+                self.vllm_config,
+                self.device,
+                cudagraph_mode,
+                decode_query_len=self.num_query_per_req,
+            )
+
     def capture(self) -> None:
         logger.info("Capturing model for %s speculator...", self._speculator_name)
         # Padded sample rows must not scatter into a live request during capture.
@@ -161,6 +178,65 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.max_model_len,
             causal=self._group_causal,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
+        )
+
+        manager = self.decode_cudagraph_manager
+        if manager is None:
+            return
+
+        def create_forward_fn(
+            desc: BatchExecutionDescriptor, warmup: bool
+        ) -> Callable[[CUDAGraphMode], None]:
+            assert desc.num_reqs is not None
+            num_reqs = desc.num_reqs
+            num_context = min(
+                num_reqs * (self.num_speculative_steps + 1), self.max_num_tokens
+            )
+            num_query_tokens = desc.num_tokens
+            query_len = num_query_tokens // num_reqs
+            batch = InputBatch.make_dummy(
+                num_reqs, num_query_tokens, self.input_buffers
+            )
+            batch.seq_lens_cpu_upper_bound.fill_(self.max_model_len)
+            self.draft_max_seq_len = self.max_model_len
+            self.block_tables.get_dummy_block_tables(num_reqs)
+            slot_mappings = self.block_tables.get_dummy_slot_mappings(num_query_tokens)
+            slot_mappings_by_layer = build_slot_mappings_by_layer(
+                slot_mappings, self.kv_cache_config
+            )
+            self.context_positions[:num_context].zero_()
+            self._context_slot_mappings[:, :num_context].fill_(PAD_SLOT_ID)
+            num_tokens_across_dp = (
+                torch.full((self.dp_size,), num_query_tokens, dtype=torch.int32)
+                if self.dp_size > 1
+                else None
+            )
+
+            def forward(cg_mode: CUDAGraphMode) -> None:
+                self._precompute_context_kv(num_context)
+                # Record the builder's GPU updates so replay refreshes metadata too.
+                attn_metadata = self._build_uniform_attn_metadata(
+                    desc,
+                    num_reqs,
+                    query_len,
+                    batch.seq_lens_cpu_upper_bound,
+                    query_len,
+                    causal=self._group_causal,
+                )
+                self._generate_draft(
+                    num_reqs,
+                    num_query_tokens,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                    num_tokens_across_dp,
+                    cg_mode,
+                )
+
+            return forward
+
+        manager.capture(
+            create_forward_fn,
+            f"Capturing {self._speculator_name.lower()} decode-step CUDA graphs",
         )
 
     def load_draft_model(
@@ -297,6 +373,22 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
+    def _precompute_context_kv(self, num_tokens: int, dummy_run: bool = False) -> None:
+        if dummy_run:
+            context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
+        elif self._layer_group_idx is not None:
+            context_slots = [
+                self._context_slot_mappings[gidx][:num_tokens]
+                for gidx in self._layer_group_idx
+            ]
+        else:
+            context_slots = self._context_slot_mappings[0][:num_tokens]
+        self.model.precompute_and_store_context_kv(
+            self.hidden_states[:num_tokens],
+            self.context_positions[:num_tokens],
+            context_slots,
+        )
+
     @torch.inference_mode()
     def propose(
         self,
@@ -407,25 +499,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_from_anchor,
             )
 
-        # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
-        # because the context shape varies per step. During dummy runs the block tables
-        # are placeholders, so we skip the cache write to avoid clobbering real entries.
-        # Each layer uses the context slots of its own kv-cache group.
-        if dummy_run:
-            context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
-        elif self._layer_group_idx is not None:
-            context_slots = [
-                self._context_slot_mappings[gidx][:num_target_tokens]
-                for gidx in self._layer_group_idx
-            ]
-        else:
-            context_slots = self._context_slot_mappings[0][:num_target_tokens]
-        self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
-            self.context_positions[:num_target_tokens],
-            context_slots,
-        )
-
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)
             if dp_sync is not None
@@ -446,6 +519,28 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
+
+        manager = self.decode_cudagraph_manager
+        if (
+            manager is not None
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and not dummy_run
+            and not input_batch.has_prefill
+        ):
+            assert batch_desc.num_reqs is not None
+            num_context = min(
+                batch_desc.num_reqs * (self.num_speculative_steps + 1),
+                self.max_num_tokens,
+            )
+            self.context_positions[num_target_tokens:num_context].zero_()
+            self._context_slot_mappings[:, num_target_tokens:num_context].fill_(
+                PAD_SLOT_ID
+            )
+            self._prepare_eplb_forward(num_query_tokens)
+            manager.run_fullgraph(batch_desc)
+            return self.draft_tokens[:num_reqs]
+
+        self._precompute_context_kv(num_target_tokens, dummy_run)
 
         # Rebuild the draft attention metadata even when replaying the FULL
         # graph so that any attention metadata builder state is updated.

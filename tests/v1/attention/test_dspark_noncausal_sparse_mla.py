@@ -755,3 +755,94 @@ def test_dsv41_flashinfer_dspark_window_matches_reference(
     )
     graph.replay()
     check_output()
+
+
+@pytest.mark.parametrize("backend", ["flashmla", "flashinfer"])
+def test_dspark_metadata_replay_refreshes_decode_state(backend):
+    """Captured build must follow changing lengths, blocks and padded requests."""
+    from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+        DeepseekSparseSWAFlashInferMetadataBuilder,
+    )
+    from vllm.models.deepseek_v41.nvidia.flashmla import (
+        DeepseekSparseSWAFlashMLAMetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            max_model_len=1024,
+            hf_config=SimpleNamespace(sliding_window=128, compress_ratios=[0]),
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=20, max_num_seqs=4),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=5, parallel_drafting=False, use_dspark=lambda: True
+        ),
+    )
+    kv_spec = SlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+    )
+    builder_cls = (
+        DeepseekSparseSWAFlashMLAMetadataBuilder
+        if backend == "flashmla"
+        else DeepseekSparseSWAFlashInferMetadataBuilder
+    )
+    builder = builder_cls(kv_spec, [], config, torch.device("cuda"))
+    reference_builder = builder_cls(kv_spec, [], config, torch.device("cuda"))
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[1024] * 4, query_lens=[5] * 4),
+        128,
+        torch.device("cuda"),
+        arange_block_indices=True,
+    )
+    common.causal = False
+
+    def build():
+        # Each build gets its own CPU cache, as in _build_uniform_attn_metadata.
+        return builder.build(0, common.replace(_token_to_req_indices_cache=None))
+
+    build()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = build()
+    fields = ["decode_swa_indices", "decode_swa_lens", "is_valid_token"]
+    live_fields = ["token_to_req_indices"]
+    if backend == "flashinfer":
+        fields.append("flashinfer_decode_topk_lens")
+        live_fields.append("flashinfer_decode_seq_lens")
+
+    for num_reqs, length in [(4, 20), (3, 137), (1, 900), (4, 513)]:
+        qsl = torch.arange(5, dtype=torch.int32).clamp_max(num_reqs) * 5
+        seq_lens = torch.zeros(4, dtype=torch.int32)
+        seq_lens[:num_reqs] = length
+        common.query_start_loc.copy_(qsl)
+        common.seq_lens.copy_(seq_lens)
+        common.block_table_tensor.add_(32)
+        common.slot_mapping.fill_(-1)
+        common.slot_mapping[: num_reqs * 5].fill_(0)
+        for field in fields + live_fields:
+            getattr(captured, field).zero_()
+        graph.replay()
+        # The reference uses fresh CPU lengths; capture retains the max-length
+        # dummy CPU metadata and must get every changing value from the GPU.
+        expected = reference_builder.build(
+            0,
+            common.replace(
+                query_start_loc_cpu=qsl,
+                seq_lens_cpu_upper_bound=seq_lens,
+                max_seq_len=length,
+                _token_to_req_indices_cache=None,
+            ),
+        )
+        for field in fields:
+            torch.testing.assert_close(
+                getattr(captured, field), getattr(expected, field)
+            )
+        for field in live_fields:
+            torch.testing.assert_close(
+                getattr(captured, field)[: num_reqs * 5],
+                getattr(expected, field)[: num_reqs * 5],
+            )

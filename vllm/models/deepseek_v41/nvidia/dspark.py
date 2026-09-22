@@ -275,6 +275,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
+    # Decode SWA metadata depends only on the graph shape and GPU inputs.
+    supports_captured_draft_step = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
