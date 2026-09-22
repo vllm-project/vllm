@@ -299,6 +299,58 @@ def fused_recurrent_kda_fwd_kernel(
         p_out += stride_out_token
 
 
+def _get_static_sequence_length(
+    total_tokens: int,
+    head_sequences: int,
+    is_single_sequence: bool,
+    uniform_sequence_length: int | None,
+) -> int:
+    if is_single_sequence:
+        return total_tokens
+    if (
+        uniform_sequence_length is not None
+        and uniform_sequence_length > 1
+        and head_sequences <= 96
+    ):
+        return uniform_sequence_length
+    return 0
+
+
+def _select_kda_launch_config(
+    use_gate_in_kernel: bool,
+    is_spec_decoding: bool,
+    head_sequences: int,
+    static_sequence_length: int,
+    has_multi_token_sequence: bool,
+) -> tuple[int, int, int]:
+    if static_sequence_length and head_sequences <= 96:
+        BV = 4 if head_sequences <= 24 else 8
+        if static_sequence_length == 1:
+            num_stages = 2
+        elif static_sequence_length <= 3:
+            num_stages = 8 if head_sequences <= 24 else 4
+        elif static_sequence_length <= 6:
+            num_stages = 6
+        elif static_sequence_length <= 10:
+            num_stages = 10
+        else:
+            num_stages = 12
+        return BV, 1, num_stages
+
+    if use_gate_in_kernel and is_spec_decoding:
+        if head_sequences <= 24:
+            return 4, 1, 4 if has_multi_token_sequence else 2
+        if has_multi_token_sequence and head_sequences <= 48:
+            return 8, 1, 4
+        if has_multi_token_sequence and head_sequences <= 96:
+            return 8, 1, 2
+        return 32, 4, 2
+
+    if use_gate_in_kernel:
+        return 32, 4, 2
+    return 8, 1, 2
+
+
 def fused_recurrent_kda_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -351,7 +403,7 @@ def fused_recurrent_kda_fwd(
     if uniform_sequence_length is not None:
         assert num_accepted_tokens is not None
         assert uniform_sequence_length > 0
-        assert T == N * uniform_sequence_length
+        assert N * uniform_sequence_length == T
     assert cu_seqlens.is_contiguous()
     if use_gate_in_kernel:
         assert A_log is not None and A_log.is_contiguous()
@@ -360,53 +412,22 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
-    is_single_sequence = num_accepted_tokens is not None and N == 1
-    if is_single_sequence:
-        candidate_sequence_length = T
-    elif uniform_sequence_length is not None:
-        candidate_sequence_length = uniform_sequence_length
-    else:
-        candidate_sequence_length = 0
+    is_spec_decoding = num_accepted_tokens is not None
+    is_single_sequence = is_spec_decoding and N == 1
     head_sequences = H * N
-    # Compile uniform low-concurrency loops with a fixed trip count. Once the
-    # grid is large enough, keeping the loop dynamic preserves occupancy.
-    static_sequence_length = (
-        candidate_sequence_length
-        if is_single_sequence
-        or (candidate_sequence_length > 1 and head_sequences <= 96)
-        else 0
+    static_sequence_length = _get_static_sequence_length(
+        total_tokens=T,
+        head_sequences=head_sequences,
+        is_single_sequence=is_single_sequence,
+        uniform_sequence_length=uniform_sequence_length,
     )
-    if static_sequence_length and head_sequences <= 96:
-        BV = 4 if head_sequences <= 24 else 8
-        num_warps = 1
-        if static_sequence_length == 1:
-            num_stages = 2
-        elif static_sequence_length <= 3:
-            num_stages = 8 if head_sequences <= 24 else 4
-        elif static_sequence_length <= 6:
-            num_stages = 6
-        elif static_sequence_length <= 10:
-            num_stages = 10
-        else:
-            num_stages = 12
-    elif use_gate_in_kernel and num_accepted_tokens is not None:
-        # Narrow V tiles while low-concurrency speculative decode is
-        # grid-starved on MI355X.
-        has_multi_token_sequence = T > N
-        if head_sequences <= 24:
-            BV = 4
-            num_warps = 1
-            num_stages = 4 if has_multi_token_sequence else 2
-        elif has_multi_token_sequence and head_sequences <= 48:
-            BV, num_warps, num_stages = 8, 1, 4
-        elif has_multi_token_sequence and head_sequences <= 96:
-            BV, num_warps, num_stages = 8, 1, 2
-        else:
-            BV, num_warps, num_stages = 32, 4, 2
-    elif use_gate_in_kernel:
-        BV, num_warps, num_stages = 32, 4, 2
-    else:
-        BV, num_warps, num_stages = 8, 1, 2
+    BV, num_warps, num_stages = _select_kda_launch_config(
+        use_gate_in_kernel=use_gate_in_kernel,
+        is_spec_decoding=is_spec_decoding,
+        head_sequences=head_sequences,
+        static_sequence_length=static_sequence_length,
+        has_multi_token_sequence=T > N,
+    )
     grid = (cdiv(V, BV) * N * H,)
     fused_recurrent_kda_fwd_kernel[grid](
         q=q,
