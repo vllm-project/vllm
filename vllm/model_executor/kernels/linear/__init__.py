@@ -231,6 +231,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -390,22 +391,7 @@ def _resolve_backend_kernels(
     layer types (e.g. NVFP4 MoE projections next to FP8 attention
     projections).
     """
-    if current_platform.is_cuda():
-        humming = next(
-            (k for k in kernels if k in _LINEAR_BACKEND_KERNEL_MAP["humming"]), None
-        )
-        marlin = next(
-            (k for k in kernels if k in _LINEAR_BACKEND_KERNEL_MAP["marlin"]), None
-        )
-        if humming is not None and marlin is not None:
-            if compute_capability is None:
-                cc = current_platform.get_device_capability()
-                compute_capability = cc.to_int() if cc is not None else None
-            if compute_capability == 90:
-                kernels = kernels.copy()
-                kernels.remove(humming)
-                kernels.insert(kernels.index(marlin), humming)
-
+    kernels = prioritize_humming(kernels, compute_capability)
     linear_backend = _get_linear_backend(quantization=quantization)
     if linear_backend == "auto":
         return kernels

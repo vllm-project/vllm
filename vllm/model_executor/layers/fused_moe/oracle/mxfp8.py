@@ -8,11 +8,11 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     backend_to_kernel_cls,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -130,10 +130,7 @@ def select_mxfp8_moe_backend(
         return backend, _select_kernel_cls(backend, config)
 
     # Auto-select: pick the first supported backend.
-    backends = list(_SUPPORTED_BACKENDS)
-    if current_platform.is_cuda() and current_platform.is_device_capability(90):
-        backends.remove(Fp8MoeBackend.HUMMING)
-        backends.insert(backends.index(Fp8MoeBackend.MARLIN), Fp8MoeBackend.HUMMING)
+    backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
     for backend in backends:
         try:
             experts_cls = _select_kernel_cls(backend, config)

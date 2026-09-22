@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_config,
     marlin_act_int8_process_scales,
@@ -131,10 +132,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         WNA16MoEBackend.HUMMING,
         WNA16MoEBackend.EMULATION,
     ]
-    if current_platform.is_cuda() and current_platform.is_device_capability(90):
-        backends.remove(WNA16MoEBackend.HUMMING)
-        backends.insert(backends.index(WNA16MoEBackend.MARLIN), WNA16MoEBackend.HUMMING)
-    return backends
+    return prioritize_humming(backends)
 
 
 def _backend_incompatibility_reason(
