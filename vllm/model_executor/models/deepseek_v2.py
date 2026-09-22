@@ -110,9 +110,6 @@ from vllm.v1.attention.backends.mla.index_group import (
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-    aiter_indexer_qk_fused_kernel,
-)
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, SparseCacheRole
 
 from .interfaces import (
@@ -753,7 +750,6 @@ class Indexer(nn.Module):
         # Static: it selects skip_k_cache_insert, and nothing else writes the cache.
         self.use_fused_indexer_qk = (
             rocm_aiter_ops.is_enabled()
-            and aiter_indexer_qk_fused_kernel() is not None
             and vllm_config.model_config.dtype == torch.bfloat16
             and self.quant_block_size == self.head_dim
             and self.head_dim == 128
