@@ -61,15 +61,19 @@ def parser(mock_tokenizer):
 _MARKERS = sorted(_LLAMA_VOCAB, key=len, reverse=True)
 
 
-def _tokenize(text: str) -> list[tuple[int, str]]:
+def _tokenize(text: str, vocab: dict[str, int] | None = None) -> list[tuple[int, str]]:
     """Markers are atomic special tokens; plain text is one token per
     character (matching the mock tokenizer's ``chr``-based decode)."""
+    vocab = _LLAMA_VOCAB if vocab is None else vocab
+    markers = (
+        _MARKERS if vocab is _LLAMA_VOCAB else sorted(vocab, key=len, reverse=True)
+    )
     tokens: list[tuple[int, str]] = []
     i = 0
     while i < len(text):
-        for marker in _MARKERS:
+        for marker in markers:
             if text.startswith(marker, i):
-                tokens.append((_LLAMA_VOCAB[marker], marker))
+                tokens.append((vocab[marker], marker))
                 i += len(marker)
                 break
         else:
@@ -154,6 +158,84 @@ def _accumulate(results):
             if tc.function and tc.function.arguments:
                 call["args"] += tc.function.arguments
     return "".join(content_parts), [{"index": i, **calls[i]} for i in sorted(calls)]
+
+
+def _delta_stream(parser, request, text: str, chunk_size: int):
+    """Drive ``parse_delta`` the way the serving layer does.
+
+    Returns ``(names, args, content)``: tool-call names in arrival order,
+    accumulated argument text per call index, and the joined content.
+    """
+    names: list[str] = []
+    args: dict[int, str] = {}
+    content: list[str] = []
+    for start in range(0, len(text), chunk_size):
+        delta_text = text[start : start + chunk_size]
+        delta = parser.parse_delta(
+            delta_text,
+            [ord(c) for c in delta_text],
+            request,
+            prompt_token_ids=[1] if start == 0 else None,
+            finished=start + chunk_size >= len(text),
+        )
+        if delta is None:
+            continue
+        if delta.content:
+            content.append(delta.content)
+        for tool_call in delta.tool_calls or []:
+            if tool_call.function and tool_call.function.name:
+                names.append(tool_call.function.name)
+            if tool_call.function and tool_call.function.arguments:
+                args[tool_call.index] = (
+                    args.get(tool_call.index, "") + tool_call.function.arguments
+                )
+    return names, args, "".join(content)
+
+
+def _chat_request(tools, tool_choice="auto", prompt="hi"):
+    """A ChatCompletionRequest with the boilerplate filled in."""
+    return ChatCompletionRequest(
+        model="llama",
+        messages=[{"role": "user", "content": prompt}],
+        tools=tools,
+        tool_choice=tool_choice,
+    )
+
+
+def _function_tool(name, parameters=None, **extra):
+    function = {"name": name, **extra}
+    if parameters is not None:
+        function["parameters"] = parameters
+    return {"type": "function", "function": function}
+
+
+def _delegating_parser_cls():
+    cls = ParserManager.get_parser(
+        tool_parser_name="llama3_json",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert cls is not None
+    return cls
+
+
+@pytest.fixture
+def lenient_parser_cls(monkeypatch):
+    """The parser class a server with strict tool calling *off* gets.
+
+    Named choice then installs the parameters schema and arms bare-argument
+    mode, so the env var is pinned rather than inherited -- leaving it
+    implicit makes these classes order-dependent.
+    """
+    monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+    return _delegating_parser_cls()
+
+
+@pytest.fixture
+def strict_parser_cls(monkeypatch):
+    """The parser class a server with strict tool calling *on* gets."""
+    monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "1")
+    return _delegating_parser_cls()
 
 
 class TestSpanHelpers:
@@ -1114,6 +1196,13 @@ class TestReasoningDefaults:
 
 class TestTraceBuilderSamples:
     def test_samples_self_validate(self):
+        """The mitigation for opting out of the shared replay grid.
+
+        ``build_samples`` replays every scenario through the real parser at
+        chunk_size=1 and asserts the result (trace_builder._validate_sample),
+        so the work is in the call. The assertion guards the degenerate case
+        that makes that vacuous: a builder returning no samples at all.
+        """
         samples = build_samples("llama_json")
         assert samples
 
@@ -1299,18 +1388,12 @@ class TestIncrementalArgScanning:
 class TestRequiredAndNamedToolChoice:
     """Required/named tool choice must be parsed here, not by the shared helpers.
 
-    ``extract_required_tool_call_streaming`` and its named counterpart
-    rebuild their state from the cumulative document, but engine-based
-    parsers are fed one delta at a time -- ``previous_text`` is always
-    empty, so those helpers never see a complete call.  A llama parser that
-    advertised ``supports_required_and_named`` therefore streamed nothing at
-    all for required choice, and streamed the whole ``{"name": ...,
-    "parameters": ...}`` envelope as the arguments for named choice.
-
-    Declaring the flag False sends both choices to this parser instead, as
-    the other engine-based parsers do.  Guided decoding is unaffected: the
-    tool schema is applied from the request's ``tool_choice``, independent
-    of the flag.
+    The shared helpers rebuild state from the cumulative document, but
+    engine-based parsers get one delta at a time (``previous_text`` is
+    always empty), so they never see a complete call: required choice
+    streamed nothing, named streamed the whole envelope as the arguments.
+    ``supports_required_and_named = False`` routes both here instead, as
+    the other engine parsers do. Guided decoding is unaffected.
     """
 
     ARRAY = '[{"name": "get_weather", "parameters": {"city": "SF"}}]'
@@ -1320,13 +1403,11 @@ class TestRequiredAndNamedToolChoice:
     def test_flag_holds_without_strict_enforcement(self, monkeypatch):
         """The regression guard for this whole class.
 
-        ``ToolParser.__init_subclass__`` forces the flag False only while
-        ``VLLM_ENFORCE_STRICT_TOOL_CALLING`` is set, and that is read once,
-        at class-creation time.  With strict enforcement off the class must
-        still declare it in its own body -- otherwise it inherits True and
-        required/named tool choice routes to the generic helpers, which is
-        the broken configuration.  Re-import the module to see what a
-        strict-disabled server actually gets.
+        ``__init_subclass__`` forces the flag False only while
+        VLLM_ENFORCE_STRICT_TOOL_CALLING is set, and reads it once at
+        class-creation time -- so the class must declare it in its own body
+        or a strict-disabled server inherits True and gets the broken
+        routing. Re-import to see what that server actually builds.
         """
         import importlib
 
@@ -1342,56 +1423,24 @@ class TestRequiredAndNamedToolChoice:
 
     @staticmethod
     def _request(tool_choice):
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "weather in SF?"}],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
+        return _chat_request(
+            [
+                _function_tool(
+                    "get_weather",
+                    {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
                     },
-                }
+                )
             ],
-            tool_choice=tool_choice,
+            tool_choice,
+            prompt="weather in SF?",
         )
-
-    @staticmethod
-    def _stream(parser, request, text, chunk_size):
-        names: list[str] = []
-        args: dict[int, str] = {}
-        for start in range(0, len(text), chunk_size):
-            delta_text = text[start : start + chunk_size]
-            delta = parser.parse_delta(
-                delta_text,
-                [ord(c) for c in delta_text],
-                request,
-                prompt_token_ids=[1] if start == 0 else None,
-                finished=start + chunk_size >= len(text),
-            )
-            for tool_call in (delta.tool_calls if delta else None) or []:
-                if tool_call.function and tool_call.function.name:
-                    names.append(tool_call.function.name)
-                if tool_call.function and tool_call.function.arguments:
-                    args[tool_call.index] = (
-                        args.get(tool_call.index, "") + tool_call.function.arguments
-                    )
-        return names, args
 
     @pytest.fixture
     def parser(self, mock_tokenizer):
-        parser_cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
-        assert parser_cls is not None
-        return parser_cls(mock_tokenizer)
+        return _delegating_parser_cls()(mock_tokenizer)
 
     @pytest.mark.parametrize("chunk_size", [1, 7, 10_000])
     @pytest.mark.parametrize("body", ["ARRAY", "NATIVE"])
@@ -1402,7 +1451,9 @@ class TestRequiredAndNamedToolChoice:
         ``[{...}]`` array schema; with one it emits the bare envelope.
         """
         text = getattr(self, body)
-        names, args = self._stream(parser, self._request("required"), text, chunk_size)
+        names, args, _ = _delta_stream(
+            parser, self._request("required"), text, chunk_size
+        )
 
         assert names == ["get_weather"]
         assert [json.loads(a) for a in args.values()] == [{"city": "SF"}]
@@ -1410,7 +1461,7 @@ class TestRequiredAndNamedToolChoice:
     @pytest.mark.parametrize("chunk_size", [1, 7, 10_000])
     def test_named_streams_only_the_arguments(self, parser, chunk_size):
         """Named choice must stream the parameters, not the whole envelope."""
-        names, args = self._stream(
+        names, args, _ = _delta_stream(
             parser, self._request(self.NAMED), self.NATIVE, chunk_size
         )
 
@@ -1441,21 +1492,11 @@ class TestRequiredAndNamedToolChoice:
         (vllm-project/vllm#45795), where the whole forced JSON leaked.
         """
         choice = self.NAMED if tool_choice == "named" else tool_choice
-        content_parts: list[str] = []
-        request = self._request(choice)
-        for start in range(0, len(self.ARRAY), chunk_size):
-            delta_text = self.ARRAY[start : start + chunk_size]
-            delta = parser.parse_delta(
-                delta_text,
-                [ord(c) for c in delta_text],
-                request,
-                prompt_token_ids=[1] if start == 0 else None,
-                finished=start + chunk_size >= len(self.ARRAY),
-            )
-            if delta and delta.content:
-                content_parts.append(delta.content)
+        _, _, content = _delta_stream(
+            parser, self._request(choice), self.ARRAY, chunk_size
+        )
 
-        assert "".join(content_parts) == ""
+        assert content == ""
 
     @pytest.mark.parametrize("tool_choice", ["required", "named"])
     def test_forced_choice_emits_no_content_non_streaming(self, parser, tool_choice):
@@ -1482,16 +1523,12 @@ class TestRequiredAndNamedToolChoice:
 class TestNamedChoiceWithoutStructuralTag:
     """sc-01: a named choice must produce a call with strict calling off.
 
-    Without ``VLLM_ENFORCE_STRICT_TOOL_CALLING`` there is no llama structural
-    tag, so ``adjust_request()`` constrains the model to the selected
-    function's ``parameters`` alone.  The model then emits ``{"city": "SF"}``
-    and never writes the ``{"name": ..., "parameters": ...}`` envelope this
-    parser keys on, so the parameters come back as content and the call is
-    lost.  Legacy synthesized the name from ``tool_choice``.
-
-    Chat completions carry that constraint in ``structured_outputs.json``
-    and the Responses API in ``text.format``, so both are driven through
-    ``adjust_request()`` and assert the field it actually wrote first.
+    With no structural tag, ``adjust_request()`` constrains the model to the
+    selected function's ``parameters`` alone, so it emits ``{"city": "SF"}``
+    and never writes the envelope this parser keys on -- the parameters came
+    back as content and the call was lost. Legacy synthesized the name from
+    ``tool_choice``. Chat and Responses carry the constraint in different
+    fields, so both are driven through ``adjust_request()``.
     """
 
     PARAMETERS = {
@@ -1502,34 +1539,15 @@ class TestNamedChoiceWithoutStructuralTag:
     BARE_PARAMETERS = '{"city":"SF","unit":"C"}'
 
     @pytest.fixture
-    def parser_cls(self, monkeypatch):
-        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
-        cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
-        assert cls is not None
-        return cls
+    def parser_cls(self, lenient_parser_cls):
+        return lenient_parser_cls
 
     def _request(self, request_kind):
         if request_kind == "chat":
-            return ChatCompletionRequest(
-                model="llama",
-                messages=[{"role": "user", "content": "weather in SF?"}],
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "parameters": self.PARAMETERS,
-                        },
-                    }
-                ],
-                tool_choice={
-                    "type": "function",
-                    "function": {"name": "get_weather"},
-                },
+            return _chat_request(
+                [_function_tool("get_weather", self.PARAMETERS)],
+                {"type": "function", "function": {"name": "get_weather"}},
+                prompt="weather in SF?",
             )
 
         from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -1789,19 +1807,9 @@ class TestPhantomRetractionIsLinear:
         return "\n".join(f'{{"id": {i}, "value": "row{i}"}}' for i in range(count))
 
     def _request(self):
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "one json object per line"}],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "f",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            ],
-            tool_choice="auto",
+        return _chat_request(
+            [_function_tool("f", {"type": "object", "properties": {}})],
+            prompt="one json object per line",
         )
 
     def test_retraction_examines_only_its_own_call(self, mock_tokenizer, monkeypatch):
@@ -1876,34 +1884,24 @@ class TestPhantomRetractionIsLinear:
 class TestNamedChoiceOnParameterlessTool:
     """A tool declaring no ``parameters`` must still produce a call.
 
-    ``get_json_schema_from_tools`` returns the selected function's
-    ``parameters``, which is ``None`` for such a tool, so no guided-decoding
-    schema was applied.  With no llama structural tag either
-    (``VLLM_ENFORCE_STRICT_TOOL_CALLING=0``) nothing constrained the model
-    and nothing told the parser the output was bare parameters, so it
-    demanded a full envelope and returned no tool call at all -- for a
-    request that explicitly named the tool it wanted.
+    ``get_json_schema_from_tools`` returns ``None`` for such a tool, so no
+    schema was applied; with no structural tag either, nothing constrained
+    the model and nothing told the parser the output was bare parameters.
+    It demanded a full envelope and returned no call at all -- for a request
+    that explicitly named the tool it wanted.
     """
 
     @pytest.fixture
-    def parser_cls(self, monkeypatch):
-        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
-        cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
-        assert cls is not None
-        return cls
+    def parser_cls(self, lenient_parser_cls):
+        return lenient_parser_cls
 
     @staticmethod
     def _request():
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "ping the server"}],
-            # No "parameters" key at all -- the shape that got no schema.
-            tools=[{"type": "function", "function": {"name": "ping"}}],
-            tool_choice={"type": "function", "function": {"name": "ping"}},
+        # No "parameters" key at all -- the shape that got no schema.
+        return _chat_request(
+            [_function_tool("ping")],
+            {"type": "function", "function": {"name": "ping"}},
+            prompt="ping the server",
         )
 
     def test_a_schema_is_applied_so_the_output_shape_is_known(
@@ -1934,26 +1932,8 @@ class TestNamedChoiceOnParameterlessTool:
     ):
         parser = parser_cls(mock_tokenizer)
         request = parser.adjust_request(self._request())
-        body = "{}"
 
-        names: list[str] = []
-        args: dict[int, str] = {}
-        for start in range(0, len(body), chunk_size):
-            delta_text = body[start : start + chunk_size]
-            delta = parser.parse_delta(
-                delta_text,
-                [ord(c) for c in delta_text],
-                request,
-                prompt_token_ids=[1] if start == 0 else None,
-                finished=start + chunk_size >= len(body),
-            )
-            for tool_call in (delta.tool_calls if delta else None) or []:
-                if tool_call.function and tool_call.function.name:
-                    names.append(tool_call.function.name)
-                if tool_call.function and tool_call.function.arguments:
-                    args[tool_call.index] = (
-                        args.get(tool_call.index, "") + tool_call.function.arguments
-                    )
+        names, args, _ = _delta_stream(parser, request, "{}", chunk_size)
 
         assert names == ["ping"]
         assert [json.loads(a) for a in args.values()] == [{}]
@@ -1962,12 +1942,10 @@ class TestNamedChoiceOnParameterlessTool:
 class TestLlama4PythonMarkers:
     """Llama 4 wraps tool calls in ``<|python_start|>``/``<|python_end|>``.
 
-    The engine sets ``skip_special_tokens=False`` so the detokenizer no
-    longer strips special tokens, and the engine's own drop machinery only
-    covers ``tokenizer.all_special_tokens`` -- on a real Llama tokenizer
-    that is just begin_of_text and eot_id.  Without explicit terminals the
-    wrappers reached the client as content, next to a correctly parsed call.
-    The sibling llama4_pythonic parser strips them for the same reason.
+    The engine sets ``skip_special_tokens=False``, and its drop machinery
+    only covers ``all_special_tokens`` -- on a real Llama tokenizer just
+    begin_of_text and eot_id. Without explicit terminals the wrappers
+    reached the client as content. llama4_pythonic strips them likewise.
     """
 
     VOCAB = {
@@ -1990,19 +1968,7 @@ class TestLlama4PythonMarkers:
 
     @classmethod
     def _tokenize(cls, text: str) -> list[tuple[int, str]]:
-        markers = sorted(cls.VOCAB, key=len, reverse=True)
-        tokens: list[tuple[int, str]] = []
-        i = 0
-        while i < len(text):
-            for marker in markers:
-                if text.startswith(marker, i):
-                    tokens.append((cls.VOCAB[marker], marker))
-                    i += len(marker)
-                    break
-            else:
-                tokens.append((ord(text[i]), text[i]))
-                i += 1
-        return tokens
+        return _tokenize(text, cls.VOCAB)
 
     @pytest.mark.parametrize("chunk_size", [1, 3, 10_000])
     @pytest.mark.parametrize(
@@ -2072,13 +2038,7 @@ class TestLlama4PythonMarkers:
         self, tokenizer, mock_request, text
     ):
         """The delegating layer returns the parser's cleaned content."""
-        parser_cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
-        assert parser_cls is not None
-        parser = parser_cls(tokenizer)
+        parser = _delegating_parser_cls()(tokenizer)
 
         cleaned = parser.extract_tool_calls(text, mock_request).content
         _, served = parser._extract_tool_calls(
@@ -2092,17 +2052,11 @@ class TestLlama4PythonMarkers:
 class TestServingPathMarkerParity:
     """``<|python_tag|>`` must not survive on the non-streaming route either.
 
-    ``ParserEngine.adjust_request`` sets ``skip_special_tokens=False``, so the
-    tag reaches the parser verbatim.  Streaming consumes it via the PYTHON_TAG
-    terminal, but when no call is promoted the serving layer's non-streaming
-    route returned the *raw* text, leaking the 14-character tag to the client
-    -- a divergence this migration introduces and released vLLM does not have.
-    Fixed by vllm-project/vllm#47562 in ``_extract_tool_calls``.
-
-    Both routes are driven through ``DelegatingParser`` (``parse`` /
-    ``parse_delta``), not through ``LlamaJsonParser.extract_tool_calls``: the
-    leak lives in the delegating layer, so the parser's own extraction never
-    sees it.
+    ``skip_special_tokens=False`` means the tag reaches the parser verbatim.
+    Streaming consumes it, but with no call promoted the non-streaming route
+    returned the raw text, leaking the 14-character tag -- a divergence this
+    migration introduces. Fixed by vllm-project/vllm#47562. Driven through
+    ``DelegatingParser``, since the leak lives in that layer.
     """
 
     BODIES = {
@@ -2121,12 +2075,7 @@ class TestServingPathMarkerParity:
 
     @pytest.fixture
     def make_parser(self):
-        cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
-        assert cls is not None
+        cls = _delegating_parser_cls()
         # <|python_tag|> is in the vocab but NOT in all_special_tokens, which
         # is how Llama-3.1 reports it.  Marking it special would let the
         # engine's drop machinery consume it for free, making these vacuous.
@@ -2136,10 +2085,8 @@ class TestServingPathMarkerParity:
 
     @staticmethod
     def _request():
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "hi"}],
-            tools=[
+        return _chat_request(
+            [
                 ChatCompletionToolsParam(
                     type="function",
                     function={
@@ -2150,8 +2097,7 @@ class TestServingPathMarkerParity:
                         },
                     },
                 )
-            ],
-            tool_choice="auto",
+            ]
         )
 
     @staticmethod
@@ -2314,37 +2260,26 @@ class TestBareArgumentsRepair:
     """
 
     @pytest.fixture
-    def parser_cls(self, monkeypatch):
-        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
-        cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
-        assert cls is not None
-        return cls
+    def parser_cls(self, lenient_parser_cls):
+        return lenient_parser_cls
 
     @staticmethod
     def _request():
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "weather in SF?"}],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "city": {"type": "string"},
-                                "unit": {"type": "string"},
-                            },
+        return _chat_request(
+            [
+                _function_tool(
+                    "get_weather",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "unit": {"type": "string"},
                         },
                     },
-                }
+                )
             ],
-            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+            {"type": "function", "function": {"name": "get_weather"}},
+            prompt="weather in SF?",
         )
 
     TRUNCATED = [
@@ -2375,21 +2310,7 @@ class TestBareArgumentsRepair:
         parser = parser_cls(mock_tokenizer)
         request = parser.adjust_request(self._request())
 
-        args: dict[int, str] = {}
-        for start in range(0, len(body), chunk_size):
-            delta_text = body[start : start + chunk_size]
-            delta = parser.parse_delta(
-                delta_text,
-                [ord(c) for c in delta_text],
-                request,
-                prompt_token_ids=[1] if start == 0 else None,
-                finished=start + chunk_size >= len(body),
-            )
-            for tool_call in (delta.tool_calls if delta else None) or []:
-                if tool_call.function and tool_call.function.arguments:
-                    args[tool_call.index] = (
-                        args.get(tool_call.index, "") + tool_call.function.arguments
-                    )
+        _, args, _ = _delta_stream(parser, request, body, chunk_size)
 
         for streamed in args.values():
             json.loads(streamed)
@@ -2412,25 +2333,14 @@ class TestBareArgsArmingRespectsTheSchema:
     BARE = '{"code": "print(1)"}'
 
     @pytest.fixture
-    def parser_cls(self, monkeypatch):
-        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
-        cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
-        assert cls is not None
-        return cls
+    def parser_cls(self, lenient_parser_cls):
+        return lenient_parser_cls
 
     def _request(self, parameters):
-        function = {"name": "run_python", "description": "run python"}
-        if parameters is not None:
-            function["parameters"] = parameters
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "run python that prints 1"}],
-            tools=[{"type": "function", "function": function}],
-            tool_choice=self.NAMED,
+        return _chat_request(
+            [_function_tool("run_python", parameters, description="run python")],
+            self.NAMED,
+            prompt="run python that prints 1",
         )
 
     # Schemas that do NOT constrain the object's keys. Guided decoding
@@ -2464,24 +2374,7 @@ class TestBareArgsArmingRespectsTheSchema:
         parser = parser_cls(mock_tokenizer)
         request = parser.adjust_request(self._request(parameters))
 
-        names: list[str] = []
-        args: dict[int, str] = {}
-        for start in range(0, len(self.ENVELOPE), chunk_size):
-            delta_text = self.ENVELOPE[start : start + chunk_size]
-            delta = parser.parse_delta(
-                delta_text,
-                [ord(c) for c in delta_text],
-                request,
-                prompt_token_ids=[1] if start == 0 else None,
-                finished=start + chunk_size >= len(self.ENVELOPE),
-            )
-            for tool_call in (delta.tool_calls if delta else None) or []:
-                if tool_call.function and tool_call.function.name:
-                    names.append(tool_call.function.name)
-                if tool_call.function and tool_call.function.arguments:
-                    args[tool_call.index] = (
-                        args.get(tool_call.index, "") + tool_call.function.arguments
-                    )
+        names, args, _ = _delta_stream(parser, request, self.ENVELOPE, chunk_size)
 
         assert names == ["run_python"]
         assert [json.loads(a) for a in args.values()] == [{"code": "print(1)"}]
@@ -2593,28 +2486,20 @@ class TestForcedChoiceKeepsUnpromotedText:
     TRUNCATED = '{"name": "run_cmd",'
     COMPLETE = '{"name": "run_cmd", "parameters": {"cmd": "ls"}}'
 
+    # Forced and auto must agree here, so every test runs all three.
+    CHOICES = [
+        pytest.param("required", id="required"),
+        pytest.param(NAMED, id="named"),
+        pytest.param("auto", id="auto"),
+    ]
+    FORCED = CHOICES[:2]
+
     @pytest.fixture
-    def parser_cls(self, monkeypatch):
-        # Pin the configuration rather than inherit it: with strict calling
-        # off, a named choice installs the parameters schema and arms
-        # bare-argument mode, which is a different code path with its own
-        # tests.  Leaving this implicit makes the class order-dependent.
-        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "1")
-        cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
-        assert cls is not None
-        return cls
+    def parser_cls(self, strict_parser_cls):
+        return strict_parser_cls
 
     def _request(self, tool_choice):
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "list files"}],
-            tools=self.TOOLS,
-            tool_choice=tool_choice,
-        )
+        return _chat_request(self.TOOLS, tool_choice, prompt="list files")
 
     def _adjusted(self, parser, tool_choice):
         request = parser.adjust_request(self._request(tool_choice))
@@ -2626,23 +2511,7 @@ class TestForcedChoiceKeepsUnpromotedText:
             assert getattr(structured, "structural_tag", None) is not None
         return request
 
-    def _choices(self):
-        return [
-            pytest.param("required", id="required"),
-            pytest.param(self.NAMED, id="named"),
-            pytest.param("auto", id="auto"),
-        ]
-
-    @pytest.mark.parametrize(
-        "tool_choice",
-        [
-            pytest.param("required", id="required"),
-            pytest.param(
-                {"type": "function", "function": {"name": "run_cmd"}}, id="named"
-            ),
-            pytest.param("auto", id="auto"),
-        ],
-    )
+    @pytest.mark.parametrize("tool_choice", CHOICES)
     def test_truncated_call_comes_back_as_content(
         self, parser_cls, mock_tokenizer, tool_choice
     ):
@@ -2657,16 +2526,7 @@ class TestForcedChoiceKeepsUnpromotedText:
         # Every tool_choice must agree, and none may swallow the response.
         assert content == self.TRUNCATED
 
-    @pytest.mark.parametrize(
-        "tool_choice",
-        [
-            pytest.param("required", id="required"),
-            pytest.param(
-                {"type": "function", "function": {"name": "run_cmd"}}, id="named"
-            ),
-            pytest.param("auto", id="auto"),
-        ],
-    )
+    @pytest.mark.parametrize("tool_choice", CHOICES)
     def test_a_promoted_call_still_suppresses_content(
         self, parser_cls, mock_tokenizer, tool_choice
     ):
@@ -2686,16 +2546,7 @@ class TestForcedChoiceKeepsUnpromotedText:
         ['[ Let me think {"x": 1}', 'prose {"x": 1} more', '{"x": 1} tail'],
         ids=["array-scaffold-then-phantom", "prose-around-phantom", "phantom-first"],
     )
-    @pytest.mark.parametrize(
-        "tool_choice",
-        [
-            pytest.param("required", id="required"),
-            pytest.param(
-                {"type": "function", "function": {"name": "run_cmd"}}, id="named"
-            ),
-            pytest.param("auto", id="auto"),
-        ],
-    )
+    @pytest.mark.parametrize("tool_choice", CHOICES)
     def test_retracted_phantom_keeps_generation_order(
         self, parser_cls, mock_tokenizer, tool_choice, text
     ):
@@ -2719,15 +2570,7 @@ class TestForcedChoiceKeepsUnpromotedText:
         # Non-streaming strips surrounding whitespace; order is the claim.
         assert content == text.strip()
 
-    @pytest.mark.parametrize(
-        "tool_choice",
-        [
-            pytest.param("required", id="required"),
-            pytest.param(
-                {"type": "function", "function": {"name": "run_cmd"}}, id="named"
-            ),
-        ],
-    )
+    @pytest.mark.parametrize("tool_choice", FORCED)
     def test_promoted_call_still_discards_a_retracted_phantom(
         self, parser_cls, mock_tokenizer, tool_choice
     ):
@@ -2752,9 +2595,8 @@ class TestPathologicalArgumentsDoNotEscape:
     """Adversarial argument payloads must fail closed, not fail the request.
 
     Model output is attacker-influenced in any agent that feeds tool results
-    back to the model, so a shape that raises out of the parser or spins is
-    worth guarding even when it is degenerate.  Legacy caught everything with
-    a blanket ``except Exception`` and returned content; the engine path is
+    back, so a shape that raises or spins is worth guarding. Legacy caught
+    everything with a blanket ``except Exception``; the engine path is
     narrower and had two holes.
     """
 
@@ -2775,12 +2617,7 @@ class TestPathologicalArgumentsDoNotEscape:
 
     @staticmethod
     def _request():
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "hi"}],
-            tools=TestPathologicalArgumentsDoNotEscape.TOOLS,
-            tool_choice="auto",
-        )
+        return _chat_request(TestPathologicalArgumentsDoNotEscape.TOOLS)
 
     @pytest.mark.parametrize(
         ("depth", "coerced"),
@@ -2798,11 +2635,7 @@ class TestPathologicalArgumentsDoNotEscape:
         non-streaming, or an error event mid-stream.  The shallow case is the
         control: coercion must still happen for ordinary values.
         """
-        cls = ParserManager.get_parser(
-            tool_parser_name="llama3_json",
-            reasoning_parser_name=None,
-            enable_auto_tools=True,
-        )
+        cls = _delegating_parser_cls()
         nest = "[" * depth + "]" * depth
         text = '{"name": "f", "parameters": {"a": "' + nest + '"}}'
 
@@ -2835,11 +2668,10 @@ class TestPathologicalArgumentsDoNotEscape:
 class TestMarkersAbsentFromTheVocabStayAsText:
     """A marker the tokenizer cannot produce is prose, not markup.
 
-    ``<|python_start|>`` / ``<|python_end|>`` are absent from Llama 3
-    vocabularies and ``<|python_tag|>`` from Llama 4 ones.  Declaring all
-    three as text terminals regardless meant a model that merely *wrote*
-    one -- in an explanation, a code sample, a quoted transcript -- had it
-    silently deleted from the reply.  Legacy returned all of them verbatim.
+    python_start/end are absent from Llama 3 vocabularies and python_tag
+    from Llama 4 ones. Declaring all three as text terminals regardless
+    silently deleted any a model merely *wrote* -- in an explanation, a code
+    sample, a quoted transcript. Legacy returned them verbatim.
     """
 
     LLAMA3_ONLY = {"<|python_tag|>": 128010, "<|eot_id|>": 128009}
@@ -2847,10 +2679,8 @@ class TestMarkersAbsentFromTheVocabStayAsText:
 
     @staticmethod
     def _request():
-        return ChatCompletionRequest(
-            model="llama",
-            messages=[{"role": "user", "content": "hi"}],
-            tools=[
+        return _chat_request(
+            [
                 ChatCompletionToolsParam(
                     type="function",
                     function={
@@ -2861,8 +2691,7 @@ class TestMarkersAbsentFromTheVocabStayAsText:
                         },
                     },
                 )
-            ],
-            tool_choice="auto",
+            ]
         )
 
     @pytest.mark.parametrize(
@@ -2899,14 +2728,12 @@ class TestMarkersAbsentFromTheVocabStayAsText:
 class TestKeyScanResumesExactly:
     """The resumable envelope-key scan must equal the one-shot function.
 
-    ``_try_extract_name`` runs on every delta, and until the top-level
-    ``"name"`` arrives it rescanned the whole accumulated envelope each
-    time -- quadratic for ordinary prose containing a stray ``{`` (12.4 s
-    for 32 KB, against the legacy parser's linear scan).  ``_KeyScan``
-    carries the scan across feeds instead.  Resuming is only sound because
+    ``_try_extract_name`` runs per delta and rescanned the whole accumulated
+    envelope until the top-level ``"name"`` arrived -- quadratic for prose
+    containing a stray ``{`` (12.4 s for 32 KB vs legacy's linear scan).
+    ``_KeyScan`` carries the scan across feeds; that is sound only because
     the scan is a left-to-right fold with no lookahead, so the property to
-    pin is that feeding a string in *any* number of pieces gives what a
-    single pass over the whole string gives.
+    pin is that any chunking agrees with a single pass.
     """
 
     CORPUS = [
