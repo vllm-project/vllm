@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Set as AbstractSet
 from functools import partial
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
+from tests.models.utils import build_model_context
 from vllm.config import ModelConfig
 from vllm.config.multimodal import (
     AudioDummyOptions,
@@ -16,10 +19,15 @@ from vllm.config.multimodal import (
     MultiModalDummyOptions,
     VideoDummyOptions,
 )
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
+from vllm.entrypoints.chat_utils import _get_embeds_data
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import batched_tensors_equal
+from vllm.multimodal.inputs import MultiModalFeatureSpec, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.platforms import current_platform
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
@@ -206,18 +214,6 @@ def get_token_prompt(
 )
 def test_audio_metadata_only_roundtrip(model_id, durations, monkeypatch):
     """EC metadata preserves the raw-audio prompt without running the HF processor."""
-    import json
-
-    import torch
-
-    from tests.models.utils import build_model_context
-    from vllm.distributed.ec_transfer.ec_connector.utils import (
-        PlaceholderMetadataResolver,
-        collect_ec_item_metadata,
-    )
-    from vllm.entrypoints.chat_utils import _get_embeds_data
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
-
     ctx = build_model_context(model_id, limit_mm_per_prompt={"audio": len(durations)})
     mm_config = ctx.model_config.multimodal_config
     mm_config.enable_mm_embeds = True

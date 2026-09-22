@@ -65,9 +65,11 @@ additional configuration options.
 
 The Python EPD proxy also rewrites audio in `/v1/chat/completions` into
 metadata-only references for Qwen2-Audio, AudioFlamingo3, Ultravox,
-Qwen2.5-Omni, and Qwen3-Omni. The encoder publishes the token count or feature
-lengths needed to reconstruct the audio placeholders; the consumer receives
-the embeddings through its EC connector without repeating audio preprocessing.
+Qwen2.5-Omni, and Qwen3-Omni. The encoder publishes `audio_num_tokens`
+(the placeholder token count of each audio) together with any feature
+lengths the model needs; the consumer uses them to reconstruct the audio
+placeholders and receives the embeddings through its EC connector without
+repeating audio preprocessing.
 
 This covers pure audio inputs, not video with an embedded audio track. It does
 not add `/v1/audio/transcriptions` or realtime routes to the example proxy.
