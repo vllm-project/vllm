@@ -165,15 +165,11 @@ class SparseIndexerTopk(torch.nn.Module):
             and not current_platform.is_device_capability_family(120)
         )
         self._is_rocm = current_platform.is_rocm()
-        self._aiter_arch = False
         self._aiter_capable = False
         if self._is_rocm:
             from vllm._aiter_ops import rocm_aiter_ops
 
-            self._aiter_arch = rocm_aiter_ops.is_indexer_top_k_arch_supported()
-            self._aiter_capable = (
-                self._aiter_arch and rocm_aiter_ops.is_indexer_top_k_importable()
-            )
+            self._aiter_capable = bool(rocm_aiter_ops.is_indexer_top_k_enabled())
 
     def resolve_backend(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
@@ -209,10 +205,8 @@ class SparseIndexerTopk(torch.nn.Module):
             # gate is applied in forward(), which falls back to per_row.
             if not self._is_rocm:
                 failures.append("requires a ROCm platform")
-            elif not self._aiter_arch:
-                failures.append("requires gfx950")
             elif not self._aiter_capable:
-                failures.append("aiter.ops.topk is not importable")
+                failures.append("requires AITER enabled on gfx950")
             if topk_tokens not in (512, 1024, 2048, 4096):
                 failures.append(
                     f"topk_tokens must be in (512, 1024, 2048, 4096), got {topk_tokens}"

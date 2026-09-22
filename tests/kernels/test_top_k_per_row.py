@@ -652,7 +652,6 @@ def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
         is_prefill=True,
         compress_ratio=4,
         num_rows=logits.shape[0],
-        on_gfx950=True,
     ):
         pytest.skip("AITER top-k is unavailable")
     assert (
@@ -703,7 +702,6 @@ def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
         compress_ratio=4,
         num_rows=num_rows,
         max_valid_seq_len=seq_lens.max().item(),
-        on_gfx950=True,
     ):
         pytest.skip("AITER top-k is unavailable")
     assert (
@@ -725,34 +723,28 @@ def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
         assert torch.all(indices[row_idx, num_valid:] == -1)
 
 
-def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
-    from vllm import _aiter_ops
+def _enable_aiter_topk(monkeypatch, enabled: bool = True) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
 
-    def prefill_kernel(*args, **kwargs) -> None:
-        pass
-
-    def decode_kernel(*args, **kwargs) -> None:
-        pass
-
     monkeypatch.setattr(
-        _aiter_ops,
-        "_get_aiter_topk_ops",
-        lambda: (prefill_kernel, decode_kernel),
+        rocm_aiter_ops, "is_indexer_top_k_enabled", lambda: enabled, raising=True
     )
+
+
+def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _enable_aiter_topk(monkeypatch)
     is_supported = rocm_aiter_ops.is_indexer_top_k_supported
 
     eligible_cases = [
-        dict(
-            indexer="dsa", is_prefill=True, compress_ratio=4, num_rows=1, on_gfx950=True
-        ),
+        dict(indexer="dsa", is_prefill=True, compress_ratio=4, num_rows=1),
         dict(
             indexer="dsa",
             is_prefill=False,
             compress_ratio=4,
             num_rows=1,
             max_valid_seq_len=65_536,
-            on_gfx950=True,
         ),
         dict(
             indexer="dsa",
@@ -761,7 +753,6 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             num_rows=257,
             max_valid_seq_len=250_000,
             num_columns=524_288,
-            on_gfx950=True,
         ),
         dict(
             indexer="dsa",
@@ -771,7 +762,6 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             max_valid_seq_len=250_000,
             num_columns=524_288,
             topk_tokens=512,
-            on_gfx950=True,
         ),
         dict(
             indexer="dsa",
@@ -781,24 +771,13 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             max_valid_seq_len=50_000,
             num_columns=1_048_577,
             topk_tokens=512,
-            on_gfx950=True,
         ),
     ]
     for kwargs in eligible_cases:
         assert is_supported(**kwargs) is True
 
-    def fail_if_imported() -> None:
-        pytest.fail("ineligible shapes must not import AITER top-k")
-
-    monkeypatch.setattr(
-        _aiter_ops,
-        "_get_aiter_topk_ops",
-        fail_if_imported,
-    )
     ineligible_cases = [
-        dict(
-            indexer="dsa", is_prefill=True, compress_ratio=1, num_rows=1, on_gfx950=True
-        ),
+        dict(indexer="dsa", is_prefill=True, compress_ratio=1, num_rows=1),
         dict(
             indexer="dsa",
             is_prefill=False,
@@ -807,7 +786,6 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             max_valid_seq_len=1_048_576,
             num_columns=1_048_576,
             topk_tokens=512,
-            on_gfx950=True,
         ),
         dict(
             indexer="dsa",
@@ -815,7 +793,6 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             compress_ratio=4,
             num_rows=1,
             max_valid_seq_len=65_537,
-            on_gfx950=True,
         ),
         dict(
             indexer="dsa",
@@ -823,29 +800,14 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             compress_ratio=4,
             num_rows=256,
             max_valid_seq_len=125_000,
-            on_gfx950=True,
-        ),
-        dict(
-            indexer="dsa",
-            is_prefill=False,
-            compress_ratio=4,
-            num_rows=320,
-            max_valid_seq_len=2_500,
-            on_gfx950=False,
         ),
     ]
     for kwargs in ineligible_cases:
         assert is_supported(**kwargs) is False
 
-    monkeypatch.setattr(_aiter_ops, "_get_aiter_topk_ops", lambda: None)
+    _enable_aiter_topk(monkeypatch, enabled=False)
     assert (
-        is_supported(
-            indexer="dsa",
-            is_prefill=True,
-            compress_ratio=4,
-            num_rows=1,
-            on_gfx950=True,
-        )
+        is_supported(indexer="dsa", is_prefill=True, compress_ratio=4, num_rows=1)
         is False
     )
 
@@ -853,14 +815,9 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
 def test_kpool_topk_skips_the_dsv4_native_window(monkeypatch) -> None:
     """The in-tree decode kernel's advantage window was measured on DSV4's
     compressed-KV logits, so it must not hold back the kpool indexer."""
-    from vllm import _aiter_ops
     from vllm._aiter_ops import rocm_aiter_ops
 
-    monkeypatch.setattr(
-        _aiter_ops,
-        "_get_aiter_topk_ops",
-        lambda: (lambda *a, **kw: None, lambda *a, **kw: None),
-    )
+    _enable_aiter_topk(monkeypatch)
     shape = dict(
         is_prefill=False,
         compress_ratio=4,
@@ -868,7 +825,6 @@ def test_kpool_topk_skips_the_dsv4_native_window(monkeypatch) -> None:
         max_valid_seq_len=50_000,
         num_columns=524_288,
         topk_tokens=512,
-        on_gfx950=True,
     )
     is_supported = rocm_aiter_ops.is_indexer_top_k_supported
     assert is_supported(indexer="dsa", **shape) is False
@@ -1952,13 +1908,11 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
             resolve("deep_select")
 
 
-def _patch_aiter_topk(monkeypatch, decode_kernel, on_gfx950: bool = True) -> None:
-    from vllm import _aiter_ops
+def _patch_aiter_topk(monkeypatch, decode_kernel, enabled: bool = True) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
 
-    monkeypatch.setattr(_aiter_ops, "_on_gfx950", lambda: on_gfx950)
-    monkeypatch.setattr(
-        _aiter_ops, "_get_aiter_topk_ops", lambda: (decode_kernel, decode_kernel)
-    )
+    _enable_aiter_topk(monkeypatch, enabled=enabled)
+    monkeypatch.setattr(rocm_aiter_ops, "indexer_top_k_decode", decode_kernel)
 
 
 def _make_topk(backend: str):
@@ -1999,7 +1953,7 @@ def test_sparse_indexer_topk_backend_resolution_aiter(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="topk_tokens must be in"):
         _make_topk("aiter").resolve_backend(logits, 3000, 8)
 
-    _patch_aiter_topk(monkeypatch, decode_kernel, on_gfx950=False)
+    _patch_aiter_topk(monkeypatch, decode_kernel, enabled=False)
     assert _make_topk("auto").resolve_backend(logits, 2048, 8) == "per_row"
     with pytest.raises(RuntimeError, match="gfx950"):
         _make_topk("aiter").resolve_backend(logits, 2048, 8)
@@ -2029,11 +1983,9 @@ def test_sparse_indexer_topk_aiter_falls_back_to_per_row(monkeypatch) -> None:
 
     # No pooling, so the gate has no compressed rows to work with.
     op(logits, seq_lens, 1, indices, 1024, 4096)
-    # topk_tokens == 512 on a narrow batch: the native kernel wins.
-    op(logits, seq_lens, 1, indices, 512, 4096, compress_ratio=4)
     # Past the measured compressed-context boundary (64Ki pools).
     op(logits, seq_lens, 1, indices, 1024, 4 * (64 * 1024 + 1), compress_ratio=4)
-    assert len(calls) == 3
+    assert len(calls) == 2
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")

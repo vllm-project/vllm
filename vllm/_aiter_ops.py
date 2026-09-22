@@ -1899,27 +1899,6 @@ _GFX950_C4A_NATIVE_MAX_ROWS = 256
 _GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
 
 
-@functools.cache
-def _on_gfx950() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx950
-
-    return on_gfx950()
-
-
-@functools.cache
-def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | None:
-    try:
-        from aiter.ops.topk import (
-            top_k_per_row_decode,
-            top_k_per_row_prefill,
-        )
-    except ImportError:
-        return None
-    return top_k_per_row_prefill, top_k_per_row_decode
-
-
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -2498,17 +2477,17 @@ class rocm_aiter_ops:
         """Whether AITER has DSV4 native-I384 configs through the given M."""
         return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
 
-    @staticmethod
-    def is_indexer_top_k_arch_supported() -> bool:
+    @classmethod
+    @if_aiter_supported
+    def is_indexer_top_k_enabled(cls) -> bool:
         """gfx950 is the only arch with tuned AITER indexer top-k kernels."""
-        return _on_gfx950()
+        from vllm.platforms.rocm import on_gfx950
 
-    @staticmethod
-    def is_indexer_top_k_importable() -> bool:
-        return _get_aiter_topk_ops() is not None
+        return cls._AITER_ENABLED and on_gfx950()
 
-    @staticmethod
+    @classmethod
     def is_indexer_top_k_supported(
+        cls,
         *,
         indexer: Literal["dsa", "kpool"],
         is_prefill: bool,
@@ -2517,16 +2496,13 @@ class rocm_aiter_ops:
         max_valid_seq_len: int | None = None,
         num_columns: int | None = None,
         topk_tokens: int = 1024,
-        on_gfx950: bool | None = None,
     ) -> bool:
         """Whether AITER's sparse indexer top-k beats the in-tree kernel for
         this shape. The in-tree decode kernel's advantage window was measured
         on DSV4's compressed-KV logits, so it applies to ``indexer="dsa"``
         only.
         """
-        if on_gfx950 is None:
-            on_gfx950 = _on_gfx950()
-        if compress_ratio <= 1 or not on_gfx950:
+        if compress_ratio <= 1 or not cls.is_indexer_top_k_enabled():
             return False
 
         if not is_prefill:
@@ -2548,7 +2524,7 @@ class rocm_aiter_ops:
             ):
                 return False
 
-        return _get_aiter_topk_ops() is not None
+        return True
 
     @staticmethod
     def indexer_top_k_decode(
@@ -2558,9 +2534,9 @@ class rocm_aiter_ops:
         topk_indices: torch.Tensor,
         topk_tokens: int,
     ) -> None:
-        topk_ops = _get_aiter_topk_ops()
-        assert topk_ops is not None
-        topk_ops[1](
+        from aiter.ops.topk import top_k_per_row_decode
+
+        top_k_per_row_decode(
             logits,
             next_n,
             seq_lens,
@@ -2579,9 +2555,9 @@ class rocm_aiter_ops:
         indices: torch.Tensor,
         topk_tokens: int,
     ) -> None:
-        topk_ops = _get_aiter_topk_ops()
-        assert topk_ops is not None
-        topk_ops[0](
+        from aiter.ops.topk import top_k_per_row_prefill
+
+        top_k_per_row_prefill(
             logits,
             row_starts,
             row_ends,
