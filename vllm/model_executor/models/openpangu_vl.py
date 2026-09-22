@@ -1150,6 +1150,9 @@ class OpenPanguVLForConditionalGeneration(
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(

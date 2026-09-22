@@ -369,7 +369,6 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             return kernel.compute(workspace, transformed, output=out)
 
         ensure_fi_moe_ep_runtime(self._vllm_config)
-        self.finalize_weights()
         assert self._mega_layer is not None
 
         y = self._mega_layer.forward(

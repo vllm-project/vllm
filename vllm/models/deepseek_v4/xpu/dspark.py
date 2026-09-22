@@ -405,9 +405,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        self._finalize_moe()
         logger.info_once("DSpark XPU draft model loaded: %d params", len(loaded_params))
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        self._finalize_moe()
 
     def _finalize_moe(self) -> None:
         for layer in self.model.layers:

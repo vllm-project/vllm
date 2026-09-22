@@ -22,6 +22,7 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     initialize_model,
+    process_weights_after_loading,
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -84,6 +85,9 @@ class TensorizerLoader(BaseModelLoader):
                 model = initialize_model(vllm_config=vllm_config, prefix=prefix)
 
             model.load_weights(self._get_weights_iterator())
+            process_weights_after_loading(
+                model, model_config, torch.device(device_config.device)
+            )
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:

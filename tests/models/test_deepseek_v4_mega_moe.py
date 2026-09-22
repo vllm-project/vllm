@@ -962,3 +962,23 @@ def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding(
         fused_topk_weights.view(torch.uint8),
         ref_topk_weights.view(torch.uint8),
     )
+
+
+def test_shared_expert_finalize_refuses_already_packed_scales():
+    experts = object.__new__(DeepseekV4MegaMoEExperts)
+    experts.prefix = "model.layers.0.ffn.experts"
+    experts.num_shared_experts = 1
+    experts._transformed_shared_l1_weights = None
+
+    def _packed_linear():
+        return SimpleNamespace(
+            weight=torch.zeros(8, 16, dtype=torch.float8_e4m3fn),
+            weight_scale=torch.zeros(8, 1, dtype=torch.int32),
+        )
+
+    shared = SimpleNamespace(gate_up_proj=_packed_linear(), down_proj=_packed_linear())
+
+    experts._finalize_shared_expert_weights(None, shared)
+
+    assert experts.num_shared_experts == 0
+    assert experts._transformed_shared_l1_weights is None
