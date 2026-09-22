@@ -257,9 +257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            self.model_config
-        )
+        self.supports_mm_inputs = self.model_config.supports_multimodal_inputs
         self.uses_inputs_embeds = (
             self.supports_mm_inputs or self.model_config.enable_prompt_embeds
         )
@@ -2257,6 +2255,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.aux_output_connector.close()
         self.cudagraph_manager = None
         self.fast_prefill = None
+        self.pooling_runner = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
