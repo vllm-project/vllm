@@ -1215,23 +1215,15 @@ def _get_kv_cache_groups_glm5_next(
         for name, spec in kv_cache_spec.items()
         if not isinstance(spec, (MambaSpec, KpoolTailSpec))
     }
-    foreign_specs = {
+    draft_specs = {
         name: spec
         for name, spec in attn_specs.items()
         if type(spec) is not MLAAttentionSpec
     }
-    target_attn_specs = {k: v for k, v in attn_specs.items() if k not in foreign_specs}
-    mla_specs = cast(dict[str, MLAAttentionSpec], target_attn_specs)
-    foreign_group: KVCacheGroupSpec | None = None
-    if foreign_specs:
-        # Plain attention layers from an attached draft model keep their own
-        # page geometry in a separate group.
-        if not all(isinstance(spec, AttentionSpec) for spec in foreign_specs.values()):
-            return None
-        foreign_uniform = UniformTypeKVCacheSpecs.from_specs(foreign_specs)
-        if foreign_uniform is None:
-            return None
-        foreign_group = KVCacheGroupSpec(list(foreign_specs), foreign_uniform)
+    mla_specs = cast(
+        dict[str, MLAAttentionSpec],
+        {k: v for k, v in attn_specs.items() if k not in draft_specs},
+    )
     if not mamba_specs:
         return None
     idx_pages = {
@@ -1240,13 +1232,37 @@ def _get_kv_cache_groups_glm5_next(
     if not idx_pages:
         return None
 
+    if draft_specs:
+        # Attention layers of an attached draft model allocate full-attention
+        # blocks in the target's attention group; their compute keeps its
+        # sliding-window behavior.
+        if not all(
+            isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
+            for spec in draft_specs.values()
+        ):
+            return None
+        mla_block_size = next(iter(mla_specs.values())).block_size
+        draft_specs = {
+            name: (
+                spec
+                if type(spec) is FullAttentionSpec
+                else replace_as(
+                    spec,
+                    FullAttentionSpec,
+                    drop=("extra_retained_tokens",),
+                    block_size=mla_block_size,
+                )
+            )
+            for name, spec in draft_specs.items()
+        }
+
     assert all(spec.page_size_padded is None for spec in mla_specs.values())
     assert len(idx_pages) == 1
     mla_names = [name for name, spec in mla_specs.items() if spec.tokens_per_state == 1]
     mla_pages = {mla_specs[name].page_size_bytes for name in mla_names}
     assert len(mla_pages) == 1
     mla_page = mla_pages.pop()
-    uniform_spec = UniformTypeKVCacheSpecs.from_specs(target_attn_specs)
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs({**mla_specs, **draft_specs})
     assert uniform_spec is not None
 
     tail_group: KVCacheGroupSpec | None = None
@@ -1284,9 +1300,8 @@ def _get_kv_cache_groups_glm5_next(
         mamba_grouped_names[index % num_groups].append(name)
 
     return (
-        [KVCacheGroupSpec(list(mla_specs), uniform_spec)]
+        [KVCacheGroupSpec(list(mla_specs) + list(draft_specs), uniform_spec)]
         + ([tail_group] if tail_group is not None else [])
-        + ([foreign_group] if foreign_group is not None else [])
         + create_kv_cache_group_specs(padded_specs, mamba_grouped_names)
     )
 
@@ -1303,7 +1318,7 @@ def _glm5_next_tensor_layout(
         int,
         list[str],
         int,
-        KVCacheGroupSpec | None,
+        list[str],
     ]
     | None
 ):
@@ -1318,38 +1333,45 @@ def _glm5_next_tensor_layout(
     ]
     attn_group: KVCacheGroupSpec | None = None
     tail_group: KVCacheGroupSpec | None = None
-    foreign_groups: list[KVCacheGroupSpec] = []
     for group in uniform_groups:
         inner = cast(UniformTypeKVCacheSpecs, group.kv_cache_spec).kv_cache_specs
-        if all(type(spec) is MLAAttentionSpec for spec in inner.values()):
+        if all(isinstance(spec, FullAttentionSpec) for spec in inner.values()) and any(
+            type(spec) is MLAAttentionSpec for spec in inner.values()
+        ):
             attn_group = group
         elif all(isinstance(spec, KpoolTailSpec) for spec in inner.values()):
             tail_group = group
-        elif all(isinstance(spec, AttentionSpec) for spec in inner.values()):
-            # Plain attention layers of an attached draft model.
-            foreign_groups.append(group)
     if attn_group is None or not mamba_groups:
         return None
     if len(uniform_groups) + len(mamba_groups) != len(kv_cache_groups):
         return None
-    if len(foreign_groups) > 1:
-        return None
 
     attn_uniform = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
-    mla_inner = cast(dict[str, MLAAttentionSpec], attn_uniform.kv_cache_specs)
-    if not all(
-        type(spec) is MLAAttentionSpec and spec.page_size_padded is None
-        for spec in mla_inner.values()
+    attn_inner = cast(dict[str, FullAttentionSpec], attn_uniform.kv_cache_specs)
+    mla_specs = {
+        name: spec
+        for name, spec in attn_inner.items()
+        if type(spec) is MLAAttentionSpec
+    }
+    if not mla_specs or not all(
+        spec.page_size_padded is None for spec in attn_inner.values()
     ):
         return None
+    draft_names = [name for name in attn_group.layer_names if name not in mla_specs]
+    if not all(type(attn_inner[name]) is FullAttentionSpec for name in draft_names):
+        return None
     mla_names = [
-        name for name in attn_group.layer_names if mla_inner[name].tokens_per_state == 1
+        name
+        for name in attn_group.layer_names
+        if name in mla_specs and mla_specs[name].tokens_per_state == 1
     ]
     idx_names = [
-        name for name in attn_group.layer_names if mla_inner[name].tokens_per_state > 1
+        name
+        for name in attn_group.layer_names
+        if name in mla_specs and mla_specs[name].tokens_per_state > 1
     ]
-    mla_pages = {mla_inner[name].page_size_bytes for name in mla_names}
-    idx_pages = {mla_inner[name].page_size_bytes for name in idx_names}
+    mla_pages = {mla_specs[name].page_size_bytes for name in mla_names}
+    idx_pages = {mla_specs[name].page_size_bytes for name in idx_names}
     if len(mla_pages) != 1 or len(idx_pages) != 1:
         return None
     mla_page = mla_pages.pop()
@@ -1383,17 +1405,18 @@ def _glm5_next_tensor_layout(
         idx_page,
         tail_names,
         tail_page,
-        foreign_groups[0] if foreign_groups else None,
+        draft_names,
     )
 
 
-def _glm5_foreign_bytes_per_block(foreign_group: KVCacheGroupSpec | None) -> int:
-    if foreign_group is None:
+def _glm5_draft_bytes_per_block(
+    attn_group: KVCacheGroupSpec,
+    draft_names: list[str],
+) -> int:
+    if not draft_names:
         return 0
-    return sum(
-        _get_per_layer_spec(foreign_group, name).page_size_bytes
-        for name in foreign_group.layer_names
-    )
+    specs = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec).kv_cache_specs
+    return sum(specs[name].page_size_bytes for name in draft_names)
 
 
 def unify_kv_cache_spec_page_size(
@@ -1624,11 +1647,13 @@ def _get_kv_cache_bytes_per_block(
 ) -> int:
     """Return the largest cache group's bytes per block."""
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
-        _, _, mla_names, idx_names, mla_page, idx_page, _, _, foreign = glm5_layout
+        attn_group, _, mla_names, idx_names, mla_page, idx_page, _, _, draft_names = (
+            glm5_layout
+        )
         return (
             len(mla_names) * mla_page
             + len(idx_names) * idx_page
-            + _glm5_foreign_bytes_per_block(foreign)
+            + _glm5_draft_bytes_per_block(attn_group, draft_names)
         )
 
     bytes_per_block = max(
@@ -1736,12 +1761,12 @@ def get_kv_cache_config_from_groups(
             idx_page,
             tail_names,
             _,
-            foreign_group,
+            draft_names,
         ) = glm5_layout
         bytes_per_block = (
             len(mla_names) * mla_page
             + len(idx_names) * idx_page
-            + _glm5_foreign_bytes_per_block(foreign_group)
+            + _glm5_draft_bytes_per_block(attn_group, draft_names)
         )
         num_blocks = may_override_num_blocks(
             vllm_config, available_memory // bytes_per_block
@@ -1785,18 +1810,13 @@ def get_kv_cache_config_from_groups(
                 ).kv_cache_specs
                 add_tensor(tail_name, tail_specs[tail_name], offset)
 
-        if foreign_group is not None:
-            # Draft layers get their own layer-outermost region past the
-            # target's slots; their group owns its block ids independently.
-            foreign_specs = cast(
-                UniformTypeKVCacheSpecs, foreign_group.kv_cache_spec
-            ).kv_cache_specs
+        if draft_names:
             offset = (len(mla_names) * mla_page + len(idx_names) * idx_page) * (
                 num_blocks
             )
-            for name in foreign_group.layer_names:
-                add_tensor(name, foreign_specs[name], offset)
-                offset += foreign_specs[name].page_size_bytes * num_blocks
+            for name in draft_names:
+                add_tensor(name, attn_specs[name], offset)
+                offset += attn_specs[name].page_size_bytes * num_blocks
 
         return KVCacheConfig(
             num_blocks=num_blocks,
@@ -2521,7 +2541,7 @@ def _max_memory_usage_bytes_from_groups(
             idx_page,
             tail_names,
             _,
-            foreign_group,
+            draft_names,
         ) = glm5_layout
         uniform_spec = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
         total_blocks = uniform_spec.max_memory_usage_pages(vllm_config)
@@ -2534,14 +2554,10 @@ def _max_memory_usage_bytes_from_groups(
         )
         if tail_names:
             total_blocks += 1
-        if foreign_group is not None:
-            total_blocks += cast(
-                UniformTypeKVCacheSpecs, foreign_group.kv_cache_spec
-            ).max_memory_usage_pages(vllm_config)
         return total_blocks * (
             len(mla_names) * mla_page
             + len(idx_names) * idx_page
-            + _glm5_foreign_bytes_per_block(foreign_group)
+            + _glm5_draft_bytes_per_block(attn_group, draft_names)
         )
 
     bytes_per_block = _pool_bytes_per_block(kv_cache_groups)

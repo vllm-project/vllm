@@ -4386,10 +4386,11 @@ def test_trailing_layer_fallback_requires_exact_partition():
 
 
 def test_get_kv_cache_config_glm5_with_dflash_draft_group():
-    """A plain-attention draft (DFlash) attached to GLM-5.3-Flash keeps the
-    slot-sharing layout: draft layers form their own group with their own
-    page, land in a separate layer-outermost region, and the per-block
-    accounting includes them."""
+    """A plain-attention draft (DFlash) attached to GLM-5.3-Flash joins the
+    target's attention group: SWA draft specs are promoted to full-attention
+    allocation at the MLA block size (keeping the window for compute), the
+    group stays uniform, and draft pages land in a layer-outermost region
+    past the target slots inside every block."""
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
 
@@ -4404,27 +4405,25 @@ def test_get_kv_cache_config_glm5_with_dflash_draft_group():
         )
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
-    draft_page = kv_cache_spec["draft.layers.0.attn"].page_size_bytes
+    mla_block_size = kv_cache_spec["layers.3.attn"].block_size
+    draft_page = 2 * 8 * 128 * 2 * mla_block_size
 
     groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
-    draft_groups = [
-        g
-        for g in groups
-        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
-        and all(
-            isinstance(s, SlidingWindowSpec)
-            for s in g.kv_cache_spec.kv_cache_specs.values()
-        )
+    uniform_groups = [
+        g for g in groups if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
     ]
-    assert len(draft_groups) == 1
-    assert sorted(draft_groups[0].layer_names) == [
-        f"draft.layers.{i}.attn" for i in range(5)
-    ]
-    # MLA/indexer group and 4 mamba groups are unchanged.
-    assert len(groups) == 6
+    assert len(groups) == 5
+    assert len(uniform_groups) == 1
+    attn_specs = uniform_groups[0].kv_cache_spec.kv_cache_specs
+    promoted = attn_specs["draft.layers.0.attn"]
+    assert type(promoted) is FullAttentionSpec
+    assert promoted.sliding_window == 2048
+    assert promoted.block_size == mla_block_size
+    assert promoted.page_size_bytes == draft_page
 
     layout = kv_cache_utils._glm5_next_tensor_layout(groups)
-    assert layout is not None and layout[8] is draft_groups[0]
+    assert layout is not None
+    assert layout[8] == [f"draft.layers.{i}.attn" for i in range(5)]
 
     bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page + 5 * draft_page
