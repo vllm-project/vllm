@@ -155,6 +155,7 @@ class RequestState:
         temperature: float | None = None,
         stream_input: bool = False,
         remote_prefill_cached_tokens: int | None = None,
+        priority: int = 0,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -175,6 +176,7 @@ class RequestState:
         self.top_p = top_p
         self.n = n
         self.temperature = temperature
+        self.priority = priority
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
@@ -294,6 +296,7 @@ class RequestState:
             stream_interval=stream_interval,
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
+            priority=request.priority,
         )
 
     def make_request_output(
@@ -892,6 +895,7 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
+            priority=req_state.priority,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 
