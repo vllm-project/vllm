@@ -5315,10 +5315,9 @@ class GPUModelRunner(
                         assert spec_config is not None
                         draft_model_config = spec_config.draft_model_config
                         assert draft_model_config is not None
-                        draft_model_name = eplb_draft_model_name(draft_model_config)
                         logger.info_once(
                             "EPLB is enabled for MoE part of drafter model %s.",
-                            draft_model_name,
+                            draft_model_config.model,
                         )
                         if self.eplb_state is None:
                             self.eplb_state = EplbState(
@@ -5327,7 +5326,7 @@ class GPUModelRunner(
                         self.eplb_state.add_model(
                             drafter_moe_model,
                             draft_model_config,
-                            model_name=draft_model_name,
+                            model_name=eplb_draft_model_name(draft_model_config),
                         )
                         assert hasattr(self.drafter, "set_eplb_state")
                         self.drafter.set_eplb_state(self.eplb_state)
