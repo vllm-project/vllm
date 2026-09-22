@@ -353,6 +353,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
+        # ModelState caches its own copy at construction time (during
+        # load_model, before memory profiling), and the cudagraph capture
+        # path sizes worst-case sequences from it. Leaving it stale makes
+        # capture ask for the pre-auto-fit length while the attention
+        # metadata builders have already sized their buffers from the
+        # reduced one.
+        self.model_state.max_model_len = max_model_len
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
