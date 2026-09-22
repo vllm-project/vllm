@@ -1721,7 +1721,48 @@ def _validate_dsv4_sparse_dims(
 
 
 @triton.jit
-def _pack_dense_prefix_to_ragged_kernel(
+def _count_valid_row_entries_kernel(
+    indices_ptr,
+    lengths_ptr,
+    counts_ptr,
+    indptr_ptr,
+    indices_stride0,
+    num_rows_limit,
+    num_queries,
+    row_width,
+    BLOCK_R: tl.constexpr,
+    BLOCK_W: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    # The scan fills indptr[1:], so write indptr[0] here and skip a zero fill.
+    if pid == 0:
+        tl.store(indptr_ptr, 0)
+
+    rows = pid * BLOCK_R + tl.arange(0, BLOCK_R)
+    row_ok = rows < num_queries
+    row_len = tl.load(lengths_ptr + rows, mask=row_ok, other=0)
+
+    acc = tl.zeros((BLOCK_R,), dtype=tl.int32)
+    for start in range(0, row_width, BLOCK_W):
+        cols = start + tl.arange(0, BLOCK_W)
+        in_row = cols[None, :] < row_width
+        vals = tl.load(
+            indices_ptr + rows[:, None] * indices_stride0 + cols[None, :],
+            mask=row_ok[:, None] & in_row,
+            other=-1,
+        ).to(tl.int32)
+        keep = (
+            row_ok[:, None] & in_row & (cols[None, :] < row_len[:, None]) & (vals >= 0)
+        )
+        if num_rows_limit >= 0:
+            keep = keep & (vals < num_rows_limit)
+        acc += tl.sum(keep.to(tl.int32), axis=1)
+
+    tl.store(counts_ptr + rows, acc, mask=row_ok)
+
+
+@triton.jit
+def _compact_dense_row_to_ragged_kernel(
     indices_ptr,
     lengths_ptr,
     indptr_ptr,
@@ -1729,28 +1770,25 @@ def _pack_dense_prefix_to_ragged_kernel(
     indices_stride0,
     num_rows_limit,
     row_width,
-    BLOCK_SIZE: tl.constexpr,
+    BLOCK_W: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-
     row_len = tl.load(lengths_ptr + row_idx)
-    if block_idx * BLOCK_SIZE >= row_len:
-        return
-
-    mask = offsets < row_len
-    safe_offsets = tl.where(offsets < row_width, offsets, 0)
-    vals = tl.load(
-        indices_ptr + row_idx * indices_stride0 + safe_offsets,
-        mask=mask & (offsets < row_width),
-        other=-1,
-    ).to(tl.int32)
-    if num_rows_limit >= 0:
-        vals = tl.where((vals >= 0) & (vals < num_rows_limit), vals, -1)
-
     out_start = tl.load(indptr_ptr + row_idx)
-    tl.store(out_ptr + out_start + offsets, vals, mask=mask)
+
+    written = 0
+    for start in range(0, row_width, BLOCK_W):
+        cols = start + tl.arange(0, BLOCK_W)
+        in_row = cols < row_width
+        vals = tl.load(
+            indices_ptr + row_idx * indices_stride0 + cols, mask=in_row, other=-1
+        ).to(tl.int32)
+        keep = in_row & (cols < row_len) & (vals >= 0)
+        if num_rows_limit >= 0:
+            keep = keep & (vals < num_rows_limit)
+        rank = tl.cumsum(keep.to(tl.int32), axis=0) - 1
+        tl.store(out_ptr + out_start + written + rank, vals, mask=keep)
+        written += tl.sum(keep.to(tl.int32), axis=0)
 
 
 def build_ragged_indices_from_dense(
@@ -1765,10 +1803,40 @@ def build_ragged_indices_from_dense(
     )
 
     max_width = indices.shape[1] if indices.ndim == 2 else 0
-    lengths = lengths.clamp(min=0, max=max_width).contiguous()
+    # Both kernels bound the row by row_width and row_len, so no clamp needed.
+    lengths = lengths.contiguous()
 
-    indptr = torch.zeros(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
-    torch.cumsum(lengths, dim=0, out=indptr[1:])
+    # Dense rows reserve slots they may not fill, leaving -1 anywhere in the
+    # first `lengths` entries. Keep only the valid ones, since the consumers
+    # index the KV pool without checking the sign.
+    num_queries = indices.shape[0]
+    # max_width is whatever the caller packed (align(topk + window, 128) for the
+    # V4.1 indexer) and nothing caps it, so loop the row rather than size the
+    # block by it.
+    block = min(triton.next_power_of_2(max_width), 1024) if max_width > 0 else 1
+    counts = torch.empty(num_queries, dtype=torch.int32, device=indices.device)
+    indptr = torch.empty(num_queries + 1, dtype=torch.int32, device=indices.device)
+    if num_queries > 0 and max_width > 0:
+        # A program per row only gets row_width elements, which is launch
+        # bound for narrow rows. Tile rows to fill the block.
+        block_r = max(1, 1024 // block)
+        _count_valid_row_entries_kernel[(triton.cdiv(num_queries, block_r),)](
+            indices,
+            lengths,
+            counts,
+            indptr,
+            indices.stride(0),
+            int(num_rows),
+            num_queries,
+            max_width,
+            BLOCK_R=block_r,
+            BLOCK_W=block,
+        )
+    else:
+        counts.zero_()
+        indptr.zero_()
+
+    torch.cumsum(counts, dim=0, out=indptr[1:])
 
     if indices.numel() == 0:
         flat = torch.empty(0, dtype=torch.int32, device=indices.device)
@@ -1779,10 +1847,7 @@ def build_ragged_indices_from_dense(
             device=indices.device,
         )
         if flat.numel() > 0:
-            block_size = 128
-            _pack_dense_prefix_to_ragged_kernel[
-                (indices.shape[0], triton.cdiv(max_width, block_size))
-            ](
+            _compact_dense_row_to_ragged_kernel[(indices.shape[0],)](
                 indices,
                 lengths,
                 indptr,
@@ -1790,7 +1855,7 @@ def build_ragged_indices_from_dense(
                 indices.stride(0),
                 int(num_rows),
                 max_width,
-                BLOCK_SIZE=block_size,
+                BLOCK_W=block,
             )
 
     return flat, indptr
