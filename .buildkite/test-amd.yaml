@@ -1852,13 +1852,13 @@ steps:
   - tests/models/kimi_k3/
   - vllm/platforms/rocm.py
   commands:
-  # The single-GPU step above skips every @multi_gpu_test case. `-m distributed`
+  # The single-GPU step above skips every @multi_gpu_test case. `-m "distributed"`
   # selects exactly those: multi_gpu_test() applies pytest.mark.distributed
   # alongside its skipif (tests/utils.py:2080), so this picks up a new
   # multi-GPU test anywhere in the directory without editing this list.
   # Four GPUs run the two tp4 cases in test_amd_latent_moe_runner.py; the tp8
   # case and the 8/16-GPU cases in test_latent_moe_tail.py still skip.
-  - pytest -v -s -m distributed models/kimi_k3
+  - pytest -v -s -m "distributed" models/kimi_k3
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 55
