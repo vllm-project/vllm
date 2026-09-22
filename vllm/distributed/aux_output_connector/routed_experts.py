@@ -10,10 +10,10 @@ from typing import Any
 
 import numpy as np
 
+from vllm.distributed.aux_output_connector.shm import ShmBlockObjectStore
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
-    BlockObjectStore,
 )
 
 
@@ -167,7 +167,7 @@ def routed_experts_keys(
 
 
 def materialize_routed_experts(
-    store: BackgroundBlockObjectStore | BlockObjectStore,
+    store: BackgroundBlockObjectStore | ShmBlockObjectStore,
     aux_output_keys: list[str],
     *,
     shape_per_token: tuple[int, ...],
@@ -180,7 +180,7 @@ def materialize_routed_experts(
 
 
 def publish_routed_experts(
-    store: BackgroundBlockObjectStore | BlockObjectStore,
+    store: BackgroundBlockObjectStore | ShmBlockObjectStore,
     *,
     batches: Sequence[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
     block_size: int,

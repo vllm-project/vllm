@@ -30,10 +30,10 @@ from vllm.distributed.aux_output_connector.routed_experts import (
     publish_routed_experts,
     routed_experts_keys,
 )
+from vllm.distributed.aux_output_connector.shm import ShmBlockObjectStore
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
-    BlockObjectStore,
     BlockObjectStoreError,
 )
 from vllm.distributed.aux_output_connector.worker import (
@@ -856,7 +856,7 @@ def _make_store(
     max_bytes: int = 1 << 20,
     object_nbytes: int = 4,
 ):
-    return BlockObjectStore(
+    return ShmBlockObjectStore(
         max_bytes=max_bytes,
         object_nbytes=object_nbytes,
     )
