@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuTe DSL sparse-attention compressor for DeepSeek V4.
 
-The public wrappers provide the C4 fused and C128 split kernels.
+The public wrappers provide the CUDA C4 fused and circular C128 split kernels.
 """
 
 from __future__ import annotations
@@ -1081,8 +1081,8 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
         return compile_key, launch_args
 
 
-class SparseAttnCompressC128Block8Kernel(
-    VllmCuTeDSLJitKernel["SparseAttnCompressC128Block8Kernel.CompileKey"]
+class SparseAttnCompressC128RingKernel(
+    VllmCuTeDSLJitKernel["SparseAttnCompressC128RingKernel.CompileKey"]
 ):
     head_tile = 64
     rows_per_warp = 16
@@ -1103,19 +1103,19 @@ class SparseAttnCompressC128Block8Kernel(
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
-        head_tile = SparseAttnCompressC128Block8Kernel.head_tile
-        rows_per_warp = SparseAttnCompressC128Block8Kernel.rows_per_warp
-        elems_per_lane = SparseAttnCompressC128Block8Kernel.elems_per_lane
-        lanes_per_row = SparseAttnCompressC128Block8Kernel.lanes_per_row
-        num_warps = SparseAttnCompressC128Block8Kernel.num_warps
-        stats_lane_stride = SparseAttnCompressC128Block8Kernel.stats_lane_stride
-        final_reduce_steps = SparseAttnCompressC128Block8Kernel.final_reduce_steps
+        head_tile = SparseAttnCompressC128RingKernel.head_tile
+        rows_per_warp = SparseAttnCompressC128RingKernel.rows_per_warp
+        elems_per_lane = SparseAttnCompressC128RingKernel.elems_per_lane
+        lanes_per_row = SparseAttnCompressC128RingKernel.lanes_per_row
+        num_warps = SparseAttnCompressC128RingKernel.num_warps
+        stats_lane_stride = SparseAttnCompressC128RingKernel.stats_lane_stride
+        final_reduce_steps = SparseAttnCompressC128RingKernel.final_reduce_steps
         final_reduce_initial_offset = (
-            SparseAttnCompressC128Block8Kernel.final_reduce_initial_offset
+            SparseAttnCompressC128RingKernel.final_reduce_initial_offset
         )
-        tb_size = SparseAttnCompressC128Block8Kernel.tb_size
-        compress_ratio = SparseAttnCompressC128Block8Kernel.compress_ratio
-        rcp_ln2 = SparseAttnCompressC128Block8Kernel.rcp_ln2
+        tb_size = SparseAttnCompressC128RingKernel.tb_size
+        compress_ratio = SparseAttnCompressC128RingKernel.compress_ratio
+        rcp_ln2 = SparseAttnCompressC128RingKernel.rcp_ln2
         head_dim = compile_key.head_size
         num_splits = head_dim // head_tile
         state_width = compile_key.state_width
@@ -1409,7 +1409,7 @@ class SparseAttnCompressC128Block8Kernel(
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         head_size = compile_key.head_size
         state_width = compile_key.state_width
-        if head_size % SparseAttnCompressC128Block8Kernel.head_tile != 0:
+        if head_size % SparseAttnCompressC128RingKernel.head_tile != 0:
             raise ValueError("head_size must be divisible by the 64-wide head tile.")
         num_positions = cute.sym_int()
         num_slots = cute.sym_int()
@@ -1490,7 +1490,7 @@ class SparseAttnCompressC128Block8Kernel(
         block_size: int,
         head_dim: int,
         compressed_kv: torch.Tensor | None = None,
-    ) -> CuTeDSLLaunchSpec[SparseAttnCompressC128Block8Kernel.CompileKey]:
+    ) -> CuTeDSLLaunchSpec[SparseAttnCompressC128RingKernel.CompileKey]:
         compile_key = self.dispatch(head_size=head_dim, state_width=head_dim)
         if compressed_kv is None:
             compressed_kv = torch.empty(
@@ -2367,7 +2367,7 @@ def split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
     if store_full_fp8 and not store_full_kv:
         raise ValueError("store_full_fp8 requires store_full_kv.")
 
-    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL(
+    _SPARSE_ATTN_COMPRESS_C128_RING_KERNEL(
         state_cache=state_cache,
         kv=kv,
         score=score,
@@ -2420,7 +2420,7 @@ class SparseAttnCompressorCuteDSL:
         *,
         c4_store: SparseAttnCompressNormRopeStoreC4Kernel,
         c4_store_full: SparseAttnCompressNormRopeStoreFullC4Kernel,
-        c128_compress: SparseAttnCompressC128Block8Kernel,
+        c128_compress: SparseAttnCompressC128RingKernel,
         c128_store: SparseAttnNormRopeStoreKernel,
         c128_store_full: SparseAttnNormRopeStoreFullKernel,
     ) -> None:
@@ -2574,13 +2574,13 @@ _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL = (
 _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL = (
     SparseAttnCompressNormRopeStoreFullC4Kernel()
 )
-_SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL = SparseAttnCompressC128Block8Kernel()
+_SPARSE_ATTN_COMPRESS_C128_RING_KERNEL = SparseAttnCompressC128RingKernel()
 _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL = SparseAttnNormRopeStoreKernel()
 _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL = SparseAttnNormRopeStoreFullKernel()
 _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL = SparseAttnCompressorCuteDSL(
     c4_store=_SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
     c4_store_full=_SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
-    c128_compress=_SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+    c128_compress=_SPARSE_ATTN_COMPRESS_C128_RING_KERNEL,
     c128_store=_SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
     c128_store_full=_SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
 )

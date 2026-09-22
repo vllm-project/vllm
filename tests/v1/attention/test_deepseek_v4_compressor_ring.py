@@ -70,6 +70,27 @@ def test_c128_capacity_covers_one_speculative_step() -> None:
     ]
 
 
+@pytest.mark.parametrize("group_phase", range(128))
+def test_c128_ring_survives_one_speculative_step(group_phase: int) -> None:
+    """Draft writes must not overwrite committed rows in the open group."""
+    num_spec = 5
+    capacity = _c128_ring_capacity(num_spec)
+    query_len = num_spec + 1
+    positions = torch.arange(group_phase, group_phase + query_len)
+    slots, _ = build_c128_ring_metadata(
+        torch.full((query_len,), -1, dtype=torch.int64),
+        torch.tensor([[0]], dtype=torch.int32),
+        torch.tensor([0, query_len], dtype=torch.int32),
+        positions,
+        query_len,
+        1,
+        capacity,
+    )
+
+    committed = torch.arange(group_phase - group_phase % 128, group_phase)
+    assert set(slots.tolist()).isdisjoint((committed % capacity).tolist())
+
+
 def test_c128_metadata_warmup_has_one_shape_independent_key(monkeypatch) -> None:
     from vllm.model_executor.warmup import jit_warmup_triton_helper
 
@@ -100,7 +121,13 @@ def test_c128_metadata_warmup_has_one_shape_independent_key(monkeypatch) -> None
     assert "num_reqs" not in prepared[0]
 
 
-def test_c128_model_registers_ring_metadata_warmup(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("is_cuda", "is_rocm", "expected"),
+    [(True, False, [{"capacity": 256}]), (False, True, [])],
+)
+def test_c128_model_registers_ring_metadata_warmup_only_on_cuda(
+    monkeypatch, is_cuda: bool, is_rocm: bool, expected: list[dict]
+) -> None:
     from vllm.models.deepseek_v4 import compressor
     from vllm.models.deepseek_v4.common.ops import fused_compress_quant_cache
 
@@ -110,8 +137,8 @@ def test_c128_model_registers_ring_metadata_warmup(monkeypatch) -> None:
         "current_platform",
         SimpleNamespace(
             device_type="cpu",
-            is_cuda=lambda: True,
-            is_rocm=lambda: False,
+            is_cuda=lambda: is_cuda,
+            is_rocm=lambda: is_rocm,
             is_xpu=lambda: False,
         ),
     )
@@ -153,7 +180,7 @@ def test_c128_model_registers_ring_metadata_warmup(monkeypatch) -> None:
 
     compressor.DeepseekCompressor(config, 128, 128, 128)
 
-    assert registered == [{"capacity": 256}]
+    assert registered == expected
 
 
 def test_only_circular_c128_builds_no_boundary_fast_path_metadata(monkeypatch) -> None:
@@ -194,77 +221,6 @@ def test_only_circular_c128_builds_no_boundary_fast_path_metadata(monkeypatch) -
 
     c4 = _state_cache(4).get_kv_cache_spec(_config())
     assert build(c4).c128_boundary is None
-
-
-def test_non_circular_two_stage_uses_paged_prefill_path(monkeypatch) -> None:
-    from vllm.models.deepseek_v4.common.ops import fused_compress_quant_cache
-
-    prefill_calls = []
-    decode_calls = []
-    monkeypatch.setattr(
-        fused_compress_quant_cache,
-        "_launch_two_stage_sparse_attn_compressor",
-        lambda **kwargs: prefill_calls.append(kwargs),
-    )
-    monkeypatch.setattr(
-        fused_compress_quant_cache,
-        "compress_norm_rope_store_triton",
-        lambda **kwargs: decode_calls.append(kwargs),
-    )
-    token_to_req = torch.zeros(3, dtype=torch.int32)
-    positions = torch.tensor([0, 127, 255])
-    slot_mapping = torch.arange(3)
-    block_table = torch.arange(32).reshape(1, 32)
-
-    fused_compress_quant_cache.compress_norm_rope_store_two_stage_triton(
-        state_cache=torch.empty(32, 8, 1024),
-        kv=torch.empty(3, 512),
-        score=torch.empty(3, 512),
-        ape=torch.empty(128, 512),
-        num_actual=3,
-        token_to_req_indices=token_to_req,
-        positions=positions,
-        slot_mapping=slot_mapping,
-        block_table=block_table,
-        block_size=8,
-        query_start_loc=torch.tensor([0, 3]),
-        is_circular=False,
-        state_width=512,
-        cos_sin_cache=torch.empty(256, 64),
-        kv_cache=torch.empty(1, 1),
-        k_cache_metadata=SimpleNamespace(slot_mapping=torch.arange(3)),
-        pdl_kwargs={},
-        head_dim=512,
-        rope_head_dim=64,
-        compress_ratio=128,
-        overlap=False,
-        use_fp4_cache=False,
-        rms_norm_weight=torch.empty(512),
-        rms_norm_eps=1e-6,
-        quant_block=64,
-        token_stride=576,
-        scale_dim=8,
-        num_decode_tokens=1,
-        compress_scratch=torch.empty(3, 512),
-    )
-
-    assert len(prefill_calls) == 1
-    assert prefill_calls[0]["block_table"] is block_table
-    assert prefill_calls[0]["block_size"] == 8
-    assert torch.equal(prefill_calls[0]["positions"], positions[1:])
-    assert (
-        not {
-            "kv",
-            "score",
-            "ape",
-            "query_start_loc",
-            "token_offset",
-        }
-        & prefill_calls[0].keys()
-    )
-    assert len(decode_calls) == 1
-    assert decode_calls[0]["num_actual"] == 1
-    assert decode_calls[0]["is_circular"] is False
 
 
 def test_c128_ring_mapping_and_tail_for_nonuniform_batch() -> None:

@@ -122,12 +122,12 @@ def _make_c128_raw_or_ring_case(device: str = "cuda"):
 )
 def test_c128_cutedsl_gather_reads_raw_chunk_before_ring_tail_write() -> None:
     from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (
-        _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+        _SPARSE_ATTN_COMPRESS_C128_RING_KERNEL,
     )
 
     case = _make_c128_raw_or_ring_case()
     output = torch.full_like(case.kv, float("nan"))
-    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL(
+    _SPARSE_ATTN_COMPRESS_C128_RING_KERNEL(
         state_cache=case.state_cache,
         kv=case.kv,
         score=case.score,
@@ -1158,25 +1158,15 @@ def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
     state_cache[..., :head_dim] = 1.0
     token_to_req = torch.zeros(1, dtype=torch.int32, device=device)
     block_table = torch.zeros(1, 1, dtype=torch.int32, device=device)
-    raw_kv = torch.ones(1, head_dim, dtype=torch.float32, device=device)
-    raw_score = torch.zeros_like(raw_kv)
-    ape = torch.zeros(1, head_dim, dtype=torch.float32, device=device)
-    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
-
     if writer == "single_pass":
         compress_norm_rope_store_triton(
             state_cache=state_cache,
-            kv=raw_kv,
-            score=raw_score,
-            ape=ape,
             num_actual=1,
             token_to_req_indices=token_to_req,
             positions=positions,
             slot_mapping=slot_mapping,
             block_table=block_table,
             block_size=1,
-            query_start_loc=query_start_loc,
-            is_circular=True,
             state_width=head_dim,
             cos_sin_cache=cos_sin_cache,
             kv_cache=cache,
@@ -1847,19 +1837,12 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         state_cache,
         state_cache.stride(0),
         state_cache.stride(1),
-        state_cache,
-        state_cache.stride(0),
-        state_cache,
-        state_cache.stride(0),
-        state_cache,
-        state_cache.stride(0),
         token_to_req,
         positions,
         slot_mapping,
         block_table,
         block_table.stride(0),
         BLOCK_SIZE,
-        torch.zeros(2, dtype=torch.int32, device=device),
         rms_weight,
         RMS_EPS,
         cos_sin_cache,
@@ -1878,7 +1861,6 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         TOKEN_STRIDE=TOKEN_STRIDE,
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
-        CIRCULAR=False,
         num_warps=1,
     )
 

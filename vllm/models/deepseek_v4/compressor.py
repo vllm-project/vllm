@@ -361,9 +361,8 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         self.compress_ratio = compress_ratio
         coff = 1 + (compress_ratio == 4)
         self.sliding_window = coff * compress_ratio
-        # C4 still shares the legacy paged layout and therefore keeps block size
-        # 4. C128 replaces this value with its per-request ring capacity in the
-        # cache spec.
+        # C4 keeps the legacy paged layout and block size 4. CUDA circular C128
+        # replaces this value with its per-request ring capacity in the cache spec.
         if compress_ratio == 4:
             self.block_size = 4
         elif compress_ratio == 128:
@@ -520,9 +519,7 @@ class DeepseekCompressor(nn.Module):
             )
 
         if vllm_config.kernel_config.enable_jit_warmup:
-            if self.compress_ratio == 128 and (
-                current_platform.is_cuda() or current_platform.is_rocm()
-            ):
+            if self.compress_ratio == 128 and current_platform.is_cuda():
                 _BUILD_C128_RING_METADATA_KERNEL.register_warmup(
                     capacity=_c128_ring_capacity(vllm_config.num_speculative_tokens)
                 )
@@ -532,7 +529,7 @@ class DeepseekCompressor(nn.Module):
             )
             if current_platform.is_cuda() and self.head_dim == 512:
                 from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
-                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_C128_RING_KERNEL,
                     _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
                     _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
                     _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
@@ -547,7 +544,7 @@ class DeepseekCompressor(nn.Module):
                         else _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL
                     ).register_warmup()
                 else:
-                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL.register_warmup()
+                    _SPARSE_ATTN_COMPRESS_C128_RING_KERNEL.register_warmup()
                     if store_full_kv:
                         _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL.register_warmup()
                     else:
@@ -589,10 +586,8 @@ class DeepseekCompressor(nn.Module):
         token_to_req_indices = state_metadata.token_to_req_indices
         slot_mapping = state_metadata.slot_mapping
         tail_slot_mapping = state_metadata.tail_slot_mapping
-        query_start_loc = state_metadata.query_start_loc
         assert token_to_req_indices is not None
         assert tail_slot_mapping is not None
-        assert query_start_loc is not None
         num_actual = slot_mapping.shape[0]
         block_table = state_metadata.block_table
         block_size = state_metadata.block_size
@@ -607,9 +602,9 @@ class DeepseekCompressor(nn.Module):
             else {"launch_pdl": False}
         )
 
-        # C4 stores before compression. C128 reads current-chunk rows directly
-        # and saves only the ring tail after compression, so a long chunk cannot
-        # wrap and overwrite an earlier group before that group is consumed.
+        # C4 stores before compression. CUDA circular C128 reads current-chunk
+        # rows directly and saves only the ring tail after compression, so a long
+        # chunk cannot overwrite an earlier group before it is consumed.
         # NOTE: PDL is disabled — both this kernel and the compress kernels
         # below depend on preceding kernel outputs (kv/score from the cublas
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
@@ -685,7 +680,14 @@ class DeepseekCompressor(nn.Module):
             # layout and the plain full-cache layout. The full-cache flags
             # are consumed only here.
             compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL
+            query_start_loc = state_metadata.query_start_loc
+            assert query_start_loc is not None
             extra_kwargs: dict[str, Any] = dict(
+                kv=kv,
+                score=score,
+                ape=self.ape,
+                query_start_loc=query_start_loc,
+                is_circular=state_metadata.is_circular,
                 store_full_kv=store_full_kv,
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
@@ -706,17 +708,12 @@ class DeepseekCompressor(nn.Module):
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,
-            kv=kv,
-            score=score,
-            ape=self.ape,
             num_actual=num_actual,
             token_to_req_indices=token_to_req_indices,
             positions=positions,
             slot_mapping=slot_mapping,
             block_table=block_table,
             block_size=block_size,
-            query_start_loc=query_start_loc,
-            is_circular=state_metadata.is_circular,
             state_width=state_width,
             cos_sin_cache=cos_sin_cache,
             kv_cache=kv_cache,
