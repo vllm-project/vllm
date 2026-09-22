@@ -6440,7 +6440,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
         metric_delta(
             &metrics_before,
             &metrics_after,
-            "vllm:rl_weight_update_requests_total",
+            "vllm:rl_weight_update_operations_total",
             Some("operation=\"update\",status=\"success\""),
         ),
         2.0
@@ -6449,7 +6449,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
         metric_delta(
             &metrics_before,
             &metrics_after,
-            "vllm:rl_weight_update_request_duration_seconds_count",
+            "vllm:rl_weight_update_operation_duration_seconds_count",
             Some("operation=\"update\""),
         ),
         2.0
@@ -6457,7 +6457,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
     assert_eq!(
         metric_value(
             &metrics_after,
-            "vllm:rl_weight_update_requests_in_flight",
+            "vllm:rl_weight_update_operations_in_flight",
             Some("operation=\"update\""),
         ),
         Some(0.0)
@@ -6466,7 +6466,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
         metric_delta(
             &metrics_before,
             &metrics_after,
-            "vllm:rl_weight_update_requests_total",
+            "vllm:rl_weight_update_operations_total",
             Some("operation=\"finish\",status=\"success\""),
         ),
         2.0
@@ -6475,7 +6475,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
         metric_delta(
             &metrics_before,
             &metrics_after,
-            "vllm:rl_weight_update_requests_total",
+            "vllm:rl_weight_update_operations_total",
             Some("operation=\"set_version\",status=\"success\""),
         ),
         2.0
@@ -6547,7 +6547,7 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
             metric_delta(
                 &metrics_before,
                 &metrics_after,
-                "vllm:rl_weight_update_requests_total",
+                "vllm:rl_weight_update_operations_total",
                 Some(&format!(
                     "operation=\"{operation}\",status=\"{status}\""
                 )),
@@ -6559,7 +6559,7 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
             metric_delta(
                 &metrics_before,
                 &metrics_after,
-                "vllm:rl_weight_update_requests_in_flight",
+                "vllm:rl_weight_update_operations_in_flight",
                 Some(&format!("operation=\"{operation}\"")),
             ),
             0.0
@@ -6719,7 +6719,7 @@ async fn weight_transfer_routes_record_finish_success_when_version_fails() {
         metric_delta(
             &metrics_before,
             &metrics_after,
-            "vllm:rl_weight_update_requests_total",
+            "vllm:rl_weight_update_operations_total",
             Some("operation=\"finish\",status=\"success\""),
         ),
         1.0
@@ -6728,7 +6728,7 @@ async fn weight_transfer_routes_record_finish_success_when_version_fails() {
         metric_delta(
             &metrics_before,
             &metrics_after,
-            "vllm:rl_weight_update_requests_total",
+            "vllm:rl_weight_update_operations_total",
             Some("operation=\"set_version\",status=\"error\""),
         ),
         1.0
@@ -6737,7 +6737,7 @@ async fn weight_transfer_routes_record_finish_success_when_version_fails() {
         metric_delta(
             &metrics_before,
             &metrics_after,
-            "vllm:rl_weight_update_requests_total",
+            "vllm:rl_weight_update_operations_total",
             Some("operation=\"set_version\",status=\"success\""),
         ),
         0.0
@@ -6745,7 +6745,7 @@ async fn weight_transfer_routes_record_finish_success_when_version_fails() {
     assert_eq!(
         metric_value(
             &metrics_after,
-            "vllm:rl_weight_update_requests_in_flight",
+            "vllm:rl_weight_update_operations_in_flight",
             Some("operation=\"set_version\""),
         ),
         Some(0.0)

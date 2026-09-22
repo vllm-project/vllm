@@ -1,14 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""HTTP weight-operation telemetry, not cluster-wide transfer-session state.
+"""Telemetry for logical frontend weight operations.
 
-Only dispatched operations are counted. Rejected input never enters the recorder.
-Durations cover one frontend weight operation, not a transfer-session lifetime.
-A cancelled operation (client disconnect) is recorded as ``status="error"``.
+A single HTTP request maps to zero or more *logical frontend weight operations*::
 
-Collectors are created on first use on ``get_prometheus_registry()``, so they land
-in the same registry the API server exposes on ``/metrics`` - including the
-multiprocess registry selected by ``PROMETHEUS_MULTIPROC_DIR``.
+    HTTP request -> input validation -> 0..N logical weight operations
+                                     -> outcome / duration / concurrency
+
+Each operation wraps exactly one dispatched engine call, so one
+``/finish_weight_update`` with a ``weight_version`` records two operations:
+``finish`` for ``engine.finish_weight_update()`` and ``set_version`` for
+``engine.update_weight_version()``. Keeping them separate means "finish succeeded,
+version handshake failed" is visible instead of being flattened into a single
+``finish=error``.
+
+Not modelled here: whole transfer-session duration, RL transaction/lifecycle
+state, weight-version labels, or whether the transferred weights were correct.
+The metric names say ``operations``, not ``requests``, for that reason: do not
+sum them across the ``operation`` label.
+
+Scope of one observation:
+
+- validation failures (malformed JSON, missing/invalid fields) never enter the
+  recorder, so they do not touch any of these series; endpoint-level 4xx already
+  has the HTTP metrics;
+- an exception or a cancellation (client disconnect) inside the block is recorded
+  as ``status="error"``;
+- durations cover one operation, not a transfer session.
+
+Collectors are instantiated lazily, on first use, so that metric objects are
+created after multiprocess Prometheus setup has run (``PROMETHEUS_MULTIPROC_DIR``
+must be set before a metric object exists). They are created on the default
+registry so that ``prometheus_client`` writes multiprocess mmap data that the
+``/metrics`` scrape registry aggregates; the scrape registry is not the creation
+registry.
 """
 
 from collections.abc import Iterator
@@ -19,34 +44,44 @@ from typing import Literal
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
-from vllm.v1.metrics.prometheus import get_prometheus_registry
-
 Operation = Literal["init", "start", "start_draft", "update", "finish", "set_version"]
+
+_OPERATION_HELP = (
+    "Logical frontend weight operations by outcome, one observation per "
+    "dispatched engine call. 'finish' covers only finish_weight_update(); the "
+    "weight-version handshake is counted separately as 'set_version'."
+)
 
 
 class WeightOperationMetrics:
-    """Bounded-label metrics for successful, failed, and cancelled RPCs."""
+    """Bounded-label metrics for successful, failed, and cancelled operations.
+
+    Args:
+        registry: Collector registry to create the metrics on. Defaults to the
+            process default registry, which is what ``prometheus_client`` expects
+            for multiprocess mode: the metric objects become mmap-backed and the
+            ``/metrics`` scrape registry aggregates them through
+            ``MultiProcessCollector``. Tests pass a private registry for isolation.
+
+    """
 
     def __init__(self, registry: CollectorRegistry | None = None):
-        if registry is None:
-            registry = get_prometheus_registry()
-        self.requests = Counter(
-            "vllm:rl_weight_update_requests_total",
-            "Dispatched HTTP weight operations by outcome. 'finish' excludes the "
-            "weight-version handshake, which is counted separately as 'set_version'.",
+        self.operations = Counter(
+            "vllm:rl_weight_update_operations_total",
+            _OPERATION_HELP,
             ["operation", "status"],
             registry=registry,
         )
         self.duration = Histogram(
-            "vllm:rl_weight_update_request_duration_seconds",
-            "Duration of a dispatched HTTP weight operation.",
+            "vllm:rl_weight_update_operation_duration_seconds",
+            "Duration of one logical frontend weight operation.",
             ["operation"],
             registry=registry,
             buckets=(0.01, 0.1, 1, 10, 30, 60, 120, 300, 600),
         )
         self.in_flight = Gauge(
-            "vllm:rl_weight_update_requests_in_flight",
-            "Currently awaited HTTP weight operations.",
+            "vllm:rl_weight_update_operations_in_flight",
+            "Logical frontend weight operations currently awaited.",
             ["operation"],
             registry=registry,
             multiprocess_mode="livesum",
@@ -54,7 +89,7 @@ class WeightOperationMetrics:
 
     @contextmanager
     def record(self, operation: Operation) -> Iterator[None]:
-        """Record one dispatched operation; anything but a clean exit is an error."""
+        """Record one operation; anything but a clean exit is an error."""
         started = perf_counter()
         active = self.in_flight.labels(operation)
         active.inc()
@@ -65,7 +100,7 @@ class WeightOperationMetrics:
         finally:
             active.dec()
             self.duration.labels(operation).observe(perf_counter() - started)
-            self.requests.labels(operation, status).inc()
+            self.operations.labels(operation, status).inc()
 
 
 _metrics: WeightOperationMetrics | None = None
@@ -73,7 +108,10 @@ _metrics_lock = Lock()
 
 
 def weight_operation_metrics() -> WeightOperationMetrics:
-    """Return the process-wide recorder, creating it on first use."""
+    """Return the process-wide recorder, creating it on first use.
+
+    Lazy so the metric objects exist only after multiprocess Prometheus setup.
+    """
     global _metrics
     if _metrics is None:
         with _metrics_lock:
