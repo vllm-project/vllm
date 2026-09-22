@@ -205,8 +205,7 @@ class CpuPlatform(Platform):
 
         if cls.get_cpu_architecture() == CpuArchEnum.X86 and not HAS_TRITON:
             logger.warning_once(
-                "Triton is not installed. triton-cpu is expected on x86 "
-                "CPUs; some kernels will fall back to slower implementations."
+                "Triton is not installed. triton-cpu is expected on x86 CPUs."
             )
 
         cache_config = vllm_config.cache_config
