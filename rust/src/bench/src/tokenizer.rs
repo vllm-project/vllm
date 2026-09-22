@@ -30,7 +30,7 @@ pub struct ServerTokenizer {
 
 impl ServerTokenizer {
     /// Create a new server tokenizer and verify connectivity.
-    pub async fn new(base_url: &str, model: &str) -> Result<Self> {
+    pub async fn new(base_url: &str, model: &str, timeout_seconds: u64) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -49,7 +49,10 @@ impl ServerTokenizer {
         };
 
         // Probe the endpoint to verify it works and discover vocab size
-        let test_tokens = st.encode_async("test").await?;
+        let test_tokens = crate::ready_checker::retry_with_timeout(timeout_seconds, 5, || {
+            st.encode_async("test")
+        })
+        .await?;
         let max_id = test_tokens.iter().copied().max().unwrap_or(0);
         let estimated_vocab = (max_id * 2).max(131072);
 
@@ -225,11 +228,11 @@ impl TokenizerKind {
 /// 2. Tiktoken model file (for Kimi, Qwen, etc.)
 /// 3. Server-side /tokenize + /detokenize endpoints
 ///
-/// `server_info` is `Some((base_url, model))` to enable server-side fallback.
+/// `server_info` is `Some((base_url, model, timeout_seconds))` to enable server-side fallback.
 pub async fn load_tokenizer(
     model_id: &str,
     _trust_remote_code: bool,
-    server_info: Option<(&str, &str)>,
+    server_info: Option<(&str, &str, u64)>,
 ) -> Result<TokenizerKind> {
     // 0. Check for built-in tiktoken encoding names (no HF download needed). These are useful for
     //    consistent cross-model token counting (e.g. Artificial Analysis).
@@ -275,13 +278,13 @@ pub async fn load_tokenizer(
                 }
                 Err(tiktoken_err) => {
                     // 3. Try server-side fallback
-                    if let Some((base_url, model)) = server_info {
+                    if let Some((base_url, model, timeout_seconds)) = server_info {
                         tracing::info!(
                             model = model_id,
                             error = %tiktoken_err.as_report(),
                             "tiktoken unavailable; trying server-side tokenization"
                         );
-                        match ServerTokenizer::new(base_url, model).await {
+                        match ServerTokenizer::new(base_url, model, timeout_seconds).await {
                             Ok(srv) => {
                                 tracing::info!(
                                     model = model_id,

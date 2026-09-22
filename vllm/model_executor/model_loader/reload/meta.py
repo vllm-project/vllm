@@ -9,7 +9,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
 from .types import LayerReloadingInfo, LayerTensors
-from .utils import get_layer_params_buffers, get_layer_tensors
+from .utils import get_layer_params_buffers, get_layer_tensors, get_tensor_load_numel
 
 __all__ = [
     "to_meta_tensor",
@@ -47,8 +47,7 @@ def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Materialize a meta tensor into an actual tensor on the current device.
+    """Materialize a meta tensor into an actual tensor on the current device.
     Should be called within the torch device context for the given rank.
     """
     tensor = torch.empty_strided(
@@ -119,16 +118,19 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
 
 
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
-    """Restore a layer to model format with tensors on the meta device"""
+    """Restore a layer to model format with tensors on the meta device."""
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
     non_persistent = set(layer._non_persistent_buffers_set)
-    for name in get_layer_tensors(layer):
-        if name not in SKIP_TENSORS:
+    restore_params, restore_buffers = info.restore_metadata
+    tensor_names = (
+        get_layer_tensors(layer).keys() | restore_params.keys() | restore_buffers.keys()
+    )
+    for name in tensor_names:
+        if name not in SKIP_TENSORS and hasattr(layer, name):
             delattr(layer, name)
 
-    restore_params, restore_buffers = info.restore_metadata
     for name, param in restore_params.items():
         if name not in SKIP_TENSORS:
             param = restore_layer_refs(param, layer)
@@ -152,8 +154,7 @@ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
 
 
 class CopyCounter(TorchDispatchMode):
-    """
-    Tracks total number of elements modified with `copy_`.
+    """Tracks total number of elements modified with `copy_`.
 
     Useful for keeping track of weight loading where underlying weights can be
     arbitrarily transformed (such as with `narrow`) before calling copy.
@@ -179,8 +180,7 @@ class CopyCounter(TorchDispatchMode):
 def get_numel_loaded(
     weight_loader: Callable, args: inspect.BoundArguments
 ) -> tuple[int, object]:
-    """
-    Determine how many elements would be loaded by a weight loader call.
+    """Determine how many elements would be loaded by a weight loader call.
 
     Args:
         weight_loader: used to load weights
@@ -189,6 +189,7 @@ def get_numel_loaded(
     Returns:
         number of elements loaded by the weight loader, the return value of the
         weight loader
+
     """
     with CopyCounter() as counter:
         return_value = weight_loader(*args.args, **args.kwargs)
@@ -205,5 +206,5 @@ def get_numel_loaded(
     numel = counter.copied_numel
     param = args.arguments.get("param", None)
     if isinstance(param, torch.Tensor):
-        numel = min(numel, param.numel())
+        numel = min(numel, get_tensor_load_numel(param))
     return numel, return_value

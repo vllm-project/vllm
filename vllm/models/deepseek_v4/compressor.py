@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import torch
 from torch import nn
@@ -18,7 +18,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
-    save_partial_states,
+    _SAVE_PARTIAL_STATES_KERNEL,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
@@ -35,9 +35,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
 )
 
-if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.eager_scratch import DeepseekV4EagerScratchPool
-
 
 def _prefer_two_stage_compressor() -> bool:
     # Platforms that favor the triton variant of two-stage compressor split.
@@ -46,10 +43,12 @@ def _prefer_two_stage_compressor() -> bool:
 
 
 def _get_c128_boundary(metadata: CommonAttentionMetadata) -> bool | None:
-    starts = metadata._num_computed_tokens_cpu
-    if starts is None:
+    seq_lens_cpu = metadata.seq_lens_cpu_upper_bound
+    if seq_lens_cpu is None:
         return None
 
+    query_lens = metadata.query_start_loc_cpu[1:] - metadata.query_start_loc_cpu[:-1]
+    starts = seq_lens_cpu - query_lens
     starts_list = starts.tolist()
     query_start_loc = metadata.query_start_loc_cpu.tolist()
     return any(
@@ -77,25 +76,6 @@ class CompressorBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["CompressorMetadataBuilder"]:
         return CompressorMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        assert num_kv_heads == 1
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
 
 
 @dataclass
@@ -138,6 +118,10 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata, decode_threshold=1
             )
+        async_spec_decode = (
+            self.vllm_config.scheduler_config.async_scheduling
+            and self.vllm_config.speculative_config is not None
+        )
         return CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -146,7 +130,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             num_decode_tokens=num_decode_tokens,
             c128_boundary=(
                 _get_c128_boundary(common_attn_metadata)
-                if self.block_size == 8
+                if self.block_size == 8 and not async_spec_decode
                 else None
             ),
         )
@@ -188,6 +172,10 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         else:
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
         # full-cache rows share state pages with contiguous KV pages, so padding
@@ -215,8 +203,8 @@ class DeepseekCompressor(nn.Module):
     prologue (kv/score split, save_partial_states launch). The
     compress → norm → RoPE → store step is dispatched to a triton kernel
     (``compress_norm_rope_store_triton``) by default, except for the NVIDIA
-    head_dim=128 indexer path which uses the cutedsl kernel
-    (``compress_norm_rope_store_cutedsl``) for better performance.
+    head_dim=512 path which uses the CuTeDSL compressor kernels for better
+    performance.
     """
 
     def __init__(
@@ -229,7 +217,6 @@ class DeepseekCompressor(nn.Module):
         prefix: str = "",
         k_cache_prefix="",
         use_fp4_cache: bool = False,
-        eager_scratch_pool: "DeepseekV4EagerScratchPool | None" = None,
     ):
         super().__init__()
         self.compress_ratio = compress_ratio
@@ -239,7 +226,6 @@ class DeepseekCompressor(nn.Module):
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
         self.use_fp4_cache = use_fp4_cache
-        self.eager_scratch_pool = eager_scratch_pool
 
         config = vllm_config.model_config.hf_config
         self.rope_head_dim = config.qk_rope_head_dim
@@ -326,6 +312,44 @@ class DeepseekCompressor(nn.Module):
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
             )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _SAVE_PARTIAL_STATES_KERNEL.register_warmup(
+                head_dim=self.head_dim,
+                compress_ratio=self.compress_ratio,
+            )
+            if current_platform.is_cuda() and self.head_dim == 512:
+                from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
+                )
+
+                store_full_kv = vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+                if self.compress_ratio == 4:
+                    (
+                        _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
+                        if store_full_kv
+                        else _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL
+                    ).register_warmup()
+                else:
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL.register_warmup()
+                    if store_full_kv:
+                        _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL.register_warmup()
+                    else:
+                        _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL.register_warmup(
+                            vllm_config,
+                            k_cache_prefix=self.k_cache_prefix,
+                            compress_ratio=self.compress_ratio,
+                        )
+            else:
+                from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
+                    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
+                )
+
+                _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL.register_warmup()
+
     def forward(
         self,
         # [num_tokens, 2 * self.coff * self.head_dim]
@@ -371,7 +395,7 @@ class DeepseekCompressor(nn.Module):
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        save_partial_states(
+        _SAVE_PARTIAL_STATES_KERNEL(
             kv=kv,
             score=score,
             ape=self.ape,
@@ -421,22 +445,18 @@ class DeepseekCompressor(nn.Module):
         compress_norm_rope_store_fn: Any
         if current_platform.is_cuda() and self.head_dim == 512:
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
-                compress_norm_rope_store_cutedsl,
+                _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
             )
 
             # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
             # layout and the plain full-cache layout. The full-cache flags
             # are consumed only here.
-            compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
+            compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL
             extra_kwargs: dict[str, Any] = dict(
                 store_full_kv=store_full_kv,
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
-            if not self.overlap and self.eager_scratch_pool is not None:
-                extra_kwargs["compress_scratch"] = (
-                    self.eager_scratch_pool.compressor_scratch(num_actual)
-                )
         elif self._use_two_stage_fused_compressor:
             # head=512 cr>=128 (no overlap): two-pass split compressor on the
             # prefill suffix, single-pass on the decode prefix.

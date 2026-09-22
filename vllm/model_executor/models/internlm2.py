@@ -323,7 +323,7 @@ class InternLM2Model(nn.Module):
 
 class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
     hf_to_vllm_mapper = InternLM2Model.hf_to_vllm_mapper
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "wqkv": ["wqkv"],
         "gate_up_proj": ["w1", "w3"],
     }
@@ -381,10 +381,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["output."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
 

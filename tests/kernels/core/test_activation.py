@@ -22,6 +22,13 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
     swiglustep_and_mul_triton,
 )
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+    apply_moe_activation,
+)
+from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -31,6 +38,100 @@ SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
+
+
+def test_masked_moe_activation_rejects_unsupported_activation() -> None:
+    input = torch.empty(1, 1, 2)
+    output = torch.empty(1, 1, 1)
+    valid_token_counts = torch.ones(1, dtype=torch.int32)
+
+    with pytest.raises(NotImplementedError, match="relu2"):
+        apply_moe_activation(
+            MoEActivation.RELU2,
+            output,
+            input,
+            valid_token_counts=valid_token_counts,
+        )
+
+
+def test_moe_silu_clamp_uses_native_xpu_fallback(
+    default_vllm_config, monkeypatch
+) -> None:
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    clamp_limit = 3.0
+    input = torch.tensor([[12.0, -12.0, 8.0, -8.0], [-2.0, 2.0, -4.0, 4.0]])
+    output = torch.empty(2, 2)
+
+    apply_moe_activation(
+        MoEActivation.SILU,
+        output,
+        input,
+        activation_config=ApplyMoEActivationConfig(clamp_limit=clamp_limit),
+    )
+
+    expected = SiluAndMulWithClamp(clamp_limit, compile_native=False).forward_native(
+        input
+    )
+    torch.testing.assert_close(output, expected)
+
+
+def _assert_masked_moe_activation(
+    activation: MoEActivation,
+    activation_config: ApplyMoEActivationConfig,
+    *,
+    dtype: torch.dtype,
+    mask_layout: str,
+    d: int,
+    max_num_tokens: int,
+) -> None:
+    device = CUDA_DEVICES[0]
+    num_experts = 4
+    input_dim = 2 * d if activation.is_gated else d
+    if mask_layout == "flat":
+        input = torch.randn(max_num_tokens, input_dim, dtype=dtype, device=device)
+        valid_token_counts = torch.tensor(
+            [max_num_tokens // 2], dtype=torch.int32, device=device
+        )
+        output = torch.full((max_num_tokens, d), 42.0, dtype=dtype, device=device)
+    else:
+        input = torch.randn(
+            num_experts, max_num_tokens, input_dim, dtype=dtype, device=device
+        )
+        valid_token_counts = torch.tensor(
+            [0, 1, max_num_tokens // 2, max_num_tokens],
+            dtype=torch.int32,
+            device=device,
+        )
+        output = torch.full(
+            (num_experts, max_num_tokens, d), 42.0, dtype=dtype, device=device
+        )
+
+    apply_moe_activation(
+        activation,
+        output,
+        input,
+        activation_config=activation_config,
+        valid_token_counts=valid_token_counts,
+    )
+
+    batched_input = input.view(-1, max_num_tokens, input_dim)
+    batched_output = output.view(-1, max_num_tokens, d)
+    for expert, num_tokens in enumerate(valid_token_counts.cpu().tolist()):
+        if num_tokens:
+            expected = torch.empty((num_tokens, d), dtype=dtype, device=device)
+            apply_moe_activation(
+                activation,
+                expected,
+                batched_input[expert, :num_tokens].clone(),
+                activation_config=activation_config,
+            )
+            torch.testing.assert_close(
+                batched_output[expert, :num_tokens],
+                expected,
+                atol=get_default_atol(output),
+                rtol=get_default_rtol(output),
+            )
+        assert torch.all(batched_output[expert, num_tokens:] == 42.0)
 
 
 @pytest.mark.parametrize(
@@ -119,6 +220,20 @@ def test_act_and_mul(
 
 
 SWIGLU_LIMITS = [3.0, 7.0, 15.0]
+
+
+@torch.inference_mode()
+def test_swiglu_limit_func_without_routing_uses_output_buffer() -> None:
+    x = torch.randn(7, 1024, dtype=torch.bfloat16, device="cuda")
+    output = torch.empty(7, 512, dtype=x.dtype, device=x.device)
+
+    swiglu_limit_func(output, x, swiglu_limit=7.0)
+    gate, up = x.chunk(2, dim=-1)
+    expected = torch.nn.functional.silu(gate.clamp(max=7.0)) * up.clamp(
+        min=-7.0, max=7.0
+    )
+
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize("swiglu_limit", SWIGLU_LIMITS)
@@ -237,6 +352,111 @@ def test_masked_situ_and_mul(
     )
 
 
+MOE_ACTIVATION_CASES = [
+    pytest.param(MoEActivation.SILU, ApplyMoEActivationConfig(), id="silu"),
+    pytest.param(
+        MoEActivation.SILU, ApplyMoEActivationConfig(clamp_limit=3.0), id="silu_clamp"
+    ),
+    pytest.param(MoEActivation.GELU, ApplyMoEActivationConfig(), id="gelu"),
+    pytest.param(MoEActivation.GELU_TANH, ApplyMoEActivationConfig(), id="gelu_tanh"),
+    pytest.param(
+        MoEActivation.SITU,
+        ApplyMoEActivationConfig(
+            activation_situ_beta=1.5,
+            activation_situ_linear_beta=2.0,
+        ),
+        id="situ",
+    ),
+    pytest.param(MoEActivation.SWIGLUOAI, ApplyMoEActivationConfig(), id="swigluoai"),
+    pytest.param(
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ApplyMoEActivationConfig(clamp_limit=3.0, alpha=1.3, beta=0.5),
+        id="swigluoai_uninterleave",
+    ),
+    pytest.param(MoEActivation.SWIGLUSTEP, ApplyMoEActivationConfig(), id="swiglustep"),
+    pytest.param(
+        MoEActivation.SILU_NO_MUL, ApplyMoEActivationConfig(), id="silu_no_mul"
+    ),
+    pytest.param(
+        MoEActivation.GELU_NO_MUL, ApplyMoEActivationConfig(), id="gelu_no_mul"
+    ),
+    pytest.param(
+        MoEActivation.GELU_TANH_NO_MUL,
+        ApplyMoEActivationConfig(),
+        id="gelu_tanh_no_mul",
+    ),
+    pytest.param(
+        MoEActivation.RELU2_NO_MUL, ApplyMoEActivationConfig(), id="relu2_no_mul"
+    ),
+]
+
+
+@pytest.mark.parametrize(("activation", "activation_config"), MOE_ACTIVATION_CASES)
+@torch.inference_mode()
+def test_masked_moe_activation_dispatch(
+    default_vllm_config,
+    activation: MoEActivation,
+    activation_config: ApplyMoEActivationConfig,
+) -> None:
+    _assert_masked_moe_activation(
+        activation,
+        activation_config,
+        dtype=torch.bfloat16,
+        mask_layout="batched_experts",
+        d=513,
+        max_num_tokens=7,
+    )
+
+
+@pytest.mark.parametrize(
+    ("activation", "activation_config", "mask_layout"),
+    [
+        pytest.param(
+            MoEActivation.SILU,
+            ApplyMoEActivationConfig(),
+            "flat",
+            id="flat",
+        ),
+        pytest.param(
+            MoEActivation.SITU,
+            ApplyMoEActivationConfig(
+                activation_situ_beta=1.5,
+                activation_situ_linear_beta=2.0,
+            ),
+            "batched_experts",
+            id="batched-experts",
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_masked_moe_activation_grid_stride(
+    default_vllm_config,
+    activation: MoEActivation,
+    activation_config: ApplyMoEActivationConfig,
+    mask_layout: str,
+) -> None:
+    _assert_masked_moe_activation(
+        activation,
+        activation_config,
+        dtype=torch.half,
+        mask_layout=mask_layout,
+        d=513,
+        max_num_tokens=67,
+    )
+
+
+@torch.inference_mode()
+def test_masked_moe_activation_opcheck(default_vllm_config) -> None:
+    device = CUDA_DEVICES[0]
+    input = torch.randn(2, 3, 64, dtype=torch.half, device=device)
+    output = torch.empty(2, 3, 32, dtype=torch.half, device=device)
+    valid_token_counts = torch.tensor([1, 3], dtype=torch.int32, device=device)
+    opcheck(
+        torch.ops._C.masked_moe_activation,
+        (output, input, valid_token_counts, "silu", 0.0, 1.0, 0.0, 1.0, -1.0),
+    )
+
+
 @pytest.mark.parametrize(
     "activation",
     [
@@ -274,3 +494,73 @@ def test_activation(
 
     out = torch.empty_like(x)
     opcheck(fn, (out, x))
+
+
+HUMMING_ACTIVATION_CASES = MOE_ACTIVATION_CASES + [
+    pytest.param(MoEActivation.RELU2, ApplyMoEActivationConfig(), id="relu2"),
+]
+HUMMING_ACTIVATION_CASES += [
+    pytest.param(
+        MoEActivation.SITU,
+        ApplyMoEActivationConfig(
+            activation_situ_beta=1.5,
+            activation_situ_linear_beta=linear_beta,
+        ),
+        id=f"situ-linear-beta-{linear_beta}",
+    )
+    for linear_beta in (None, 0.0, -1.0)
+]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA")
+@pytest.mark.parametrize(("activation", "activation_config"), HUMMING_ACTIVATION_CASES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(("num_tokens", "d"), [(1, 512), (7, 768), (83, 512)])
+@torch.inference_mode()
+def test_humming_activation_matches_framework(
+    activation: MoEActivation,
+    activation_config: ApplyMoEActivationConfig,
+    dtype: torch.dtype,
+    num_tokens: int,
+    d: int,
+) -> None:
+    """Compare activation math/layouts without quantization or Hadamard error."""
+    pytest.importorskip("humming")
+    from humming.ops import process_input
+
+    from vllm.model_executor.layers.quantization.utils.humming.activation import (
+        get_humming_activation,
+    )
+
+    set_random_seed(0)
+    width = d * 2 if activation.is_gated else d
+    x = 4 * torch.randn(num_tokens, width, dtype=dtype, device=CUDA_DEVICES[0])
+    # Exercise zero, saturation, and both sides of the clamp limits (3 and 7).
+    edges = x.new_tensor([0, 0.001, 1, 2.99, 3, 3.01, 6.99, 7, 7.01, 8, 16])
+    edges = torch.cat((-edges[1:].flip(0), edges))
+    x[0] = edges[torch.arange(width, device=x.device) % edges.numel()]
+
+    actual, _, _ = process_input(
+        x,
+        quant_mode="none",
+        hadamard_block_size=0,
+        **get_humming_activation(activation, activation_config),
+    )
+    expected = torch.empty(num_tokens, d, dtype=dtype, device=x.device)
+    if activation == MoEActivation.RELU2:
+        # apply_moe_activation has only the non-gated ReLU2 variant.
+        gate, up = x.float().chunk(2, dim=-1)
+        activated_gate = torch.empty_like(gate)
+        apply_moe_activation(MoEActivation.RELU2_NO_MUL, activated_gate, gate.clone())
+        expected.copy_(activated_gate * up)
+    else:
+        # The framework's non-gated ReLU2 path modifies its input in place.
+        apply_moe_activation(
+            activation, expected, x.clone(), activation_config=activation_config
+        )
+    torch.testing.assert_close(
+        actual,
+        expected,
+        atol=get_default_atol(expected),
+        rtol=get_default_rtol(expected),
+    )
