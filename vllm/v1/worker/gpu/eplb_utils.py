@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 
 
 def eplb_draft_model_name(model_config: ModelConfig) -> str:
-    """Return the EPLB display name for a draft model."""
+    """Return the EPLB step-log display name for a draft model."""
     return f"{model_config.model} (draft)"
 
 
@@ -99,16 +99,15 @@ class EPLBController:
         assert speculative_config is not None
         draft_model_config = speculative_config.draft_model_config
         assert draft_model_config is not None
-        draft_model_name = eplb_draft_model_name(draft_model_config)
         logger.info_once(
             "EPLB is enabled for MoE part of drafter model %s.",
-            draft_model_name,
+            draft_model_config.model,
         )
         assert self.state is not None
         self.state.add_model(
             draft_moe_model,
             draft_model_config,
-            model_name=draft_model_name,
+            model_name=eplb_draft_model_name(draft_model_config),
         )
         speculator.set_eplb_state(self.state)
         self._has_registered_models = True
