@@ -308,9 +308,9 @@ steps:
   parallelism: 6
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Quantization Kernels Shard %N"
+      label: ":amd: (MI300) Quantization Kernels Shard %N"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -350,9 +350,9 @@ steps:
   parallelism: 5
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) MoE Kernels Shard %N"
+      label: ":amd: (MI300) MoE Kernels Shard %N"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 55
       source_file_dependencies:
       - csrc/quantization/cutlass_w8a8/moe/
@@ -701,6 +701,62 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
+
+- label: ":amd: (MI355 DPX) Native Quantization Kernels"
+  key: amd-native-quantization-kernels-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/rocm/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/kernels/linear/
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  - tests/kernels/quantization/test_rocm_mxfp4.py
+  - tests/kernels/quantization/test_rocm_mxfp8_linear.py
+  - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  - tests/quantization/reference_mxfp4.py
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
+  commands:
+  - pytest -v -s kernels/quantization/test_rocm_mxfp4.py
+  - pytest -v -s kernels/quantization/test_rocm_mxfp8_linear.py
+  - pytest -v -s kernels/quantization/test_rocm_skinny_gemms.py -k wvsplitkrc
+
+- label: ":amd: (MI355 DPX) FP4 and INT4 MoE Kernels"
+  key: amd-fp4-moe-kernels-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/moe/
+  - csrc/rocm/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  - vllm/config/
+  - tests/kernels/moe/test_rocm_aiter_moe.py
+  - tests/kernels/moe/test_ocp_mx_moe.py
+  - tests/kernels/moe/test_flydsl_moe.py
+  - tests/kernels/moe/utils.py
+  - tests/kernels/utils.py
+  commands:
+  - pytest -v -s kernels/moe/test_rocm_aiter_moe.py -k 'mi350_mxfp4 or quant_scheme_support_matches_gfx950'
+  - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_rocm_mxfp4_moe_oracle -k AITER_MXFP4
+  - pytest -v -s kernels/moe/test_flydsl_moe.py
 
 - label: ":amd: (MI355 DPX) FP8 MoE Kernels"
   key: amd-fp8-moe-kernels-mi355
