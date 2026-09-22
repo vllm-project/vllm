@@ -43,6 +43,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -118,7 +119,7 @@ class Qwen3MoeMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
+        out = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
