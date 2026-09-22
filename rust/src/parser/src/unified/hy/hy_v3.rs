@@ -154,7 +154,10 @@ mod tests {
     #[test]
     fn structural_tag_uses_tokenizer_detected_suffix() {
         let tools = tools();
-        let parser = HyV3UnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+        let tokenizer = Arc::new(tokenizer());
+        let mut parser = HyV3UnifiedParser::new(&tools, tokenizer.clone()).unwrap();
+        let prompt = tokenizer.encode("<think:opensource>", false).unwrap();
+        parser.initialize(&prompt).unwrap();
         let tag = parser
             .build_output_grammar(&OutputGrammarContext {
                 tools: &tools,
@@ -164,11 +167,44 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        assert_eq!(tag.coverage, GrammarCoverage::FinalOutputOnly);
+        assert_eq!(tag.coverage, GrammarCoverage::FromTokenZero);
         let tag = StructuralTag::new(tag.format).to_json_string().unwrap();
 
+        assert!(tag.contains("</think:opensource>"));
         assert!(tag.contains("<tool_calls:opensource>"));
         assert!(tag.contains("<arg_value:opensource>"));
         assert!(!tag.contains("glm_xml"));
+    }
+
+    #[test]
+    fn grammar_root_follows_prompt_reasoning_state() {
+        let tools = tools();
+        let tokenizer = Arc::new(tokenizer());
+        let mut parser = HyV3UnifiedParser::new(&tools, tokenizer.clone()).unwrap();
+        for (prompt, inside) in [
+            ("<think:opensource>", true),
+            ("</think:opensource>", false),
+            ("", false),
+        ] {
+            parser.initialize(&tokenizer.encode(prompt, false).unwrap()).unwrap();
+            let grammar = parser
+                .build_output_grammar(&OutputGrammarContext {
+                    tools: &tools,
+                    tool_choice: &ToolChoice::required(),
+                    tool_strict_level: Default::default(),
+                    parallel_tool_calls: true,
+                })
+                .unwrap()
+                .unwrap();
+            let value = serde_json::to_value(grammar.format).unwrap();
+            let root = &value["elements"][0];
+            if inside {
+                assert_eq!(root["begin"], "");
+                assert_eq!(root["end"], "</think:opensource>");
+            } else {
+                assert_eq!(root["type"], "optional");
+                assert_eq!(root["content"]["begin"], "<think:opensource>");
+            }
+        }
     }
 }
