@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from vllm.config import ParallelConfig, VllmConfig, replace
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 logger = init_logger(__name__)
@@ -52,20 +53,12 @@ def load_pard2_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     )
 
     draft_vllm_config = replace(
-        vllm_config,
+        speculative_config.apply_draft_overrides(vllm_config),
         parallel_config=_get_pard2_parallel_config(
             vllm_config.parallel_config,
             speculative_config.draft_parallel_config.tensor_parallel_size,
         ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
-        ),
-        load_config=get_pp_safe_draft_load_config(vllm_config.load_config),
+        load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
     # VllmConfig post-init restores the target's quant config, which the draft
     # config is kept around for (pard2_target_layers). Against a quantized target
