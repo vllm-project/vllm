@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
+    prepare_sparse_mla_safe_lengths,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -697,18 +698,16 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         sparse_topk_capacity = topk_indices.shape[1]
 
         extra_kwargs: dict[str, torch.Tensor] = {}
-        empty_rows: torch.Tensor | None = None
+        needs_empty_query_guard = self.need_to_return_lse_for_decode or isinstance(
+            self.index_group, HiSparseMLAIndexGroup
+        )
         if self.is_nope_mla:
-            # The native no-rope kernel takes the active top-k length per query
-            # token (``seq_lens`` here is already the compacted per-token valid
-            # count, int32) and rejects zero-length rows. Point empty rows at a
-            # single valid dummy slot with length 1 and zero their output after
-            # the launch. ``triton_convert_req_index_to_global_index`` packs the
-            # valid indices into a contiguous prefix, which is what the kernel
-            # requires of the page table.
-            empty_rows = seq_lens == 0
-            topk_indices[:, 0] = topk_indices[:, 0].masked_fill(empty_rows, 0)
-            extra_kwargs["sparse_mla_top_k_lens"] = seq_lens.clamp(min=1)
+            # Resident TP queries have nonempty selections. Preserve empty-query
+            # handling for DCP's local selections and host-backed HiSparse.
+            topk_lens = seq_lens
+            if needs_empty_query_guard:
+                topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
+            extra_kwargs["sparse_mla_top_k_lens"] = topk_lens
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
@@ -737,12 +736,17 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         out = o.view(-1, o.shape[-2], o.shape[-1])
         if lse is not None:
             lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
-        if empty_rows is None and lse is not None:
-            empty_rows = (topk_indices == -1).all(dim=-1)
-        if empty_rows is not None:
-            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+        if self.is_nope_mla and needs_empty_query_guard:
+            empty_queries = seq_lens == 0
             if lse is not None:
-                lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+                # DCP combine already suppresses outputs with zero LSE weight.
+                lse.masked_fill_(empty_queries[:, None], float("-inf"))
+            else:
+                out.masked_fill_(empty_queries[:, None, None], 0.0)
+        elif lse is not None:
+            empty_rows = (topk_indices == -1).all(dim=-1)
+            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         return out, lse
 
     @staticmethod
