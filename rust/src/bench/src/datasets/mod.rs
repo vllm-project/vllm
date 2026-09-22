@@ -144,6 +144,64 @@ pub fn batch_requests(
         .collect()
 }
 
+/// Read a JSONL file into `T` values, skipping blank lines.
+///
+/// `what` names the dataset in error messages ("custom dataset", "timed
+/// trace"); `max_entries` stops the read early. Returns `(line_number, value)`
+/// pairs with 0-based line numbers so callers can index or report by row.
+pub fn read_jsonl<T: serde::de::DeserializeOwned>(
+    path: &str,
+    what: &str,
+    max_entries: Option<usize>,
+) -> crate::error::Result<Vec<(usize, T)>> {
+    use crate::error::BenchError;
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| BenchError::Config(format!("Failed to read {what} '{path}': {e}")))?;
+
+    let mut entries: Vec<(usize, T)> = Vec::new();
+    for (lineno, line) in content.lines().enumerate() {
+        if max_entries.is_some_and(|max| entries.len() >= max) {
+            break;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str(line).map_err(|e| {
+            BenchError::Config(format!("Invalid JSONL at {path}:{}: {e}", lineno + 1))
+        })?;
+        entries.push((lineno, value));
+    }
+
+    if entries.is_empty() {
+        return Err(BenchError::Config(format!("No entries in {what} '{path}'")));
+    }
+    Ok(entries)
+}
+
+/// Fixtures shared by the dataset test modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::tokenizer::TokenizerKind;
+
+    /// gpt2 via built-in tiktoken encoding — loads without network access.
+    pub(crate) fn test_tokenizer() -> TokenizerKind {
+        TokenizerKind::Tiktoken(
+            crate::tiktoken::load_builtin_tiktoken("gpt2")
+                .expect("gpt2 built-in tiktoken should always load without network"),
+        )
+    }
+
+    /// Write a JSONL fixture to the temp dir. `name` must be unique across the
+    /// whole test suite — all fixtures share one directory.
+    pub(crate) fn write_temp_jsonl(name: &str, content: &str) -> String {
+        let path = std::env::temp_dir().join(format!("vllm-bench-{name}.jsonl"));
+        std::fs::write(&path, content).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
