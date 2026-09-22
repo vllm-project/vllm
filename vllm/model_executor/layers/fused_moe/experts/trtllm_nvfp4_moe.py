@@ -225,11 +225,10 @@ class TrtLlmNvFp4ExpertsBase:
         activation_key: QuantKey | None,
     ) -> bool:
         """Supports Nvfp4 quantization."""
-        SUPPORTED_W_A = [
-            (kNvfp4Static, kNvfp4Dynamic),
-            (kNvfp4Static, kNvfp4DynamicToken),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        return weight_key == kNvfp4Static and activation_key in (
+            kNvfp4Dynamic,
+            kNvfp4DynamicToken,
+        )
 
     @staticmethod
     def is_supported_config(
@@ -240,10 +239,7 @@ class TrtLlmNvFp4ExpertsBase:
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
         if activation_key == kNvfp4DynamicToken and not moe_config.is_act_and_mul:
-            return False, (
-                "kernel does not support per-token NVFP4 activation scaling "
-                "for non-gated MoE"
-            )
+            return False, "kernel does not support non-gated per-token NVFP4"
         return mk.FusedMoEExperts.is_supported_config(
             cls,
             moe_config,
