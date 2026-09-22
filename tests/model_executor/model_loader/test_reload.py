@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.reload.meta import (
     restore_layer_on_meta,
     to_meta_tensor,
 )
+from vllm.model_executor.model_loader.reload.mla import CommonMLAProcessingPolicy
 from vllm.model_executor.model_loader.reload.moe import RoutedExpertsReloadPlan
 from vllm.model_executor.model_loader.reload.trace import (
     ModelReloadTracer,
@@ -249,6 +250,98 @@ def test_reload_trace_packed_policy_loading_sources(
         )
         torch.testing.assert_close(runtime[4:], torch.zeros(4, dtype=runtime.dtype))
     torch.testing.assert_close(layer.derived_scale, torch.ones(2))
+
+
+def test_mla_reload_lifecycle_retains_projection():
+    """Cold MLA PWAL retains kv_b_proj; binding and reload must preserve it."""
+    from vllm.model_executor.layers.attention import MLAAttention
+    from vllm.model_executor.model_loader.reload.integration import (
+        create_model_reload_tracer,
+    )
+
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_b_proj = torch.nn.Module()
+    source = layer.kv_b_proj
+    source.quant_method = None
+    source.weight = torch.nn.Parameter(
+        torch.zeros(6, 4, dtype=torch.bfloat16, device="cuda"),
+        requires_grad=False,
+    )
+    source.weight.weight_loader = default_weight_loader
+    layer.num_heads = 2
+    layer.kv_lora_rank = 4
+    layer.qk_nope_head_dim = 2
+    layer.v_head_dim = 1
+    layer.is_amx_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.dcp_q_replicate = False
+    layer.W_UK_T_dcp_qrep = None
+    layer.quant_config = None
+    for name in ("_k_scale", "_v_scale", "_q_scale", "_prob_scale"):
+        layer.register_buffer(name, torch.ones((), device="cuda"))
+    layer.impl = types.SimpleNamespace(process_weights_after_loading=lambda dtype: None)
+    model = torch.nn.Module()
+    model.attn = layer
+    trace = create_model_reload_tracer(model)
+    weight = torch.arange(24, device="cuda", dtype=torch.bfloat16).reshape(6, 4)
+    with trace.observe():
+        source.weight.weight_loader(source.weight, weight)
+    layer.process_weights_after_loading(torch.bfloat16)
+    trace.bind_runtime()
+    targets = (source.weight, layer.W_UK_T, layer.W_UV)
+    pointers = tuple(t.data_ptr() for t in targets)
+    for multiplier in (2, 3):
+        fresh = weight * multiplier
+        with trace.round():
+            source.weight.weight_loader(source.weight, fresh)
+        expected = fresh.T.reshape(4, 2, 3)
+        torch.testing.assert_close(source.weight, fresh)
+        torch.testing.assert_close(layer.W_UK_T, expected[:, :, :2].permute(1, 2, 0))
+        torch.testing.assert_close(layer.W_UV, expected[:, :, 2:].transpose(0, 1))
+        assert tuple(t.data_ptr() for t in targets) == pointers
+        assert source.weight is targets[0]
+        assert layer.W_UK_T is targets[1]
+        assert layer.W_UV is targets[2]
+
+
+def test_mla_processing_policy_splits_bf16_kv_b_projection():
+    layer = types.SimpleNamespace(
+        num_heads=2,
+        kv_lora_rank=3,
+        qk_nope_head_dim=2,
+        v_head_dim=1,
+    )
+    weight = torch.arange(18, dtype=torch.float32).reshape(6, 3)
+
+    values = CommonMLAProcessingPolicy().process_reload(layer, weight, torch.float32)
+    w_uk_t, w_uv = values["W_UK_T"], values["W_UV"]
+
+    expected = weight.T.reshape(3, 2, 3)
+    assert torch.equal(w_uk_t, expected[:, :, :2].permute(1, 2, 0))
+    assert torch.equal(w_uv, expected[:, :, 2:].transpose(0, 1))
+
+
+def test_mla_processing_policy_consumes_dequantized_canonical_projection():
+    """MLA consumes the canonical projection, not backend-packed FP8 storage."""
+    layer = types.SimpleNamespace(
+        num_heads=1,
+        kv_lora_rank=2,
+        qk_nope_head_dim=1,
+        v_head_dim=1,
+    )
+    weight = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float8_e4m3fn)
+    scale = torch.tensor(2.0)
+
+    values = CommonMLAProcessingPolicy().process_reload(
+        layer, weight.to(torch.float32) * scale, torch.float32
+    )
+    w_uk_t, w_uv = values["W_UK_T"], values["W_UV"]
+
+    expected = (weight.to(torch.float32) * 2).T.reshape(2, 1, 2)
+    assert torch.equal(w_uk_t, expected[:, :, :1].permute(1, 2, 0))
+    assert torch.equal(w_uv, expected[:, :, 1:].transpose(0, 1))
 
 
 @pytest.mark.parametrize("preserve", [False, True])

@@ -540,6 +540,7 @@ class DeepGEMMReloadPolicy(_CanonicalReloadPolicy):
     def bind(self, state: ReloadState) -> None:
         method = state.module.quant_method
         self.kernel = getattr(method, "fp8_linear", getattr(method, "moe_kernel", None))
+        self.kernel = getattr(self.kernel, "fallback", self.kernel)
         self.plan = getattr(method, "processing_plan", None)
         for weight, scale in self.pairs:
             if state.targets[weight].tensor.dtype != torch.float8_e4m3fn:
@@ -551,6 +552,7 @@ class DeepGEMMReloadPolicy(_CanonicalReloadPolicy):
     def _validate_kernel(self, state: ReloadState) -> None:
         method = state.module.quant_method
         kernel = getattr(method, "fp8_linear", getattr(method, "moe_kernel", None))
+        kernel = getattr(kernel, "fallback", kernel)
         if kernel is not self.kernel:
             raise ReloadError("DeepGEMM kernel changed since runtime binding")
         if getattr(method, "processing_plan", None) is not self.plan:

@@ -743,3 +743,181 @@ rg -n 'processing_plan|prepare_weights' \
 
 本文件记录的是本次静态审计结果和接入设计，不新增后端能力，
 也不以历史回归测试替代本次没有执行的全量离线量化验证。
+
+## 13. 需要模型级特殊适配的 FP8 模型
+
+本节针对“先完成一个模型级 FP8 reload”单独列出模型。
+这里的“模型级特殊适配”不是指模型使用了 FP8，而是指模型本身存在
+额外的 `process_weights_after_loading`、专用 quant config、MTP/MLA/
+DeepSpark wrapper，或者同一个模型内混合多种量化格式。
+
+普通的 decoder-only FP8 模型，如果所有量化 Linear/MoE 都直接使用
+`Fp8LinearMethod`/`Fp8MoEMethod`，且模型根节点和特殊 attention 没有
+额外 PWAL，通常只需要通用 FP8 reload policy，不需要本节的模型专用适配。
+
+### 13.1 DeepSeek V4 / V4.1
+
+相关入口：
+
+- [DeepSeek V4 quant config](../../../vllm/models/deepseek_v4/quant_config.py)
+- [DeepSeek V4.1 quant config](../../../vllm/models/deepseek_v41/quant_config.py)
+- [DeepSeek V4 model](../../../vllm/models/deepseek_v4/nvidia/model.py)
+- [DeepSeek V4.1 model](../../../vllm/models/deepseek_v41/nvidia/model.py)
+
+这是当前模型级 FP8 reload 中最复杂的一组，主要原因是：
+
+- 使用专用 `DeepseekV4FP8Config`，不是普通 `Fp8Config` 的简单别名。
+- 同一模型内可能同时出现 FP8、MXFP8、MXFP4 和 NVFP4。
+- FP8 routed experts 可以委托到 `Fp8MoEMethod`，但 MXFP4/NVFP4 experts
+  会走其他 method，不能据此宣布整模型支持。
+- V4.1 的部分 32x32 MXFP8 Linear 会使用 `ModelOptLinearMethod`。
+- DeepSeek V4/V4.1 的 model、MTP、DeepSpark、VL wrapper 存在模型级
+  后处理。
+- MLA、shared experts、routed experts 的权重和 scale 布局不完全相同。
+- NVIDIA、AMD、XPU、CPU 版本的后处理和 kernel 选择存在差异。
+
+接入时至少要拆分：
+
+```text
+模型级 PWAL
+  -> 固定结构初始化 / 可重入数值转换
+FP8 shared/linear
+  -> Fp8LinearMethod policy
+FP8 routed experts
+  -> Fp8MoEMethod + 当前 expert mapping
+MXFP8 linear
+  -> ModelOpt processing plan
+MXFP4/NVFP4 experts
+  -> 各自独立 processing plan
+MLA / quantized attention
+  -> 单独的 attention reload policy
+MTP / DeepSpark / VL
+  -> 独立 state 或明确排除
+```
+
+因此不能只给 `DeepseekV4FP8Config` 添加一个 builder。
+必须先按实际模型 class、平台和 checkpoint quantization config 列出每一类
+module 的 method，然后逐类闭合。
+
+### 13.2 Kimi K3
+
+相关入口：
+
+- [Kimi K3 model](../../../vllm/models/kimi_k3/nvidia/model.py)
+- [Kimi K3 MLA](../../../vllm/models/kimi_k3/nvidia/mla.py)
+- [Kimi K3 KDA](../../../vllm/models/kimi_k3/nvidia/kda.py)
+- [Kimi K3 DeepSpark MLA](../../../vllm/models/kimi_k3/nvidia/dspark_mla.py)
+
+Kimi K3 需要关注：
+
+- language model 和 VL wrapper 可能定义模型级 PWAL。
+- MLA 有独立的权重后处理和量化配置。
+- KDA 的部分 projection 会根据 `ModelOptMixedPrecisionConfig`
+  选择特殊 FP8 block 格式。
+- MTP、DeepSpark MLA 等子路径可能有独立的 quant config 和后处理。
+
+如果只验证普通语言模型主干，需要明确排除 MLA、KDA、MTP 和 VL；
+否则当前 tracer 会在模型级 PWAL 或特殊 attention 处拒绝。
+
+### 13.3 HY V4
+
+相关入口：
+
+- [HY V4 MTP](../../../vllm/models/hy_v4/nvidia/mtp.py)
+- [HY V4 model](../../../vllm/models/hy_v4/nvidia/model.py)
+- [HY V4 attention](../../../vllm/models/hy_v4/nvidia/attention.py)
+
+HY V4 的主要风险在 MTP，而不是普通 FP8 Linear：
+
+- MTP 会根据 backbone quant config 重新构造或复制 quant config。
+- 需要重新处理 `ignored_layers`、excluded modules 和
+  `packed_modules_mapping`。
+- block FP8、E8M0 scale 和 MTP head 的布局可能与主模型不同。
+- MTP 的量化层集合不一定等于 backbone 的量化层集合。
+
+接入时不能只把主模型的 `quant_config` 传给 MTP。应当为主模型和 MTP
+分别生成 reload state，并验证它们使用的 processing plan 是否可以共享。
+
+### 13.4 Qwen4-Exp
+
+相关入口：
+
+- [Qwen4-Exp ngram embedding](../../../vllm/models/qwen4_exp/nvidia/ngram_embedding.py)
+- [Qwen4-Exp AMD model](../../../vllm/models/qwen4_exp/amd/model.py)
+- [Qwen4-Exp AMD MTP](../../../vllm/models/qwen4_exp/amd/mtp.py)
+
+Qwen4-Exp 的特殊点包括：
+
+- ngram embedding 有自己的量化后处理。
+- AMD MTP 会重新构造 draft quant config。
+- MTP 可能调整 ignored、excluded 和 quantized layer 集合。
+- AMD model 对 ModelOpt FP4 等配置存在额外分派逻辑。
+
+如果目标只是语言模型主干，可以先将 ngram embedding 和 MTP 明确列为
+不支持范围；如果目标是完整模型级 reload，则需要为它们建立独立 state，
+不能把普通 embedding 或 Linear 直接当作 copy path。
+
+### 13.5 GLM5Next
+
+相关入口：
+
+- [GLM5Next KDA](../../../vllm/models/glm5next/nvidia/kda.py)
+- [GLM5Next MTP](../../../vllm/models/glm5next/nvidia/mtp.py)
+- [GLM5Next multimodal](../../../vllm/models/glm5next/nvidia/multimodal.py)
+
+GLM5Next 的特殊适配点：
+
+- KDA 初始化过程中会临时移除或恢复 quant config。
+- MTP 和 multimodal 子模块有自己的量化配置传递路径。
+- 实际 checkpoint 可能只量化语言模型主干，KDA、MTP 或视觉层可能保持
+  BF16/FP16；必须依据实际 checkpoint 逐层确认。
+
+因此 GLM5Next 适合先做“主干 FP8 + 其他模块明确非量化”的受限验证，
+不建议一开始就把 KDA、MTP 和 multimodal 一并纳入通用 FP8 reload。
+
+### 13.6 其他需要边界检查的模型
+
+以下模型不一定都需要新的 FP8 processing plan，但存在模型级后处理或
+特殊模块，不能仅凭普通 FP8 Linear 测试结果宣布支持：
+
+| 模型/模块 | 特殊点 | 首轮建议 |
+| --- | --- | --- |
+| DeepSeek V3.2 | MTP、MLA 或平台特有 wrapper | 先确认实际 quant method 和模型级 PWAL |
+| `dots3_note` | 视觉模块定义自己的后处理 | 语言主干和视觉分支分开验收 |
+| 普通 VLM | vision encoder/projector 可能有 transform 或 PWAL | 先排除视觉分支，后单独接入 |
+| DeepSeek V4 CPU/XPU/AMD | 同名模型的后处理和 kernel 不同 | 按平台分别建立支持矩阵 |
+
+### 13.7 首个模型的选择约束
+
+为了先验证模型级 FP8 reload 的基础流程，首个模型建议满足：
+
+```text
+所有量化 Linear      -> Fp8LinearMethod
+所有量化 MoE         -> Fp8MoEMethod（如果存在）
+根模型无 PWAL
+无量化 MLA / 特殊 attention
+无 MTP / DeepSpark / multimodal wrapper
+无 ModelOpt mixed
+无 MXFP4 / NVFP4 混合专家
+```
+
+满足这些条件的普通 dense FP8 decoder-only 模型最适合作为第一阶段目标。
+之后再按以下顺序扩展：
+
+```text
+普通 dense FP8
+  -> 普通 FP8 MoE + EPLB
+  -> DeepSeek V3/V3.2 类特殊 MoE
+  -> DeepSeek V4/V4.1 混合 FP8/FP4/MXFP8
+  -> MLA、MTP、DeepSpark、VL 和平台专用路径
+```
+
+模型级验收必须同时比较：
+
+```text
+冷加载 checkpoint B
+    vs
+冷加载 checkpoint A -> reload checkpoint B
+```
+
+并分别报告主干、MoE、MTP、MLA、视觉模块和模型级后处理是否实际覆盖。

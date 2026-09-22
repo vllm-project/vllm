@@ -67,6 +67,7 @@ def main():
     parser.add_argument("--moe-backend", default="flashinfer_cutlass")
     parser.add_argument("--server-gpu", default="0")
     parser.add_argument("--publisher-gpu", default="2")
+    parser.add_argument("--startup-timeout", type=float, default=900)
     parser.add_argument("--publish-ipc", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     print(sys.executable, sys.prefix, flush=True)
@@ -94,6 +95,15 @@ def main():
         response = requests.post(
             base + "/collective_rpc",
             json={"method": "inspect_reload_trace", "args": [arm]},
+            timeout=180,
+        )
+        response.raise_for_status()
+        return response.json()["results"][0]
+
+    def inspect_parameters():
+        response = requests.post(
+            base + "/collective_rpc",
+            json={"method": "inspect_model_parameters", "args": []},
             timeout=180,
         )
         response.raise_for_status()
@@ -161,7 +171,7 @@ def main():
                 start_new_session=True,
             )
             try:
-                deadline = time.monotonic() + 900
+                deadline = time.monotonic() + args.startup_timeout
                 while time.monotonic() < deadline:
                     if server.poll() is not None:
                         raise RuntimeError(f"Server exited: server-{variant}.log")
@@ -174,6 +184,7 @@ def main():
                 else:
                     raise TimeoutError("Server did not become healthy")
                 evidence[f"cold_{variant}"] = inspect(variant == "a")
+                evidence[f"cold_{variant}_parameters"] = inspect_parameters()
                 evidence[f"cold_{variant}_output"] = generate()
                 if variant == "a":
                     requests.post(
@@ -182,6 +193,7 @@ def main():
                     if args.backend == "nccl":
                         command = [
                             sys.executable,
+                            str(Path(__file__).with_name("run_day0_nccl_publisher.py")),
                             str(
                                 args.kit / "scripts/vllm_weight_update_client/"
                                 "run_vllm_weight_update.py"
@@ -218,6 +230,7 @@ def main():
                             check=True,
                         )
                     evidence["warm_b"] = inspect()
+                    evidence["warm_b_parameters"] = inspect_parameters()
                     requests.post(base + "/resume", timeout=180).raise_for_status()
                     evidence["warm_b_output"] = generate()
             finally:
@@ -234,6 +247,18 @@ def main():
 
     assert evidence["cold_a"].keys() == evidence["warm_b"].keys()
     assert evidence["warm_b"].keys() == evidence["cold_b"].keys()
+    assert (
+        evidence["cold_a_parameters"].keys()
+        == evidence["warm_b_parameters"].keys()
+        == evidence["cold_b_parameters"].keys()
+    )
+    for name, warm in evidence["warm_b_parameters"].items():
+        cold_a = evidence["cold_a_parameters"][name]
+        cold_b = evidence["cold_b_parameters"][name]
+        for key in ("shape", "dtype", "numel"):
+            assert warm[key] == cold_b[key] == cold_a[key], (name, key)
+        assert warm["hash"] == cold_b["hash"], name
+        assert warm["ptr"] == cold_a["ptr"], name
     changed = False
     for name, warm in evidence["warm_b"].items():
         old, cold = evidence["cold_a"][name], evidence["cold_b"][name]

@@ -10,6 +10,23 @@ from vllm.model_executor.model_loader.reload.integration import get_model_reload
 
 
 class ReloadTraceEvidence:
+    def inspect_model_parameters(self):
+        """Return content and storage identities for every model parameter."""
+        result = {}
+        for name, parameter in self.model_runner.model.named_parameters():
+            value = parameter.detach()
+            raw = value.contiguous().reshape(-1).view(torch.uint8)
+            result[name] = {
+                "id": id(value),
+                "ptr": value.data_ptr(),
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "numel": value.numel(),
+                "hash": hashlib.sha256(raw.cpu().numpy().tobytes()).hexdigest(),
+            }
+        assert result
+        return result
+
     def inspect_reload_trace(self, arm=False):
         trace = get_model_reload_tracer(self.model_runner.model)
         result = {}

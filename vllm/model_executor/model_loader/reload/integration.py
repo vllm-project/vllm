@@ -54,6 +54,7 @@ def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
     """Register supported layers before cold loading; never silently fall back."""
     from vllm.model_executor.layers.attention import (
         Attention,
+        MLAAttention,
         is_deferred_attention_layer,
     )
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -71,6 +72,9 @@ def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
     # sharing storage.
     copy_owners: dict[int, str] = {}
     for key, module in model.named_modules():
+        if isinstance(module, MLAAttention):
+            trace.register_state(module.create_reload_state(key))
+            continue
         method = getattr(module, "quant_method", None)
         if is_deferred_attention_layer(module):
             if type(module) is not Attention or is_quantized_kv_cache(

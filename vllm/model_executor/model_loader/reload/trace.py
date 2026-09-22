@@ -31,10 +31,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
 
+from vllm.logger import init_logger
+
 from .meta import to_meta_tensor
 
 if TYPE_CHECKING:
     from .moe import RoutedExpertsReloadPlan
+
+logger = init_logger(__name__)
 
 
 class ReloadError(RuntimeError):
@@ -628,6 +632,22 @@ class ModelReloadTracer:
                 and all(dep in order for dep in self.states[key].dependencies)
             ]
             if not ready:
+                missing = {
+                    key: tuple(
+                        dep
+                        for dep in self.states[key].dependencies
+                        if dep not in self.states
+                    )
+                    for key in pending
+                    if any(
+                        dep not in self.states for dep in self.states[key].dependencies
+                    )
+                }
+                logger.error(
+                    "Reload dependency validation failed: missing=%s states=%s",
+                    missing,
+                    tuple(self.states),
+                )
                 raise ReloadError("Missing dependency or cycle in reload states")
             order.extend(ready)
             pending.difference_update(ready)
@@ -637,7 +657,7 @@ class ModelReloadTracer:
                 raise ReloadError(f"{state.key}: runtime mapping has unknown roles")
             for role in state.roles:
                 name = state.runtime_names.get(role, role)
-                if name != role and hasattr(state.module, role):
+                if name is not None and name != role and hasattr(state.module, role):
                     raise ReloadError(f"{state.key}: checkpoint alias already exists")
                 if name is not None:
                     state.bind_target(role, partial(getattr, state.module, name))
@@ -687,7 +707,7 @@ class ModelReloadTracer:
                 target.validate()
             state.policy.validate(state)
             for role, name in state.runtime_names.items():
-                if name != role and hasattr(state.module, role):
+                if name is not None and name != role and hasattr(state.module, role):
                     raise ReloadError(f"{state.key}: checkpoint alias already exists")
             if state.expert_plan is not None:
                 state.slots = state.expert_plan.build(state)
@@ -714,7 +734,8 @@ class ModelReloadTracer:
                         ).expand(meta.shape)
                     else:
                         param = role_target.tensor
-                    if state.runtime_names.get(role, role) != role:
+                    name = state.runtime_names.get(role, role)
+                    if name != role:
                         # A distinct object prevents named_parameters() from
                         # deduplicating the checkpoint name against the live one.
                         param = torch.nn.Parameter(param.detach(), requires_grad=False)
@@ -875,12 +896,25 @@ class ModelReloadTracer:
         queue = deque([key])
         while queue:
             state = self.states[queue.popleft()]
-            if (
-                state.complete
-                or len(state.slots.arrived) != len(state.slots.expected)
-                or any(not self.states[dep].complete for dep in state.dependencies)
-            ):
+            if state.complete:
                 continue
+            if len(state.slots.arrived) != len(state.slots.expected):
+                continue
+            unfinished = tuple(
+                dep for dep in state.dependencies if not self.states[dep].complete
+            )
+            if unfinished:
+                logger.info(
+                    "Reload state %s waiting for dependencies: %s",
+                    state.key,
+                    unfinished,
+                )
+                continue
+            logger.info(
+                "Reload state %s finishing after dependencies: %s",
+                state.key,
+                state.dependencies,
+            )
             if state.expert_plan is not None:
                 state.expert_plan.validate(state)
             state.policy.validate(state)
@@ -888,6 +922,7 @@ class ModelReloadTracer:
             for target in state.targets.values():
                 target.validate()
             state.complete = True
+            logger.info("Reload state %s finished", state.key)
             if not state.preserve_checkpoint:
                 state.checkpoint.clear()
             queue.extend(self._dependents[state.key])
