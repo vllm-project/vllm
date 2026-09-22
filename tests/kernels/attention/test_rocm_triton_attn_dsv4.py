@@ -1450,6 +1450,149 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     torch.testing.assert_close(out, expected_reallocated, atol=2e-2, rtol=2e-2)
 
 
+@requires_gfx950
+@torch.inference_mode()
+def test_dsv41_adaptive_metadata_uses_device_boundaries_and_stable_buffers() -> None:
+    """V4.1 metadata follows device reallocations without changing graph pointers."""
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.models.deepseek_v41.amd.rocm import (
+        DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+        DeepseekV41ROCMAiterMLASparseMetadataBuilder,
+    )
+    from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
+
+    device = torch.device("cuda")
+    num_reqs = 3
+    upper_query_len = 6
+    graph_tokens = num_reqs * upper_query_len
+    block_size = 128
+
+    vllm_config = create_vllm_config(
+        model_name="facebook/opt-125m",
+        max_model_len=1024,
+        block_size=block_size,
+        max_num_seqs=num_reqs,
+        max_num_batched_tokens=graph_tokens,
+        hf_config_override={
+            "compress_ratios": [0, 1, 2],
+            "index_topk": 8,
+            "sliding_window": 32,
+        },
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=upper_query_len - 1,
+        parallel_drafting=False,
+        enable_adaptive_verification=True,
+        use_dspark=lambda: True,
+    )
+    mla_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.uint8,
+        tokens_per_state=2,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.uint8,
+        sliding_window=32,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    mla_builder = DeepseekV41ROCMAiterMLASparseMetadataBuilder(
+        mla_spec, ["c2a"], vllm_config, device
+    )
+    swa_builder = DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
+        swa_spec, ["c2a"], vllm_config, device
+    )
+    assert (
+        mla_builder.get_cudagraph_support(vllm_config, mla_spec)
+        == AttentionCGSupport.ALWAYS
+    )
+    assert (
+        swa_builder.get_cudagraph_support(vllm_config, swa_spec)
+        == AttentionCGSupport.ALWAYS
+    )
+
+    seq_lens = torch.tensor([100, 110, 120], dtype=torch.int32, device=device)
+    seq_lens_cpu = seq_lens.cpu()
+    query_start_loc_cpu = torch.arange(
+        0, graph_tokens + 1, upper_query_len, dtype=torch.int32
+    )
+    block_table = torch.arange(num_reqs, dtype=torch.int32, device=device).view(
+        num_reqs, 1
+    )
+
+    def build_metadata(query_lens: list[int]):
+        query_lens_tensor = torch.tensor(query_lens, dtype=torch.int32, device=device)
+        query_start_loc = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32, device=device),
+                query_lens_tensor.cumsum(0),
+            ]
+        )
+        active_tokens = sum(query_lens)
+        slot_mapping = torch.full((graph_tokens,), -1, dtype=torch.int64, device=device)
+        slot_mapping[:active_tokens] = torch.arange(
+            active_tokens, dtype=torch.int64, device=device
+        )
+        common = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
+            num_reqs=num_reqs,
+            num_actual_tokens=graph_tokens,
+            max_query_len=upper_query_len,
+            max_seq_len=int(seq_lens_cpu.max()),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=True,
+        )
+        return (
+            mla_builder.build_for_cudagraph_capture(common),
+            swa_builder.build_for_cudagraph_capture(common),
+        )
+
+    full_mla, full_swa = build_metadata([6, 6, 6])
+    pointers = (
+        full_mla.req_id_per_token.data_ptr(),
+        full_mla.slot_mapping.data_ptr(),
+        full_swa.token_to_req_indices.data_ptr(),
+        full_swa.decode_swa_ragged_indices.data_ptr(),
+        full_swa.decode_swa_ragged_indptr.data_ptr(),
+    )
+
+    reallocated_mla, reallocated_swa = build_metadata([2, 6, 4])
+    assert pointers == (
+        reallocated_mla.req_id_per_token.data_ptr(),
+        reallocated_mla.slot_mapping.data_ptr(),
+        reallocated_swa.token_to_req_indices.data_ptr(),
+        reallocated_swa.decode_swa_ragged_indices.data_ptr(),
+        reallocated_swa.decode_swa_ragged_indptr.data_ptr(),
+    )
+    expected_owners = torch.tensor(
+        [0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2],
+        dtype=torch.int32,
+        device=device,
+    )
+    torch.testing.assert_close(reallocated_mla.req_id_per_token[:12], expected_owners)
+    torch.testing.assert_close(
+        reallocated_swa.token_to_req_indices[:12], expected_owners
+    )
+    assert reallocated_swa.is_valid_token[:12].all()
+    assert not reallocated_swa.is_valid_token[12:].any()
+    torch.testing.assert_close(
+        reallocated_swa.decode_swa_lens[12:],
+        torch.zeros(6, dtype=torch.int32, device=device),
+    )
+
+
 # ---------------------------------------------------------------------------
 # o-projection: fused inverse-RoPE + cached bf16 wo_a (rocm_inv_rope_einsum)
 # ---------------------------------------------------------------------------
