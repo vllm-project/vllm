@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -18,15 +18,9 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
 
-def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
-    state = object.__new__(MambaHybridModelState)
-    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
-    state.max_model_len = 8192
-    state._align_mode = False
-    state.recoverssm = None
-
-    positions = torch.tensor([1536], dtype=torch.int64)
-    input_batch = SimpleNamespace(
+@pytest.fixture
+def input_batch() -> SimpleNamespace:
+    return SimpleNamespace(
         num_reqs=1,
         num_tokens=1,
         num_reqs_after_padding=1,
@@ -38,9 +32,20 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         seq_lens=torch.tensor([1537], dtype=torch.int32),
         is_prefilling_np=torch.tensor([False]).numpy(),
         dcp_local_seq_lens=None,
-        positions=positions,
+        positions=torch.tensor([1536], dtype=torch.int64),
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
+        idx_mapping=torch.tensor([2], dtype=torch.int32),
     )
+
+
+def test_prepare_attn_forwards_positions(
+    monkeypatch: pytest.MonkeyPatch, input_batch: SimpleNamespace
+) -> None:
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    state.max_model_len = 8192
+    state._align_mode = False
+    state.recoverssm = None
     expected_metadata = {"layer": object()}
     build_attn_metadata = Mock(return_value=expected_metadata)
     monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", build_attn_metadata)
@@ -55,7 +60,82 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
     assert metadata is expected_metadata
-    assert build_attn_metadata.call_args.kwargs["positions"] is positions
+    assert build_attn_metadata.call_args.kwargs["positions"] is input_batch.positions
+
+
+@pytest.mark.parametrize("warmup_first", [True, False])
+def test_aligned_metadata_and_state_copies_keep_separate_table_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+    input_batch: SimpleNamespace,
+    warmup_first: bool,
+) -> None:
+    """Keep batch-order metadata separate from copies, even for request slot 2."""
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(
+        num_speculative_tokens=0,
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    state.max_model_len = 8192
+    state.max_num_reqs = 4
+    state.device = torch.device("cpu")
+    state._align_mode = True
+    state.recoverssm = None
+    state._mamba_ctx = None
+    state._mamba_metadata_ctx = None
+    state._mamba_state_copy_funcs = Mock()
+    state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
+    state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32)
+    state._mamba_src_col_gpu = torch.zeros(4, dtype=torch.int32)
+    state._mamba_src_off_gpu = torch.zeros(4, dtype=torch.int32)
+    state._get_mamba_group_info = Mock(
+        return_value=([0], SimpleNamespace(block_size=8))
+    )
+    monkeypatch.setattr(
+        mamba_hybrid, "preprocess_mamba_align_fused_kernel", MagicMock()
+    )
+    monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", Mock(return_value={}))
+
+    class Context:
+        is_initialized = False
+        run_fused_precopy = Mock()
+
+        def initialize_from_forward_context(self, config, forward, funcs, tables):
+            assert not self.is_initialized
+            self.tables = tables
+            self.is_initialized = True
+
+        def compute_aligned_state_indices(self, seq_lens, num_reqs):
+            return torch.stack([table[:num_reqs, :1] for table in self.tables])
+
+    create = Mock(side_effect=lambda **kwargs: Context())
+    monkeypatch.setattr(mamba_hybrid.MambaSpecDecodeGPUContext, "create", create)
+    source = torch.full((4, 2), 17, dtype=torch.int32)
+    gathered = torch.full((1, 2), 29, dtype=torch.int32)
+    builder = SimpleNamespace(mamba_aligned_state_indices=None)
+    group = SimpleNamespace(get_metadata_builder=lambda _: builder)
+    config = Mock()
+
+    def metadata():
+        state.prepare_attn(
+            input_batch,
+            CUDAGraphMode.NONE,
+            (gathered,),
+            torch.empty(0),
+            [[group]],
+            config,
+            for_capture=True,
+        )
+
+    def copies():
+        state.preprocess_state(input_batch, (source,), config, torch.zeros(4))
+
+    first, second = (metadata, copies) if warmup_first else (copies, metadata)
+    for _ in range(2):
+        first()
+        second()
+        assert state._mamba_ctx.tables[0] is source
+        torch.testing.assert_close(builder.mamba_aligned_state_indices, gathered[:, :1])
+    assert create.call_count == 2
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

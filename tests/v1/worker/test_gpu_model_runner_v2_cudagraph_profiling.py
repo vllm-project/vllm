@@ -420,6 +420,7 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=False,
         _mamba_ctx=object(),
+        _mamba_metadata_ctx=object(),
         _mamba_group_ids=[0, 1],
         _mamba_spec=object(),
     )
@@ -437,5 +438,6 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     cgu._teardown_profiling_state(runner)
 
     assert runner.model_state._mamba_ctx is None
+    assert runner.model_state._mamba_metadata_ctx is None
     assert runner.model_state._mamba_group_ids == []
     assert runner.model_state._mamba_spec is None

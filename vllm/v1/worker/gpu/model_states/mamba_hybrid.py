@@ -108,6 +108,7 @@ class MambaHybridModelState(DefaultModelState):
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
+            self._mamba_metadata_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
@@ -143,6 +144,8 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
+        *,
+        metadata_only: bool = False,
     ) -> MambaSpecDecodeGPUContext:
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
@@ -151,13 +154,15 @@ class MambaHybridModelState(DefaultModelState):
             validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
             self._mamba_state_copy_funcs = copy_funcs
         copy_funcs = self._mamba_state_copy_funcs
-        if self._mamba_ctx is None:
+        context_attr = "_mamba_metadata_ctx" if metadata_only else "_mamba_ctx"
+        ctx = getattr(self, context_attr)
+        if ctx is None:
             # Both SD and DS conv layouts support a >0 spec-decode shift: the
             # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
             # ``token_bias = num_accepted - 1`` window shift per conv layout
             # (SD: contiguous slice; DS: per-dim-row strided slice), matching
             # the V1 ``get_conv_copy_spec`` semantics.
-            self._mamba_ctx = MambaSpecDecodeGPUContext.create(
+            ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,
                 copy_funcs=copy_funcs,
@@ -166,12 +171,12 @@ class MambaHybridModelState(DefaultModelState):
                     n, dtype=dtype, device=self.device
                 ),
             )
-        ctx = self._mamba_ctx
+            setattr(self, context_attr, ctx)
         if not ctx.is_initialized:
             forward_context = self.vllm_config.compilation_config.static_forward_context
-            # block_tables are batch-order slices of the persistent
-            # input_block_tables (stable data_ptr), so the metadata is captured
-            # once here and reused across steps.
+            # Aligned metadata uses gathered batch-order tables, including in
+            # dummy warmup before preprocess_state runs. Keep that one-time
+            # pointer capture separate from the tables used by state copies.
             ctx.initialize_from_forward_context(
                 kv_cache_config,
                 forward_context,
@@ -299,8 +304,9 @@ class MambaHybridModelState(DefaultModelState):
                         aligned_index_builders.append((group_idx, builder))
             if aligned_index_builders:
                 ctx = self._ensure_align_ctx(
-                    kv_cache_config, mamba_group_ids, block_tables
+                    kv_cache_config, mamba_group_ids, block_tables, metadata_only=True
                 )
+                # This context already owns gathered, batch-order tables.
                 all_group_indices = ctx.compute_aligned_state_indices(
                     input_batch.seq_lens, num_reqs
                 )
