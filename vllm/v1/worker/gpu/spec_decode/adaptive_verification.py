@@ -19,8 +19,8 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
 from vllm.v1.worker.gpu.attn_utils import (
-    get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
+    get_varlen_decode_cudagraph_limit,
 )
 
 logger = init_logger(__name__)
@@ -28,7 +28,6 @@ _PROFILE_REPLAYS = 5
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.states import RequestState
     from vllm.v1.worker.utils import AttentionGroup
@@ -452,7 +451,6 @@ def maybe_create_adaptive_verification_manager(
     *,
     enable_adaptive_verification: bool,
     attn_groups: list[list["AttentionGroup"]],
-    attn_cg_support: "AttentionCGSupportInfo",
     req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
@@ -477,28 +475,28 @@ def maybe_create_adaptive_verification_manager(
             "use a backend that does."
         )
 
-    target_attn_cg_support = attn_cg_support
-    if target_layer_names is not None:
-        target_attn_cg_support = get_attn_cg_support(
-            attn_groups,
-            vllm_config,
-            checked_layer_names=target_layer_names,
-        )
-        if additional_attn_cg_support is not None:
-            target_attn_cg_support = target_attn_cg_support.narrow(
-                *additional_attn_cg_support
-            )
-    if (
-        target_attn_cg_support.min_cg_support.value
-        < AttentionCGSupport.VARLEN_DECODE.value
-    ):
+    # The runner's decode_query_len, the width varlen decode graphs capture.
+    max_query_len = req_states.num_speculative_steps + num_bonus_tokens
+    limit, limiting_backend = get_varlen_decode_cudagraph_limit(
+        attn_groups,
+        vllm_config,
+        checked_layer_names=target_layer_names,
+    )
+    if additional_attn_cg_support is not None:
+        # Groups built outside init_attn_backend follow the builders' default:
+        # only ALWAYS graphs ragged decode batches.
+        additional_support, additional_backend = additional_attn_cg_support
+        if additional_support != AttentionCGSupport.ALWAYS:
+            limit, limiting_backend = 0, additional_backend
+    if limit < max_query_len:
+        # Without a limiting backend, the step budget itself is too small.
+        allowed = f"at most {limit}" if limit else "none"
         raise ValueError(
-            "Adaptive verification captures varlen decode cudagraphs, so every"
-            " target attention builder must report VARLEN_DECODE or ALWAYS, but "
-            f"{target_attn_cg_support.min_cg_attn_backend} reports "
-            f"{target_attn_cg_support.min_cg_support}. Pass "
-            "enable_adaptive_verification=false in the speculative config, or "
-            "use a backend that does."
+            "Adaptive verification replays decode cudagraphs whose per-request "
+            f"query lengths vary up to {max_query_len}, but "
+            f"{limiting_backend or 'max_num_batched_tokens'} allows {allowed}. "
+            "Pass enable_adaptive_verification=false in the speculative config, "
+            "or use a backend that does."
         )
 
     return AdaptiveVerificationManager(

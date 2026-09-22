@@ -328,6 +328,41 @@ def get_query_lens_mismatch_unsupported_backend(
     return None
 
 
+def get_varlen_decode_cudagraph_limit(
+    attn_groups: list[list[AttentionGroup]],
+    vllm_config: VllmConfig,
+    checked_layer_names: set[str] | None = None,
+) -> tuple[int, str | None]:
+    """Return the tightest ragged decode cudagraph bound among the checked
+    layers and the backend that sets it.
+
+    Starts from max_num_batched_tokens, which no request can exceed, so the
+    backend is None when no builder is tighter than that. See
+    AttentionMetadataBuilder.get_varlen_decode_cudagraph_max_query_len().
+    """
+    limit = vllm_config.scheduler_config.max_num_batched_tokens
+    limiting_backend = None
+    for groups in attn_groups:
+        for group in groups:
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
+            builder = group.get_metadata_builder(0)
+            spec = group.kv_cache_spec
+            bound = builder.get_varlen_decode_cudagraph_max_query_len(vllm_config, spec)
+            if (
+                builder.get_cudagraph_support(vllm_config, spec)
+                == AttentionCGSupport.NEVER
+            ):
+                # NEVER means never, whatever an inherited override says.
+                bound = 0
+            if bound < limit:
+                limit = bound
+                limiting_backend = group.backend.__name__
+    return limit, limiting_backend
+
+
 def init_kv_cache(
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,

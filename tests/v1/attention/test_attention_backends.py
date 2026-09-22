@@ -30,8 +30,10 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
+    AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
@@ -1073,26 +1075,37 @@ def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets(
     reason="FlashInfer is not available.",
 )
 @pytest.mark.parametrize(
-    "adaptive,decode_kernel,expected",
+    "adaptive,decode_kernel,dcp_size,expected_bound",
     [
-        (None, "TRTLLM_GEN", AttentionCGSupport.UNIFORM_BATCH),
-        (False, "TRTLLM_GEN", AttentionCGSupport.UNIFORM_BATCH),
-        (True, "TRTLLM_GEN", AttentionCGSupport.VARLEN_DECODE),
-        (True, "XQA", AttentionCGSupport.UNIFORM_BATCH),
+        (None, "TRTLLM_GEN", 1, 0),
+        (False, "TRTLLM_GEN", 1, 0),
+        (True, "TRTLLM_GEN", 1, 8),
+        (True, "XQA", 1, 0),
+        (True, "TRTLLM_GEN", 2, 0),
     ],
 )
 def test_flashinfer_varlen_decode_capability(
-    monkeypatch, adaptive, decode_kernel, expected
+    monkeypatch, adaptive, decode_kernel, dcp_size, expected_bound
 ):
+    """Only the trtllm-gen path that adaptive verification enables replays
+    ragged decode graphs, up to the decode width; the uniform level is fixed."""
+    from vllm.model_executor.layers.attention.chunked_local_attention import (
+        create_chunked_local_attention_backend,
+    )
     from vllm.v1.attention.backends import flashinfer as fi
 
     config = SimpleNamespace(
         attention_config=SimpleNamespace(use_non_causal=False),
-        speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive)
+        speculative_config=SimpleNamespace(
+            enable_adaptive_verification=adaptive,
+            num_speculative_tokens=7,
+            parallel_drafting=True,
+        )
         if adaptive is not None
         else None,
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
         model_config=SimpleNamespace(get_num_attention_heads=lambda _: 32),
+        use_v2_model_runner=True,
     )
     monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
     monkeypatch.setattr(
@@ -1106,7 +1119,56 @@ def test_flashinfer_varlen_decode_capability(
         head_size=64,
         dtype=torch.bfloat16,
     )
-    assert fi.FlashInferMetadataBuilder.get_cudagraph_support(config, spec) == expected
+    builder_cls = fi.FlashInferMetadataBuilder
+    assert builder_cls.get_cudagraph_support(config, spec) == (
+        AttentionCGSupport.UNIFORM_BATCH
+        if dcp_size == 1
+        else AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
+    bound = builder_cls.get_varlen_decode_cudagraph_max_query_len(config, spec)
+    assert bound == expected_bound
+    if bound:
+        # A wrapper forcing NEVER inherits the override but not the bound.
+        chunked_local = create_chunked_local_attention_backend(fi.FlashInferBackend, 16)
+        wrapped_cls = chunked_local.get_builder_cls()
+        assert wrapped_cls.get_varlen_decode_cudagraph_max_query_len(config, spec) == 0
+
+
+@pytest.mark.parametrize(
+    "use_v2_model_runner,parallel_drafting,expected",
+    [
+        (True, None, 1),
+        (True, False, 8),
+        (True, True, 8),
+        (False, False, 8),
+        (False, True, 15),
+    ],
+)
+def test_spec_as_decode_width_follows_model_runner(
+    use_v2_model_runner, parallel_drafting, expected
+):
+    """Only model runner V1's parallel drafter widens decode requests."""
+
+    class Builder(AttentionMetadataBuilder):
+        def __init__(self, vllm_config):
+            self.vllm_config = vllm_config
+
+        def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+            raise NotImplementedError
+
+    config = SimpleNamespace(
+        speculative_config=None
+        if parallel_drafting is None
+        else SimpleNamespace(
+            num_speculative_tokens=7, parallel_drafting=parallel_drafting
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        use_v2_model_runner=use_v2_model_runner,
+    )
+    assert max_decode_query_len(config) == expected
+    builder = Builder(config)
+    builder._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+    assert builder.reorder_batch_threshold == expected
 
 
 @pytest.mark.skipif(

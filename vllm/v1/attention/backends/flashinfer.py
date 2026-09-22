@@ -67,6 +67,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
@@ -856,15 +857,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.use_xqa = (
             self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
         )
-        # Adaptive verification trims drafts on device, so decode query lengths
-        # must come from the device qo_indptr; only trtllm-gen supports that
-        # (the selector already rejects the other configurations).
-        self.use_trtllm_gen_varlen_decode = (
-            speculative_config is not None
-            and speculative_config.enable_adaptive_verification
-            and self.flashinfer_trtllm_api_decode_kernel
-            == FlashInferDecodeKernel.TRTLLM_GEN
-            and not self.use_dcp
+        self.use_trtllm_gen_varlen_decode = self._uses_trtllm_gen_varlen_decode(
+            vllm_config, self.flashinfer_trtllm_api_decode_kernel, self.use_dcp
         )
         self._init_reorder_batch_threshold(
             1,
@@ -1006,18 +1000,35 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 break
 
         use_non_causal = vllm_config.attention_config.use_non_causal
-        speculative_config = vllm_config.speculative_config
         if has_uniform_batch_support and (not use_non_causal or is_xqa_arch):
-            if (
-                speculative_config is not None
-                and speculative_config.enable_adaptive_verification
-                and cls._get_flashinfer_trtllm_api_decode_kernel()
-                == FlashInferDecodeKernel.TRTLLM_GEN
-            ):
-                return AttentionCGSupport.VARLEN_DECODE
             return AttentionCGSupport.UNIFORM_BATCH
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+    @override  # type: ignore[misc]
+    @classmethod
+    def get_varlen_decode_cudagraph_max_query_len(
+        cls: type["FlashInferMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int:
+        # The uniform gate already covers DCP, head geometry, the XQA head-dim
+        # limit and causality, and yields 0 for subclasses that force NEVER.
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return 0
+        # The kernel selector asserts off the trtllm-capable architectures, so
+        # call it only past the gate, as get_cudagraph_support does.
+        if not cls._uses_trtllm_gen_varlen_decode(
+            vllm_config,
+            cls._get_flashinfer_trtllm_api_decode_kernel(),
+            use_dcp=vllm_config.parallel_config.decode_context_parallel_size > 1,
+        ):
+            return 0
+        # Longer requests are split off as prefills.
+        return max_decode_query_len(vllm_config)
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -1046,6 +1057,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
         self._workspace_buffer = workspace_buffer
+
+    @staticmethod
+    def _uses_trtllm_gen_varlen_decode(
+        vllm_config: VllmConfig,
+        decode_kernel: FlashInferDecodeKernel | None,
+        use_dcp: bool,
+    ) -> bool:
+        """Whether decode reads per-request query lengths from the device
+        qo_indptr. Adaptive verification trims drafts on device, and only
+        trtllm-gen supports that (the selector already rejects the other
+        configurations)."""
+        speculative_config = vllm_config.speculative_config
+        return (
+            speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+            and decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
+            and not use_dcp
+        )
 
     @staticmethod
     def _get_flashinfer_trtllm_api_decode_kernel() -> FlashInferDecodeKernel:

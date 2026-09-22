@@ -559,10 +559,8 @@ class AttentionCGSupport(Enum):
     Here we do not consider the cascade attention, as currently
     it is never cudagraph supported."""
 
-    ALWAYS = 4
+    ALWAYS = 3
     """Cudagraph always supported; supports mixed-prefill-decode"""
-    VARLEN_DECODE = 3
-    """FULL graphs support variable-length queries within the decode bound."""
     UNIFORM_BATCH = 2
     """Cudagraph supported for batches the only contain query lengths that are
     the same, this can be used for spec-decode
@@ -571,6 +569,26 @@ class AttentionCGSupport(Enum):
     """Cudagraph supported for batches the only contain query_len==1 decodes"""
     NEVER = 0
     """NO cudagraph support"""
+
+
+def max_decode_query_len(vllm_config: "VllmConfig") -> int:
+    """Widest request a spec-as-decode builder treats as a decode.
+
+    On model runner V2 this is a verification request, 1 +
+    num_speculative_tokens: no V2 speculator builds a wider query. The reorder
+    threshold and the code that mirrors the builders' decode/prefill split all
+    read this, so they cannot drift apart.
+    """
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or speculative_config.num_speculative_tokens is None:
+        return 1
+    num_speculative_tokens = speculative_config.num_speculative_tokens
+    max_query_len = 1 + num_speculative_tokens
+    if speculative_config.parallel_drafting and not vllm_config.use_v2_model_runner:
+        # Model runner V1 only; remove with it. Its parallel drafter appends up
+        # to num_speculative_tokens mask slots to each verified request.
+        max_query_len += num_speculative_tokens
+    return max_query_len
 
 
 class AttentionMetadataBuilder(ABC, Generic[M]):
@@ -616,6 +634,38 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
 
+    @classmethod
+    def get_varlen_decode_cudagraph_max_query_len(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "KVCacheSpec",
+    ) -> int:
+        """Get the largest per-request query length L of the ragged decode
+        batches a FULL cudagraph of this builder class can replay; 0 means none.
+
+        The graph is captured on a pure-decode batch whose requests have at most
+        L tokens. It must replay any pure-decode batch in which every real
+        request has between 1 and L tokens and every padding request has 0.
+        Per-request lengths are read from the device query_start_loc at replay;
+        host metadata supplies only the token count and an upper bound on the
+        per-request length. A builder with no limit of its own returns
+        max_num_batched_tokens, which no request can exceed in one step.
+
+        Independent of get_cudagraph_support(): UNIFORM_BATCH implies nothing
+        about ragged batches, and the reverse. Only ALWAYS, which graphs any
+        batch composition, implies support for every length. Overrides describe
+        the builder as configured by vllm_config and return 0 when
+        get_cudagraph_support() is NEVER. Whether host metadata may understate
+        device query lengths at all is a separate backend question; see
+        supports_device_cpu_query_lens_mismatch().
+        """
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            == AttentionCGSupport.ALWAYS
+        ):
+            return vllm_config.scheduler_config.max_num_batched_tokens
+        return 0
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,
@@ -632,14 +682,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                max_num_queries_for_spec = (
-                    1
-                    + (2 if speculative_config.parallel_drafting else 1)
-                    * speculative_config.num_speculative_tokens
-                )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,
-                    max_num_queries_for_spec,
+                    max_decode_query_len(self.vllm_config),
                 )
 
         if (

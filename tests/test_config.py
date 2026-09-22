@@ -836,8 +836,8 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ("FULL_AND_PIECEWISE", False, "ALWAYS", "FULL_DECODE_ONLY"),
         ("FULL_DECODE_ONLY", False, "ALWAYS", "FULL_DECODE_ONLY"),
         ("FULL_DECODE_ONLY", False, "NEVER", "NONE"),
-        ("FULL_AND_PIECEWISE", True, "VARLEN_DECODE", "FULL_AND_PIECEWISE"),
-        ("FULL", True, "VARLEN_DECODE", "FULL_DECODE_ONLY"),
+        ("FULL_AND_PIECEWISE", True, "UNIFORM_BATCH", "FULL_AND_PIECEWISE"),
+        ("FULL", True, "UNIFORM_BATCH", "FULL_DECODE_ONLY"),
     ],
 )
 def test_resolve_cudagraph_mode_uses_loaded_piecewise_provider(
