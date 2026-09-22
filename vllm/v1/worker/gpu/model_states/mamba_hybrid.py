@@ -124,13 +124,18 @@ class MambaHybridModelState(DefaultModelState):
             # out-of-range block_table column, so the fused align pre-copy reads
             # a garbage block id (illegal memory access on sm_121, silently
             # wrong state where the read stays mapped) -- vllm#53142.
-            # ``_mamba_spec`` is populated by the first batch's preprocess;
-            # fresh requests seed from num_computed_tokens=0 either way, so the
-            # fallback is safe.
+            # ``_mamba_spec`` is populated by the first batch's preprocess; until
+            # then fall back to the mamba block size from the cache config, which
+            # is the unit the align block table is laid out in (MambaSpec.block_size
+            # is derived from it). A request admitted before the first preprocess
+            # -- e.g. a prefix restored by a KV connector -- would otherwise seed
+            # with the attention block size, reintroducing the same wrong divisor.
             mamba_bs = (
                 self._mamba_spec.block_size
                 if self._mamba_spec is not None
-                else self.cache_config.block_size
+                else (
+                    self.cache_config.mamba_block_size or self.cache_config.block_size
+                )
             )
             self._mamba_state_idx_gpu[req_index].fill_(
                 (new_req_data.num_computed_tokens - 1) // mamba_bs
