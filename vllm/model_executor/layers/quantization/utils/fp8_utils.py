@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    amax_for_moe_activation_quant,
     get_fp8_min_max,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -37,11 +38,31 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
+# Pre-fill value for scale parameters whose shards load independently. The
+# shards are combined with .max(), so an unloaded shard must never win; the
+# smallest representable float32 guarantees that.
+FP8_SCALE_SENTINEL = torch.finfo(torch.float32).min
+
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
+
+
+def get_fp8_block_weight_scale(layer: torch.nn.Module) -> torch.Tensor | None:
+    """Return the block-FP8 weight scale for supported quant methods."""
+    # Local import avoids a circular import: quark_w8a8_fp8 imports this module.
+    from vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8 import (
+        QuarkW8A8Fp8PerBlock,
+    )
+
+    if isinstance(
+        getattr(layer, "scheme", None),
+        QuarkW8A8Fp8PerBlock,
+    ):
+        return getattr(layer, "weight_scale", None)
+    return getattr(layer, "weight_scale_inv", None)
 
 
 def input_to_float8(
@@ -326,12 +347,10 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     BLOCK_N: tl.constexpr,
 ):
     # TODO(varun) : Add expert_ids so we may early-exit no-op thread blocks.
-    """
-    Each thread block (BLOCK_N) computes [BLOCK_M, GROUP_SIZE] act-mul outputs. Then
+    """Each thread block (BLOCK_N) computes [BLOCK_M, GROUP_SIZE] act-mul outputs. Then
     the thread block quantizes the [BLOCK_M, GROUP_SIZE] block of values and fills
     the outputs tensors at the right positions.
     """
-
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     N_2 = N // 2
@@ -400,8 +419,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     alpha: float = 1.0,
     beta: float = 0.0,
 ):
-    """
-    Gated activation + block-fp8 quant. ``alpha``/``beta`` select the gate
+    """Gated activation + block-fp8 quant. ``alpha``/``beta`` select the gate
     (silu: alpha=1, beta=0; swigluoai: alpha, beta from config).
     """
     GROUP_SIZE = group_size
@@ -543,18 +561,23 @@ def per_token_group_quant_fp8(
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
     quantized tensor along with the scaling factor used for quantization.
+
     Args:
         x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
         dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
-        is supported for now.
+            is supported for now.
         column_major_scales: Outputs scales in column major.
         tma_aligned_scales: Outputs scales in TMA-aligned layout.
         out_q: Optional output tensor. If not provided, function will create.
+        use_ue8m0: If True, round each scale down to a power of two (UE8M0
+            format). None defers to the platform default.
+
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor.
+
     """
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()
@@ -674,6 +697,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
             x_s_packed: Int32 tensor with logical shape
                         [mn, ceil(num_groups_per_row / 4)], laid out with
                         TMA-aligned stride along the packed-K dimension
+
     """
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()
@@ -768,7 +792,6 @@ def _w8a8_triton_block_scaled_mm(
     product) on input tensors `A` and `B` with block-wise quantization, and
     store the result in output tensor `C`.
     """
-
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -821,14 +844,12 @@ def _w8a8_triton_block_scaled_mm(
 def get_w8a8_block_fp8_configs(
     N: int, K: int, block_n: int, block_k: int
 ) -> dict[int, Any] | None:
-    """
-    Return optimized configurations for the w8a8 block fp8 kernel.
+    """Return optimized configurations for the w8a8 block fp8 kernel.
     The return value will be a dictionary that maps an irregular grid of
     batch sizes to configurations of the w8a8 block fp8 kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
     """
-
     # First look up if an optimized configuration is available in the configs
     # directory
     device_name = get_device_name_as_file_name()
@@ -868,21 +889,27 @@ def w8a8_triton_block_scaled_mm(
     quantization.
     It takes two input tensors `A` and `B` with scales `As` and `Bs`.
     The output is returned in the specified `output_dtype`.
+
     Args:
         A: The input tensor, e.g., activation.
         B: The input tensor, e.g., weight.
         As: The per-token-group quantization scale for `A`.
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization. It should
-        be 2-dim, e.g., [128, 128].
-        output_dytpe: The dtype of the returned tensor.
+            be 2-dim, e.g., [128, 128].
+        output_dtype: The dtype of the returned tensor.
+
     Returns:
         torch.Tensor: The result of matmul.
+
     """
+    _on_gfx1250 = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
 
-    from vllm.platforms.rocm import on_gfx1250
+        _on_gfx1250 = on_gfx1250()
 
-    if on_gfx1250():
+    if _on_gfx1250:
         # Torch upcast reference: dequantize A,B to fp32 and matmul in fp32.
         # Avoids the gfx1250 native-fp8 block GEMM NaN bug. Correct but slow.
         _bn, _bk = block_size[0], block_size[1]
@@ -912,14 +939,13 @@ def w8a8_triton_block_scaled_mm(
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
 
-    # Triton cannot currently bind E8M0 scale tensors directly. On ROCm,
-    # DeepSeek-V4 checkpoints store block scales in exponent-only E8M0 format,
-    # so decode them to fp32 before launching the kernel.
-    if current_platform.is_rocm() or current_platform.is_xpu():
-        if As.dtype == torch.float8_e8m0fnu:
-            As = _upcast_e8m0_to_fp32(As).contiguous()
-        if Bs.dtype == torch.float8_e8m0fnu:
-            Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
+    # Triton cannot currently bind E8M0 scale tensors directly. Checkpoints
+    # with exponent-only UE8M0 scales (e.g. DeepSeek-V4) are decoded to fp32
+    # before launching the kernel.
+    if As.dtype == torch.float8_e8m0fnu:
+        As = _upcast_e8m0_to_fp32(As).contiguous()
+    if Bs.dtype == torch.float8_e8m0fnu:
+        Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
 
     assert A.shape[-1] == B.shape[-1]
     assert A.shape[:-1] == As.shape[:-1] and A.is_contiguous()
@@ -998,6 +1024,7 @@ def requant_weight_ue8m0_inplace(
             with shape `(..., M // block_size[0], K // block_size[1])`.
         block_size: 2-element iterable `[block_m, block_k]` describing the
             block quantisation granularity.
+
     """
     if weight.numel() == 0:
         return
@@ -1064,8 +1091,6 @@ def deepgemm_post_process_weight_scale_block(
     is_sfa: bool = False,
 ) -> torch.Tensor:
     if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
-        # Scales already in E8M0 from checkpoint; upcast to fp32 and let
-        # DeepGEMM pack the layout expected by the target architecture.
         ws = _upcast_e8m0_to_fp32(ws)
     else:
         assert ws.dtype == torch.float32, (
@@ -1096,12 +1121,7 @@ def deepgemm_post_process_fp8_weight_block(
         f"to be torch.float8_e4m3fn, got {wq.dtype} instead."
     )
 
-    if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
-        # Scales already in E8M0 from checkpoint (float8_e8m0fnu, or raw E8M0
-        # bits as uint8 for MXFP8) - upcast to fp32 and skip requantization
-        # (weights already have power-of-two scales).
-        ws = _upcast_e8m0_to_fp32(ws)
-    else:
+    if ws.dtype not in (torch.float8_e8m0fnu, torch.uint8):
         assert ws.dtype == torch.float32, (
             f"Expected tensor scales dtype to be torch.float32 or "
             f"torch.float8_e8m0fnu or torch.uint8, got {ws.dtype} instead"
@@ -1112,7 +1132,7 @@ def deepgemm_post_process_fp8_weight_block(
     if is_bmm:
         # Reshape 2D weight/scale to 3D for grouped BMM (einsum):
         # wq: (g*r, d) -> (g, r, d)
-        # ws: (g*r/128, d/128) -> (g, r/128, d/128)
+        # Scale dimensions follow quant_block_shape.
         g = bmm_batch_size
         assert wq.ndim == 2 and ws.ndim == 2
         d = wq.size(1)
@@ -1238,6 +1258,35 @@ def validate_fp8_block_shape(
                     f"{output_partition_size} is not divisible by "
                     f"weight quantization block_n = {block_n}."
                 )
+
+
+def validate_fp8_block_shape_moe(
+    intermediate_size_per_partition: int,
+    block_size: list[int],
+) -> None:
+    """Validate fused MoE block quantization shapes for tensor parallelism."""
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    tp_size = get_tensor_model_parallel_world_size()
+    block_n, block_k = block_size[0], block_size[1]
+
+    # NOTE: To ensure proper alignment of the block-wise quantization
+    # scales, the output_size of the weights for both the gate and up
+    # layers must be divisible by block_n.
+    # Required by column parallel or enabling merged weights
+    if intermediate_size_per_partition % block_n != 0:
+        raise ValueError(
+            f"The output_size of gate's and up's weight = "
+            f"{intermediate_size_per_partition} is not divisible by "
+            f"weight quantization block_n = {block_n}."
+        )
+    if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
+        # Required by row parallel
+        raise ValueError(
+            f"The input_size of down's weight = "
+            f"{intermediate_size_per_partition} is not divisible by "
+            f"weight quantization block_k = {block_k}."
+        )
 
 
 def create_fp8_weight_parameter(
@@ -1437,9 +1486,9 @@ def process_fp8_weight_tensor_strategy_moe(
 def process_fp8_input_tensor_strategy_moe(
     w13_input_scale: torch.Tensor,
     w2_input_scale: torch.Tensor,
+    enable_eplb: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Process moe input scales for tensor-wise quantization strategy."""
-
     if not all_close_1d(w13_input_scale) or not all_close_1d(w2_input_scale):
         logger.info_once(
             "Found input_scales that are not equal for "
@@ -1447,4 +1496,7 @@ def process_fp8_input_tensor_strategy_moe(
             "for each layer."
         )
 
-    return w13_input_scale.max(), w2_input_scale.max()
+    return (
+        amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
+        amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
+    )

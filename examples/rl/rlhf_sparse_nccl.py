@@ -1,62 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Demonstrates dense-vs-sparse NCCL weight syncing with a real model.
+"""Demonstrate checkpoint-coordinate sparse NCCL updates with expert parallelism.
 
-This example mirrors the validation story used for the sparse NCCL MVP:
-both the dense update path and the sparse patch path start from the same real
-checkpoint and apply the same deterministic trainer-side patch. The script then
-checks that greedy 1-token outputs match between the dense and sparse vLLM
-engines after the update.
+The trainer and vLLM start from the same Qwen3 MoE checkpoint. The trainer
+modifies rows from two global experts, converts its fused expert storage back to
+per-expert checkpoint coordinates, and sends both patches through one
+``send_weights()`` lifecycle. Every vLLM rank receives both patches; the native
+loader applies its local expert and skips the foreign expert.
 
-The example performs the following steps:
-* Load a training model on one GPU via a Ray actor.
-* Launch a vLLM engine with the same real model on a second GPU.
-* Verify trainer vs vLLM baseline agreement before any update.
-* Apply a deterministic patch to ``model.embed_tokens.weight`` on the trainer.
-* Run a dense NCCL update into a fresh vLLM engine and collect post-update
-  outputs.
-* Reset the trainer back to the baseline checkpoint.
-* Apply the same deterministic patch again.
-* Run a sparse NCCL update into another fresh vLLM engine and collect
-  post-update outputs.
-* Compare dense vs sparse baseline outputs, dense vs sparse post-update
-  outputs, estimated payload sizes, and trainer-side send times.
-
-Current sparse weight transfer MVP limitations:
-* ``TP=1`` and ``PP=1`` only
-* sparse updates use runtime/kernel-format parameter names
-* sparse updates are not composable with checkpoint-format or packed updates
-
-This example assumes a single-node cluster with two GPUs.
+This example uses three GPUs on one node: one for the full BF16 Hugging Face
+trainer model and two for a TP2/EP2 vLLM inference engine. Unspecified checkpoint
+elements keep their initialized values, so sparse updates require a known shared
+baseline. ``SPARSE_NCCL_MODEL`` may point to a compatible local Qwen3 MoE
+checkpoint.
 """
 
-import hashlib
 import os
-import time
-from collections.abc import Sequence
+from contextlib import suppress
 
 import ray
 import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
+from vllm.distributed.weight_transfer import (
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
-    SparseNCCLWeightTransferEngine,
+    SparseNCCLTrainerInitInfo,
     SparseWeightPatch,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
-PATCHED_PARAM_NAME = "model.embed_tokens.weight"
-MAX_PATCH_ROWS = 32
+MODEL_NAME = os.environ.get("SPARSE_NCCL_MODEL", "Qwen/Qwen3-30B-A3B")
+INFERENCE_TP_SIZE = 2
+PATCHED_LAYER = 0
+PATCHED_ROWS = 2
 PROMPTS = [
     "Hello, my name is",
     "The president of the United States is",
@@ -70,460 +53,201 @@ class MyLLM(LLM):
     """Configure the vLLM worker for Ray placement group execution."""
 
     def __init__(self, *args, **kwargs):
-        os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0"
+        os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(
+            str(index) for index in range(INFERENCE_TP_SIZE)
+        )
         super().__init__(*args, **kwargs)
 
 
 @ray.remote(num_gpus=1)
 class TrainModel:
-    """Ray actor that owns the trainer-side model and deterministic patch state."""
+    """Own the trainer model and sparse NCCL sender on one GPU."""
 
     def __init__(self, model_name: str):
-        self.model_name = model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self.model = None
-        self.patched_param = None
-        self.pending_sparse_patches: list[SparseWeightPatch] | None = None
-        self.model_update_group = None
-        self.master_address = get_ip()
-        self.port = get_open_port()
-        self.reset_model()
-
-    def reset_model(self) -> None:
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
+            model_name,
             torch_dtype=torch.bfloat16,
         ).to("cuda:0")
         self.model.eval()
 
+        config = self.model.config
+        if config.model_type != "qwen3_moe" or config.num_experts % INFERENCE_TP_SIZE:
+            raise RuntimeError(
+                "This recipe requires a Qwen3 MoE model whose experts divide "
+                f"evenly across TP{INFERENCE_TP_SIZE}"
+            )
+        self.expert_ids = (0, config.num_experts // 2)
+        self.expert_intermediate_size = config.moe_intermediate_size
+        fused_name = f"model.layers.{PATCHED_LAYER}.mlp.experts.gate_up_proj"
         try:
-            self.patched_param = self.model.get_parameter(PATCHED_PARAM_NAME)
+            self.gate_up_proj = self.model.get_parameter(fused_name)
         except AttributeError as exc:
             raise RuntimeError(
-                f"Expected trainer model to expose `{PATCHED_PARAM_NAME}`"
+                f"Expected trainer model to expose `{fused_name}`"
             ) from exc
 
-        self.pending_sparse_patches = None
+        expected_shape = (
+            config.num_experts,
+            2 * self.expert_intermediate_size,
+            config.hidden_size,
+        )
+        if self.gate_up_proj.shape != expected_shape:
+            raise RuntimeError(
+                f"Unexpected fused expert shape: {self.gate_up_proj.shape} "
+                f"!= {expected_shape}"
+            )
 
-    def create_rendezvous(self) -> tuple[str, int]:
-        self.port = get_open_port()
-        return self.master_address, self.port
+        self.master_address = get_ip()
+        self.master_port = get_open_port()
+        self.engine = None
 
-    def init_weight_transfer_group(self, world_size: int) -> None:
-        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
-            dict(
+    def init_sparse_engine(self, world_size: int, llm_handle) -> None:
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=SparseNCCLTrainerInitInfo(
                 master_address=self.master_address,
-                master_port=self.port,
+                master_port=self.master_port,
                 world_size=world_size,
-            )
-        )
-
-    def get_dense_update_info(self, packed: bool = False) -> tuple[dict, int]:
-        names = []
-        dtype_names = []
-        shapes = []
-        payload_bytes = 0
-        for name, param in self.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(param.dtype).split(".")[-1])
-            shapes.append(list(param.shape))
-            payload_bytes += param.numel() * param.element_size()
-
-        return (
-            dict(
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                packed=packed,
+                rank=0,
             ),
-            payload_bytes,
+            client=RayVLLMWeightSyncClient(llm_handle),
         )
 
-    @torch.inference_mode()
-    def generate(
-        self,
-        prompts: Sequence[str],
-        max_new_tokens: int = 1,
-    ) -> list[dict[str, object]]:
-        generations = []
-        for prompt in prompts:
-            model_inputs = self.tokenizer(prompt, return_tensors="pt").to("cuda:0")
-            output = self.model.generate(
-                **model_inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=self.tokenizer.pad_token_id,
+    @torch.no_grad()
+    def patch_and_send(self) -> tuple[list[str], int]:
+        if self.engine is None:
+            raise RuntimeError("Sparse NCCL engine is not initialized")
+
+        patches = []
+        for expert_id in self.expert_ids:
+            checkpoint_weight = self.gate_up_proj[
+                expert_id, : self.expert_intermediate_size
+            ]
+            original_rows = checkpoint_weight[:PATCHED_ROWS].clone()
+            replacement_rows = original_rows.flip(0)
+            if torch.equal(original_rows, replacement_rows):
+                raise RuntimeError(f"Expert {expert_id} patch would be a no-op")
+            checkpoint_weight[:PATCHED_ROWS] = replacement_rows
+
+            hidden_size = checkpoint_weight.shape[1]
+            flat_indices = torch.arange(
+                PATCHED_ROWS * hidden_size,
+                device=checkpoint_weight.device,
+                dtype=torch.int32,
             )
-            new_token_ids = output[0, model_inputs["input_ids"].shape[1] :].tolist()
-            generations.append(
-                {
-                    "token_ids": new_token_ids,
-                    "text": self.tokenizer.decode(
-                        new_token_ids,
-                        skip_special_tokens=False,
+            patches.append(
+                SparseWeightPatch(
+                    name=(
+                        f"model.layers.{PATCHED_LAYER}.mlp.experts."
+                        f"{expert_id}.gate_proj.weight"
                     ),
-                }
+                    full_shape=tuple(checkpoint_weight.shape),
+                    indices=flat_indices,
+                    values=replacement_rows.reshape(-1).contiguous(),
+                )
             )
-        return generations
 
-    def prepare_sparse_patch(
-        self,
-        prompts: Sequence[str],
-        max_patch_rows: int = MAX_PATCH_ROWS,
-    ) -> tuple[dict[str, object], list[int], str, int]:
-        selected_token_ids: list[int] = []
-        special_ids = set(self.tokenizer.all_special_ids)
-        for prompt in prompts:
-            token_ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
-            for token_id in token_ids:
-                if token_id in special_ids or token_id in selected_token_ids:
-                    continue
-                selected_token_ids.append(token_id)
-                if len(selected_token_ids) == max_patch_rows:
-                    break
-            if len(selected_token_ids) == max_patch_rows:
-                break
-
-        if not selected_token_ids:
-            raise ValueError("Could not derive any non-special token IDs to patch")
-
-        vocab_size = self.patched_param.shape[0]
-        next_token_id = selected_token_ids[-1]
-        while len(selected_token_ids) < max_patch_rows:
-            next_token_id = (next_token_id + 1) % vocab_size
-            if next_token_id in special_ids or next_token_id in selected_token_ids:
-                continue
-            selected_token_ids.append(next_token_id)
-
-        row_ids = torch.tensor(
-            selected_token_ids,
-            device=self.patched_param.device,
-            dtype=torch.long,
-        )
-        hidden_size = self.patched_param.shape[1]
-        column_offsets = torch.arange(
-            hidden_size,
-            device=self.patched_param.device,
-            dtype=torch.long,
+        self.engine.send_weights(patches)
+        return [patch.name for patch in patches], sum(
+            patch.indices.numel() for patch in patches
         )
 
-        with torch.no_grad():
-            # Rotate the selected embedding rows instead of zeroing them so the
-            # patch remains deterministic while avoiding a degenerate collapse
-            # to the same special token after the update.
-            replacement_rows = self.patched_param[row_ids].roll(shifts=1, dims=0)
-            self.patched_param[row_ids] = replacement_rows
-
-        flat_indices = (
-            row_ids.unsqueeze(1).mul(hidden_size).add(column_offsets).reshape(-1)
-        )
-        flat_values = self.patched_param[row_ids].reshape(-1).contiguous()
-        self.pending_sparse_patches = [
-            SparseWeightPatch(
-                name=PATCHED_PARAM_NAME,
-                indices=flat_indices.to(torch.int32),
-                values=flat_values,
-            )
-        ]
-        patch_digest = hashlib.sha256(
-            self.pending_sparse_patches[0].indices.cpu().numpy().tobytes()
-            + self.pending_sparse_patches[0]
-            .values.detach()
-            .float()
-            .cpu()
-            .numpy()
-            .tobytes()
-        ).hexdigest()
-
-        sparse_payload_bytes = (
-            flat_indices.numel() * torch.tensor([], dtype=torch.int32).element_size()
-            + flat_values.numel() * flat_values.element_size()
-        )
-        update_info = dict(
-            names=[PATCHED_PARAM_NAME],
-            dtype_names=[str(self.patched_param.dtype).split(".")[-1]],
-            shapes=[list(self.patched_param.shape)],
-            num_updates_list=[flat_indices.numel()],
-        )
-        return update_info, selected_token_ids, patch_digest, sparse_payload_bytes
-
-    def broadcast_weights(self, packed: bool = False) -> float:
-        if self.model_update_group is None:
-            raise RuntimeError("Weight transfer group is not initialized")
-
-        trainer_args = NCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
-        )
-        start = time.perf_counter()
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
-        )
-        torch.accelerator.synchronize()
-        return (time.perf_counter() - start) * 1000.0
-
-    def broadcast_pending_sparse_patch(self) -> float:
-        if self.model_update_group is None:
-            raise RuntimeError("Weight transfer group is not initialized")
-        if self.pending_sparse_patches is None:
-            raise RuntimeError("Sparse patch has not been prepared")
-
-        start = time.perf_counter()
-        SparseNCCLWeightTransferEngine.trainer_send_weights(
-            iter(self.pending_sparse_patches),
-            NCCLTrainerSendWeightsArgs(group=self.model_update_group),
-        )
-        torch.accelerator.synchronize()
-        self.pending_sparse_patches = None
-        return (time.perf_counter() - start) * 1000.0
+    def shutdown_engine(self) -> None:
+        if self.engine is not None:
+            self.engine.shutdown()
+            self.engine = None
 
 
-def launch_llm(
-    scheduling_inference: PlacementGroupSchedulingStrategy,
-    backend: str = "nccl",
-):
+def launch_llm(scheduling_strategy: PlacementGroupSchedulingStrategy):
     return ray.remote(
         num_cpus=0,
         num_gpus=0,
-        scheduling_strategy=scheduling_inference,
+        scheduling_strategy=scheduling_strategy,
     )(MyLLM).remote(
         model=MODEL_NAME,
         enforce_eager=True,
-        tensor_parallel_size=1,
+        tensor_parallel_size=INFERENCE_TP_SIZE,
+        enable_expert_parallel=True,
+        expert_placement_strategy="linear",
+        moe_backend="triton",
         distributed_executor_backend="ray",
         gpu_memory_utilization=0.7,
-        weight_transfer_config=WeightTransferConfig(backend=backend),
+        enable_prefix_caching=False,
+        weight_transfer_config=WeightTransferConfig(backend="sparse_nccl"),
     )
 
 
-def collect_vllm_generations(llm_handle) -> list[dict[str, object]]:
+def generate(llm_handle) -> list[dict[str, object]]:
     outputs = ray.get(llm_handle.generate.remote(PROMPTS, SAMPLING_PARAMS))
-    generations = []
-    for output in outputs:
-        generations.append(
-            {
-                "token_ids": output.outputs[0].token_ids,
-                "text": output.outputs[0].text,
-            }
-        )
-    return generations
+    return [
+        {
+            "token_ids": output.outputs[0].token_ids,
+            "text": output.outputs[0].text,
+        }
+        for output in outputs
+    ]
 
 
-def token_sequences_match(
-    left: Sequence[dict[str, object]],
-    right: Sequence[dict[str, object]],
-) -> bool:
-    return [item["token_ids"] for item in left] == [item["token_ids"] for item in right]
-
-
-def print_generations(label: str, prompts: Sequence[str], generations) -> None:
+def print_generations(label: str, generations: list[dict[str, object]]) -> None:
     print(f"\n{label}")
-    print("-" * 50)
-    for prompt, generation in zip(prompts, generations):
-        print(f"Prompt: {prompt!r}")
-        print(f"Token IDs: {generation['token_ids']}")
-        print(f"Text: {generation['text']!r}")
-        print("-" * 50)
+    for prompt, generation in zip(PROMPTS, generations):
+        print(
+            f"  {prompt!r} -> {generation['text']!r} "
+            f"(token_ids={generation['token_ids']})"
+        )
 
 
-def run_dense_phase(
-    train_model,
-    scheduling_inference: PlacementGroupSchedulingStrategy,
-) -> dict[str, object]:
-    ray.get(train_model.reset_model.remote())
-    llm = launch_llm(scheduling_inference, backend="nccl")
+def main() -> None:
+    ray.init()
+    train_model = None
+    pg_inference = None
+    llm = None
     try:
-        dense_before = collect_vllm_generations(llm)
+        train_model = TrainModel.remote(MODEL_NAME)
+        pg_inference = placement_group(
+            [{"GPU": 1, "CPU": 0}] * INFERENCE_TP_SIZE,
+            strategy="STRICT_PACK",
+        )
+        ray.get(pg_inference.ready())
+        scheduling_strategy = PlacementGroupSchedulingStrategy(
+            placement_group=pg_inference,
+            placement_group_capture_child_tasks=True,
+            placement_group_bundle_index=0,
+        )
+        llm = launch_llm(scheduling_strategy)
+
+        before = generate(llm)
+        print_generations("BEFORE sparse update", before)
 
         ray.get(llm.sleep.remote(level=0))
-        master_address, master_port = ray.get(train_model.create_rendezvous.remote())
         world_size = ray.get(llm.get_world_size.remote()) + 1
-        inference_init = llm.init_weight_transfer_engine.remote(
-            dict(
-                init_info=dict(
-                    master_address=master_address,
-                    master_port=master_port,
-                    rank_offset=1,
-                    world_size=world_size,
-                )
-            )
-        )
-        trainer_init = train_model.init_weight_transfer_group.remote(world_size)
-        ray.get([trainer_init, inference_init])
-        ray.get(llm.start_weight_update.remote())
-
-        dense_update_info, dense_payload_bytes = ray.get(
-            train_model.get_dense_update_info.remote()
-        )
-        _, selected_token_ids, patch_digest, _ = ray.get(
-            train_model.prepare_sparse_patch.remote(PROMPTS)
-        )
-
-        inference_update = llm.update_weights.remote(
-            dict(update_info=dense_update_info)
-        )
-        dense_send_ms, _ = ray.get(
-            [
-                train_model.broadcast_weights.remote(packed=False),
-                inference_update,
-            ]
-        )
-        ray.get(llm.finish_weight_update.remote())
+        ray.get(train_model.init_sparse_engine.remote(world_size, llm))
+        patched_names, num_updates = ray.get(train_model.patch_and_send.remote())
         ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
-        dense_after = collect_vllm_generations(llm)
-
-        return {
-            "dense_before": dense_before,
-            "dense_after": dense_after,
-            "selected_token_ids": selected_token_ids,
-            "patch_digest": patch_digest,
-            "dense_payload_bytes": dense_payload_bytes,
-            "dense_send_ms": dense_send_ms,
-        }
+        after = generate(llm)
+        print_generations("AFTER sparse update", after)
+        print(f"patched_checkpoint_names={patched_names}")
+        print(f"num_sparse_values={num_updates}")
+        outputs_changed = any(
+            old["token_ids"] != new["token_ids"]
+            for old, new in zip(before, after, strict=True)
+        )
+        print(f"outputs_changed={outputs_changed}")
     finally:
-        ray.kill(llm)
+        if train_model is not None:
+            with suppress(Exception):
+                ray.get(train_model.shutdown_engine.remote())
+        if llm is not None:
+            with suppress(Exception):
+                ray.kill(llm)
+        if train_model is not None:
+            with suppress(Exception):
+                ray.kill(train_model)
+        if pg_inference is not None:
+            with suppress(Exception):
+                ray.util.remove_placement_group(pg_inference)
+        ray.shutdown()
 
 
-def run_sparse_phase(
-    train_model,
-    scheduling_inference: PlacementGroupSchedulingStrategy,
-) -> dict[str, object]:
-    ray.get(train_model.reset_model.remote())
-    llm = launch_llm(scheduling_inference, backend="sparse_nccl")
-    try:
-        sparse_before = collect_vllm_generations(llm)
-
-        ray.get(llm.sleep.remote(level=0))
-        master_address, master_port = ray.get(train_model.create_rendezvous.remote())
-        world_size = ray.get(llm.get_world_size.remote()) + 1
-        inference_init = llm.init_weight_transfer_engine.remote(
-            dict(
-                init_info=dict(
-                    master_address=master_address,
-                    master_port=master_port,
-                    rank_offset=1,
-                    world_size=world_size,
-                )
-            )
-        )
-        trainer_init = train_model.init_weight_transfer_group.remote(world_size)
-        ray.get([trainer_init, inference_init])
-        ray.get(llm.start_weight_update.remote())
-
-        sparse_update_info, selected_token_ids, patch_digest, sparse_payload_bytes = (
-            ray.get(train_model.prepare_sparse_patch.remote(PROMPTS))
-        )
-
-        inference_update = llm.update_weights.remote(
-            dict(update_info=sparse_update_info)
-        )
-        sparse_send_ms, _ = ray.get(
-            [
-                train_model.broadcast_pending_sparse_patch.remote(),
-                inference_update,
-            ]
-        )
-        ray.get(llm.finish_weight_update.remote())
-        ray.get(llm.wake_up.remote(tags=["scheduling"]))
-
-        sparse_after = collect_vllm_generations(llm)
-
-        return {
-            "sparse_before": sparse_before,
-            "sparse_after": sparse_after,
-            "selected_token_ids": selected_token_ids,
-            "patch_digest": patch_digest,
-            "sparse_payload_bytes": sparse_payload_bytes,
-            "sparse_send_ms": sparse_send_ms,
-        }
-    finally:
-        ray.kill(llm)
-
-
-ray.init()
-
-try:
-    train_model = TrainModel.remote(MODEL_NAME)
-
-    pg_inference = placement_group([{"GPU": 1, "CPU": 0}])
-    ray.get(pg_inference.ready())
-    scheduling_inference = PlacementGroupSchedulingStrategy(
-        placement_group=pg_inference,
-        placement_group_capture_child_tasks=True,
-        placement_group_bundle_index=0,
-    )
-
-    dense_results = run_dense_phase(train_model, scheduling_inference)
-    sparse_results = run_sparse_phase(train_model, scheduling_inference)
-
-    baseline_equal = token_sequences_match(
-        dense_results["dense_before"],
-        sparse_results["sparse_before"],
-    )
-    patch_selection_equal = (
-        dense_results["selected_token_ids"] == sparse_results["selected_token_ids"]
-    )
-    patch_digest_equal = dense_results["patch_digest"] == sparse_results["patch_digest"]
-    after_equal = token_sequences_match(
-        dense_results["dense_after"],
-        sparse_results["sparse_after"],
-    )
-    any_output_changed = any(
-        before["token_ids"] != after["token_ids"]
-        for before, after in zip(
-            dense_results["dense_before"],
-            dense_results["dense_after"],
-        )
-    )
-    dense_payload_mb = dense_results["dense_payload_bytes"] / (1024 * 1024)
-    sparse_payload_mb = sparse_results["sparse_payload_bytes"] / (1024 * 1024)
-
-    print_generations(
-        "Dense baseline outputs",
-        PROMPTS,
-        dense_results["dense_before"],
-    )
-    print_generations(
-        "Sparse baseline outputs", PROMPTS, sparse_results["sparse_before"]
-    )
-    print_generations(
-        "Dense outputs after update", PROMPTS, dense_results["dense_after"]
-    )
-    print_generations(
-        "Sparse outputs after update",
-        PROMPTS,
-        sparse_results["sparse_after"],
-    )
-
-    print(f"patched_token_ids = {dense_results['selected_token_ids']}")
-    print(f"patch_selection_equal = {patch_selection_equal}")
-    print(f"dense_patch_digest = {dense_results['patch_digest']}")
-    print(f"sparse_patch_digest = {sparse_results['patch_digest']}")
-    print(f"patch_digest_equal = {patch_digest_equal}")
-    print(f"baseline_equal = {baseline_equal}")
-    print(f"after_equal = {after_equal}")
-    print(f"any_output_changed = {any_output_changed}")
-    print(f"dense_payload_mb = {dense_payload_mb:.2f}")
-    print(f"sparse_payload_mb = {sparse_payload_mb:.2f}")
-    print(f"dense_send_ms = {dense_results['dense_send_ms']:.2f}")
-    print(f"sparse_send_ms = {sparse_results['sparse_send_ms']:.2f}")
-
-    if not baseline_equal:
-        raise RuntimeError(
-            "Dense and sparse phases did not start from the same baseline"
-        )
-    if not patch_selection_equal:
-        raise RuntimeError("Dense and sparse phases used different sparse patches")
-    if not patch_digest_equal:
-        raise RuntimeError("Dense and sparse phases produced different patch values")
-    if not after_equal:
-        raise RuntimeError("Dense and sparse updates produced different outputs")
-    if not any_output_changed:
-        raise RuntimeError("Patch did not change the observed outputs")
-finally:
-    ray.shutdown()
+if __name__ == "__main__":
+    main()

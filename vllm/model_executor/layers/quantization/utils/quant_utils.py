@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""This file is used for /tests and /benchmarks"""
+"""This file is used for /tests and /benchmarks."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple
 
 import numpy
 import torch
 from torch import fx
 
+from vllm.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -22,6 +23,72 @@ FP4_DTYPE = torch.uint8
 MXFP_SCALE_DTYPE = torch.uint8
 INT4_DTYPE = scalar_types.uint4b8
 INT8_DTYPE = scalar_types.uint8b128
+
+
+def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
+    """Return a stable short name for torch and ScalarType dtypes."""
+    if isinstance(dtype, ScalarType):
+        return str(dtype)
+    return fx.graph.dtype_abbrs[dtype]
+
+
+def weight_amax(
+    weight: torch.Tensor, *, dim: int | None = None, keepdim: bool = False
+) -> torch.Tensor:
+    """``max(|weight|)``, without materializing a full-size ``abs()``."""
+    lo, hi = weight.aminmax(dim=dim, keepdim=keepdim)
+    return torch.maximum(lo.abs(), hi.abs())
+
+
+def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tensor:
+    """Reduce a weight ``amax`` over the TP group when the weight is sharded
+    along a dim the ``amax`` reduces over, so each shard derives the same scale
+    it would as part of the whole weight.
+    """
+    if is_sharded:
+        torch.distributed.all_reduce(
+            amax,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_tp_group().device_group,
+        )
+    return amax
+
+
+def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Tensor:
+    """Reduce a per-expert weight ``amax`` over the ranks that tensor-shard the
+    MoE weights. That sharding is flattened over DP x PCP x TP, exactly the EP
+    group's span. Under EP ``moe_tp_size`` is 1 and each rank owns whole
+    experts, so no reduction is needed.
+    """
+    if moe_tp_size > 1:
+        torch.distributed.all_reduce(
+            amax,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_ep_group().device_group,
+        )
+    return amax
+
+
+def amax_for_moe_activation_quant(
+    a_scale: torch.Tensor, enable_eplb: bool
+) -> torch.Tensor:
+    """Reduce a per-expert activation scale to one value shared by all experts.
+
+    Note: when EPLB is enabled and since this quantization scales get
+    folded into the per-expert dequantization alphas, we can only
+    ensure that the quant/dequant scales match by having a single
+    quantization scale shared across all ranks.
+    """
+    a_max = a_scale.max().to(torch.float32)
+    if enable_eplb:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        torch.distributed.all_reduce(
+            a_max,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_ep_group().device_group,
+        )
+    return a_max
 
 
 def get_fp8_min_max() -> tuple[float, float]:
@@ -42,8 +109,7 @@ class _GroupShape(NamedTuple):
 
 
 class GroupShape(_GroupShape):
-    """
-    This class describes the quantization group shape.
+    """This class describes the quantization group shape.
     It includes static members for common shapes (per-tensor, per-token).
     """
 
@@ -72,8 +138,7 @@ GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 @dataclass(frozen=True)
 class ScaleDesc:
-    """
-    Class for describing a single quantization scaling factor.
+    """Class for describing a single quantization scaling factor.
     dtype: data type of the scale
     static: static scale if True, dynamic if False
     group_shape: group shape of the scale
@@ -92,15 +157,14 @@ class ScaleDesc:
         group_shape = d.get(self.group_shape, str(self.group_shape))
 
         return (
-            f"{fx.graph.dtype_abbrs[self.dtype]},"
+            f"{_dtype_abbr(self.dtype)},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
         )
 
 
 @dataclass(frozen=True)
 class QuantKey:
-    """
-    Class for identifying the type of quantization.
+    """Class for identifying the type of quantization.
     dtype: quantized data type
     scale: scale descriptor
     scale2: second-level scale descriptor
@@ -118,13 +182,8 @@ class QuantKey:
 
     def __str__(self):
         scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
-        dtype_description = (
-            fx.graph.dtype_abbrs[self.dtype]
-            if isinstance(self.dtype, torch.dtype)
-            else self.dtype
-        )
         return (
-            f"QuantKey({dtype_description},"
+            f"QuantKey({_dtype_abbr(self.dtype)},"
             f"scale({self.scale}),{scale2_str}"
             f"{'a' if not self.symmetric else ''}symmetric)"
         )
@@ -160,6 +219,11 @@ kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 
 kStatic128BlockScale = ScaleDesc(torch.float32, True, GroupShape(128, 128))
 kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True)
+kFp8Static128BlockE8M0Sym = QuantKey(
+    FP8_DTYPE,
+    ScaleDesc(torch.float8_e8m0fnu, True, GroupShape(128, 128)),
+    symmetric=True,
+)
 
 kMxfp8StaticScale = ScaleDesc(torch.uint8, True, GroupShape(1, 32))
 kMxfp8Static = QuantKey(FP8_DTYPE, kMxfp8StaticScale, symmetric=True)
@@ -222,6 +286,9 @@ kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
 kInt8StaticTensorSym = QuantKey(torch.int8, kStaticTensorScale, symmetric=True)
 kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True)
+kInt8DynamicTokenAsym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=False)
+kInt8StaticTensorAsym = QuantKey(torch.int8, kStaticTensorScale, symmetric=False)
+kInt8DynamicTensorAsym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=False)
 
 # INT4 W4A8 quantization keys
 
@@ -308,8 +375,7 @@ def prep_scale_for_group_broadcast(
     x: torch.Tensor,
     group_shape: GroupShape | None,
 ) -> torch.Tensor:
-    """
-    Prepare the input quantization scale for group broadcasting.
+    """Prepare the input quantization scale for group broadcasting.
 
     Args:
         scale: The scale tensor (scalar or 1D).
@@ -318,6 +384,7 @@ def prep_scale_for_group_broadcast(
 
     Returns:
         scale reshaped for correct broadcasting.
+
     """
     if scale.numel() == 1:
         # For per-tensor quant, keep the scale as a scalar (not reshaped to (1, 1)).
@@ -362,13 +429,13 @@ def scaled_quantize(
     quant_dtype: torch.dtype,
     compute_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Args:
-        x: Input tensor to quantize
-        group_shape: Shape of quantization groups
-        quant_dtype: Target quantized dtype (e.g., torch.float8_e4m3fn)
-        compute_dtype: Optional dtype for intermediate computations.
-            If None, uses input dtype. Use torch.float32 for higher precision.
+    """Args:
+    x: Input tensor to quantize
+    group_shape: Shape of quantization groups
+    quant_dtype: Target quantized dtype (e.g., torch.float8_e4m3fn)
+    compute_dtype: Optional dtype for intermediate computations.
+        If None, uses input dtype. Use torch.float32 for higher precision.
+
     """
     group_shape = _normalize_quant_group_shape(x, group_shape)
     assert quant_dtype.is_floating_point, (
@@ -436,7 +503,7 @@ def get_attribute_fallback(obj, attributes: list[str]):
 def get_and_maybe_dequant_weights(
     layer: "LinearBase", out_dtype: torch.dtype = torch.float32
 ):
-    """Return layer's unquantized weights in [out, in] layout"""
+    """Return layer's unquantized weights in [out, in] layout."""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
     from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -544,7 +611,7 @@ def is_layer_skipped(
     ignored_layers: list[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
     *,
-    skip_with_substr: bool = False,
+    match_mode: Literal["exact", "substring", "suffix"] = "exact",
 ) -> bool:
     def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
         return prefix in ignored_layers
@@ -553,7 +620,22 @@ def is_layer_skipped(
     def substr_match(prefix: str, ignored_layers: list[str]) -> bool:
         return any(layer in prefix for layer in ignored_layers)
 
-    match_func = substr_match if skip_with_substr else prefix_full_match
+    # Match abbreviated module paths at a component boundary. For example,
+    # ``b_proj`` matches ``model.layers.0.self_attn.b_proj`` but not
+    # ``model.layers.0.self_attn.q_b_proj``.
+    def suffix_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return any(
+            prefix == layer or prefix.endswith(f".{layer}") for layer in ignored_layers
+        )
+
+    if match_mode == "exact":
+        match_func = prefix_full_match
+    elif match_mode == "substring":
+        match_func = substr_match
+    elif match_mode == "suffix":
+        match_func = suffix_match
+    else:
+        raise ValueError(f"Unsupported layer skip match mode: {match_mode}")
 
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
@@ -589,14 +671,11 @@ def is_layer_skipped(
                     "are quantized. All shards of fused layers "
                     "to have the same precision."
                 )
-    elif "experts" in prefix and not skip_with_substr:
+    elif "experts" in prefix and match_mode == "exact":
         expert_ignore_layers = filter(
             lambda layer_name: "experts" in layer_name, ignored_layers
         )
-        return any(
-            prefix in layer_name if not skip_with_substr else layer_name in prefix
-            for layer_name in expert_ignore_layers
-        )
+        return any(prefix in layer_name for layer_name in expert_ignore_layers)
     else:
         is_skipped = match_func(prefix, ignored_layers)
 
@@ -607,36 +686,6 @@ def is_layer_skipped(
 def get_pack_factor(num_bits):
     assert 32 % num_bits == 0, f"Unsupported num_bits = {num_bits}"
     return 32 // num_bits
-
-
-def permute_rows(
-    q_w: torch.Tensor,
-    w_ref: torch.Tensor,
-    group_size: int,
-    test_perm: torch.Tensor | None = None,
-):
-    assert q_w.shape == w_ref.shape
-
-    orig_device = q_w.device
-    k_size, _ = q_w.shape
-
-    g_idx = torch.zeros((k_size,), dtype=torch.int32)
-    for i in range(k_size):
-        g_idx[i] = i // group_size
-
-    # Simulate act_order by doing a random permutation on K
-    rand_perm = test_perm if test_perm is not None else torch.randperm(k_size)
-
-    g_idx = g_idx[rand_perm].contiguous()
-    q_w = q_w[rand_perm, :].contiguous()
-    w_ref = w_ref[rand_perm, :].contiguous()
-
-    return (
-        w_ref.to(device=orig_device),
-        q_w.to(device=orig_device),
-        g_idx.to(device=orig_device),
-        rand_perm.to(device=orig_device),
-    )
 
 
 def quantize_weights(
@@ -742,8 +791,6 @@ def gptq_quantize_weights(
     w: torch.Tensor,
     quant_type: ScalarType,
     group_size: int,
-    act_order: bool,
-    test_perm: torch.Tensor | None = None,
 ):
     size_k, _ = w.shape
 
@@ -756,35 +803,7 @@ def gptq_quantize_weights(
     )
 
     w_ref, w_q, w_s, _ = quantize_weights(w, quant_type, group_size)
-
-    # Apply act_order
-    g_idx = torch.empty(0, dtype=torch.int, device=w.device)
-    rand_perm = torch.empty(0, dtype=torch.int, device=w.device)
-    if act_order:
-        assert group_size < size_k, (
-            "For act_order, groupsize = {} must be less than size_k = {}".format(
-                group_size, size_k
-            )
-        )
-
-        w_ref, w_q, g_idx, rand_perm = permute_rows(w_q, w_ref, group_size, test_perm)
-
-    return w_ref, w_q, w_s, g_idx, rand_perm
-
-
-def sort_weights(q_w: torch.Tensor, g_idx: torch.Tensor):
-    orig_device = q_w.device
-
-    sort_indices = torch.argsort(g_idx).to(dtype=torch.int32)  # Sort based on g_idx
-
-    g_idx = g_idx[sort_indices].contiguous()
-    q_w = q_w[sort_indices, :].contiguous()
-
-    return (
-        q_w.to(device=orig_device),
-        g_idx.to(device=orig_device),
-        sort_indices.to(device=orig_device),
-    )
+    return w_ref, w_q, w_s
 
 
 def pack_rows(
@@ -902,8 +921,7 @@ def awq_pack(
 def convert_bf16_scales_to_fp8(
     quant_fp8: Callable, scales: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Convert a BF16 scale tensor into the pair of (fp8_scales, channel_scales)
+    """Convert a BF16 scale tensor into the pair of (fp8_scales, channel_scales)
     expected by W4A8 GEMM kernels.
     """
     assert scales.is_contiguous(), (
@@ -927,9 +945,7 @@ def convert_bf16_scales_to_fp8(
 
 
 def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tensor:
-    """
-    Convert int4b8 (packed to int32) to signed int4
-    """
+    """Convert int4b8 (packed to int32) to signed int4."""
     assert t.is_cuda, "tensor must be on gpu"
     assert t.dtype == torch.int32, f"expected int32 packed weights but got {t.dtype}"
 

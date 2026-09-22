@@ -6,7 +6,7 @@ import lm_eval
 import openai
 
 BASE_URL = "http://localhost:8192/v1"
-NUM_CONCURRENT = 100
+NUM_CONCURRENT = int(os.getenv("NUM_CONCURRENT", "100"))
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 # TODO(#43186): Widened from 0.03 to absorb chunk_scan/SSU numeric jitter
@@ -36,6 +36,19 @@ SIMPLE_PROMPT = (
 
 # Get model name from environment variable
 MODEL_NAME = os.environ.get("TEST_MODEL", "Qwen/Qwen3-0.6B")
+
+
+def _meets_accuracy_threshold(measured_value: float, expected_value: float) -> bool:
+    return measured_value >= expected_value - RTOL
+
+
+def test_accuracy_threshold_is_one_sided():
+    expected_value = 0.77
+    minimum_value = expected_value - RTOL
+
+    assert _meets_accuracy_threshold(minimum_value, expected_value)
+    assert _meets_accuracy_threshold(expected_value + RTOL + 0.01, expected_value)
+    assert not _meets_accuracy_threshold(minimum_value - 0.01, expected_value)
 
 
 def run_simple_prompt():
@@ -93,7 +106,7 @@ def test_accuracy():
         )
         return
 
-    assert (
-        measured_value - RTOL < expected_value
-        and measured_value + RTOL > expected_value
-    ), f"Expected: {expected_value} | Measured: {measured_value}"
+    minimum_value = expected_value - RTOL
+    assert _meets_accuracy_threshold(measured_value, expected_value), (
+        f"Expected at least: {minimum_value} | Measured: {measured_value}"
+    )

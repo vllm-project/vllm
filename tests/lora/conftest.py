@@ -33,7 +33,6 @@ def should_do_global_cleanup_after_test(request) -> bool:
     This can provide a ~10x speedup for non-GPU unit tests since they don't need
     to initialize torch.
     """
-
     return not request.node.get_closest_marker("skip_global_cleanup")
 
 
@@ -254,6 +253,11 @@ def qwen3vl_vision_lora_files():
 
 
 @pytest.fixture(scope="session")
+def gemma4_vision_lora_files():
+    return hf_api().snapshot_download(repo_id="EpochEcho/gemma4-e2b-it-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
 def qwen3_meowing_lora_files():
     """Download Qwen3 Meow LoRA files once per test session."""
     return hf_api().snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
@@ -266,8 +270,27 @@ def qwen3_woofing_lora_files():
 
 
 @pytest.fixture(scope="session")
-def tinyllama_lora_files():
-    return hf_api().snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+def qwen3_guard_star_trek_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="geoffmunn/Qwen3Guard-StarTrek-Classification-0.6B",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
+
+
+@pytest.fixture(scope="session")
+def qwen3_guard_new_zealand_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="geoffmunn/Qwen3Guard-NewZealand-Classification-0.6B",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
+
+
+@pytest.fixture(scope="session")
+def skywork_qwen3_reward_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="AmirMohseni/skywork-qwen3-0.6b-reward-lora",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
 
 
 @pytest.fixture(scope="session")
@@ -343,8 +366,7 @@ def qwen36_moe_3d_lora_files():
 
 @pytest.fixture
 def reset_default_device():
-    """
-    Some tests, such as `test_punica_ops.py`, explicitly set the
+    """Some tests, such as `test_punica_ops.py`, explicitly set the
     default device, which can affect subsequent tests. Adding this fixture
     helps avoid this problem.
     """

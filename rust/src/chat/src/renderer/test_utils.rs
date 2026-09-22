@@ -8,10 +8,11 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
-    GenerationPromptMode, ReasoningEffort,
+    GenerationPromptMode, ResolvedToolContext,
 };
 
 /// Options for constructing a [`ChatRequest`] from a fixture file.
@@ -47,7 +48,7 @@ pub(crate) struct FixtureRequest {
     tools: Vec<FixtureTool>,
     messages: Vec<FixtureMessage>,
     add_generation_prompt: Option<bool>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<EffortValue>,
     /// Standard response format passed to model-specific renderers.
     #[serde(default)]
     response_format: Option<Value>,
@@ -158,22 +159,20 @@ struct FixtureToolCallFunction {
 impl FixtureRequest {
     fn into_chat_request(self, options: FixtureRequestOptions) -> ChatRequest {
         let tools = to_chat_tools(&self.tools);
-        let tool_choice = self.tool_choice.unwrap_or(if tools.is_empty() {
-            ChatToolChoice::None
-        } else {
-            ChatToolChoice::Auto
-        });
+
+        let messages = self
+            .messages
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| fixture_message_to_chat_message(index, message))
+            .collect::<Vec<_>>();
+        let tool_context = ResolvedToolContext::new(&messages, tools, self.tool_choice, true)
+            .expect("fixture tool context should resolve");
 
         let mut request = ChatRequest {
             request_id: "renderer-fixture".to_string(),
-            messages: self
-                .messages
-                .into_iter()
-                .enumerate()
-                .map(|(index, message)| fixture_message_to_chat_message(index, message))
-                .collect(),
-            tools,
-            tool_choice,
+            messages,
+            tool_context,
             ..ChatRequest::for_test()
         };
 

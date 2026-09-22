@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MXFP4 linear kernel selection logic (CPU-only)
+"""Tests for MXFP4 linear kernel selection logic (CPU-only).
 
 Run `pytest tests/kernels/quantization/test_mxfp4_kernel_selection.py`.
 """
@@ -14,7 +14,6 @@ from vllm.model_executor.kernels.linear import (
     AiterMxfp4LinearKernel,
     EmulationMxfp4LinearKernel,
     FlashInferMxFp4LinearKernel,
-    HummingMxFp4LinearKernel,
     MarlinMxFp4LinearKernel,
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
@@ -44,7 +43,7 @@ _TRUE_W4A4_KERNELS = [
 
 # Weight-only (A16) kernels: they never quantize activations. They still accept
 # MXFP4 activation keys as an intentional compatibility fallback.
-_WEIGHT_ONLY_KERNELS = [MarlinMxFp4LinearKernel, HummingMxFp4LinearKernel]
+_WEIGHT_ONLY_KERNELS = [MarlinMxFp4LinearKernel]
 
 
 def test_can_implement_is_abstract():
@@ -114,9 +113,15 @@ def test_weight_only_kernels_reject_non_mxfp4_activation(kernel_cls):
     "activation_quant_key",
     [None, kMxfp4Dynamic, kMxfp6E3M2Dynamic, kMxfp6E2M3Dynamic],
 )
-def test_emulation_kernel_accepts_any_config(activation_quant_key):
+def test_emulation_kernel_accepts_any_config(activation_quant_key, monkeypatch):
     """EmulationMxfp4LinearKernel is the universal fallback: it must accept
     every supported activation format."""
+    # `EmulationMxfp4LinearKernel.can_implement` gates on `has_quark()`,
+    # which we are not testing here.
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+        lambda: True,
+    )
     config = MxFp4LinearLayerConfig(activation_quant_key=activation_quant_key)
     with patch(
         "vllm.model_executor.kernels.linear._get_linear_backend",
@@ -126,9 +131,15 @@ def test_emulation_kernel_accepts_any_config(activation_quant_key):
     assert can_implement, reason
 
 
-def test_emulation_kernel_derives_quant_dequant_func_from_config():
+def test_emulation_kernel_derives_quant_dequant_func_from_config(monkeypatch):
     """quant_dequant_func must be derived purely from the config's activation
     QuantKey, not set externally."""
+    # `EmulationMxfp4LinearKernel.can_implement` gates on `has_quark()`,
+    # which we are not testing here.
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+        lambda: True,
+    )
     with patch(
         "vllm.model_executor.kernels.linear._get_linear_backend",
         return_value="emulation",

@@ -49,6 +49,45 @@ def hf_fs() -> "huggingface_hub.HfFileSystem":
     )
 
 
+def resolve_revision(
+    repo_id: str,
+    revision: str | None = None,
+    token: str | bool | None = None,
+) -> str | None:
+    """Best-effort attempt to resolve a Hub revision to a commit hash.
+
+    Resolving the commit hash once prevents repeated HTTP calls downstream and
+    avoids races if the branch moves while the model is loading.
+
+    `HfApi.resolve_revision` returns a `ResolvedRevision`: a `str` equal to the
+    requested revision that also carries the commit hash, so downstream error
+    messages stay readable and offline loads reuse the cached `refs/` entry.
+
+    Returns:
+        The resolved revision, or `revision` unchanged if it cannot be resolved
+        (local path, ModelScope, or any Hub error).
+
+    """
+    if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
+        return revision
+
+    try:
+        return hf_api().resolve_revision(
+            repo_id,
+            revision=revision,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            token=token,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to resolve revision for %s; falling back to %s.",
+            repo_id,
+            revision,
+            exc_info=True,
+        )
+        return revision
+
+
 _R = TypeVar("_R")
 
 
@@ -57,10 +96,24 @@ def with_retry(
     log_msg: str,
     max_retries: int = 2,
     retry_delay: int = 2,
+    fatal_errors: tuple[type[Exception], ...] = (),
 ) -> _R:
+    """Call `func`, retrying transient failures.
+
+    Args:
+        func: The call to make.
+        log_msg: Prefix for the message logged when a call fails.
+        max_retries: How many times to call `func` before giving up.
+        retry_delay: Seconds to wait after the first failure, doubled each time.
+        fatal_errors: Exceptions that are a definitive answer rather than a
+            transient failure. These are raised immediately, without logging.
+
+    """
     for attempt in range(max_retries):
         try:
             return func()
+        except fatal_errors:
+            raise
         except Exception as e:
             if attempt == max_retries - 1:
                 logger.error("%s: %s", log_msg, e)
@@ -302,8 +355,7 @@ def get_hf_file_bytes(
 def try_get_local_file(
     model: str | Path, file_name: str, revision: str | None = "main"
 ) -> Path | Any | None:
-    """
-    Try to get a local file from the HuggingFace repository.
+    """Try to get a local file from the HuggingFace repository.
 
     The possible return values are:
 
@@ -334,20 +386,19 @@ def try_get_local_file(
 def get_hf_file_to_dict(
     file_name: str, model: str | Path, revision: str | None = "main"
 ):
-    """
-    Downloads a file from the Hugging Face Hub and returns
+    """Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
 
-    Parameters:
-    - file_name (str): The name of the file to download.
-    - model (str): The name of the model on the Hugging Face Hub.
-    - revision (str): The specific version of the model.
+    Args:
+        file_name (str): The name of the file to download.
+        model (str): The name of the model on the Hugging Face Hub.
+        revision (str): The specific version of the model.
 
     Returns:
     - config_dict (dict): A dictionary containing
     the contents of the downloaded file.
-    """
 
+    """
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:

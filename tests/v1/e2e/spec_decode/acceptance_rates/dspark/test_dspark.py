@@ -1,129 +1,156 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+
 import pytest
-import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
-from vllm import LLM
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.config import CompilationConfig
+from vllm.platforms import current_platform
 
 from ...utils import compute_acceptance_len, compute_acceptance_rate
 
+REGRESSION_TOLERANCE = 0.95
 
-def test_gemma4_dspark_correctness_and_acceptance_rate(
+
+@dataclass(frozen=True)
+class DSparkCorrectnessConfig:
+    model: str
+    draft_model: str
+    reference_accuracy: float
+    reference_acceptance_rate: float
+    reference_acceptance_len: float
+    num_speculative_tokens: int = 7
+    max_model_len: int = 4096
+    max_num_seqs: int | None = None
+    num_questions: int = 1319
+    max_tokens: int = 256
+    use_chat_completions: bool = False
+    chat_template_kwargs: dict[str, object] | None = None
+    attention_backend: str | None = None
+    gpu_memory_utilization: float = 0.92
+    enforce_eager: bool = False
+    disable_flashinfer_sampler: bool = False
+    language_model_only: bool = False
+
+
+# References from 12 full GSM8K runs at temperature 1.0: accuracy 0.782-0.814,
+# acceptance rate 0.418-0.434, acceptance length 3.928-4.037.
+QWEN3_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
+    model="Qwen/Qwen3-4B-FP8",
+    draft_model="deepseek-ai/dspark_qwen3_4b_block7",
+    reference_accuracy=0.801,
+    reference_acceptance_rate=0.428,
+    reference_acceptance_len=3.994,
+    attention_backend="FLASH_ATTN",
+)
+
+# References from five 200-question runs at temperature 1.0: accuracy
+# 0.900-0.955, acceptance rate 0.578-0.595, acceptance length 5.044-5.167.
+GEMMA4_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
+    model="RedHatAI/gemma-4-12B-it-NVFP4",
+    draft_model="deepseek-ai/dspark_gemma4_12b_block7",
+    reference_accuracy=0.92,
+    reference_acceptance_rate=0.58,
+    reference_acceptance_len=5.0,
+    max_num_seqs=32,
+    num_questions=200,
+    use_chat_completions=True,
+    gpu_memory_utilization=0.85,
+    enforce_eager=True,
+    disable_flashinfer_sampler=True,
+    language_model_only=True,
+)
+
+# Reference from 200 GSM8K questions at temperature 1.0.
+QWEN3_6_DSPARK_SPECULATORS = DSparkCorrectnessConfig(
+    model="RedHatAI/Qwen3.6-35B-A3B-NVFP4",
+    draft_model="RedHatAI/Qwen3.6-35B-A3B-speculator.dspark",
+    reference_accuracy=0.85,
+    reference_acceptance_rate=0.41,
+    reference_acceptance_len=4.25,
+    num_speculative_tokens=8,
+    max_num_seqs=32,
+    num_questions=200,
+    use_chat_completions=True,
+    chat_template_kwargs={"enable_thinking": False},
+    gpu_memory_utilization=0.85,
+    language_model_only=True,
+)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param(QWEN3_DSPARK_DEEPSPEC, id="qwen3-deepspec"),
+        pytest.param(GEMMA4_DSPARK_DEEPSPEC, id="gemma4-deepspec"),
+        pytest.param(QWEN3_6_DSPARK_SPECULATORS, id="qwen3.6-speculators"),
+    ],
+)
+def test_dspark_correctness_and_acceptance_rate(
     monkeypatch: pytest.MonkeyPatch,
+    config: DSparkCorrectnessConfig,
+    vllm_runner,
 ):
-    """
-    E2E test for Gemma4 DSpark speculative decoding: acceptance rate/length
-    regression coverage plus GSM8K correctness, at temperature=1.0 to exercise
-    the probabilistic draft-sampling/rejection-sampling path (not just greedy).
+    """Guard GSM8K accuracy and acceptance metrics for DSpark models."""
+    if config.disable_flashinfer_sampler:
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
-    gemma-4-12B is instruct-tuned, so GSM8K is run through the chat template
-    (use_chat_completions=True; raw few-shot completion collapses to a few
-    percent). Reference: measured over 5 runs of 200 GSM8K questions at
-    temperature=1.0 (prefix caching disabled):
-      accuracy:        min=0.900 max=0.955 mean=0.937
-      acceptance_rate: min=0.578 max=0.595 mean=0.588
-      acceptance_len:  min=5.044 max=5.167 mean=5.116
-    Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
-    """
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    speculative_config = {
+        "method": "dspark",
+        "model": config.draft_model,
+        "num_speculative_tokens": config.num_speculative_tokens,
+        "draft_sample_method": "probabilistic",
+    }
+    if config.attention_backend is not None and current_platform.is_cuda():
+        speculative_config["attention_backend"] = config.attention_backend
 
-    spec_llm = LLM(
-        model="RedHatAI/gemma-4-12B-it-NVFP4",
-        trust_remote_code=True,
-        speculative_config={
-            "method": "dspark",
-            "model": "deepseek-ai/dspark_gemma4_12b_block7",
-            "num_speculative_tokens": 7,
-            "draft_sample_method": "probabilistic",
-        },
-        max_model_len=4096,
-        max_num_seqs=32,
-        gpu_memory_utilization=0.85,
-        enforce_eager=True,
-        enable_prefix_caching=False,
-        disable_log_stats=False,
-    )
-    try:
+    runner_config = {
+        "block_size": None,
+        "trust_remote_code": True,
+        "speculative_config": speculative_config,
+        "max_model_len": config.max_model_len,
+        "gpu_memory_utilization": config.gpu_memory_utilization,
+        "enforce_eager": config.enforce_eager,
+        "enable_chunked_prefill": None,
+        "enable_prefix_caching": False,
+        "disable_log_stats": False,
+        "compilation_config": CompilationConfig(),
+    }
+    if config.max_num_seqs is not None:
+        runner_config["max_num_seqs"] = config.max_num_seqs
+    if config.language_model_only:
+        runner_config["language_model_only"] = True
+
+    with vllm_runner(config.model, **runner_config) as spec_runner:
+        spec_llm = spec_runner.llm
         results = evaluate_gsm8k_offline(
-            spec_llm, num_questions=200, temperature=1.0, use_chat_completions=True
+            spec_llm,
+            num_questions=config.num_questions,
+            max_tokens=config.max_tokens,
+            temperature=1.0,
+            use_chat_completions=config.use_chat_completions,
+            chat_template_kwargs=config.chat_template_kwargs,
         )
-        gsm8k_accuracy = results["accuracy"]
-
+        accuracy = results["accuracy"]
         metrics = spec_llm.get_metrics()
         acceptance_rate = compute_acceptance_rate(metrics)
         acceptance_len = compute_acceptance_len(metrics)
-        print(
-            f"Gemma4 DSpark acceptance_rate={acceptance_rate:.2f}, "
-            f"acceptance_len={acceptance_len:.2f}, "
-            f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+        context = f"DSpark target={config.model}, draft={config.draft_model}"
+        metrics_summary = (
+            f"gsm8k_accuracy={accuracy:.3f}, "
+            f"acceptance_rate={acceptance_rate:.3f}, "
+            f"acceptance_len={acceptance_len:.3f}"
         )
+        print(f"{context}: {metrics_summary}")
 
-        assert acceptance_rate >= 0.58 * 0.9
-        assert acceptance_len >= 5.0 * 0.9
-        assert gsm8k_accuracy >= 0.92 * 0.9
-    finally:
-        del spec_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
-
-
-@pytest.fixture
-def dspark_config():
-    target_model = "Qwen/Qwen3-4B-FP8"
-    draft_model = "deepseek-ai/dspark_qwen3_4b_block7"
-
-    return dict(
-        model=target_model,
-        trust_remote_code=True,
-        speculative_config={
-            "method": "dspark",
-            "model": draft_model,
-            "num_speculative_tokens": 7,
-            "attention_backend": "FLASH_ATTN",
-            "draft_sample_method": "probabilistic",
-        },
-        max_model_len=4096,
-        disable_log_stats=False,
-    )
-
-
-def test_dspark_correctness_and_acceptance_rate(dspark_config):
-    """
-    E2E test for DSpark speculative decoding: acceptance rate/length
-    regression coverage plus GSM8K correctness, at temperature=1.0 to
-    exercise the probabilistic draft-sampling/rejection-sampling path
-    (not just greedy).
-
-    Uses Qwen/Qwen3-4B-FP8 as target with the dspark_qwen3_4b_block7 draft
-    model. Reference: measured over 12 runs of the full GSM8K set at
-    temperature=1.0 (prefix caching disabled to avoid cross-run reuse):
-      accuracy:        min=0.782 max=0.814 mean=0.801
-      acceptance_rate: min=0.418 max=0.434 mean=0.428
-      acceptance_len:  min=3.928 max=4.037 mean=3.994
-    Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
-    """
-    spec_llm = LLM(**dspark_config)
-
-    results = evaluate_gsm8k_offline(spec_llm, temperature=1.0)
-    gsm8k_accuracy = results["accuracy"]
-
-    metrics = spec_llm.get_metrics()
-    acceptance_rate = compute_acceptance_rate(metrics)
-    acceptance_len = compute_acceptance_len(metrics)
-
-    print(
-        f"DSpark acceptance_rate={acceptance_rate:.2f}, "
-        f"acceptance_len={acceptance_len:.2f}, "
-        f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
-    )
-
-    assert acceptance_rate >= 0.428 * 0.9
-    assert acceptance_len >= 3.994 * 0.9
-    assert gsm8k_accuracy >= 0.801 * 0.9
-
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        assert accuracy >= config.reference_accuracy * REGRESSION_TOLERANCE, (
+            f"{context}: {metrics_summary}"
+        )
+        assert (
+            acceptance_rate >= config.reference_acceptance_rate * REGRESSION_TOLERANCE
+        ), f"{context}: {metrics_summary}"
+        assert (
+            acceptance_len >= config.reference_acceptance_len * REGRESSION_TOLERANCE
+        ), f"{context}: {metrics_summary}"

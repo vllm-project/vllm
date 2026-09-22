@@ -27,7 +27,6 @@ __all__ = ["CompressedTensorsW4A8Int"]
 W4A8_SUPPORTED_TYPES_MAP = {
     4: scalar_types.int4,
 }
-W4A8_SUPPORTED_BITS = list(W4A8_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsW4A8Int(CompressedTensorsScheme):
@@ -99,7 +98,6 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
             act_type=params_dtype,
             group_size=effective_group_size,
             zero_points=False,
-            has_g_idx=False,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
@@ -141,7 +139,6 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
             w_q_param_name="weight_packed",
             w_s_param_name="weight_scale",
             w_zp_param_name=None,
-            w_gidx_param_name=None,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
