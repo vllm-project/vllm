@@ -3,7 +3,7 @@
 import dataclasses
 from concurrent.futures import Future
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -1214,7 +1214,6 @@ def test_schedule_concurrent_batches(
         pooler_output=[],
     )
     scheduler.update_from_output(scheduler_output1, model_runner_output)
-
 
 @pytest.mark.parametrize("enable_chunked_prefill", [True, False])
 def test_schedule_order(enable_chunked_prefill: bool):
@@ -6872,3 +6871,47 @@ def test_update_draft_token_ids_in_output_strips_padding():
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+def test_cost_aware_preemption_victim():
+    scheduler = create_scheduler()
+
+    requests = create_requests(
+        num_requests=3,
+        num_tokens=32,
+        max_tokens=32,
+    )
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+
+    # Request 0: many blocks, little generation progress.
+    requests[0]._output_token_ids.extend([0] * 2)
+
+    # Request 1: few blocks, little generation progress.
+    requests[1]._output_token_ids.extend([0] * 2)
+
+    # Request 2: many blocks, but almost finished.
+    requests[2]._output_token_ids.extend([0] * 30)
+
+    # Give the scoring function a lightweight fake block mapping.
+    fake_block = type("FakeBlock", (), {"ref_cnt": 1})
+
+    fake_blocks = {
+        requests[0].request_id: [[fake_block() for _ in range(8)]],
+        requests[1].request_id: [[fake_block() for _ in range(2)]],
+        requests[2].request_id: [[fake_block() for _ in range(8)]],
+    }
+
+    with patch.object(
+        scheduler.kv_cache_manager,
+        "get_blocks",
+        side_effect=lambda request_id: type(
+            "FakeKVCacheBlocks",
+            (),
+            {"blocks": fake_blocks[request_id]},
+        )(),
+    ):
+        victim = scheduler._select_preemption_victim()
+
+    assert victim is requests[0]

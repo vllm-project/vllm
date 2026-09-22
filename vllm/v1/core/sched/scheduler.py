@@ -783,7 +783,8 @@ class Scheduler(SchedulerInterface):
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
                     else:
-                        preempted_req = self.running.pop()
+                        preempted_req = self._select_preemption_victim()
+                        self.running.remove(preempted_req)
 
                     self._preempt_request(
                         preempted_req,
@@ -1522,6 +1523,45 @@ class Scheduler(SchedulerInterface):
             skip.clear()
 
         return new_block_ids_to_zero or None
+
+    def _get_preemption_score(self, request: Request) -> float:
+        """Score a running request as a candidate for preemption.
+
+        Higher score means the request is a better preemption victim.
+        """
+        blocks = self.kv_cache_manager.get_blocks(
+            request.request_id
+        ).blocks
+
+        num_reclaimable_blocks = sum(
+            block.ref_cnt == 1
+            for block_group in blocks
+            for block in block_group
+        )
+
+        # After preemption, num_computed_tokens is reset to zero, so estimate
+        # the amount of work that will have to be recomputed before doing so.
+        recompute_cost = request.num_tokens
+
+        yield_per_token = num_reclaimable_blocks / max(1, recompute_cost)
+
+        # Protect requests that are close to finishing generation.
+        progress = min(
+            request.num_output_tokens / max(1, request.max_tokens),
+            1.0,
+        )
+        progress_weight = 1.0 - progress
+
+        return yield_per_token * progress_weight
+
+    def _select_preemption_victim(self) -> Request:
+        """Select the running request with the highest preemption score."""
+        assert self.running
+
+        return max(
+            enumerate(self.running),
+            key=lambda item: (self._get_preemption_score(item[1]), item[0]),
+        )[1]
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
