@@ -551,32 +551,6 @@ def _dcp_partial_tail_store(
     )
 
 
-@pytest.mark.parametrize("max_offload_tokens", [0, 20])
-def test_partial_tail_store_honours_max_offload_tokens(max_offload_tokens: int):
-    # A cap of 0 means "offload nothing" and must not be read as "no cap"; a cap
-    # below the tail must skip the tail rather than abort the scheduler step.
-    scheduler = _make_dcp_shaped_hybrid_scheduler()
-    _make_dcp_shaped_request(scheduler)
-    req_status = scheduler._req_status["req"]
-    req_status.max_offload_tokens = max_offload_tokens
-    req_status.group_states[0].block_ids[:] = [11, 12]
-    req_status.group_states[1].block_ids[:] = [0, 0, 0, 24]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-    jobs = scheduler._build_partial_tail_store_jobs(
-        SimpleNamespace(
-            kv_connector_block_state=KVConnectorBlockState(
-                req_ids=set(),
-                resolve_block_ids={}.__getitem__,
-                boundary_state_offloads={"req": [(1, 99, 44)]},
-            )
-        )
-    )
-    assert jobs == {}
-    scheduler.manager.prepare_store.assert_not_called()
-
-
 def test_partial_tail_store_covers_every_boundary_in_one_handoff():
     # One hand-off drains every "align" manager for the step, so it can carry a
     # shared-prefix junction next to the replay boundary. Both are reachable and

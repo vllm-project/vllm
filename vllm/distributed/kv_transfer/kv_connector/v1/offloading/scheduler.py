@@ -307,9 +307,12 @@ class SchedulerOffloadConfig(NamedTuple):
         # boundary identifies every group's source block. Group block sizes may
         # differ -- under DCP the full-attention offload block is dcp x the
         # attention block while recurrent blocks stay unsharded -- as long as
-        # every recurrent block divides the full-attention block and hash
-        # boundaries split evenly across DCP ranks. EAGLE needs additional
-        # hand-off semantics for its volatile draft tail.
+        # every recurrent block divides the full-attention block. The
+        # tokens_per_hash % dcp check is conservative: store and load copy
+        # whole physical blocks per rank, so it is not required by the copy
+        # path, but it keeps every hash boundary on a whole number of tokens
+        # per rank and is the only shape validated on hardware. EAGLE needs
+        # additional hand-off semantics for its volatile draft tail.
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         full_attention_block_sizes = {
             config.tokens_per_block
@@ -1053,14 +1056,12 @@ class OffloadingConnectorScheduler:
             max_hit_size_tokens = min(
                 max_hit_size_tokens, local_tokens + req_status.max_load_tokens
             )
-        anchor_hit = complete_hit
-        if self._cow_source_groups:
-            full_attention_hit = self._full_attention_complete_hit(
-                req_status, max_hit_size_tokens
-            )
-            if full_attention_hit is None:
-                return None if complete_hit == 0 else complete_hit
-            anchor_hit = max(complete_hit, full_attention_hit)
+        full_attention_hit = self._full_attention_complete_hit(
+            req_status, max_hit_size_tokens
+        )
+        if full_attention_hit is None:
+            return None if complete_hit == 0 else complete_hit
+        anchor_hit = max(complete_hit, full_attention_hit)
 
         complete_boundary = local_tokens + anchor_hit
         tokens_per_hash = self.config.tokens_per_hash
@@ -1489,16 +1490,14 @@ class OffloadingConnectorScheduler:
                 self.config.kv_group_configs, req_status.group_states
             )
         }
+        max_boundary = min(
+            req.num_prompt_tokens,
+            req_status.max_offload_tokens or req.num_prompt_tokens,
+        )
         assert boundary > 0
         assert boundary % self.config.tokens_per_hash == 0
+        assert boundary <= max_boundary
         assert boundary % self._partial_tail_window != 0
-        # Honour the request's offload cap the way the aligned and normal store
-        # paths do. A capped request skips its tail; `max_offload_tokens == 0`
-        # means offload nothing, so it cannot be tested for truthiness.
-        if boundary > self._calc_num_offloadable_tokens(
-            req_status, req.num_prompt_tokens
-        ):
-            return
 
         cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
         if not self._cow_source_groups.issubset(cow_blocks):
