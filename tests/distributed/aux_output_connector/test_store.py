@@ -56,7 +56,9 @@ _BLOCK_SIZE = 4
 def test_mooncake_aux_configuration_is_explicit(monkeypatch, tmp_path, aux_config):
     """Aux selects its own configuration without changing KV's default entry."""
     kv_path, aux_path = tmp_path / "kv.json", tmp_path / "aux.json"
-    kv_path.write_text(json.dumps({"master_server_address": "kv:50051"}))
+    kv_path.write_text(
+        json.dumps({"master_server_address": "kv:50051", "enable_offload": True})
+    )
     aux_path.write_text(
         json.dumps(
             {
@@ -81,11 +83,11 @@ def test_mooncake_aux_configuration_is_explicit(monkeypatch, tmp_path, aux_confi
     monkeypatch.setitem(
         sys.modules, "mooncake.store", SimpleNamespace(MooncakeDistributedStore=factory)
     )
-    assert MooncakeStoreConfig.load_from_config().master_server_address == "kv:50051"
-    if aux_config in ("missing", "offload"):
-        with pytest.raises(
-            ValueError, match=name if aux_config == "missing" else "enable_offload"
-        ):
+    kv_config = MooncakeStoreConfig.load_from_config()
+    assert kv_config.master_server_address == "kv:50051"
+    assert kv_config.enable_offload
+    if aux_config == "missing":
+        with pytest.raises(ValueError, match=name):
             create_mooncake_block_store(object_nbytes=24)
         factory.assert_not_called()
         return
@@ -96,7 +98,7 @@ def test_mooncake_aux_configuration_is_explicit(monkeypatch, tmp_path, aux_confi
     calls = native.setup.call_args_list
     assert len(calls) == 2 and calls[0] == calls[1]
     assert calls[0].args[6] == ("kv:50051" if aux_config == "shared" else "aux:50051")
-    if aux_config == "separate":
+    if aux_config != "shared":
         assert calls[0].args[1:6] == ("P2PHANDSHAKE", 0, 4096, "rdma", "")
         assert calls[0].kwargs == {"tenant_id": "rl"}
     publisher.close()
@@ -228,6 +230,65 @@ def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
     connector.close()
 
 
+def test_mooncake_string_stop_delivers_keys_before_engine_abort(remote_store):
+    """API-side termination must retain R3 from every accepted step."""
+    from tokenizers import Tokenizer, models
+    from transformers import PreTrainedTokenizerFast
+
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+    from vllm.v1.engine.output_processor import OutputProcessor
+
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(
+            models.WordLevel({"hello": 0, "!": 1, "[UNK]": 2}, unk_token="[UNK]")
+        )
+    )
+    processor = OutputProcessor(tokenizer, log_stats=False)
+    params = SamplingParams(stop=["!"], max_tokens=10)
+    processor.add_request(
+        EngineCoreRequest(
+            request_id="request",
+            external_req_id="request",
+            prompt_token_ids=[0],
+            mm_features=None,
+            sampling_params=params,
+            pooling_params=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        ),
+        None,
+    )
+    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE)
+    request = _SchedulerRequest("request", [], num_tokens=2, sampling_params=params)
+    rows = np.arange(12, dtype=_DTYPE).reshape(2, *_SHAPE)
+    for index, token in enumerate([0, 1]):
+        request.num_tokens = index + 2
+        keys = connector.take_output(
+            request, {"request": AuxRequestOutput(index, rows[index : index + 1], [])}
+        )
+        assert keys is not None
+        result = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id="request", new_token_ids=[token], aux_output_keys=keys
+                )
+            ]
+        )
+        completion = result.request_outputs[0].outputs[0]
+        if index == 0:
+            assert completion.aux_output_keys is None
+    assert not request.is_finished()
+    assert result.request_outputs[0].finished
+    assert result.reqs_to_abort == ["request"]
+    assert remote_store.get_concatenated(completion.aux_output_keys) == rows.tobytes()
+    request.finished = True
+    connector.request_finished(request)
+    connector.close()
+
+
 def test_mooncake_batches_preserve_order_and_request_release_keeps_objects():
     """The shared writer publishes bytes; a request does not own remote retention."""
     remote: dict[str, bytes] = {}
@@ -334,7 +395,7 @@ class _SchedulerRequest:
     num_in_flight_tokens: int = 0
     finished: bool = False
     sampling_params: SimpleNamespace = field(
-        default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0)
+        default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0, stop=[])
     )
 
     def is_finished(self) -> bool:
@@ -829,26 +890,14 @@ def test_publish_routed_experts_publishes_full_blocks():
 
 
 @pytest.mark.parametrize("backend", ["shm", "mooncake"])
-def test_worker_data_plane_publishes_blocks_and_reuses_prefix(backend):
+def test_worker_data_plane_publishes_blocks_and_reuses_prefix(backend, remote_store):
     worker = _make_worker(2)
     if backend == "mooncake":
         worker._key_namespace = "test-instance:"
+        worker._return_keys = True
         worker._store.close()
-        remote: dict[str, bytes] = {}
-        native = Mock()
-
-        def put(keys, values):
-            remote.update(zip(keys, values, strict=True))
-            return 0
-
-        native.put_batch.side_effect = put
-        native.batch_get_buffer.side_effect = lambda keys: [remote.get(k) for k in keys]
         worker._store = BackgroundBlockObjectStore(
-            MooncakeBlockObjectStore(
-                native,
-                object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)),
-                max_batch_bytes=1024,
-            ),
+            remote_store,
             max_pending_batches=2,
         )
 
@@ -861,7 +910,13 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix(backend):
     )
     output = _process_output(worker, first, logical[:8], ["first"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["first"].rows, logical[:8])
+    if backend == "mooncake":
+        assert output["first"].rows.size == 0
+        assert remote_store.get_concatenated(output["first"].block_keys) == (
+            logical[:8].tobytes()
+        )
+    else:
+        np.testing.assert_array_equal(output["first"].rows, logical[:8])
 
     second = _metadata(
         generation=0,
@@ -870,7 +925,13 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix(backend):
     )
     output = _process_output(worker, second, logical[8:], ["second"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["second"].rows, logical)
+    if backend == "mooncake":
+        assert remote_store.get_concatenated(output["second"].block_keys) == (
+            logical[:8].tobytes()
+        )
+        np.testing.assert_array_equal(output["second"].rows, logical[8:])
+    else:
+        np.testing.assert_array_equal(output["second"].rows, logical)
     worker.close()
 
 

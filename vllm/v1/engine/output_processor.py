@@ -691,7 +691,9 @@ class OutputProcessor:
                     engine_core_output.routed_experts
                 )
             if engine_core_output.aux_output_keys is not None:
-                req_state.aux_output_keys = engine_core_output.aux_output_keys
+                if req_state.aux_output_keys is None:
+                    req_state.aux_output_keys = []
+                req_state.aux_output_keys.extend(engine_core_output.aux_output_keys)
 
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:
