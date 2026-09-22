@@ -170,7 +170,13 @@ def test_emulation_kernel_derives_quant_dequant_func_from_config(monkeypatch):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_emulation_kernel_dequantizes_at_load_and_keeps_activation_qdq(dtype):
+def test_emulation_kernel_dequantizes_at_load_and_keeps_activation_qdq(
+    dtype, monkeypatch
+):
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+        lambda: True,
+    )
     kernel = EmulationMxfp4LinearKernel(
         MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
     )
@@ -200,7 +206,11 @@ def test_emulation_kernel_dequantizes_at_load_and_keeps_activation_qdq(dtype):
     assert not layer.weight_scale.requires_grad
 
 
-def test_emulation_kernel_opt_out_dequantizes_per_invocation():
+def test_emulation_kernel_opt_out_dequantizes_per_invocation(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+        lambda: True,
+    )
     kernel = EmulationMxfp4LinearKernel(
         MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
     )
