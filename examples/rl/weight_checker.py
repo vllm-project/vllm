@@ -12,7 +12,7 @@ Then run:
 
 The example follows the Weight Checker lifecycle:
 
-    checksum -> pause -> reset -> reload/transfer -> checksum -> compare -> resume
+    checksum -> pause -> reset -> reload/transfer -> compare -> resume
 
 The server keeps no baseline state, so the caller holds the first checksum
 and sends it back when comparing. That keeps the check valid when requests
@@ -79,14 +79,14 @@ def verify_weight_update(base_url: str) -> dict[str, str]:
     Returns:
         The baseline checksums, which a later replica check can reuse.
     """
-    print("[1/6] Computing the original checksums and saving the baseline...")
+    print("[1/5] Computing the original checksums and saving the baseline...")
     original = check_weights(base_url, "checksum")["checksums"]
     print(f"      hashed {len(original)} tensors")
 
-    print("[2/6] Pausing generation so no request reads random weights...")
+    print("[2/5] Pausing generation so no request reads random weights...")
     post(base_url, "/pause", params={"mode": "abort"})
 
-    print("[3/6] Resetting inference weights...")
+    print("[3/5] Resetting inference weights...")
     reset = check_weights(base_url, "reset")
     assert reset["status"] == "reset"
 
@@ -100,10 +100,9 @@ def verify_weight_update(base_url: str) -> dict[str, str]:
     if not reset_cache["success"]:
         raise RuntimeError("Could not clear the blocks cached from random weights")
 
-    print("[4/6] Computing checksums of the reloaded inference weights...")
-    check_weights(base_url, "checksum")
-
-    print("[5/6] Comparing the current weights with the original baseline...")
+    # No checksum first: compare hashes the current weights itself, so asking
+    # for them here would repeat the work and discard the result.
+    print("[4/5] Comparing the current weights with the original baseline...")
     comparison = check_weights(base_url, "compare", original)
     if not comparison["match"]:
         mismatches = comparison["mismatches"]
@@ -112,7 +111,7 @@ def verify_weight_update(base_url: str) -> dict[str, str]:
             f"Weight verification failed with {len(mismatches)} mismatches:\n{preview}"
         )
 
-    print("[6/6] Resuming generation...")
+    print("[5/5] Resuming generation...")
     post(base_url, "/resume")
 
     print("Weight verification passed: all inference weights match.")

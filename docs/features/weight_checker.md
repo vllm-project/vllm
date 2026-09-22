@@ -130,9 +130,9 @@ that the reports actually covered the ranks you expected.
 ### RLHF weight-update workflow
 
 The verification sequence is
-`checksum -> pause -> reset -> transfer -> checksum -> compare -> resume`, with
-the weight transfer or reload occurring between `reset` and the second
-`checksum`. Keep the first checksum client-side and pass it to `compare`:
+`checksum -> pause -> reset -> transfer -> compare -> resume`, with the weight
+transfer or reload occurring between `reset` and the `compare`. Keep the
+checksum client-side and pass it to `compare`:
 
 ```bash
 # 1. Hash the original weights and save this result as the baseline.
@@ -155,19 +155,19 @@ curl -X POST 'http://localhost:8000/finish_weight_update' \
   -H 'Content-Type: application/json' \
   -d '{"weight_version":"step-100"}'
 
-# 4. Hash the transferred weights.
-curl -X POST 'http://localhost:8000/weight_checker' \
-  -H 'Content-Type: application/json' \
-  -d '{"action":"checksum"}'
-
-# 5. Compare the transferred weights with the original baseline.
+# 4. Compare the transferred weights with the original baseline.
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
   -d '{"action":"compare","baseline":{"...":"..."}}'
 
-# 6. Serve again.
+# 5. Serve again.
 curl -X POST 'http://localhost:8000/resume'
 ```
+
+There is no separate `checksum` between the transfer and the `compare`:
+`compare` hashes the current weights itself, so a preceding `checksum` would
+only repeat that work and throw the result away. Ask for the digests separately
+only if you want to read the new values rather than just confirm they match.
 
 Because the original weights are transferred back after `reset`, the expected
 result is `match: true` with an empty `mismatches` list.
