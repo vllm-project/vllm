@@ -7,6 +7,9 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    compute_mamba_prefill_checkpoints,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -16,10 +19,7 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import (
-    MambaSpec,
-    compute_mamba_prefill_checkpoints,
-)
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 def compute_varlen_chunk_metadata(
