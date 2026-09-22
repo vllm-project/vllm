@@ -116,14 +116,20 @@ class _FakeVllmConfig:
 
 def _spec_cls_with_metric_definitions(
     metric_definitions: dict[str, Any],
+    info_keys: tuple[str, ...] = (),
 ) -> type:
     """Build a fake offloading spec class reporting the given metric
-    definitions, so tests don't need to patch the real CPU spec."""
+    definitions and info label names, so tests don't need to patch the real
+    CPU spec."""
 
     class _FakeOffloadingSpec:
         @staticmethod
         def build_metric_definitions(extra_config):
             return metric_definitions
+
+        @staticmethod
+        def config_info_keys(extra_config):
+            return info_keys
 
     return _FakeOffloadingSpec
 
@@ -787,9 +793,12 @@ def test_prom_metrics_rejects_undeclared_metric():
         )
 
 
-def _prom_metrics(metric_definitions: dict[str, Any] | None = None):
+def _prom_metrics(
+    metric_definitions: dict[str, Any] | None = None,
+    info_keys: tuple[str, ...] = (),
+):
     """Build OffloadPromMetrics over fake metric classes, with one engine."""
-    spec_cls = _spec_cls_with_metric_definitions(metric_definitions or {})
+    spec_cls = _spec_cls_with_metric_definitions(metric_definitions or {}, info_keys)
     with patch.object(OffloadingSpecFactory, "get_spec_cls", return_value=spec_cls):
         return OffloadPromMetrics(
             vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
@@ -847,18 +856,12 @@ def test_prom_metrics_omits_multiprocess_mode_outside_a_gauge():
     assert "multiprocess_mode" not in histogram_def.kwargs
 
 
-def test_prom_metrics_creates_the_info_gauge_on_the_first_payload():
-    """The API-server process holds no manager, so it learns the label names
-    from the payload. The gauge cannot exist before that."""
-    prom_metrics = _prom_metrics()
-    assert prom_metrics._info_metric is None
+def test_prom_metrics_declares_the_info_gauge_from_the_spec_keys():
+    """The API-server process holds no manager, but it does hold the spec, so
+    it declares the gauge at startup, before any payload."""
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks", "tier1_fs_path"))
 
-    prom_metrics.observe(
-        {_StatsKey.INFO: {"cpu_num_chunks": 512, "tier1_fs_path": "/mnt/a"}}
-    )
-
-    gauge_def = prom_metrics._info_metric
-    assert gauge_def is not None
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
     assert gauge_def.kwargs["name"] == KV_OFFLOAD_CONFIG_INFO
     assert gauge_def.kwargs["labelnames"] == [
         "model_name",
@@ -866,11 +869,31 @@ def test_prom_metrics_creates_the_info_gauge_on_the_first_payload():
         "cpu_num_chunks",
         "tier1_fs_path",
     ]
+    # A labeled gauge makes no child until a payload binds label values, so
+    # an engine that never reports exposes no series.
+    assert gauge_def.children == []
+
+    prom_metrics.observe(
+        {_StatsKey.INFO: {"cpu_num_chunks": 512, "tier1_fs_path": "/mnt/a"}}
+    )
+
     # Every value renders as a label value, and the metric itself is pinned
     # to 1.
     (gauge,) = gauge_def.children
     assert gauge.labelvalues == ("model", "0", "512", "/mnt/a")
     assert gauge.set_values == [1]
+
+
+def test_prom_metrics_reads_the_info_payload_by_label_name():
+    """A manager orders config_info() as it likes, and msgpack keeps that
+    order, so the frontend must key on the name rather than on the position."""
+    prom_metrics = _prom_metrics(info_keys=("first", "second"))
+
+    prom_metrics.observe({_StatsKey.INFO: {"second": 2, "first": 1}})
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "1", "2")
 
 
 def test_prom_metrics_declares_the_info_gauge_as_most_recent():
@@ -881,54 +904,73 @@ def test_prom_metrics_declares_the_info_gauge_as_most_recent():
     processes instead of the 1 an info gauge is pinned to -- wrong only under
     multiprocess deployment, and silently, since the facts ride the labels.
     """
-    prom_metrics = _prom_metrics()
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks",))
 
-    prom_metrics.observe({_StatsKey.INFO: {"cpu_num_chunks": 512}})
-
-    assert prom_metrics._info_metric.kwargs["multiprocess_mode"] == "mostrecent"
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["multiprocess_mode"] == "mostrecent"
 
 
 def test_prom_metrics_reports_the_info_gauge_without_manager_labels():
-    """A manager that publishes no fact still yields the metric, so its
-    presence alone answers whether offloading runs."""
+    """A spec that declares no fact still yields the metric, so its presence
+    alone answers whether offloading runs."""
     prom_metrics = _prom_metrics()
 
     prom_metrics.observe({_StatsKey.INFO: {}})
 
-    gauge_def = prom_metrics._info_metric
-    assert gauge_def is not None
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
     assert gauge_def.kwargs["labelnames"] == ["model_name", "engine"]
     (gauge,) = gauge_def.children
     assert gauge.labelvalues == ("model", "0")
 
 
-def test_prom_metrics_warns_when_a_second_key_set_arrives():
-    """A Prometheus metric binds its label names once, so a second key set
-    cannot join it. This code runs on the engine output path of the API server,
-    where an exception ends the output handler, so it warns and goes on."""
-    prom_metrics = _prom_metrics()
-    prom_metrics.observe({_StatsKey.INFO: {"cpu_num_chunks": 512}})
+def test_prom_metrics_empties_a_declared_info_label_no_manager_fills():
+    """A name the spec declares and the manager skips must publish empty.
+
+    PromQL reads an empty label value as an absent label, so the series still
+    matches both shapes. This code runs on the engine output path of the API
+    server, where an exception ends the output handler, so it warns and goes
+    on rather than drop the whole series.
+    """
+    prom_metrics = _prom_metrics(info_keys=("filled", "skipped"))
 
     with patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics.logger"
     ) as mock_logger:
-        prom_metrics.observe({_StatsKey.INFO: {"other_fact": 1}}, engine_idx=1)
+        prom_metrics.observe({_StatsKey.INFO: {"filled": 512}})
 
     assert mock_logger.warning_once.call_count == 1
-    gauge_def = prom_metrics._info_metric
-    assert gauge_def.kwargs["labelnames"] == ["model_name", "engine", "cpu_num_chunks"]
-    assert len(gauge_def.children) == 1
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "512", "")
+
+
+def test_prom_metrics_drops_an_info_label_the_spec_did_not_declare():
+    """A Prometheus metric binds its label names once, so a name that the spec
+    did not declare cannot join the gauge. It warns and publishes the rest."""
+    prom_metrics = _prom_metrics(info_keys=("declared",))
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics.logger"
+    ) as mock_logger:
+        prom_metrics.observe({_StatsKey.INFO: {"declared": 512, "undeclared": 1}})
+
+    assert mock_logger.warning_once.call_count == 1
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["labelnames"] == ["model_name", "engine", "declared"]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "512")
 
 
 def test_prom_metrics_reports_the_info_of_every_engine():
     """Every engine of one instance runs one offloading config, so they share
     the gauge and differ by the engine label alone."""
-    prom_metrics = _prom_metrics()
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks",))
 
     prom_metrics.observe({_StatsKey.INFO: {"cpu_num_chunks": 512}}, engine_idx=0)
     prom_metrics.observe({_StatsKey.INFO: {"cpu_num_chunks": 512}}, engine_idx=1)
 
-    assert [child.labelvalues for child in prom_metrics._info_metric.children] == [
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert [child.labelvalues for child in gauge_def.children] == [
         ("model", "0", "512"),
         ("model", "1", "512"),
     ]
