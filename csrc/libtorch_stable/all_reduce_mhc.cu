@@ -5,6 +5,7 @@
 #include "custom_all_gather_reduce_scatter.cuh"
 #include <cooperative_groups.h>
 #include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/macros.h>
 
 namespace {
 using Tensor = torch::stable::Tensor;
