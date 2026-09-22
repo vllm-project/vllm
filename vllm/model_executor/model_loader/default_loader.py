@@ -28,6 +28,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_mm_encoder_only_safetensors_files,
     get_quant_config,
     instanttensor_weights_iterator,
+    resolve_mm_encoder_only_lm_prefixes,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
     multi_thread_safetensors_weights_iterator,
@@ -379,13 +380,11 @@ class DefaultModelLoader(BaseModelLoader):
             self._encoder_only_lm_prefixes = None
             return
 
-        lm_names = getattr(model, "_language_model_names", None) or ()
-        prefixes = tuple(
-            name if name.endswith(".") else f"{name}." for name in lm_names
+        # Map module attrs → HF index deny prefixes. Fail closed on coarse
+        # denies (e.g. bare ``model.``) that would drop vision shards.
+        self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
+            getattr(model, "_language_model_names", None)
         )
-        # Fallback covers HF VLMs that nest LM weights under language_model.*
-        # when _mark_language_model did not record names.
-        self._encoder_only_lm_prefixes = prefixes or ("language_model.",)
 
     def _init_ep_weight_filter(self, model_config: ModelConfig) -> None:
         """Compute local expert ids for EP weight filtering.

@@ -656,6 +656,53 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
     return hf_weights_files
 
 
+# Deny prefixes that also match vision/tower HF keys for known VLMs
+# (Molmo / Phi-4-MM / Muse Glimmer mark the LM attr as ``model``).
+_UNSAFE_MM_ENCODER_ONLY_LM_PREFIXES = frozenset({"model."})
+
+# Extra HF index prefixes when the vLLM module attr is ``language_model``.
+# Covers nested Qwen3/LLaVA (``model.language_model.*``) and flat Qwen2.5
+# (``model.layers.*`` + ``visual.*``). Do **not** add bare ``model.``.
+_HF_LANGUAGE_MODEL_INDEX_PREFIXES = (
+    "model.language_model.",
+    "model.layers.",
+    "model.embed_tokens.",
+    "model.norm.",
+    "lm_head.",
+)
+
+
+def resolve_mm_encoder_only_lm_prefixes(
+    language_model_names: Iterable[str] | None,
+) -> tuple[str, ...] | None:
+    """Map ``_language_model_names`` to HF-index deny prefixes.
+
+    Returns ``None`` (disable filtering) when a deny would be too coarse and
+    risk dropping vision shards — fail closed.
+    """
+    names = tuple(language_model_names or ())
+    prefixes = tuple(n if n.endswith(".") else f"{n}." for n in names)
+    if not prefixes:
+        prefixes = ("language_model.",)
+
+    unsafe = tuple(p for p in prefixes if p in _UNSAFE_MM_ENCODER_ONLY_LM_PREFIXES)
+    if unsafe:
+        logger.warning_once(
+            "mm-encoder-only shard filter disabled: deny prefix(es) %s are too "
+            "coarse and may drop vision weights (e.g. Molmo/Phi-4-MM). "
+            "Encoder-only load will read the full safetensors file list.",
+            unsafe,
+        )
+        return None
+
+    expanded = list(prefixes)
+    if "language_model." in prefixes:
+        for extra in _HF_LANGUAGE_MODEL_INDEX_PREFIXES:
+            if extra not in expanded:
+                expanded.append(extra)
+    return tuple(expanded)
+
+
 def filter_mm_encoder_only_safetensors_files(
     hf_weights_files: list[str],
     hf_folder: str,

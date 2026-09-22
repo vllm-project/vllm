@@ -10,6 +10,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.model_executor.model_loader.weight_utils import (
     filter_mm_encoder_only_safetensors_files,
+    resolve_mm_encoder_only_lm_prefixes,
 )
 
 
@@ -79,3 +80,107 @@ def test_no_index_returns_unchanged():
             ("language_model.",),
         )
         assert kept == files
+
+
+def test_resolve_expands_qwen_nested_and_flat_prefixes():
+    prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
+    assert prefixes is not None
+    assert "language_model." in prefixes
+    assert "model.language_model." in prefixes
+    assert "model.layers." in prefixes
+    assert "model.embed_tokens." in prefixes
+    assert "model.norm." in prefixes
+    assert "lm_head." in prefixes
+    # Must never broaden to bare model. (Molmo / Phi-4-MM / Muse).
+    assert "model." not in prefixes
+
+
+def test_resolve_fail_closed_on_bare_model_attr():
+    assert resolve_mm_encoder_only_lm_prefixes(["model"]) is None
+    assert resolve_mm_encoder_only_lm_prefixes(["model."]) is None
+
+
+def test_resolve_keeps_llm_prefix_without_model_broadening():
+    prefixes = resolve_mm_encoder_only_lm_prefixes(["llm"])
+    assert prefixes == ("llm.",)
+
+
+def test_qwen3_nested_index_skips_lm_keeps_visual():
+    with tempfile.TemporaryDirectory() as folder:
+        files = [
+            os.path.join(folder, "model-00001-of-000002.safetensors"),
+            os.path.join(folder, "model-00002-of-000002.safetensors"),
+        ]
+        for path in files:
+            open(path, "wb").close()
+        _write_index(
+            folder,
+            {
+                "model.language_model.layers.0.weight": (
+                    "model-00001-of-000002.safetensors"
+                ),
+                "lm_head.weight": "model-00001-of-000002.safetensors",
+                "model.visual.blocks.0.weight": "model-00002-of-000002.safetensors",
+            },
+        )
+        prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
+        assert prefixes is not None
+        kept = filter_mm_encoder_only_safetensors_files(
+            files, folder, SAFE_WEIGHTS_INDEX_NAME, prefixes
+        )
+        assert kept == [files[1]]
+
+
+def test_qwen25_flat_index_skips_lm_keeps_visual():
+    with tempfile.TemporaryDirectory() as folder:
+        files = [
+            os.path.join(folder, "model-00001-of-000002.safetensors"),
+            os.path.join(folder, "model-00002-of-000002.safetensors"),
+        ]
+        for path in files:
+            open(path, "wb").close()
+        _write_index(
+            folder,
+            {
+                "model.layers.0.self_attn.q_proj.weight": (
+                    "model-00001-of-000002.safetensors"
+                ),
+                "model.embed_tokens.weight": "model-00001-of-000002.safetensors",
+                "model.norm.weight": "model-00001-of-000002.safetensors",
+                "lm_head.weight": "model-00001-of-000002.safetensors",
+                "visual.blocks.0.weight": "model-00002-of-000002.safetensors",
+            },
+        )
+        prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
+        assert prefixes is not None
+        kept = filter_mm_encoder_only_safetensors_files(
+            files, folder, SAFE_WEIGHTS_INDEX_NAME, prefixes
+        )
+        assert kept == [files[1]]
+
+
+def test_molmo_shaped_index_not_filtered_when_deny_disabled():
+    """Bare model. deny is refused; filter must not run with that prefix."""
+    assert resolve_mm_encoder_only_lm_prefixes(["model"]) is None
+    with tempfile.TemporaryDirectory() as folder:
+        files = [
+            os.path.join(folder, "vision.safetensors"),
+            os.path.join(folder, "lm.safetensors"),
+        ]
+        for path in files:
+            open(path, "wb").close()
+        _write_index(
+            folder,
+            {
+                "model.vision_backbone.patch.weight": "vision.safetensors",
+                "model.transformer.blocks.0.weight": "lm.safetensors",
+            },
+        )
+        # If someone bypassed resolve and passed bare model., vision would drop.
+        # Callers must use resolve → None and skip calling the filter.
+        dangerous = filter_mm_encoder_only_safetensors_files(
+            files, folder, SAFE_WEIGHTS_INDEX_NAME, ("model.",)
+        )
+        assert dangerous == []  # documents the hazard
+        # Safe path: no filter call → unchanged list.
+        assert files == files
