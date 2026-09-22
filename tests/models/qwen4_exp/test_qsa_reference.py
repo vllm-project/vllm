@@ -9,10 +9,10 @@ import torch
 
 from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
-from vllm.models.qwen4_exp.nvidia import indexer_qsa
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
+from vllm.models.qwen4_exp.nvidia import qsa_indexer
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.platforms import current_platform
@@ -63,7 +63,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     )
 
     monkeypatch.setattr(
-        indexer_qsa,
+        qsa_indexer,
         "qsa_pre_indexer",
         lambda *args, **kwargs: updates.append((args, kwargs)),
     )
@@ -78,7 +78,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         lambda *args, **kwargs: selections.append((args, kwargs)),
     )
 
-    actual = indexer_qsa.QSAIndexer.forward(
+    actual = qsa_indexer.QSAIndexer.forward(
         indexer,
         torch.zeros(2, 2),
         torch.tensor([7, 8]),
@@ -509,7 +509,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
     )
     padded_keys = torch.full((8, 64), torch.nan, dtype=torch.bfloat16, device=device)
     padded_keys[:5].copy_(keys)
-    indexer_qsa.QSAIndexer.forward(
+    qsa_indexer.QSAIndexer.forward(
         indexer,
         torch.cat((torch.ones_like(padded_keys), padded_keys), dim=-1),
         torch.zeros(8, dtype=torch.long, device=device),
