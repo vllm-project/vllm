@@ -380,7 +380,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # full-cache rows share state pages with contiguous KV pages, so padding
         # would break page matching.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
-        if self.compress_ratio == 128:
+        if self.compress_ratio == 128 and current_platform.is_cuda():
             return CircularBufferSpec(
                 block_size=_c128_ring_capacity(vllm_config.num_speculative_tokens),
                 num_kv_heads=1,

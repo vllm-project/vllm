@@ -38,12 +38,21 @@ def _config(num_speculative_tokens: int = 0):
     )
 
 
-def test_c128_uses_a_circular_spec_without_changing_c4() -> None:
+@pytest.mark.parametrize("is_cuda", [True, False])
+def test_c128_spec_is_circular_only_on_cuda(monkeypatch, is_cuda: bool) -> None:
+    from vllm.models.deepseek_v4 import compressor
+
+    monkeypatch.setattr(compressor.current_platform, "is_cuda", lambda: is_cuda)
     c128_spec = _state_cache(128).get_kv_cache_spec(_config(5))
-    assert isinstance(c128_spec, CircularBufferSpec)
-    assert c128_spec.block_size == 256
-    assert c128_spec.prefix_cacheable is False
-    assert c128_spec.uses_slot_mapping is False
+    if is_cuda:
+        assert isinstance(c128_spec, CircularBufferSpec)
+        assert c128_spec.block_size == 256
+        assert c128_spec.prefix_cacheable is False
+        assert c128_spec.uses_slot_mapping is False
+    else:
+        assert isinstance(c128_spec, SlidingWindowMLASpec)
+        assert c128_spec.block_size == 8
+        assert c128_spec.sliding_window == 128
 
     c4_spec = _state_cache(4).get_kv_cache_spec(_config(5))
     assert isinstance(c4_spec, SlidingWindowMLASpec)
@@ -147,7 +156,10 @@ def test_c128_model_registers_ring_metadata_warmup(monkeypatch) -> None:
     assert registered == [{"capacity": 256}]
 
 
-def test_only_circular_c128_builds_no_boundary_fast_path_metadata() -> None:
+def test_only_circular_c128_builds_no_boundary_fast_path_metadata(monkeypatch) -> None:
+    from vllm.models.deepseek_v4 import compressor
+
+    monkeypatch.setattr(compressor.current_platform, "is_cuda", lambda: True)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=128,
@@ -182,6 +194,77 @@ def test_only_circular_c128_builds_no_boundary_fast_path_metadata() -> None:
 
     c4 = _state_cache(4).get_kv_cache_spec(_config())
     assert build(c4).c128_boundary is None
+
+
+def test_non_circular_two_stage_uses_paged_prefill_path(monkeypatch) -> None:
+    from vllm.models.deepseek_v4.common.ops import fused_compress_quant_cache
+
+    prefill_calls = []
+    decode_calls = []
+    monkeypatch.setattr(
+        fused_compress_quant_cache,
+        "_launch_two_stage_sparse_attn_compressor",
+        lambda **kwargs: prefill_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        fused_compress_quant_cache,
+        "compress_norm_rope_store_triton",
+        lambda **kwargs: decode_calls.append(kwargs),
+    )
+    token_to_req = torch.zeros(3, dtype=torch.int32)
+    positions = torch.tensor([0, 127, 255])
+    slot_mapping = torch.arange(3)
+    block_table = torch.arange(32).reshape(1, 32)
+
+    fused_compress_quant_cache.compress_norm_rope_store_two_stage_triton(
+        state_cache=torch.empty(32, 8, 1024),
+        kv=torch.empty(3, 512),
+        score=torch.empty(3, 512),
+        ape=torch.empty(128, 512),
+        num_actual=3,
+        token_to_req_indices=token_to_req,
+        positions=positions,
+        slot_mapping=slot_mapping,
+        block_table=block_table,
+        block_size=8,
+        query_start_loc=torch.tensor([0, 3]),
+        is_circular=False,
+        state_width=512,
+        cos_sin_cache=torch.empty(256, 64),
+        kv_cache=torch.empty(1, 1),
+        k_cache_metadata=SimpleNamespace(slot_mapping=torch.arange(3)),
+        pdl_kwargs={},
+        head_dim=512,
+        rope_head_dim=64,
+        compress_ratio=128,
+        overlap=False,
+        use_fp4_cache=False,
+        rms_norm_weight=torch.empty(512),
+        rms_norm_eps=1e-6,
+        quant_block=64,
+        token_stride=576,
+        scale_dim=8,
+        num_decode_tokens=1,
+        compress_scratch=torch.empty(3, 512),
+    )
+
+    assert len(prefill_calls) == 1
+    assert prefill_calls[0]["block_table"] is block_table
+    assert prefill_calls[0]["block_size"] == 8
+    assert torch.equal(prefill_calls[0]["positions"], positions[1:])
+    assert (
+        not {
+            "kv",
+            "score",
+            "ape",
+            "query_start_loc",
+            "token_offset",
+        }
+        & prefill_calls[0].keys()
+    )
+    assert len(decode_calls) == 1
+    assert decode_calls[0]["num_actual"] == 1
+    assert decode_calls[0]["is_circular"] is False
 
 
 def test_c128_ring_mapping_and_tail_for_nonuniform_batch() -> None:
