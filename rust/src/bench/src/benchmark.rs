@@ -17,8 +17,12 @@ use crate::metrics::calculator::{calculate_embedding_metrics, calculate_metrics}
 use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
-use crate::rate_control::{RequestSchedule, compute_schedule};
+use crate::rate_control::{compute_schedule, trace_schedule};
 use crate::ready_checker::{get_first_model, wait_for_endpoint};
+
+/// Past this first-arrival offset a self-timed run is almost certainly a
+/// mis-scaled or epoch-anchored trace rather than a real idle head.
+const TRACE_START_WARN_SECONDS: f64 = 3600.0;
 
 /// Pre-resolve the hostname in `base_url` and pin all resolved IPs on the
 /// client builder via [`reqwest::ClientBuilder::resolve_to_addrs`].  This
@@ -614,9 +618,14 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             let tok = tokenizer.as_ref().ok_or_else(|| {
                 BenchError::Config("Timed trace dataset requires a tokenizer".into())
             })?;
+            let path = config.dataset_path.as_deref().ok_or_else(|| {
+                BenchError::Config(
+                    "--dataset-path is required for --dataset-name timed_trace".into(),
+                )
+            })?;
             crate::datasets::timed_trace::load_timed_trace_dataset(
                 tok,
-                config.dataset_path.as_deref().unwrap_or_default(),
+                path,
                 config.num_prompts,
                 &config.request_id_prefix,
                 &crate::datasets::timed_trace::TimedTraceOptions {
@@ -848,20 +857,30 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         tracing::info!("detected speculative decoding; collecting metrics");
     }
 
-    // Main benchmark
-    let distribution = if config.burstiness == 1.0 {
-        "Poisson process"
+    // Main benchmark. Self-timed runs ignore --request-rate/--burstiness
+    // entirely (config.rs rejects them), so don't report a rate that isn't used.
+    if config.self_timed {
+        tracing::info!(
+            timing = "trace",
+            max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
+            prompts = config.num_prompts,
+            "starting main benchmark run; firing requests at their trace timestamps"
+        );
     } else {
-        "Gamma distribution"
-    };
-    tracing::info!(
-        request_rate = config.request_rate,
-        burstiness = config.burstiness,
-        distribution,
-        max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
-        prompts = config.num_prompts,
-        "starting main benchmark run"
-    );
+        let distribution = if config.burstiness == 1.0 {
+            "Poisson process"
+        } else {
+            "Gamma distribution"
+        };
+        tracing::info!(
+            request_rate = config.request_rate,
+            burstiness = config.burstiness,
+            distribution,
+            max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
+            prompts = config.num_prompts,
+            "starting main benchmark run"
+        );
+    }
 
     // Pre-assign LoRA adapters to each request (None when --lora-modules not set).
     let lora_assignments = assign_lora_modules(
@@ -885,10 +904,26 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     // dispatch loop below sleeps to benchmark_start + delay, an absolute
     // deadline, so trace replay does not accumulate drift.
     let schedule = if config.self_timed {
-        RequestSchedule {
-            delays: input_requests.iter().map(|r| r.timestamp.unwrap_or(0.0)).collect(),
-            rates: vec![0.0; input_requests.len()],
+        let schedule = trace_schedule(input_requests.iter().map(|r| r.timestamp));
+        let first = schedule.delays.first().copied().unwrap_or(0.0);
+        let last = schedule.delays.iter().copied().fold(0.0, f64::max);
+        tracing::info!(
+            first_arrival_seconds = first,
+            last_arrival_seconds = last,
+            "replaying trace arrival schedule"
+        );
+        // Timestamps are absolute offsets from now, never normalized (Python
+        // does the same). An unscaled millisecond trace or an epoch-anchored
+        // one parks every request past any plausible run length, so say so
+        // rather than sitting at 0/N.
+        if first > TRACE_START_WARN_SECONDS {
+            tracing::warn!(
+                first_arrival_seconds = first,
+                "first trace arrival is far in the future; check \
+                 --timed-trace-sec-multiplier or re-anchor the trace timestamps"
+            );
         }
+        schedule
     } else {
         compute_schedule(
             input_requests.len(),
@@ -1116,7 +1151,10 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     };
 
     // Attach steady-state metrics when the closed-loop scope gate passes.
+    // Trace replay is open-loop: an in-flight plateau there reflects a burst
+    // in the trace, not a saturated server, so it is out of scope.
     let scope_ok = !config.no_steady_state
+        && !config.self_timed
         && config.max_concurrency.is_some()
         && config.request_rate.is_infinite();
     if scope_ok {

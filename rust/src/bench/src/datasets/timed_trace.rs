@@ -49,47 +49,40 @@ pub fn load_timed_trace_dataset(
     request_id_prefix: &str,
     opts: &TimedTraceOptions<'_>,
 ) -> Result<Vec<SampleRequest>> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| BenchError::Config(format!("Failed to read timed trace '{path}': {e}")))?;
-
     let allowed_tokens = tokenizer.get_allowed_tokens();
     if allowed_tokens.is_empty() {
-        return Err(BenchError::Config(
-            "timed_trace: tokenizer reports an empty vocabulary".into(),
-        ));
+        return Err(BenchError::Tokenizer("No allowed tokens found".into()));
     }
 
-    let mut chunk_cache: HashMap<(i64, usize), Arc<[u32]>> = HashMap::new();
-    let mut requests: Vec<SampleRequest> = Vec::new();
+    let entries: Vec<(usize, Value)> = super::read_jsonl(path, "timed trace", Some(num_requests))?;
 
-    for (lineno, line) in content.lines().enumerate() {
-        if requests.len() >= num_requests {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let entry: Value = serde_json::from_str(line).map_err(|e| {
-            BenchError::Config(format!("Invalid JSONL at {path}:{}: {e}", lineno + 1))
-        })?;
+    let mut chunk_cache: HashMap<(u64, usize), Arc<[u32]>> = HashMap::new();
+    let mut requests: Vec<SampleRequest> = Vec::with_capacity(entries.len());
 
+    for (lineno, entry) in &entries {
         let input_length = require_u64(
-            &entry,
+            entry,
             opts.label_input_length,
             "--timed-trace-label-input-length",
         )? as usize;
         let output_length = require_u64(
-            &entry,
+            entry,
             opts.label_output_length,
             "--timed-trace-label-output-length",
         )? as usize;
-        let timestamp = require_f64(
-            &entry,
-            opts.label_timestamp,
-            "--timed-trace-label-timestamp",
-        )? * opts.sec_multiplier;
-        let hash_ids = parse_hash_ids(&entry, opts.label_hash_ids)?;
+        let timestamp = require_f64(entry, opts.label_timestamp, "--timed-trace-label-timestamp")?
+            * opts.sec_multiplier;
+        // A non-finite offset panics in `Duration::from_secs_f64` once the
+        // scheduler consumes it; reject here, naming the offending row.
+        if !timestamp.is_finite() {
+            return Err(BenchError::Config(format!(
+                "Field '{}' at {path}:{} scales to a non-finite offset ({timestamp}); \
+                 check --timed-trace-sec-multiplier",
+                opts.label_timestamp,
+                lineno + 1,
+            )));
+        }
+        let hash_ids = parse_hash_ids(entry, opts.label_hash_ids)?;
 
         let prompt_ids = expand_prompt(
             &hash_ids,
@@ -109,11 +102,6 @@ pub fn load_timed_trace_dataset(
         });
     }
 
-    if requests.is_empty() {
-        return Err(BenchError::Config(format!(
-            "Timed trace '{path}' contains no entries"
-        )));
-    }
     Ok(requests)
 }
 
@@ -123,13 +111,17 @@ pub fn load_timed_trace_dataset(
 /// trace supplies fewer hashes than `target_len / chunk_size`, the prompt
 /// comes out shorter — same as Python.
 fn expand_prompt(
-    hash_ids: &[i64],
+    hash_ids: &[u64],
     target_len: usize,
     chunk_size: usize,
     allowed_tokens: &[u32],
-    cache: &mut HashMap<(i64, usize), Arc<[u32]>>,
+    cache: &mut HashMap<(u64, usize), Arc<[u32]>>,
 ) -> Vec<u32> {
-    let mut prompt = Vec::with_capacity(target_len);
+    // `target_len` is raw trace input, so reserve only what the hashes can
+    // actually produce: a corrupt or mis-unit row would otherwise ask the
+    // allocator for terabytes before any length filter runs.
+    let capacity = target_len.min(hash_ids.len().saturating_mul(chunk_size));
+    let mut prompt = Vec::with_capacity(capacity);
     let mut remaining = target_len;
     for &h in hash_ids {
         let size = remaining.min(chunk_size);
@@ -149,9 +141,11 @@ fn expand_prompt(
 }
 
 /// Stable seed for a chunk. The golden-ratio multiply is bijective on u64, so
-/// distinct (hash_id, size) pairs collide only by astronomical accident.
-fn chunk_seed(hash_id: i64, size: usize) -> u64 {
-    (hash_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (size as u64)
+/// distinct `hash_id`s never collide at a fixed `size`. The trailing xor is not
+/// injective across sizes: two unrelated hashes seen at different sizes can
+/// alias and share a token prefix, at ~2^-64 odds per pair.
+fn chunk_seed(hash_id: u64, size: usize) -> u64 {
+    hash_id.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (size as u64)
 }
 
 fn require_field<'v>(entry: &'v Value, label: &str, flag: &str) -> Result<&'v Value> {
@@ -167,13 +161,20 @@ fn require_field<'v>(entry: &'v Value, label: &str, flag: &str) -> Result<&'v Va
     })
 }
 
+/// Float-encoded integers (`512.0`) are accepted, matching Python's `int()`.
 fn require_u64(entry: &Value, label: &str, flag: &str) -> Result<u64> {
     let v = require_field(entry, label, flag)?;
-    v.as_u64().ok_or_else(|| {
-        BenchError::Config(format!(
-            "Field '{label}' must be a non-negative integer, got: {v}"
-        ))
-    })
+    v.as_u64()
+        .or_else(|| {
+            v.as_f64()
+                .filter(|f| f.fract() == 0.0 && (0.0..u64::MAX as f64).contains(f))
+                .map(|f| f as u64)
+        })
+        .ok_or_else(|| {
+            BenchError::Config(format!(
+                "Field '{label}' must be a non-negative integer, got: {v}"
+            ))
+        })
 }
 
 fn require_f64(entry: &Value, label: &str, flag: &str) -> Result<f64> {
@@ -184,7 +185,10 @@ fn require_f64(entry: &Value, label: &str, flag: &str) -> Result<f64> {
 
 /// Missing hash_ids field means an empty prompt (mirrors Python's
 /// `entry.get(label, [])`); a present field must be an array of integers.
-fn parse_hash_ids(entry: &Value, label: &str) -> Result<Vec<i64>> {
+///
+/// Ids are kept as `u64` because traces carry raw unsigned 64-bit block hashes;
+/// negative ids keep the two's-complement value `chunk_seed` used before.
+fn parse_hash_ids(entry: &Value, label: &str) -> Result<Vec<u64>> {
     let Some(v) = entry.get(label) else {
         return Ok(Vec::new());
     };
@@ -193,7 +197,7 @@ fn parse_hash_ids(entry: &Value, label: &str) -> Result<Vec<i64>> {
         .ok_or_else(|| BenchError::Config(format!("Field '{label}' must be an array, got: {v}")))?;
     arr.iter()
         .map(|x| {
-            x.as_i64().ok_or_else(|| {
+            x.as_u64().or_else(|| x.as_i64().map(|i| i as u64)).ok_or_else(|| {
                 BenchError::Config(format!(
                     "Field '{label}' must contain only integers, got: {x}"
                 ))
@@ -204,21 +208,8 @@ fn parse_hash_ids(entry: &Value, label: &str) -> Result<Vec<i64>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{test_tokenizer, write_temp_jsonl};
     use super::*;
-
-    fn write_temp_jsonl(name: &str, content: &str) -> String {
-        let path = std::env::temp_dir().join(format!("vllm-bench-timed-trace-{name}.jsonl"));
-        std::fs::write(&path, content).unwrap();
-        path.to_string_lossy().into_owned()
-    }
-
-    /// gpt2 via built-in tiktoken encoding — loads without network access.
-    fn test_tokenizer() -> TokenizerKind {
-        TokenizerKind::Tiktoken(
-            crate::tiktoken::load_builtin_tiktoken("gpt2")
-                .expect("gpt2 built-in tiktoken should always load without network"),
-        )
-    }
 
     fn opts(chunk_size: usize, sec_multiplier: f64) -> TimedTraceOptions<'static> {
         TimedTraceOptions {
@@ -234,7 +225,7 @@ mod tests {
     #[test]
     fn test_prompt_len_matches_input_length_and_fields_map() {
         let path = write_temp_jsonl(
-            "basic",
+            "timed-trace-basic",
             r#"{"timestamp": 1000, "input_length": 40, "output_length": 7, "hash_ids": [1, 2, 3]}
 {"timestamp": 2500, "input_length": 32, "output_length": 9, "hash_ids": [1, 4]}
 "#,
@@ -254,7 +245,7 @@ mod tests {
     #[test]
     fn test_shared_hash_prefix_gives_identical_tokens() {
         let path = write_temp_jsonl(
-            "prefix",
+            "timed-trace-prefix",
             r#"{"timestamp": 0, "input_length": 32, "output_length": 1, "hash_ids": [7, 8]}
 {"timestamp": 1, "input_length": 32, "output_length": 1, "hash_ids": [7, 9]}
 "#,
@@ -270,7 +261,7 @@ mod tests {
     #[test]
     fn test_reload_is_bit_identical() {
         let path = write_temp_jsonl(
-            "determinism",
+            "timed-trace-determinism",
             r#"{"timestamp": 0, "input_length": 40, "output_length": 1, "hash_ids": [11, 12, 13]}"#,
         );
         let load = || {
@@ -283,7 +274,7 @@ mod tests {
     #[test]
     fn test_too_few_hashes_yields_short_prompt() {
         let path = write_temp_jsonl(
-            "short",
+            "timed-trace-short",
             r#"{"timestamp": 0, "input_length": 100, "output_length": 1, "hash_ids": [1]}"#,
         );
         let reqs = load_timed_trace_dataset(&test_tokenizer(), &path, 10, "t-", &opts(16, 1.0))
@@ -291,10 +282,23 @@ mod tests {
         assert_eq!(reqs[0].prompt_len, 16, "one hash covers only one chunk");
     }
 
+    /// `input_length` is untrusted: the reservation must follow what the hashes
+    /// can produce, not the raw field, or the allocator aborts the process.
+    #[test]
+    fn test_absurd_input_length_does_not_overallocate() {
+        let path = write_temp_jsonl(
+            "timed-trace-absurd-len",
+            r#"{"timestamp": 0, "input_length": 10000000000000, "output_length": 1, "hash_ids": [1]}"#,
+        );
+        let reqs = load_timed_trace_dataset(&test_tokenizer(), &path, 10, "t-", &opts(16, 1.0))
+            .expect("load should succeed");
+        assert_eq!(reqs[0].prompt_len, 16);
+    }
+
     #[test]
     fn test_num_requests_caps_rows() {
         let path = write_temp_jsonl(
-            "cap",
+            "timed-trace-cap",
             r#"{"timestamp": 0, "input_length": 8, "output_length": 1, "hash_ids": [1]}
 {"timestamp": 1, "input_length": 8, "output_length": 1, "hash_ids": [2]}
 {"timestamp": 2, "input_length": 8, "output_length": 1, "hash_ids": [3]}
@@ -308,7 +312,7 @@ mod tests {
     #[test]
     fn test_missing_field_error_names_label_and_flag() {
         let path = write_temp_jsonl(
-            "missing",
+            "timed-trace-missing",
             r#"{"timestamp": 0, "input_length": 8, "output_length": 1, "hash_ids": [1]}"#,
         );
         let mut o = opts(16, 1.0);
@@ -317,5 +321,56 @@ mod tests {
             .expect_err("should fail on missing field");
         let msg = err.to_string();
         assert!(msg.contains("input_len") && msg.contains("--timed-trace-label-input-length"));
+    }
+
+    /// Hashes above `i64::MAX` are ordinary 64-bit block hashes, and Python
+    /// takes them as unbounded ints.
+    #[test]
+    fn test_accepts_unsigned_64bit_hash_ids() {
+        let path = write_temp_jsonl(
+            "timed-trace-u64-hash",
+            r#"{"timestamp": 0, "input_length": 16, "output_length": 1, "hash_ids": [18446744073709551615]}"#,
+        );
+        let reqs = load_timed_trace_dataset(&test_tokenizer(), &path, 1, "t-", &opts(16, 1.0))
+            .expect("load should succeed");
+        assert_eq!(reqs[0].prompt_len, 16);
+    }
+
+    /// Exporters that round-trip lengths through floats emit `512.0`; Python's
+    /// `int()` accepts it.
+    #[test]
+    fn test_accepts_float_encoded_lengths() {
+        let path = write_temp_jsonl(
+            "timed-trace-float-len",
+            r#"{"timestamp": 0, "input_length": 16.0, "output_length": 4.0, "hash_ids": [1]}"#,
+        );
+        let reqs = load_timed_trace_dataset(&test_tokenizer(), &path, 1, "t-", &opts(16, 1.0))
+            .expect("load should succeed");
+        assert_eq!(reqs[0].prompt_len, 16);
+        assert_eq!(reqs[0].expected_output_len, 4);
+    }
+
+    #[test]
+    fn test_non_finite_scaled_timestamp_is_rejected() {
+        let path = write_temp_jsonl(
+            "timed-trace-overflow-ts",
+            r#"{"timestamp": 1e308, "input_length": 16, "output_length": 1, "hash_ids": [1]}"#,
+        );
+        let err = load_timed_trace_dataset(&test_tokenizer(), &path, 1, "t-", &opts(16, 1e10))
+            .expect_err("should reject an offset that overflows to inf");
+        assert!(err.to_string().contains("non-finite offset"));
+    }
+
+    /// Negative offsets load unchanged; the scheduler clamps them to fire
+    /// immediately (Python's `get_request` does the same).
+    #[test]
+    fn test_negative_timestamp_loads() {
+        let path = write_temp_jsonl(
+            "timed-trace-negative-ts",
+            r#"{"timestamp": -5.0, "input_length": 16, "output_length": 1, "hash_ids": [1]}"#,
+        );
+        let reqs = load_timed_trace_dataset(&test_tokenizer(), &path, 1, "t-", &opts(16, 1.0))
+            .expect("load should succeed");
+        assert_eq!(reqs[0].timestamp, Some(-5.0));
     }
 }

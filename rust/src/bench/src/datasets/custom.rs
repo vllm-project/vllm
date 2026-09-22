@@ -43,29 +43,10 @@ pub fn load_custom_dataset(
     no_oversample: bool,
     disable_shuffle: bool,
 ) -> Result<Vec<SampleRequest>> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| BenchError::Config(format!("Failed to read custom dataset '{path}': {e}")))?;
-
-    let mut lines: Vec<CustomLine> = Vec::new();
-    for (lineno, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let parsed: CustomLine = serde_json::from_str(line).map_err(|e| {
-            BenchError::Config(format!(
-                "Invalid JSONL at {path}:{}: {e} (each line must be an object \
-                 with a 'prompt' field)",
-                lineno + 1
-            ))
-        })?;
-        lines.push(parsed);
-    }
-    if lines.is_empty() {
-        return Err(BenchError::Config(format!(
-            "Custom dataset '{path}' contains no entries"
-        )));
-    }
+    let mut lines: Vec<CustomLine> = super::read_jsonl(path, "custom dataset", None)?
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
 
     // Python shuffles the loaded data (seeded) before taking num_requests.
     if !disable_shuffle {
@@ -118,26 +99,13 @@ pub fn load_custom_dataset(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{test_tokenizer, write_temp_jsonl};
     use super::*;
-
-    fn write_temp_jsonl(name: &str, content: &str) -> String {
-        let path = std::env::temp_dir().join(format!("vllm-bench-custom-{name}.jsonl"));
-        std::fs::write(&path, content).unwrap();
-        path.to_string_lossy().into_owned()
-    }
-
-    /// gpt2 via built-in tiktoken encoding — loads without network access.
-    fn test_tokenizer() -> TokenizerKind {
-        TokenizerKind::Tiktoken(
-            crate::tiktoken::load_builtin_tiktoken("gpt2")
-                .expect("gpt2 built-in tiktoken should always load without network"),
-        )
-    }
 
     #[test]
     fn test_load_custom_dataset_basic() {
         let path = write_temp_jsonl(
-            "basic",
+            "custom-basic",
             r#"{"prompt": "hello world", "output_tokens": 10}
 {"prompt": "foo bar baz", "output_tokens": 20}
 "#,
@@ -154,7 +122,7 @@ mod tests {
     #[test]
     fn test_load_custom_dataset_per_line_output_tokens() {
         let path = write_temp_jsonl(
-            "perline",
+            "custom-perline",
             r#"{"prompt": "hello", "output_tokens": 10}
 {"prompt": "world", "output_tokens": 20}
 "#,
@@ -167,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_load_custom_dataset_missing_output_tokens_errors() {
-        let path = write_temp_jsonl("missing", r#"{"prompt": "hello"}"#);
+        let path = write_temp_jsonl("custom-missing", r#"{"prompt": "hello"}"#);
         let err = load_custom_dataset(&test_tokenizer(), &path, 1, -1, 0, "t-", true, true)
             .expect_err("should fail without output_tokens");
         assert!(err.to_string().contains("output_tokens"));
@@ -175,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_load_custom_dataset_missing_prompt_errors() {
-        let path = write_temp_jsonl("noprompt", r#"{"text": "hello"}"#);
+        let path = write_temp_jsonl("custom-noprompt", r#"{"text": "hello"}"#);
         assert!(
             load_custom_dataset(&test_tokenizer(), &path, 1, 256, 0, "t-", true, true).is_err()
         );
