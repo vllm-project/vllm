@@ -82,6 +82,7 @@ from vllm.v1.kv_offload.tiering.base import (
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 
 
 _REQUIRED_ROUTER_CAPABILITIES = ROUTER_HINT_CAPABILITIES
@@ -295,8 +296,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         g3: dict[str, Any] | None = None,
         local_dram_backend: str = "UCX",
         remote_fw_dram_backend: str = "UCX",
+        backpressure_detector: "BackpressureDetector | None" = None,
     ) -> None:
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(
+            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+        )
         selected_policy = _resolve_policy(policy)
         if (kvcr_service_socket_path is None) != (compatibility_digest is None):
             raise ValueError(
