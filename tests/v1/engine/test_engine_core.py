@@ -662,6 +662,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.model_executor = MagicMock()
     core.scheduler = MagicMock()
     core.scheduler.has_requests.return_value = False
+    core.scheduler.has_finished_requests.return_value = False
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
@@ -669,18 +670,22 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 
 
 @pytest.mark.parametrize(
-    "pause_state,has_requests,has_batches",
+    "pause_state,has_requests,has_batches,has_retained",
     [
-        pytest.param(PauseState.UNPAUSED, False, False, id="not-paused"),
-        pytest.param(PauseState.PAUSED_ALL, True, False, id="pending-requests"),
-        pytest.param(PauseState.PAUSED_ALL, False, True, id="pending-batches"),
+        pytest.param(PauseState.UNPAUSED, False, False, False, id="not-paused"),
+        pytest.param(PauseState.PAUSED_ALL, True, False, False, id="pending-requests"),
+        pytest.param(PauseState.PAUSED_ALL, False, True, False, id="pending-batches"),
+        pytest.param(PauseState.PAUSED_ALL, False, False, True, id="retained-kv"),
     ],
 )
-def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_batches):
+def test_kv_cache_release_rejects_unsafe_state(
+    pause_state, has_requests, has_batches, has_retained
+):
     """Reject release before touching caches or memory if work can still use KV."""
     core = _pausable_engine_core_proc()
     core.scheduler.pause_state = pause_state
     core.scheduler.has_requests.return_value = has_requests
+    core.scheduler.has_finished_requests.return_value = has_retained
     core.batch_queue = [object()] if has_batches else None
     core._reset_caches = MagicMock()
 
@@ -692,7 +697,10 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
 
 
 @pytest.mark.parametrize("deferred", [False, True])
-def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
+@pytest.mark.parametrize("clear_cache", [False, True])
+def test_pause_synchronizes_device_before_cache_reset(
+    deferred: bool, clear_cache: bool
+):
     """A resolved pause promises an idle device: the barrier must run before
     caches are cleared and before the caller is unblocked."""
     core = _pausable_engine_core_proc()
@@ -701,7 +709,10 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
     core._reset_caches = lambda: order.append("reset_caches")
 
-    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=clear_cache)
+    core.scheduler.set_pause_state.assert_called_once_with(
+        PauseState.PAUSED_ALL, preserve_kv_cache=not clear_cache
+    )
     if deferred:
         assert isinstance(result, Future)
         assert not result.done() and order == []
@@ -710,4 +721,4 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
         assert result.result(timeout=0) is None
     else:
         assert result is None
-    assert order == ["synchronize_device", "reset_caches"]
+    assert order == ["synchronize_device"] + (["reset_caches"] if clear_cache else [])

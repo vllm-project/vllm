@@ -208,7 +208,9 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_pause_state(self, pause_state: PauseState) -> None:
+    def set_pause_state(
+        self, pause_state: PauseState, *, preserve_kv_cache: bool = False
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod

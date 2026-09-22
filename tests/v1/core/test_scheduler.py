@@ -5303,8 +5303,9 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
 
 @pytest.mark.parametrize("skipped", [False, True])
 @pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("preserve_kv_cache", [False, True])
 def test_keep_pause_drains_remote_kv_without_scheduling_tokens(
-    skipped, async_scheduling
+    skipped, async_scheduling, preserve_kv_cache
 ):
     scheduler = create_scheduler(
         use_kv_connector=mock_kv(matched_tokens=32, is_async=True),
@@ -5318,7 +5319,9 @@ def test_keep_pause_drains_remote_kv_without_scheduling_tokens(
         scheduler.skipped_waiting.remove_requests([request])
         scheduler.waiting.add_request(request)
 
-    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.set_pause_state(
+        PauseState.PAUSED_ALL, preserve_kv_cache=preserve_kv_cache
+    )
     assert not scheduler.has_unfinished_requests()
     assert scheduler.has_requests()
     output = scheduler.schedule()
@@ -5393,7 +5396,8 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
-def test_delayed_kv_connector_free_keeps_scheduler_active():
+@pytest.mark.parametrize("preserve_kv_cache", [False, True])
+def test_delayed_kv_connector_free_keeps_scheduler_active(preserve_kv_cache):
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
         num_requests=2, req_ids=["queued", "finished"]
@@ -5408,6 +5412,17 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
 
     assert scheduler.has_finished_requests()
     assert scheduler.has_requests()
+
+    scheduler.set_pause_state(
+        PauseState.PAUSED_ALL, preserve_kv_cache=preserve_kv_cache
+    )
+    assert scheduler.has_requests() is not preserve_kv_cache
+    assert request.request_id in scheduler.requests
+    scheduler.finished_req_ids.add(request.request_id)
+    assert scheduler.has_requests()
+    scheduler.finished_req_ids.clear()
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert scheduler.has_finished_requests()
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
