@@ -180,6 +180,34 @@ def check_replicas(extra_urls: list[str], bundle: dict[str, str]) -> None:
     print(f"All {len(extra_urls) + 1} replicas hold the same weights.")
 
 
+def collect_update_digests(
+    base_url: str, update_info: dict[str, Any], weight_version: str
+) -> dict[str, str]:
+    """Drive a weight update and get this instance's digests back.
+
+    `update_info` is the payload the weight-transfer engine built for this
+    chunk. Passing `checksum` on the update makes the finish call return the
+    digests, which avoids the second pass over the weights that a separate
+    `checksum` afterwards would cost.
+    """
+    post(
+        base_url,
+        "/update_weights",
+        json={"update_info": update_info, "checksum": True},
+    )
+    finished = post(
+        base_url, "/finish_weight_update", json={"weight_version": weight_version}
+    )
+    digests = finished.get("checksums")
+    if not digests:
+        raise RuntimeError(
+            "finish_weight_update returned no digests; was 'checksum' set on "
+            "the update?"
+        )
+    print(f"collected {len(digests)} digests for {weight_version}")
+    return digests
+
+
 if __name__ == "__main__":
     args = parse_args()
     base_url = args.base_url.rstrip("/")

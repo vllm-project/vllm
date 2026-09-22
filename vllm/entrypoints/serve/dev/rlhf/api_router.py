@@ -199,7 +199,9 @@ async def update_weights(raw_request: Request):
             detail="Missing 'update_info' in request body",
         )
     await engine_client(raw_request).update_weights(
-        request=WeightTransferUpdateRequest(update_info=update_info)
+        request=WeightTransferUpdateRequest(
+            update_info=update_info, checksum=bool(body.get("checksum", False))
+        )
     )
     return JSONResponse(content={"message": "Weights updated"})
 
@@ -209,8 +211,11 @@ async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
 ):
-    await engine_client(raw_request).finish_weight_update(weight_version)
-    return JSONResponse(content={"message": "Weight update finished"})
+    checksums = await engine_client(raw_request).finish_weight_update(weight_version)
+    content: dict[str, Any] = {"message": "Weight update finished"}
+    if checksums is not None:
+        content["checksums"] = checksums
+    return JSONResponse(content=content)
 
 
 @router.post("/update_weight_version")

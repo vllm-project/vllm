@@ -43,6 +43,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
+from vllm.utils.weight_checksum import merge_finish_checksums
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -1258,18 +1259,28 @@ class AsyncLLM(EngineClient):
         """Batched weight update for RL training.
 
         Args:
-            request: Weight update request with backend-specific update info
+            request: Weight update request with backend-specific update info.
+                ``checksum`` asks finish_weight_update to return weight digests.
 
         """
         await self.collective_rpc(
-            "update_weights", kwargs={"update_info": request.update_info}
+            "update_weights",
+            kwargs={"update_info": request.update_info, "checksum": request.checksum},
         )
 
-    async def finish_weight_update(self, weight_version: str | None = None) -> None:
-        """Finish the weight update and set its version if provided."""
-        await self.collective_rpc("finish_weight_update")
+    async def finish_weight_update(
+        self, weight_version: str | None = None
+    ) -> dict[str, str] | None:
+        """Finish the weight update and set its version if provided.
+
+        Returns:
+            Rank-qualified weight digests when the update asked for them by
+            passing ``checksum=True``, otherwise None.
+        """
+        per_worker = await self.collective_rpc("finish_weight_update")
         if weight_version is not None:
             await self.update_weight_version(weight_version)
+        return merge_finish_checksums(per_worker)
 
     async def update_weight_version(self, new_version: str) -> None:
         """Set the weight version without updating weights."""

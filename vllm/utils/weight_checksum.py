@@ -49,6 +49,32 @@ def combine_weight_checksums(per_worker: list[dict[str, str]]) -> dict[str, str]
     return combined
 
 
+def merge_finish_checksums(
+    per_worker: list[dict[str, str] | None],
+) -> dict[str, str] | None:
+    """Merge the per-worker digests a ``finish_weight_update`` returned.
+
+    A weight-update session that did not ask for digests reports None from every
+    worker, so that case stays None rather than becoming an empty result that a
+    caller could mistake for a successful empty check.
+
+    Args:
+        per_worker: One worker's rank-qualified digests, or None when the
+            session did not ask for them.
+
+    Returns:
+        The merged digests, or None when no worker reported any.
+
+    Raises:
+        RuntimeError: If two workers report the same key, which means a worker
+            failed to qualify its keys with its ranks.
+    """
+    reports = [report for report in per_worker if report is not None]
+    if not reports:
+        return None
+    return combine_weight_checksums(reports)
+
+
 def compare_weight_checksum_reports(
     reports: list[dict[str, str]],
 ) -> tuple[bool, list[str], list[str]]:

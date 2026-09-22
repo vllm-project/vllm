@@ -327,6 +327,14 @@ class WeightTransferUpdateRequest:
     """API-level weight update request."""
 
     update_info: WeightTransferUpdatePayload = field(default_factory=dict)
+    checksum: bool = False
+    """Also return per-tensor weight digests from ``finish_weight_update``.
+
+    Off by default: hashing every weight copies each one to the host, which is
+    far too slow to do on every update. An RL trainer that turns it on can
+    compare the digests each instance reports and independently confirm that a
+    weight update landed.
+    """
 
 
 class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
@@ -543,9 +551,13 @@ class VLLMWeightSyncClient(Protocol):
 
     def start_weight_update(self) -> None: ...
 
-    def update_weights(self, update_info: WeightTransferUpdatePayload) -> None: ...
+    def update_weights(
+        self, update_info: WeightTransferUpdatePayload, checksum: bool = False
+    ) -> None: ...
 
-    def finish_weight_update(self, weight_version: str | None = None) -> None: ...
+    def finish_weight_update(
+        self, weight_version: str | None = None
+    ) -> dict[str, str] | None: ...
 
 
 class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):

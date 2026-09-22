@@ -141,6 +141,33 @@ that is worth depends on the baseline: a baseline taken from a healthy replica
 or a checkpoint confirms the group agrees, while one taken after a `reset`
 would confirm only that the group agrees on random weights.
 
+### Collect a digest per weight update
+
+Calling `checksum` after every update costs a second full pass over the
+weights, because comparing already hashes them. A trainer that wants the
+digests of each update can ask for them on the update itself and get them back
+from `finish_weight_update`:
+
+```bash
+curl -X POST 'http://localhost:8000/update_weights' \
+  -H 'Content-Type: application/json' \
+  -d '{"update_info":{...},"checksum":true}'
+
+curl -X POST 'http://localhost:8000/finish_weight_update'
+# {"message":"Weight update finished","checksums":{"dp0:...":"abc..."}}
+```
+
+The option is off by default and applies to that update session only: without
+`"checksum": true` the response is unchanged and nothing extra is hashed. The
+digests are taken after the transfer engine reports the update complete, so
+they describe the committed weights.
+
+`checksum` reports what one instance holds. Because a checksum key carries the
+data-parallel rank, the digests from two replicas describe the same weights
+under different keys, so comparing them means checking each one against a
+shared reference rather than against each other. See
+[Check that a replica holds the same weights](#check-that-a-replica-holds-the-same-weights).
+
 ### RLHF weight-update workflow
 
 The verification sequence is
@@ -181,7 +208,8 @@ curl -X POST 'http://localhost:8000/resume'
 There is no separate `checksum` between the transfer and the `compare`:
 `compare` hashes the current weights itself, so a preceding `checksum` would
 only repeat that work and throw the result away. Ask for the digests separately
-only if you want to read the new values rather than just confirm they match.
+only if you want to read the new values rather than just confirm they match, or
+pass `"checksum": true` on the update to get them without the extra pass.
 
 Because the original weights are transferred back after `reset`, the expected
 result is `match: true` with an empty `mismatches` list.
