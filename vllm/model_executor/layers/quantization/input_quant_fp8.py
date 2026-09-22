@@ -156,7 +156,7 @@ class QuantFP8(CustomOp):
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
         # Fallback to CUDA implementation
-        return self.forward_cuda(x, scale, scale_ub)
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub)
 
     def forward_xpu(
         self,
