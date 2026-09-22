@@ -280,12 +280,8 @@ def test_rocm_aiter_topk_gating_matches_softmax_reference(
     assert (selected_scores >= cutoff).all()
     expected_weights = selected_scores
     if renormalize:
-        expected_weights = expected_weights / expected_weights.sum(
-            dim=-1, keepdim=True
-        )
-    torch.testing.assert_close(
-        topk_weights, expected_weights, atol=2e-2, rtol=2e-2
-    )
+        expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
+    torch.testing.assert_close(topk_weights, expected_weights, atol=2e-2, rtol=2e-2)
 
 
 def test_rocm_aiter_topk_gating_torch_compile_compatibility():
