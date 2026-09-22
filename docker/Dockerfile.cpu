@@ -110,56 +110,32 @@ ENV TARGETARCH=${TARGETARCH}
 ######################### TRITON-CPU BUILD IMAGE #########################
 # Branches off base-common directly (before requirements/cpu.txt is installed
 # below) so a torch/etc. version bump doesn't invalidate this stage's cache --
-# it builds triton-cpu in an isolated `uv build` environment and never touches
-# these packages.
+# it just downloads the prebuilt triton-cpu release wheel matching this
+# stage's Python version and never touches these packages.
 FROM base-common AS vllm-triton-cpu-build
 
 # Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
 # Re-declared here because this stage is `FROM base-common` (not `vllm-build`),
 # so it does not inherit the ARG/ENV defined there. Without it, the guard
-# below would see an empty value and build triton-cpu on non-x86 targets
+# below would see an empty value and fetch triton-cpu on non-x86 targets
 # (e.g. arm64).
 ARG VLLM_CPU_X86=0
-
-ARG USE_SCCACHE
-ARG SCCACHE_ENDPOINT
-ARG SCCACHE_LOCAL_ONLY=0
 
 WORKDIR /vllm-workspace
 
 RUN mkdir dist
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
-    --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
-    --mount=type=cache,target=/root/.triton \
-    --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
-    set -ex; \
+RUN set -ex; \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
-        cd triton-cpu; \
-        git checkout "270e696d"; \
-        if [ ! -f third_party/sleef/CMakeLists.txt ]; then \
-            echo "sleef submodule empty after shallow fetch; retrying unshallow"; \
-            git submodule foreach --recursive 'git fetch --unshallow origin || true'; \
-            git submodule update --init --recursive --force; \
-        fi; \
-        test -f third_party/sleef/CMakeLists.txt || { echo "FATAL: sleef submodule unavailable"; exit 1; }; \
-        if [ "$USE_SCCACHE" = "1" ]; then \
-            if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
-                unset SCCACHE_BUCKET SCCACHE_REGION; \
-                export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
-            elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
-                export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
-            fi; \
-            export TRITON_APPEND_CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"; \
-            sccache --show-stats; \
-        fi; \
-        uv build --wheel --out-dir=../dist; \
-        if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi; \
-        cd ..; \
-        rm -rf triton-cpu; \
+        TRITON_CPU_VERSION=3.8.0; \
+        case "$(python3 -c 'import sys; print(f"{sys.version_info[0]}{sys.version_info[1]}")')" in \
+            310) WHEEL_TAG="cp310-cp310" ;; \
+            311) WHEEL_TAG="cp311-cp311" ;; \
+            *) WHEEL_TAG="cp312-abi3" ;; \
+        esac; \
+        WHEEL_NAME="triton-${TRITON_CPU_VERSION}+cpu-${WHEEL_TAG}-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
+        curl -L --fail -o "dist/${WHEEL_NAME}" \
+            "https://github.com/triton-lang/triton-cpu/releases/download/v${TRITON_CPU_VERSION}/${WHEEL_NAME}"; \
     fi
 
 ######################### COMMON BASE IMAGE + PYTHON DEPS #########################
