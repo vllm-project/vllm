@@ -1471,6 +1471,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "CohereAsrForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
+    "MarianMTModel": _HfExamplesInfo("Helsinki-NLP/opus-mt-en-de"),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
     ),
