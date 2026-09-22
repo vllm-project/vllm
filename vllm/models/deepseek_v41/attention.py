@@ -26,6 +26,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
     fused_indexer_q_rope_quant,
@@ -33,6 +34,7 @@ from vllm.models.deepseek_v41.common.ops import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -389,6 +391,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             return_bias=False,
             prefix=f"{prefix}.wo_b",
         )
+        # Set by ``bind_gemm_rs`` when the decoder layer runs sequence
+        # parallel and the fused GEMM + reduce-scatter kernel accepts wo_b.
+        self.gemm_rs: GemmRsAr | None = None
 
         # Initialize rotary embedding before the indexer/compressor consume it.
         self.rotary_emb = build_deepseek_v4_rope(
@@ -671,6 +676,41 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
         return self._o_proj(attn_out, positions)
+
+    def bind_gemm_rs(self) -> None:
+        """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.
+
+        The decoder layer calls this after the model initialized the
+        process-wide GEMM-RS workspace and before weights load: the
+        eligibility check inspects the projection's linear kernel and weight
+        shape, which online quantization may later re-layout.
+        """
+        from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+            get_gemm_rs_ar,
+        )
+
+        # The layer owns the reduction under sequence parallel.
+        assert not self.wo_b.reduce_results
+        gemm_rs = get_gemm_rs_ar()
+        if gemm_rs.can_run(self.wo_b):
+            self.gemm_rs = gemm_rs
+        else:
+            gemm_rs.warn_incompatible_projection()
+
+    def _wo_b_proj(self, z: torch.Tensor) -> torch.Tensor:
+        """Apply ``wo_b``; with GEMM-RS bound, also reduce-scatter the result.
+
+        Every ``_o_proj`` implementation projects through this so the decoder
+        layer sees one contract: when ``gemm_rs`` is bound the output is
+        already the local sequence-parallel shard, otherwise it is the
+        unreduced TP partial.
+        """
+        if self.gemm_rs is None:
+            return self.wo_b(z)
+        if self.gemm_rs.should_run(z):
+            return self.gemm_rs.apply(z, self.wo_b)
+        # Small batches stay on the unfused path, which is faster there.
+        return sp_reduce_scatter(self.wo_b(z))
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
