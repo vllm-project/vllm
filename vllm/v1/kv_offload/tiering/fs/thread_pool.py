@@ -51,7 +51,8 @@ class JobState:
         "_n_tasks",
         "_completed",
         "_success",
-        "_transfer_time",
+        "_transfer_start",
+        "_transfer_end",
         "_lock",
     )
 
@@ -60,7 +61,8 @@ class JobState:
         self._n_tasks = n_tasks
         self._completed = 0
         self._success = True
-        self._transfer_time = 0.0
+        self._transfer_start = float("inf")
+        self._transfer_end = 0.0
         self._lock = threading.Lock()
 
     @property
@@ -68,15 +70,17 @@ class JobState:
         return self._job_id
 
     def task_done(
-        self, batch_size: int, success: bool, transfer_time: float
+        self, batch_size: int, success: bool, start_time: float, end_time: float
     ) -> tuple[bool, bool, float]:
-        """Returns if job completed and success flag"""
+        """Returns (job_finished, success, transfer_time)."""
         with self._lock:
             self._completed += batch_size
-            self._transfer_time += transfer_time
+            self._transfer_start = min(self._transfer_start, start_time)
+            self._transfer_end = max(self._transfer_end, end_time)
             if not success:
                 self._success = False
-            return self._completed == self._n_tasks, self._success, self._transfer_time
+            transfer_time = self._transfer_end - self._transfer_start
+            return self._completed == self._n_tasks, self._success, transfer_time
 
 
 class DualQueueThreadPool:
@@ -252,19 +256,19 @@ class DualQueueThreadPool:
             try:
                 start_time = time.monotonic()
                 fn()
-                transfer_time = time.monotonic() - start_time
+                end_time = time.monotonic()
                 job_finished, success, total_time = state.task_done(
-                    batch_size, True, transfer_time
+                    batch_size, True, start_time, end_time
                 )
             except Exception as exc:
-                transfer_time = time.monotonic() - start_time
+                end_time = time.monotonic()
                 logger.error(
                     "Job %s block I/O failed: %s",
                     state.job_id,
                     exc,
                 )
                 job_finished, success, total_time = state.task_done(
-                    batch_size, False, transfer_time
+                    batch_size, False, start_time, end_time
                 )
 
             if job_finished:
