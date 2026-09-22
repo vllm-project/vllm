@@ -19,6 +19,7 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 logger = init_logger(__name__)
@@ -172,14 +173,6 @@ class PCPManager:
             raise NotImplementedError(
                 "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
                 "Set -cc.cudagraph_mode=NONE."
-            )
-        if (
-            cudagraph_mode.has_full_cudagraphs()
-            and not cudagraph_mode.separate_routine()
-        ):
-            raise NotImplementedError(
-                "MRV2 PCP supports full CUDA graphs for decode-only routines. "
-                "Use FULL_DECODE_ONLY, FULL_AND_PIECEWISE, PIECEWISE, or NONE."
             )
         if (
             parallel_config.decode_context_parallel_size > 1
@@ -384,6 +377,57 @@ class PCPManager:
             )
             for rank in range(self.pcp_world_size)
         )
+
+    @staticmethod
+    def adjust_cudagraph_support(
+        support: "AttentionCGSupportInfo",
+        cudagraph_mode: CUDAGraphMode | None,
+    ) -> "AttentionCGSupportInfo":
+        """Keep an explicit FULL request while limiting it to PCP decode.
+
+        Dense MLA backends conservatively advertise uniform-batch support, so
+        the generic resolver would rewrite ``FULL`` to a combined mode. PCP
+        stages decode inputs in persistent, graph-bound buffers and routes
+        prefills eagerly because MLA prefill metadata is data-dependent.
+        """
+        if cudagraph_mode != CUDAGraphMode.FULL:
+            return support
+
+        from vllm.v1.attention.backend import AttentionCGSupport
+
+        if support.min_cg_support != AttentionCGSupport.UNIFORM_BATCH:
+            return support
+        return replace(
+            support,
+            min_cg_support=AttentionCGSupport.ALWAYS,
+            min_cg_attn_backend=None,
+        )
+
+    @staticmethod
+    def configure_full_cudagraph_capture(
+        compilation_config: object,
+        cudagraph_mode: CUDAGraphMode,
+        max_num_reqs: int,
+    ) -> None:
+        """Restrict pure FULL captures to one-token-per-request decode shapes."""
+        if cudagraph_mode != CUDAGraphMode.FULL:
+            return
+        capture_sizes = compilation_config.cudagraph_capture_sizes
+        compilation_config.cudagraph_capture_sizes = [
+            size for size in capture_sizes if size <= max_num_reqs
+        ]
+        compilation_config.max_cudagraph_capture_size = min(
+            compilation_config.max_cudagraph_capture_size,
+            max_num_reqs,
+        )
+
+    @staticmethod
+    def requires_eager_full_graph(
+        cudagraph_mode: CUDAGraphMode,
+        is_prefilling: np.ndarray,
+    ) -> bool:
+        """Return whether this PCP batch cannot use a decode-shaped FULL graph."""
+        return cudagraph_mode == CUDAGraphMode.FULL and bool(is_prefilling.any())
 
     @staticmethod
     def _resolve_num_reqs_after_padding(

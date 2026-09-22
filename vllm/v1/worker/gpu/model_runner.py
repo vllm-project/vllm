@@ -687,6 +687,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.compilation_config.cudagraph_mode,
                 piecewise_capture_available=piecewise_capture_available,
             )
+        if self.pcp_manager is not None:
+            attn_cg_support = self.pcp_manager.adjust_cudagraph_support(
+                attn_cg_support,
+                self.compilation_config.cudagraph_mode,
+            )
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
@@ -698,6 +703,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_profiling=is_profiling,
             piecewise_capture_available=piecewise_capture_available,
         )
+        if self.pcp_manager is not None:
+            self.pcp_manager.configure_full_cudagraph_capture(
+                self.compilation_config,
+                cudagraph_mode,
+                self.max_num_reqs,
+            )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -1667,11 +1678,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
             scheduler_output, dummy_run
         )
+        pcp_requires_eager = False
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
             if self.pcp_manager is not None:
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
                     batch_req_state.num_scheduled_tokens,
+                    batch_req_state.is_prefilling_np,
+                )
+                pcp_requires_eager = self.pcp_manager.requires_eager_full_graph(
+                    self.compilation_config.cudagraph_mode,
                     batch_req_state.is_prefilling_np,
                 )
 
@@ -1682,7 +1698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.lora_config, self.lora_state, req_ids, dummy_run
             )
 
-        skip_compiled = False
+        skip_compiled = pcp_requires_eager
         if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
             # Encoder-decoder models such as Whisper should run eager/non-compiled
             # when encoder inputs are scheduled, because this step updates

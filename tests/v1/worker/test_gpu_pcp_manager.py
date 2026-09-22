@@ -9,9 +9,11 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
+from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -63,17 +65,55 @@ def _make_capture_manager(block_table: torch.Tensor):
 
 @pytest.mark.parametrize(
     "cudagraph_mode",
-    [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
+    [
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ],
 )
-def test_validate_config_accepts_decode_only_full_graphs(cudagraph_mode):
+def test_validate_config_accepts_full_graphs(cudagraph_mode):
     PCPManager.validate_config(_make_config(cudagraph_mode), supports_mm_inputs=False)
 
 
-def test_validate_config_rejects_full_graph_for_prefills():
-    with pytest.raises(NotImplementedError, match="decode-only routines"):
-        PCPManager.validate_config(
-            _make_config(CUDAGraphMode.FULL), supports_mm_inputs=False
-        )
+def test_full_mode_promotes_uniform_attention_cudagraph_support():
+    uniform = AttentionCGSupportInfo(
+        min_cg_support=AttentionCGSupport.UNIFORM_BATCH,
+        min_cg_attn_backend="TritonMLABackend",
+    )
+
+    actual = PCPManager.adjust_cudagraph_support(uniform, CUDAGraphMode.FULL)
+
+    assert actual == AttentionCGSupportInfo()
+    assert (
+        PCPManager.adjust_cudagraph_support(uniform, CUDAGraphMode.FULL_DECODE_ONLY)
+        is uniform
+    )
+
+
+def test_full_mode_limits_capture_to_decode_shapes():
+    compilation_config = SimpleNamespace(
+        cudagraph_capture_sizes=[1, 2, 4, 8, 16, 32, 64, 128],
+        max_cudagraph_capture_size=128,
+    )
+
+    PCPManager.configure_full_cudagraph_capture(
+        compilation_config, CUDAGraphMode.FULL, max_num_reqs=64
+    )
+
+    assert compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8, 16, 32, 64]
+    assert compilation_config.max_cudagraph_capture_size == 64
+
+
+def test_full_mode_routes_pcp_prefill_eager():
+    assert PCPManager.requires_eager_full_graph(
+        CUDAGraphMode.FULL, np.array([False, True])
+    )
+    assert not PCPManager.requires_eager_full_graph(
+        CUDAGraphMode.FULL, np.array([False, False])
+    )
+    assert not PCPManager.requires_eager_full_graph(
+        CUDAGraphMode.FULL_DECODE_ONLY, np.array([False, True])
+    )
 
 
 def test_replicated_decode_piecewise_graph_padding(monkeypatch):
