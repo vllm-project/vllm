@@ -156,8 +156,8 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
-        return [576]
+        # DeepSeek V3.2: 512 NoPE + 64 RoPE = 576; GLM5Next NoPE: 512.
+        return [576, 512]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -184,6 +184,37 @@ class FlashMLASparseBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if head_size == 512:
+            # GLM5Next NoPE (qk_rope_head_dim == 0, kv_lora_rank == 512) has
+            # head_size 512 and is served here by the direct 512-wide bf16
+            # cache on SM90. Quantized DS-MLA caches need the zero-padded
+            # 576/656B envelope, which is wired up separately; plain fp8,
+            # SM100 bf16, and rope-carrying 512 models must fall through to
+            # FlashInfer/TRITON.
+            if (
+                kv_cache_dtype in (None, "auto", "bfloat16", "float16")
+                and device_capability.major == 9
+            ):
+                # Direct bf16 NoPE-512 is only correct for rope-free models.
+                # Precedent for reading hf_text_config in supports_combination:
+                # flashinfer_mla_sparse.py.
+                from vllm.config import get_current_vllm_config
+
+                vllm_config = get_current_vllm_config()
+                if vllm_config.model_config is not None:
+                    hf_text_config = vllm_config.model_config.hf_text_config
+                    if getattr(hf_text_config, "qk_rope_head_dim", 64) != 0:
+                        return (
+                            "FLASHMLA_SPARSE supports head_size 512 only for "
+                            "rope-free (NoPE) models"
+                        )
+            else:
+                return (
+                    "FLASHMLA_SPARSE supports head_size 512 only with bf16 "
+                    "kv-cache on SM90 (NoPE), got "
+                    f"kv_cache_dtype={kv_cache_dtype}, "
+                    f"capability={device_capability}"
+                )
         if kv_cache_dtype == "nvfp4_ds_mla" and device_capability.major != 10:
             return (
                 f"FLASHMLA_SPARSE only supports the {kv_cache_dtype} kv-cache "
@@ -1332,7 +1363,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 *self.workspace_specs
             )
             q = q_concat_buffer[: ql_nope.shape[0]]
-            ops.concat_mla_q(ql_nope, q_pe, q)
+            if q_pe.size(-1) == 0:
+                # NoPE (GLM5Next): concat_mla_q requires rope_dim == 64,
+                # copy directly into the head-padded buffer instead.
+                q[:, : ql_nope.shape[1]].copy_(ql_nope)
+            else:
+                ops.concat_mla_q(ql_nope, q_pe, q)
         else:
             actual_num_heads = q.shape[1]
 
