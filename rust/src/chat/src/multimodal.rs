@@ -58,8 +58,6 @@ pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
     /// Rendered placeholder marker IDs for all resolved modalities.
     placeholder_token_ids: Vec<u32>,
-    /// Checkpoint context-length limit used when an engine limit is unavailable.
-    fallback_max_model_len: Option<usize>,
     image: Option<VisionModalitySupport>,
     video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
@@ -404,17 +402,6 @@ impl MultimodalModelInfo {
         video_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
-        let fallback_max_model_len = [
-            context.config.get("max_position_embeddings"),
-            context.config.pointer("/text_config/max_position_embeddings"),
-            context.config.pointer("/llm_config/max_position_embeddings"),
-            preprocessor_config.extra.get("max_model_len"),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_u64)
-        .find_map(|limit| usize::try_from(limit).ok());
-
         let (image, video) = Self::resolve_vision_lanes(
             &context,
             preprocessor_config.clone(),
@@ -448,7 +435,6 @@ impl MultimodalModelInfo {
         Ok(Some(Self {
             context,
             placeholder_token_ids,
-            fallback_max_model_len,
             image,
             video,
             audio,
@@ -585,9 +571,7 @@ impl MultimodalModelInfo {
             .filter(|token_id| !self.placeholder_token_ids.contains(token_id))
             .count();
         VisionPreprocessingContext {
-            token_budget: max_model_len
-                .or(self.fallback_max_model_len)
-                .map(|limit| limit.saturating_sub(text_prompt_length)),
+            token_budget: max_model_len.map(|limit| limit.saturating_sub(text_prompt_length)),
         }
     }
 }
@@ -1121,59 +1105,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn vision_budget_uses_checkpoint_limits_when_engine_limit_is_unavailable() {
-        for fields in [
-            serde_json::json!({"max_position_embeddings": 512}),
-            serde_json::json!({"text_config": {"max_position_embeddings": 512}}),
-            serde_json::json!({"llm_config": {"max_position_embeddings": 512}}),
-            serde_json::json!({
-                "max_position_embeddings": 512,
-                "text_config": {"max_position_embeddings": 1024}
-            }),
-        ] {
-            let mut config = qwen3_vl_config();
-            config.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
-            let info = test_info("qwen3_vl", config, qwen3_vl_tokenizer());
-            let tokens = [11, QWEN3_IMAGE_PAD_ID, 12, QWEN3_VIDEO_PAD_ID, 13];
-            assert_eq!(
-                info.vision_preprocessing_context(&tokens, None).token_budget,
-                Some(509)
-            );
-            assert_eq!(
-                info.vision_preprocessing_context(&tokens, Some(256)).token_budget,
-                Some(253)
-            );
-        }
-    }
-
-    #[test]
-    fn vision_budget_falls_back_to_preprocessor_limit() {
-        let context = MultimodalModelContext {
-            model_id: "qwen3_vl-test".to_string(),
-            model_type: Some("qwen3_vl".to_string()),
-            config: qwen3_vl_config(),
-            tokenizer: TokenizerResolver(Arc::new(qwen3_vl_tokenizer())),
-        };
-        let preprocessor = PreProcessorConfig::from_value(serde_json::json!({
-            "max_model_len": 1024
-        }))
-        .unwrap();
-        let info = MultimodalModelInfo::from_loaded(
-            context,
-            preprocessor,
-            PreProcessorConfig::default(),
-            HashMap::new(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            info.vision_preprocessing_context(&[11, QWEN3_IMAGE_PAD_ID, 12], None)
-                .token_budget,
-            Some(1022)
-        );
-    }
-
     #[tokio::test]
     async fn nemotron_budget_controls_preprocessing_and_engine_features() {
         use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
@@ -1203,39 +1134,42 @@ mod tests {
         let mut prompt = vec![11; 100];
         prompt.push(1018);
 
-        for limit in [Some(512), None] {
-            let mut tokens = prompt.clone();
-            let features = info
-                .prepare_multimodal(vec![media.clone()], &mut tokens, ModelDtype::Float32, limit)
-                .await
-                .unwrap();
-            assert_eq!(features.len(), 1);
-            let feature = &features[0];
-            assert_eq!(
-                (feature.mm_position.offset, feature.mm_position.length),
-                (100, 258)
-            );
-            assert_eq!(tokens.len(), 358);
-            assert_eq!(tokens[100], 1019);
-            assert!(tokens[101..357].iter().all(|&token| token == 1018));
-            assert_eq!(tokens[357], 1020);
-            let data = feature.data.as_ref().unwrap();
-            assert!(matches!(
-                data["pixel_values_flat"].data.as_ref(),
-                Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [3, 512, 512]
-            ));
-            assert_eq!(
-                data["num_tokens_per_image"].data,
-                Some(MmKwargValue::Int(256))
-            );
-            assert_eq!(
-                data["imgs_sizes"].data,
-                Some(MmKwargValue::List(vec![
-                    MmKwargValue::Int(512),
-                    MmKwargValue::Int(512),
-                ]))
-            );
-        }
+        let mut tokens = prompt.clone();
+        let features = info
+            .prepare_multimodal(
+                vec![media.clone()],
+                &mut tokens,
+                ModelDtype::Float32,
+                Some(512),
+            )
+            .await
+            .unwrap();
+        assert_eq!(features.len(), 1);
+        let feature = &features[0];
+        assert_eq!(
+            (feature.mm_position.offset, feature.mm_position.length),
+            (100, 258)
+        );
+        assert_eq!(tokens.len(), 358);
+        assert_eq!(tokens[100], 1019);
+        assert!(tokens[101..357].iter().all(|&token| token == 1018));
+        assert_eq!(tokens[357], 1020);
+        let data = feature.data.as_ref().unwrap();
+        assert!(matches!(
+            data["pixel_values_flat"].data.as_ref(),
+            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [3, 512, 512]
+        ));
+        assert_eq!(
+            data["num_tokens_per_image"].data,
+            Some(MmKwargValue::Int(256))
+        );
+        assert_eq!(
+            data["imgs_sizes"].data,
+            Some(MmKwargValue::List(vec![
+                MmKwargValue::Int(512),
+                MmKwargValue::Int(512),
+            ]))
+        );
 
         let error = info
             .prepare_multimodal(vec![media], &mut prompt, ModelDtype::Float32, Some(100))
