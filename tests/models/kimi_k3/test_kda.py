@@ -23,6 +23,9 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    fused_recurrent_kda as fused_recurrent_kda_amd,
+)
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
 from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
@@ -44,9 +47,11 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     chunk_kda,
     chunk_kda_with_fused_gate,
     fused_kda_gate,
-    fused_recurrent_kda,
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
+)
+from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
+    fused_recurrent_kda as fused_recurrent_kda_nvidia,
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
@@ -65,6 +70,10 @@ pytestmark = pytest.mark.skipif(
 PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
+}
+SPEC_DECODE_IMPLS = {
+    "nvidia": fused_recurrent_kda_nvidia,
+    "amd": fused_recurrent_kda_amd,
 }
 
 
@@ -472,11 +481,13 @@ def test_packed_kda_decode_correctness(
     [(12, True), (12, False), (12, None), (96, None)],
 )
 @pytest.mark.parametrize("lower_bound", [-5.0, None])
+@pytest.mark.parametrize("impl", SPEC_DECODE_IMPLS)
 @torch.inference_mode()
 def test_kda_spec_decode_correctness(
     H: int,
     fuse_gate: bool | None,
     lower_bound: float | None,
+    impl: str,
 ):
     num_seqs, query_len, D = 3, 3, 128
     T = num_seqs * query_len
@@ -578,7 +589,7 @@ def test_kda_spec_decode_correctness(
     expected = torch.cat(expected_outputs, dim=1)
 
     actual_state = state.clone()
-    actual, _ = fused_recurrent_kda(
+    actual, _ = SPEC_DECODE_IMPLS[impl](
         q=q,
         k=k,
         v=v,

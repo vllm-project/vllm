@@ -344,8 +344,25 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
-    BV = 32 if use_gate_in_kernel else 8
-    num_warps = 4 if use_gate_in_kernel else 1
+    if use_gate_in_kernel and num_accepted_tokens is not None:
+        # Narrow V tiles while low-concurrency speculative decode is
+        # grid-starved on MI355X.
+        head_sequences = H * N
+        has_multi_token_sequence = T > N
+        if head_sequences <= 24:
+            BV = 4
+            num_warps = 1
+            num_stages = 4 if has_multi_token_sequence else 2
+        elif has_multi_token_sequence and head_sequences <= 48:
+            BV, num_warps, num_stages = 8, 1, 4
+        elif has_multi_token_sequence and head_sequences <= 96:
+            BV, num_warps, num_stages = 8, 1, 2
+        else:
+            BV, num_warps, num_stages = 32, 4, 2
+    elif use_gate_in_kernel:
+        BV, num_warps, num_stages = 32, 4, 2
+    else:
+        BV, num_warps, num_stages = 8, 1, 2
     grid = (cdiv(V, BV) * N * H,)
     fused_recurrent_kda_fwd_kernel[grid](
         q=q,
@@ -380,7 +397,7 @@ def fused_recurrent_kda_fwd(
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         num_warps=num_warps,
-        num_stages=2,
+        num_stages=num_stages,
     )
     return out, initial_state
 
