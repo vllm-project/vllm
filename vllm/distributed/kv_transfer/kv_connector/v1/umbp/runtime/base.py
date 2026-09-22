@@ -59,6 +59,9 @@ class UMBPWorkerHandle(Protocol):
     def wait(self, job: TransferJobState) -> TransferJobState:
         """Wait for a job and return its final per-key state."""
 
+    def poll(self, job: TransferJobState) -> TransferJobState | None:
+        """Return a finished job without blocking, or None if still pending."""
+
     def publish(self, job: TransferJobState) -> None:
         """Make a completed store visible to scheduler lookups."""
 

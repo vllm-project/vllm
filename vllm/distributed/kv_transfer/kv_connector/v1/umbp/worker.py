@@ -135,7 +135,21 @@ class UMBPStoreConnectorWorker:
         self, request_id: str, plans: list[BlockTransferPlan]
     ) -> None:
         materialized = self._materialize_plans(plans)
-        if not self.layerwise_load:
+        if self._report_load_completions or not self.layerwise_load:
+            logger.debug(
+                "UMBP bulk load submitted request=%s plans=%d ranges=%d bytes=%d",
+                request_id,
+                len(materialized),
+                sum(len(plan.ranges) for plan in materialized),
+                sum(item.length for plan in materialized for item in plan.ranges),
+            )
+            self._stats.record(
+                "load",
+                submitted=len(materialized),
+                num_bytes=sum(
+                    item.length for plan in materialized for item in plan.ranges
+                ),
+            )
             self._load_jobs[request_id] = self.runtime.load(materialized)
             return
         plans_by_layer: dict[str, list[BlockTransferPlan]] = {}
@@ -540,6 +554,7 @@ class UMBPStoreConnectorWorker:
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
+        self._poll_load_jobs()
         allowed = finished_req_ids | set()
         sending = self._finished_sending & allowed
         recving = set(self._finished_recving)
@@ -547,6 +562,59 @@ class UMBPStoreConnectorWorker:
         self._finished_recving.difference_update(recving)
         self._failed_recving.difference_update(recving)
         return sending or None, recving or None
+
+    def _poll_load_jobs(self) -> None:
+        affected: set[str] = set()
+        for layer_name in list(self._layer_load_jobs):
+            jobs = self._layer_load_jobs[layer_name]
+            for request_id, job in list(jobs.items()):
+                result = self.runtime.poll(job)
+                if result is None:
+                    continue
+                jobs.pop(request_id)
+                affected.add(request_id)
+                self._finish_job(
+                    request_id,
+                    result,
+                    is_load=True,
+                    mark_finished=False,
+                    wait=False,
+                )
+                pending = self._pending_load_layers.get(request_id)
+                if pending is not None:
+                    pending.discard(layer_name)
+            if not jobs:
+                self._layer_load_jobs.pop(layer_name)
+
+        for request_id, job in list(self._load_jobs.items()):
+            result = self.runtime.poll(job)
+            if result is None:
+                continue
+            self._load_jobs.pop(request_id)
+            affected.add(request_id)
+            self._finish_job(
+                request_id,
+                result,
+                is_load=True,
+                mark_finished=False,
+                wait=False,
+            )
+            logger.debug(
+                "UMBP bulk load completed request=%s status=%s completed=%d failed=%d",
+                request_id,
+                result.status.value,
+                len(result.completed_keys),
+                len(result.failed_keys),
+            )
+
+        for request_id in affected:
+            if request_id in self._load_jobs:
+                continue
+            if self._pending_load_layers.get(request_id):
+                continue
+            self._pending_load_layers.pop(request_id, None)
+            if self._report_load_completions:
+                self._finished_recving.add(request_id)
 
     def get_failed_recving(self) -> set[str]:
         failed = set(self._failed_recving)

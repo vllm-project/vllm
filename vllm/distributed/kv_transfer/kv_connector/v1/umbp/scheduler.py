@@ -8,8 +8,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -384,6 +384,17 @@ class UMBPStoreConnectorScheduler:
                     if store_plans:
                         meta.store_requests[request_id] = store_plans
 
+        # Async loads are admitted without scheduling model tokens, so those
+        # requests are absent from both scheduled request collections above.
+        # Forward their plans explicitly so workers can start the transfer and
+        # eventually move the request out of WAITING_FOR_REMOTE_KVS.
+        for request_id, load_plans in list(self._pending_loads.items()):
+            self._pending_loads.pop(request_id, None)
+            self._load_specs.pop(request_id, None)
+            meta.load_plans.extend(load_plans)
+            if load_plans:
+                meta.load_requests[request_id] = load_plans
+
         for request_id in scheduler_output.preempted_req_ids or set():
             meta.preempted_request_ids.add(request_id)
             plans = self._pending_loads.pop(request_id, [])
@@ -624,7 +635,9 @@ class UMBPStoreConnectorScheduler:
     def _object_hash_at_token_end(self, hashes: list[bytes], token_end: int) -> bytes:
         hash_index = token_end // self.hash_block_size - 1
         if hash_index < 0 or hash_index >= len(hashes):
-            raise ValueError(f"request has {len(hashes)} hashes, needs index {hash_index}")
+            raise ValueError(
+                f"request has {len(hashes)} hashes, needs index {hash_index}"
+            )
         return hashes[hash_index]
 
     def _store_plans(
@@ -655,7 +668,9 @@ class UMBPStoreConnectorScheduler:
             group_block_size = self.group_block_sizes[group_id]
             start_block = previous_saved_tokens // group_block_size
             num_blocks = save_to // group_block_size
-            for index, block_id in enumerate(block_ids[start_block:num_blocks], start=start_block):
+            for index, block_id in enumerate(
+                block_ids[start_block:num_blocks], start=start_block
+            ):
                 token_end = (index + 1) * group_block_size
                 block_hash = self._object_hash_at_token_end(
                     request.block_hashes, token_end
