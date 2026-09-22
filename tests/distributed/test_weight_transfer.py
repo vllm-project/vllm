@@ -1202,7 +1202,10 @@ class TestTrainerClients:
         """Ray client must hand the actor typed Request objects, not raw dicts."""
         import ray
 
-        monkeypatch.setattr(ray, "get", lambda refs: None)
+        # `ray.get` on a list of refs returns a list, one entry per ref. The
+        # finish call merges those entries, so a bare None is not a valid
+        # stand-in for the result.
+        monkeypatch.setattr(ray, "get", lambda refs: [None])
         handle = MagicMock()
         client = RayVLLMWeightSyncClient(handle)
 
@@ -1216,7 +1219,9 @@ class TestTrainerClients:
         assert isinstance(update_req, WeightTransferUpdateRequest)
         assert update_req.update_info == {"names": ["w"]}
 
-        client.finish_weight_update("step-42")
+        # An actor that was not asked for digests reports None, which the
+        # client must fold into None rather than an empty snapshot.
+        assert client.finish_weight_update("step-42") is None
         handle.finish_weight_update.remote.assert_called_once_with(checksum=False)
         handle.update_weight_version.remote.assert_called_once_with("step-42")
 
