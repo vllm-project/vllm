@@ -237,6 +237,27 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
+  mirror:
+    amd:
+      label: ":amd: (MI355) Extract Hidden States Integration Single GPU"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 45
+      working_dir: /vllm-workspace
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/extract_hidden_states.py
+      - vllm/model_executor/models/extract_hidden_states.py
+      - vllm/transformers_utils/configs/extract_hidden_states.py
+      - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
+      - tests/v1/kv_connector/extract_hidden_states_integration
+      - vllm/platforms/rocm.py
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      commands:
+      - pytest -v -s -m 'not distributed' tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":nvidia: (L4) Extract Hidden States Integration"
   key: extract-hidden-states-integration-2-gpus
@@ -416,7 +437,6 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
-      soft_fail: true
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -505,6 +525,9 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/reasoning
+  - tools/pre_commit/check_test_tethering.py
+  - tools/pre_commit/test_tethering_allowlist.txt
+  - tests/tools/test_check_test_tethering.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -532,6 +555,7 @@ steps:
   commands:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
+  - pytest -v -s tools/test_check_test_tethering.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
