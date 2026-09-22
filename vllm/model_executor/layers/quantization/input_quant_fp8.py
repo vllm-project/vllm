@@ -155,8 +155,11 @@ class QuantFP8(CustomOp):
         if use_aiter_per_token_quant:
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
-        # Fallback to CUDA implementation
-        return self.forward_cuda(x, scale, scale_ub)
+        # Fall back to the CUDA implementation. Dispatch on the class, not
+        # through self: a subclass may override forward_cuda with a different
+        # signature (_DecodeConcatQuantFP8 does), and a virtual call would
+        # re-enter it with mismatched arguments.
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub)
 
     def forward_xpu(
         self,
@@ -175,7 +178,8 @@ class QuantFP8(CustomOp):
                 dtype=_FP8_DTYPE,
                 use_ue8m0=self.use_ue8m0,
             )
-        return self.forward_cuda(x, scale, scale_ub, use_triton)
+        # Dispatch on the class, for the same reason as in forward_hip.
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub, use_triton)
 
     def forward_native(
         self,
