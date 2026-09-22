@@ -127,9 +127,7 @@ class StructuredOutputsParams:
             )
 
     def all_constraints_none(self) -> bool:
-        """
-        Returns True if all structured-output constraint fields are None.
-        """
+        """Returns True if all structured-output constraint fields are None."""
         return all(
             getattr(self, field) is None
             for field in (
@@ -143,9 +141,7 @@ class StructuredOutputsParams:
         )
 
     def all_non_structural_tag_constraints_none(self) -> bool:
-        """
-        Returns True if all structured-output constraint fields are None.
-        """
+        """Returns True if all structured-output constraint fields are None."""
         return all(
             getattr(self, field) is None
             for field in (
@@ -692,7 +688,7 @@ class SamplingParams(
         generation_config: dict[str, Any],
         eos_token_id: int | None = None,
     ) -> None:
-        """Update if there are non-default values from generation_config"""
+        """Update if there are non-default values from generation_config."""
         if not self.ignore_eos:
             self._eos_token_id = eos_token_id
 
@@ -827,7 +823,6 @@ class SamplingParams(
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
-        self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
@@ -996,13 +991,6 @@ class SamplingParams(
                 parameter="trace_decode_token_ids",
                 value=invalid_token_ids,
             )
-
-    def _validate_logits_processors(self, model_config: ModelConfig) -> None:
-        from vllm.v1.sample.logits_processor import (
-            validate_logits_processors_parameters,
-        )
-
-        validate_logits_processors_parameters(model_config.logits_processors, self)
 
     def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids
@@ -1313,6 +1301,7 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+    skip_special_tokens: bool = True
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
