@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Check AITER's fused indexer prologue against the kernels it replaces."""
 
+from importlib.util import find_spec
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import aiter_indexer_qk_fused_kernel
 
 N_HEAD = 32
 HEAD_DIM = 128
@@ -16,8 +17,8 @@ EPS = 1e-6
 MAX_POSITION = 512
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm() or aiter_indexer_qk_fused_kernel() is None,
-    reason="requires an AITER build exporting indexer_qk_rope_quant_and_cache",
+    not current_platform.is_rocm() or find_spec("aiter") is None,
+    reason="requires AITER",
 )
 
 
@@ -108,9 +109,11 @@ def test_fused_qk_matches_separate_kernels(
         "ue8m0",
     )
 
+    from aiter import indexer_qk_rope_quant_and_cache
+
     fused_q = torch.empty(q.shape, dtype=current_platform.fp8_dtype(), device=device)
     fused_weights = torch.empty(weights.shape, dtype=torch.float32, device=device)
-    aiter_indexer_qk_fused_kernel()(
+    indexer_qk_rope_quant_and_cache(
         q,
         fused_q,
         weights,
