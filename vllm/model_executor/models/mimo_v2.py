@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from dataclasses import replace
 from itertools import islice
 
 import torch
@@ -372,6 +373,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
 
         v_scale = getattr(config, "attention_value_scale", None)
+        cache_config = replace(vllm_config.cache_config, sliding_window=None)
 
         if self.is_compressed_softmax_layer():
             self.self_attn = MiMoV2Attention(
@@ -390,6 +392,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 rope_theta=getattr(config, "swa_rope_theta", rope_theta),
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
+                cache_config=cache_config,
                 partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
                 prefix=f"{prefix}.self_attn",
             )
@@ -407,6 +410,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 rope_theta=rope_theta,
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
+                cache_config=cache_config,
                 partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
                 prefix=f"{prefix}.self_attn",
             )

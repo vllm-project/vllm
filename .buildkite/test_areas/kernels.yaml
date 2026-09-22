@@ -226,8 +226,11 @@ steps:
   - vllm/v1/attention/backends/triton_attn_diffkv.py
   - vllm/v1/attention/backends/flash_attn_diffkv.py
   - tests/kernels/attention/test_triton_unified_attention_diffkv.py
+  - tests/models/test_mimo_v2.py
+  - vllm/model_executor/models/mimo_v2.py
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+    - pytest -v -s models/test_mimo_v2.py
   mirror:
     amd:
       label: ":amd: (MI355) Attention DiffKV Kernels"
