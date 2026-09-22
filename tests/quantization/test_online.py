@@ -506,6 +506,32 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
         ModelConfig(model=str(tmp_path), quantization="fp8_per_channel")
 
 
+def test_nvfp4_per_token_rejects_one_sided_before_buffer_allocation(
+    monkeypatch,
+) -> None:
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsModular,
+    )
+
+    config = make_dummy_moe_config()
+    config.moe_parallel_config.dp_size = 2
+    config.moe_parallel_config.ep_size = 2
+    config.moe_parallel_config.use_ep = True
+    config.moe_parallel_config.all2all_backend = "flashinfer_nvlink_one_sided"
+    prepare = Mock(side_effect=AssertionError("must reject before allocating buffers"))
+    monkeypatch.setattr(nvfp4_oracle, "maybe_make_prepare_finalize", prepare)
+    with pytest.raises(NotImplementedError, match="flashinfer_nvlink_one_sided"):
+        nvfp4_oracle.make_nvfp4_moe_kernel(
+            moe_quant_config=Mock(),
+            moe_config=config,
+            experts_cls=TrtLlmNvFp4ExpertsModular,
+            backend=nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            per_token_activation=True,
+        )
+    prepare.assert_not_called()
+
+
 def test_nvfp4_per_token_backend_contract() -> None:
     from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
         BatchedMarlinExperts,
