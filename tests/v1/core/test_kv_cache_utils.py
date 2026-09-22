@@ -145,7 +145,7 @@ def test_heterogeneous_full_attention_rejects_incompatible_specs(difference):
     else:
         draft = replace(draft, non_causal=True)
     with pytest.raises((AssertionError, ValueError)):
-        kv_cache_utils._merge_uniform_page_group_specs({"target": full, "draft": draft})
+        kv_cache_utils._get_uniform_page_group_spec({"target": full, "draft": draft})
 
 
 @pytest.mark.parametrize("gpu_block_size", [32, 64])

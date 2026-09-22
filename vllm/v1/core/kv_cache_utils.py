@@ -1523,13 +1523,13 @@ def _get_kv_cache_groups_uniform_page_size(
     spec_buckets: list[list[KVCacheSpec]] = []
     for layer_spec, layer_names in same_type_layers.items():
         for names, specs in zip(layer_buckets, spec_buckets):
+            candidate_specs = [*specs, layer_spec]
             try:
-                # A raise means that the specs are incompatible.
-                _merge_uniform_page_group_specs(
-                    {str(i): spec for i, spec in enumerate([*specs, layer_spec])}
-                )
+                type(specs[0]).merge(candidate_specs)
             except (AssertionError, ValueError):
-                continue
+                # Different full-attention shapes can still share a block table.
+                if not _can_share_full_attention_block_table(candidate_specs):
+                    continue
             names.extend(layer_names)
             specs.append(layer_spec)
             break
@@ -1600,18 +1600,15 @@ def _get_kv_cache_groups_uniform_page_size(
         len(grouped_layers),
         group_size,
     )
-    return [
-        KVCacheGroupSpec(
-            layers,
-            _merge_uniform_page_group_specs(
-                {name: kv_cache_spec[name] for name in layers}
-            ),
-        )
-        for layers in grouped_layers
-    ]
+    groups = []
+    for layers in grouped_layers:
+        layer_specs = {name: kv_cache_spec[name] for name in layers}
+        group_spec = _get_uniform_page_group_spec(layer_specs)
+        groups.append(KVCacheGroupSpec(layers, group_spec))
+    return groups
 
 
-def _merge_uniform_page_group_specs(
+def _get_uniform_page_group_spec(
     specs: dict[str, KVCacheSpec],
 ) -> KVCacheSpec:
     """Preserve distinct full-attention shapes sharing one block table."""
@@ -1620,24 +1617,35 @@ def _merge_uniform_page_group_specs(
     try:
         return type(first).merge(values)
     except (AssertionError, ValueError):
-        # Equal bytes alone are insufficient: retain block size, dtype,
-        # quantization and attention semantics. Only the tensor shape may vary.
-        if not all(type(spec) is FullAttentionSpec for spec in values):
+        if not _can_share_full_attention_block_table(values):
             raise
-        assert isinstance(first, FullAttentionSpec)
-        for spec in values:
-            assert isinstance(spec, FullAttentionSpec)
-            normalized = replace(
-                spec,
-                num_kv_heads=first.num_kv_heads,
-                head_size=first.head_size,
-                head_size_v=first.head_size_v,
-            )
-            if normalized != first or spec.page_size_bytes != first.page_size_bytes:
-                raise
-        merged = UniformTypeKVCacheSpecs.from_specs(specs)
-        assert merged is not None
-        return merged
+
+    # Keep each layer's original shape for tensor allocation and attention kernels.
+    per_layer_specs = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert per_layer_specs is not None
+    return per_layer_specs
+
+
+def _can_share_full_attention_block_table(specs: Sequence[KVCacheSpec]) -> bool:
+    """Allow different head shapes only when page bytes and all other fields match."""
+    if not all(type(spec) is FullAttentionSpec for spec in specs):
+        return False
+    full_attention_specs = cast(Sequence[FullAttentionSpec], specs)
+    first = full_attention_specs[0]
+    for spec in full_attention_specs:
+        if spec.page_size_bytes != first.page_size_bytes:
+            return False
+        # Ignore the three shape fields when comparing block size, dtype,
+        # quantization, attention semantics, and any future spec fields.
+        same_shape = replace(
+            spec,
+            num_kv_heads=first.num_kv_heads,
+            head_size=first.head_size,
+            head_size_v=first.head_size_v,
+        )
+        if same_shape != first:
+            return False
+    return True
 
 
 def _get_per_layer_spec(
