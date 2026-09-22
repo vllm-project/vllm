@@ -143,11 +143,12 @@ vllm serve openai/gpt-oss-20b \
   --enable-per-request-output-token-metrics
 ```
 
-vLLM automatically selects its built-in Harmony parser for gpt-oss models.
-Other reasoning models must be started with a compatible `--reasoning-parser`,
-such as `gemma4` or `nemotron_v3`. If the selected parser configuration cannot
-fully classify reasoning, final content, and control tokens, vLLM rejects the
-configuration at startup instead of returning incomplete metrics.
+GPT-OSS models automatically configure the built-in `openai_gptoss` reasoning
+parser and Harmony output parser. Other reasoning models must be started with a
+compatible `--reasoning-parser`, such as `gemma4` or `nemotron_v3`. When
+output-token metrics are enabled, vLLM verifies at startup that the resolved
+parser supports output-token classification and rejects unsupported parser
+configurations.
 
 This option does not require `--enable-per-request-metrics`; it includes the
 aggregate timing metrics and adds a nested `output_token_metrics` object to
