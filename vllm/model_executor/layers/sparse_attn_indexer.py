@@ -341,6 +341,24 @@ def _rocm_fp4_cache_views(
     return values, scales
 
 
+@triton.jit
+def _rocm_fp4_fill_all_prefill_indices_kernel(
+    local_ends,
+    topk_indices,
+    topk_stride,
+    TOP_K: tl.constexpr,
+    PADDED_TOP_K: tl.constexpr,
+):
+    row = tl.program_id(0)
+    offsets = tl.arange(0, PADDED_TOP_K)
+    local_end = tl.load(local_ends + row)
+    tl.store(
+        topk_indices + row * topk_stride + offsets,
+        tl.where(offsets < local_end, offsets, -1),
+        mask=offsets < TOP_K,
+    )
+
+
 def _rocm_fp4_sparse_attn_indexer(
     kv_cache,
     q_quant,
@@ -365,7 +383,9 @@ def _rocm_fp4_sparse_attn_indexer(
     values, scales = _rocm_fp4_cache_views(kv_cache, head_dim)
     block_size = kv_cache.shape[1]
     block_k = 256
-    weights_bf16 = weights.to(torch.bfloat16)
+    weights_bf16 = (
+        weights if weights.dtype == torch.bfloat16 else weights.to(torch.bfloat16)
+    )
     topk_indices_buffer[: q_quant.shape[0]].fill_(-1)
 
     if metadata.num_prefills:
@@ -374,10 +394,26 @@ def _rocm_fp4_sparse_attn_indexer(
             if chunk.local_total_seq_lens == 0 or chunk.token_start == chunk.token_end:
                 continue
             assert chunk.fp4_windows is not None
-            assert chunk.fp4_cta_info is not None
-            assert chunk.fp4_total_ctas is not None
             row_to_batch, starts, ends = chunk.fp4_windows
             rows = slice(chunk.token_start, chunk.token_end)
+            num_rows = chunk.token_end - chunk.token_start
+            if chunk.logits_width <= topk_tokens:
+                chunk_topk = topk_indices_buffer[rows, :topk_tokens]
+                _rocm_fp4_fill_all_prefill_indices_kernel[(num_rows,)](
+                    ends,
+                    chunk_topk,
+                    chunk_topk.stride(0),
+                    TOP_K=topk_tokens,
+                    PADDED_TOP_K=triton.next_power_of_2(topk_tokens),
+                    num_warps=8,
+                )
+                continue
+            assert metadata.prefill.fp4_logits is not None
+            assert chunk.fp4_cta_info is not None
+            assert chunk.fp4_total_ctas is not None
+            logits = metadata.prefill.fp4_logits[: num_rows * chunk.logits_width].view(
+                num_rows, chunk.logits_width
+            )
             logits = flydsl_pa_mqa_logits_fp4_prefill(
                 q_quant[rows],
                 q_scale[rows],
@@ -391,7 +427,8 @@ def _rocm_fp4_sparse_attn_indexer(
                 min(max_model_len, chunk.logits_width),
                 block_k=block_k,
                 kv_block_size=block_size,
-                parallel_unit_num=max(512, chunk.token_end - chunk.token_start),
+                parallel_unit_num=max(512, num_rows),
+                out=logits,
                 cta_info=chunk.fp4_cta_info,
                 n_ctas=chunk.fp4_total_ctas,
             )
@@ -414,6 +451,7 @@ def _rocm_fp4_sparse_attn_indexer(
         if rows:
             assert decode.fp4_cta_info is not None
             assert decode.fp4_total_ctas is not None
+            assert decode.fp4_logits is not None
             logits = flydsl_pa_mqa_logits_fp4(
                 q_quant[:rows].unsqueeze(1),
                 q_scale[:rows].unsqueeze(1),
@@ -427,6 +465,7 @@ def _rocm_fp4_sparse_attn_indexer(
                 block_k=block_k,
                 kv_block_size=block_size,
                 parallel_unit_num=max(512, rows),
+                out=decode.fp4_logits[:rows],
                 cta_info=decode.fp4_cta_info,
                 total_ctas=decode.fp4_total_ctas,
             )

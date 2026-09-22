@@ -750,6 +750,7 @@ class BuildPrefillChunkMetadataKernel(
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
+    fp4_logits: torch.Tensor | None = None
 
 
 @dataclass
@@ -771,6 +772,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     # Views into builder-owned storage, refreshed before each graph replay.
     fp4_cta_info: torch.Tensor | None = None
     fp4_total_ctas: int | None = None
+    fp4_logits: torch.Tensor | None = None
 
 
 @dataclass
@@ -1034,6 +1036,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
         self.use_rocm_fp4 = current_platform.is_rocm() and self.indexer_uses_fp4
+        self.fp4_topk_tokens = int(
+            getattr(self.vllm_config.model_config.hf_config, "index_topk", 0)
+        )
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -1129,10 +1134,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             raise ValueError("ROCm MXFP4 indexer requires C4 and 64-token pages")
 
         self.fp4_cta_info_buffer: torch.Tensor | None = None
+        self.fp4_decode_logits_buffer: torch.Tensor | None = None
+        self.fp4_prefill_logits_buffer: torch.Tensor | None = None
         if self.use_rocm_fp4:
             compilation_config = self.vllm_config.compilation_config
             max_decode_tokens = max(
-                scheduler_config.max_num_batched_tokens,
+                scheduler_config.max_num_seqs * next_n,
                 compilation_config.max_cudagraph_capture_size or 0,
                 max(compilation_config.cudagraph_capture_sizes or (), default=0),
             )
@@ -1145,6 +1152,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             self.fp4_max_seq_len = (
                 self.vllm_config.model_config.max_model_len // self.compress_ratio
+            )
+            self.fp4_decode_logits_buffer = torch.empty(
+                (max_decode_tokens, self.fp4_max_seq_len),
+                dtype=torch.float32,
+                device=self.device,
             )
 
         # Pre-allocate buffers for CUDA graph compatibility when
@@ -1634,10 +1646,30 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                         else 0
                     ),
                     build_fp4_schedule=self.use_rocm_fp4,
+                    fp4_topk_tokens=self.fp4_topk_tokens,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
+            fp4_logits = None
+            scored_fp4_chunks = [
+                chunk for chunk in chunks if chunk.fp4_cta_info is not None
+            ]
+            if self.use_rocm_fp4 and scored_fp4_chunks:
+                required_logits_elems = max(
+                    (chunk.token_end - chunk.token_start) * chunk.logits_width
+                    for chunk in scored_fp4_chunks
+                )
+                if (
+                    self.fp4_prefill_logits_buffer is None
+                    or self.fp4_prefill_logits_buffer.numel() < required_logits_elems
+                ):
+                    self.fp4_prefill_logits_buffer = torch.empty(
+                        required_logits_elems,
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                fp4_logits = self.fp4_prefill_logits_buffer
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
                 max_prefill_seq_len=(
@@ -1645,6 +1677,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     if num_prefills > 0
                     else 0
                 ),
+                fp4_logits=fp4_logits,
             )
 
         decode_metadata = None
@@ -1827,6 +1860,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             fp4_cta_info = None
             fp4_total_ctas = None
+            fp4_logits = None
             if self.fp4_cta_info_buffer is not None and num_decode_tokens > 0:
                 from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
                     compute_varctx_schedule,
@@ -1845,6 +1879,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     next_n=1,
                     cta_info_out=self.fp4_cta_info_buffer[:parallel_unit_num],
                 )
+                assert self.fp4_decode_logits_buffer is not None
+                assert num_decode_tokens <= self.fp4_decode_logits_buffer.shape[0]
+                fp4_logits = self.fp4_decode_logits_buffer[:num_decode_tokens]
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
@@ -1859,6 +1896,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 write_max_decode_len=max_decode_len,
                 fp4_cta_info=fp4_cta_info,
                 fp4_total_ctas=fp4_total_ctas,
+                fp4_logits=fp4_logits,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -1894,6 +1932,7 @@ def build_prefill_chunk_metadata(
     pcp_plan: PCPGlobalChunkPlan | None = None,
     logits_width: int = 0,
     build_fp4_schedule: bool = False,
+    fp4_topk_tokens: int = 0,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     if pcp_plan is not None:
         total_seq_lens = pcp_plan.total
@@ -2006,17 +2045,18 @@ def build_prefill_chunk_metadata(
             num_reqs,
             qs_start,
         )
-        from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
-            compute_prefill_schedule,
-        )
+        if logits_width > fp4_topk_tokens:
+            from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
+                compute_prefill_schedule,
+            )
 
-        parallel_unit_num = max(512, output_query_len)
-        _, fp4_cta_info, fp4_total_ctas = compute_prefill_schedule(
-            *fp4_windows,
-            block_k=256,
-            parallel_unit_num=parallel_unit_num,
-            max_seq_len=logits_width,
-        )
+            parallel_unit_num = max(512, output_query_len)
+            _, fp4_cta_info, fp4_total_ctas = compute_prefill_schedule(
+                *fp4_windows,
+                block_k=256,
+                parallel_unit_num=parallel_unit_num,
+                max_seq_len=logits_width,
+            )
 
     return DeepseekV32IndexerPrefillChunkMetadata(
         pcp_deinterleave_idx=pcp_deinterleave_idx,

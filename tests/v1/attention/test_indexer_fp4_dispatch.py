@@ -48,6 +48,7 @@ def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
         block_table=torch.zeros((2, 1), dtype=torch.int32),
         fp4_cta_info=cta_info,
         fp4_total_ctas=512,
+        fp4_logits=torch.empty((2, 64), dtype=torch.float32),
     )
     metadata = SimpleNamespace(
         num_prefills=0, num_decodes=2, num_decode_tokens=2, decode=decode
@@ -68,6 +69,7 @@ def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
 
     assert scorer.call_args.kwargs["cta_info"] is cta_info
     assert scorer.call_args.kwargs["total_ctas"] == 512
+    assert scorer.call_args.kwargs["out"] is decode.fp4_logits
 
 
 def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch):
@@ -117,7 +119,9 @@ def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch):
         num_prefills=2,
         num_decodes=0,
         num_decode_tokens=0,
-        prefill=SimpleNamespace(chunks=[chunk]),
+        prefill=SimpleNamespace(
+            chunks=[chunk], fp4_logits=torch.empty((3 * 192,), dtype=torch.float32)
+        ),
         decode=None,
     )
 
@@ -139,7 +143,90 @@ def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch):
     assert scorer.call_args.args[9] == 192
     assert scorer.call_args.kwargs["cta_info"] is cta_info
     assert scorer.call_args.kwargs["n_ctas"] == 512
+    assert scorer.call_args.kwargs["out"].shape == (3, 192)
+    assert (
+        scorer.call_args.kwargs["out"].untyped_storage().data_ptr()
+        == metadata.prefill.fp4_logits.untyped_storage().data_ptr()
+    )
     assert topk.call_args.args[2] is ends
+
+
+def test_rocm_fp4_prefill_skips_scoring_when_topk_covers_context(monkeypatch):
+    import torch
+
+    from vllm.model_executor.layers import sparse_attn_indexer as sparse
+
+    scorer = Mock()
+    decode_module = ModuleType("aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4")
+    monkeypatch.setattr(
+        decode_module, "flydsl_pa_mqa_logits_fp4", Mock(), raising=False
+    )
+    prefill_module = ModuleType(
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill"
+    )
+    monkeypatch.setattr(
+        prefill_module, "flydsl_pa_mqa_logits_fp4_prefill", scorer, raising=False
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4",
+        decode_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill",
+        prefill_module,
+    )
+    topk = Mock()
+    monkeypatch.setattr(sparse.ops, "top_k_per_row_prefill", topk)
+
+    fill = Mock()
+
+    class FillKernel:
+        def __getitem__(self, grid):
+            assert grid == (3,)
+            return fill
+
+    monkeypatch.setattr(
+        sparse, "_rocm_fp4_fill_all_prefill_indices_kernel", FillKernel()
+    )
+
+    ends = torch.tensor([4, 6, 8], dtype=torch.int32)
+    chunk = SimpleNamespace(
+        local_total_seq_lens=18,
+        token_start=0,
+        token_end=3,
+        block_table=torch.zeros((2, 1), dtype=torch.int32),
+        logits_width=8,
+        fp4_windows=(torch.tensor([0, 1, 1]), torch.zeros(3), ends),
+        fp4_cta_info=None,
+        fp4_total_ctas=None,
+    )
+    metadata = SimpleNamespace(
+        num_prefills=2,
+        num_decodes=0,
+        num_decode_tokens=0,
+        prefill=SimpleNamespace(chunks=[chunk], fp4_logits=None),
+        decode=None,
+    )
+    output = torch.empty((3, 8), dtype=torch.int32)
+
+    sparse._rocm_fp4_sparse_attn_indexer(
+        torch.zeros((2, 64, 68), dtype=torch.uint8),
+        torch.zeros((3, 64, 64), dtype=torch.uint8),
+        torch.zeros((3, 1, 4, 16, 4), dtype=torch.uint8),
+        torch.zeros((3, 64), dtype=torch.bfloat16),
+        128,
+        4096,
+        8,
+        output,
+        metadata,
+    )
+
+    scorer.assert_not_called()
+    topk.assert_not_called()
+    assert fill.call_args.args[0] is ends
+    assert fill.call_args.args[1].untyped_storage().data_ptr() == output.data_ptr()
 
 
 def test_fp4_prefill_planner_uses_max_width_and_ignores_gather_workspace():
