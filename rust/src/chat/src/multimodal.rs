@@ -138,10 +138,10 @@ impl MultimodalModelContext {
         model_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: &PreProcessorConfig,
         modality: Modality,
-    ) -> Option<Arc<dyn VisionPreProcessor>> {
-        model_spec
-            .vision_processor(&self.metadata(), preprocessor_config, modality)
-            .map(Arc::from)
+    ) -> Result<Option<Arc<dyn VisionPreProcessor>>> {
+        Ok(model_spec
+            .vision_processor(&self.metadata(), preprocessor_config, modality)?
+            .map(Arc::from))
     }
 
     /// Resolve an audio preprocessor for one loaded model.
@@ -400,7 +400,7 @@ impl MultimodalModelInfo {
             &context,
             preprocessor_config.clone(),
             video_preprocessor_config,
-        );
+        )?;
         let audio = Self::resolve_audio_lane(&context, &preprocessor_config)?;
 
         if image.is_none() && video.is_none() && audio.is_none() {
@@ -431,18 +431,19 @@ impl MultimodalModelInfo {
     ///
     /// A missing model spec or vision processor disables both lanes but is
     /// not an error: unsupported model families are logged and skipped.
+    /// Processor construction errors propagate to model loading.
     fn resolve_vision_lanes(
         context: &MultimodalModelContext,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
-    ) -> (Option<VisionModalitySupport>, Option<VisionModalitySupport>) {
+    ) -> Result<(Option<VisionModalitySupport>, Option<VisionModalitySupport>)> {
         let Some(raw_spec) = context.resolve_model_spec() else {
             warn!(
                 model_id = context.model_id,
                 model_type = context.model_type,
                 "multimodal model spec is not registered; disabling image/video support for this model"
             );
-            return (None, None);
+            return Ok((None, None));
         };
 
         // Warn and disable the modality if the placeholder resolution fails.
@@ -460,20 +461,19 @@ impl MultimodalModelInfo {
                 }
             };
 
-        let image = resolve_placeholder(Modality::Image).and_then(|placeholder| {
-            let processor = context.resolve_vision_processor(
-                raw_spec,
-                &preprocessor_config,
-                Modality::Image,
-            )?;
-            Some(VisionModalitySupport {
-                spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Image),
-                placeholder,
-                processor,
-            })
-        });
+        let image = if let Some(placeholder) = resolve_placeholder(Modality::Image) {
+            context
+                .resolve_vision_processor(raw_spec, &preprocessor_config, Modality::Image)?
+                .map(|processor| VisionModalitySupport {
+                    spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Image),
+                    placeholder,
+                    processor,
+                })
+        } else {
+            None
+        };
 
-        let video = resolve_placeholder(Modality::Video).and_then(|placeholder| {
+        let video = if let Some(placeholder) = resolve_placeholder(Modality::Video) {
             // Placeholder expansion attributes markers to modalities by token
             // ID, so a marker shared with the image modality is ambiguous.
             let image_marker = image.as_ref().map(|image| image.placeholder.marker_token_id);
@@ -485,16 +485,23 @@ impl MultimodalModelInfo {
                 );
                 None
             } else {
-                let processor = context.resolve_vision_processor(raw_spec, &video_preprocessor_config, Modality::Video)?;
-                Some(VisionModalitySupport {
-                    spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Video),
-                    placeholder,
-                    processor,
-                })
+                context
+                    .resolve_vision_processor(
+                        raw_spec,
+                        &video_preprocessor_config,
+                        Modality::Video,
+                    )?
+                    .map(|processor| VisionModalitySupport {
+                        spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Video),
+                        placeholder,
+                        processor,
+                    })
             }
-        });
+        } else {
+            None
+        };
 
-        (image, video)
+        Ok((image, video))
     }
 
     /// Resolve a spec-backed audio lane when the model advertises audio support.
