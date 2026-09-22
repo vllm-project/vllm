@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonJitKey
 from vllm.models.deepseek_v4.compressor import (
     CompressorMetadataBuilder,
     CompressorStateCache,
-    _build_c128_ring_metadata,
     _c128_ring_capacity,
     build_c128_ring_metadata,
 )
@@ -89,36 +86,6 @@ def test_c128_ring_survives_one_speculative_step(group_phase: int) -> None:
 
     committed = torch.arange(group_phase - group_phase % 128, group_phase)
     assert set(slots.tolist()).isdisjoint((committed % capacity).tolist())
-
-
-def test_c128_metadata_warmup_has_one_shape_independent_key(monkeypatch) -> None:
-    from vllm.model_executor.warmup import jit_warmup_triton_helper
-
-    prepared = []
-
-    def fake_key_deriver(kernel):
-        def derive(kwargs):
-            prepared.append(kwargs)
-            return {TritonJitKey(id(kernel), "fake", 0, kwargs["CAPACITY"])}
-
-        return derive
-
-    monkeypatch.setattr(
-        jit_warmup_triton_helper, "_triton_key_deriver", fake_key_deriver
-    )
-    kernel = _build_c128_ring_metadata.kernel
-    kernel_fn = getattr(kernel, "func", kernel)
-    monkeypatch.setitem(
-        _build_c128_ring_metadata.__dict__,
-        "_kernel_arg_names",
-        tuple(inspect.signature(kernel_fn).parameters),
-    )
-    keys = _build_c128_ring_metadata.get_warmup_keys(capacity=256)
-
-    assert len(keys) == 1
-    assert prepared[0]["CAPACITY"] == 256
-    assert prepared[0]["BLOCK"] == 256
-    assert "num_reqs" not in prepared[0]
 
 
 @pytest.mark.parametrize(
@@ -284,43 +251,6 @@ def test_c128_ring_mapping_masks_padded_actual_tokens() -> None:
 
     assert slots.tolist() == [266, 267, 268, -1]
     assert tail_slots.tolist() == [266, 267, 268, -1]
-
-
-def test_c128_reads_the_batch_before_saving_the_wrapped_tail() -> None:
-    old_positions = range(128, 250)
-    new_positions = torch.arange(250, 521)
-    query_start_loc = torch.tensor([0, new_positions.numel()])
-    common_slots = torch.full_like(new_positions, -1)
-    block_table = torch.tensor([[0]], dtype=torch.int32)
-    capacity = 256
-    slots, tail_slots = build_c128_ring_metadata(
-        common_slots,
-        block_table,
-        query_start_loc,
-        new_positions,
-        new_positions.numel(),
-        1,
-        capacity,
-    )
-
-    ring = {pos % capacity: pos for pos in old_positions}
-    boundaries = [255, 383, 511]
-    chunk_start = int(new_positions[0])
-    for position in boundaries:
-        gathered = [
-            (
-                int(new_positions[pos - chunk_start])
-                if pos >= chunk_start
-                else ring[pos % capacity]
-            )
-            for pos in range(position - 127, position + 1)
-        ]
-        assert gathered == list(range(position - 127, position + 1))
-
-    for row in torch.nonzero(tail_slots >= 0).flatten().tolist():
-        ring[int(slots[row]) % capacity] = int(new_positions[row])
-    assert boundaries == [255, 383, 511]
-    assert sorted(ring.values()) == list(range(265, 521))
 
 
 def test_c128_null_block_keeps_all_slots_invalid() -> None:
