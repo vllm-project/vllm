@@ -52,6 +52,15 @@ def test_trace_function_call():
     os.remove(path)
 
 
+def test_caplog_vllm_captures_info_before_runtime_logging_is_configured(caplog_vllm):
+    message = "Capture this unconfigured INFO record"
+    logger = init_logger(f"vllm.test_logger.{uuid4()}")
+
+    logger.info(message)
+
+    assert message in caplog_vllm.text
+
+
 def test_default_vllm_root_logger_configuration(monkeypatch):
     """This test presumes that VLLM_CONFIGURE_LOGGING (default: True) and
     VLLM_LOGGING_CONFIG_PATH (default: None) are not configured and default
