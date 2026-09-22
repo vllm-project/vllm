@@ -343,29 +343,66 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
 
-- label: ":nvidia: (H200) LM Eval Large Models"
-  key: lm-eval-large-models-8xh200
-  timeout_in_minutes: 120
+- label: ":nvidia: (H200) LM Eval DeepSeek R1 TP"
+  key: lm-eval-deepseek-r1-tp-8xh200
+  timeout_in_minutes: 35
   device: h200
   optional: true
   num_devices: 8
   commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
-  mirror:
-    amd:
-      label: ":amd: (MI300) LM Eval Large Models"
-      dind: false
-      device: mi300_8
-      timeout_in_minutes: 65
-      depends_on:
-      - image-build-amd
-      commands:
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
-      source_file_dependencies:
-      - vllm/_aiter_ops.py
-      - vllm/platforms/rocm.py
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-r1-tp.txt
+
+- label: ":nvidia: (H200) LM Eval DeepSeek R1 DP"
+  key: lm-eval-deepseek-r1-dp-8xh200
+  timeout_in_minutes: 35
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-r1-dp.txt
+
+- label: ":nvidia: (H200) LM Eval DeepSeek V3.2 TP"
+  key: lm-eval-deepseek-v32-tp-8xh200
+  timeout_in_minutes: 35
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-v32-tp.txt
+
+- label: ":nvidia: (H200) LM Eval DeepSeek V3.2 DP"
+  key: lm-eval-deepseek-v32-dp-8xh200
+  timeout_in_minutes: 35
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-v32-dp.txt
+
+- label: ":nvidia: (H200) LM Eval Nemotron 3 Super"
+  key: lm-eval-nemotron-3-super-8xh200
+  timeout_in_minutes: 35
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-nemotron-3-super.txt
+
+- label: ":amd: (MI300) LM Eval Large Models"
+  key: amd-lm-eval-large-models
+  dind: false
+  device: mi300_8
+  optional: true
+  timeout_in_minutes: 65
+  depends_on:
+  - image-build-amd
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+  source_file_dependencies:
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) MoE Refactor Integration TEMPORARY"
   key: moe-refactor-integration-test-h100-temporary
