@@ -12,7 +12,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -504,8 +504,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         return routed + shared_out
 
 
-def _fuse_shared_experts_enabled(config) -> bool:
-    parallel_config = get_current_vllm_config().parallel_config
+def _fuse_shared_experts_enabled(config, parallel_config: ParallelConfig) -> bool:
     if (
         getattr(config, "n_shared_experts", None)
         and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -604,7 +603,7 @@ class DeepseekV4MoE(nn.Module):
         # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
         self.fuse_heterogeneous_shared_expert = fuse_heterogeneous_shared_expert
         fse_requested = (
-            _fuse_shared_experts_enabled(config)
+            _fuse_shared_experts_enabled(config, vllm_config.parallel_config)
             and not self.fuse_heterogeneous_shared_expert
         )
         fse_compatible = False
