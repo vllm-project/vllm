@@ -261,7 +261,7 @@ class FusedMMInputNorm(CustomOp):
         else:
             self.register_buffer("weight", None)
             self.register_buffer("bias", None)
-            self.forward = self._identity_forward
+            self.forward = self._identity_forward  # type: ignore[method-assign]
 
         if not self.is_identity and self.compute_dtype != torch.float32:
             logger.warning_once(
