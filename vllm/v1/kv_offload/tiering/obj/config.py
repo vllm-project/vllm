@@ -29,6 +29,8 @@ _RESERVED_BACKEND_PARAM_KEYS = frozenset(
 def _to_nixl_param(value: Any) -> str:
     if isinstance(value, bool):
         return str(value).lower()
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower()
     return str(value)
 
 

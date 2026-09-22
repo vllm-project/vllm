@@ -788,6 +788,17 @@ class TestObjStoreConfig:
         assert params["accelerated"] == "true"
         assert params["type"] == "custom"
 
+    def test_accelerated_obj_bool_strings_normalized(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            use_virtual_addressing="False",
+            accelerated="True",
+        )
+        params = cfg.to_nixl_params()
+        assert params["use_virtual_addressing"] == "false"
+        assert params["accelerated"] == "true"
+
     def test_backend_params_pass_through(self):
         cfg = ObjStoreConfig(
             bucket="b",
