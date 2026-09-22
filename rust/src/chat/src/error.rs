@@ -60,6 +60,11 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
+    #[error("failed to initialize request output parser")]
+    OutputParserInitialization {
+        #[source]
+        error: BoxedError,
+    },
     #[error(
         "gpt_oss uses native Harmony output parsing; generic {kind} parser override `{selection}` is not supported"
     )]
@@ -87,8 +92,11 @@ pub enum Error {
     ToolChoiceRequiresTools,
     #[error("tool_choice function `{name}` was not found in the available tools")]
     ToolChoiceFunctionNotFound { name: String },
-    #[error("failed to build structural tag: {message}")]
-    StructuralTag { message: String },
+    #[error("failed to build output grammar")]
+    OutputGrammar {
+        #[source]
+        error: BoxedError,
+    },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]

@@ -741,6 +741,9 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    sleep_preserve_parameter_names: list[str] = get_field(
+        ModelConfig, "sleep_preserve_parameter_names"
+    )
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
     override_generation_config: dict[str, Any] = get_field(
@@ -976,6 +979,10 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
+        )
+        model_group.add_argument(
+            "--sleep-preserve-parameter-names",
+            **model_kwargs["sleep_preserve_parameter_names"],
         )
         model_group.add_argument(
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
@@ -1293,7 +1300,10 @@ class EngineArgs:
         )
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument(
-            "--gpu-memory-utilization", **cache_kwargs["gpu_memory_utilization"]
+            "--gpu-memory-utilization",
+            "--device-memory-utilization",
+            dest="gpu_memory_utilization",
+            **cache_kwargs["gpu_memory_utilization"],
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
@@ -1903,6 +1913,7 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
             model_impl=self.model_impl,
@@ -2234,12 +2245,22 @@ class EngineArgs:
                 self.node_rank * local_world_size
             ) // world_size_within_dp
             if self.data_parallel_size > 1 and self.data_parallel_external_lb:
-                self.data_parallel_rank = inferred_data_parallel_rank
-                logger.info(
-                    "Inferred data_parallel_rank %d from node_rank %d for external lb",
-                    self.data_parallel_rank,
-                    self.node_rank,
-                )
+                if self.data_parallel_rank is None:
+                    if self.nnodes % self.data_parallel_size != 0:
+                        raise ValueError(
+                            "Invalid data-parallel launch options: "
+                            "`--node-rank` cannot unambiguously identify external "
+                            "data-parallel ranks when `--nnodes` is not divisible "
+                            "by `--data-parallel-size`. Set a unique "
+                            "`--data-parallel-rank` for each external-LB process."
+                        )
+                    self.data_parallel_rank = inferred_data_parallel_rank
+                    logger.info(
+                        "Inferred data_parallel_rank %d from node_rank %d "
+                        "for external lb",
+                        self.data_parallel_rank,
+                        self.node_rank,
+                    )
             elif self.data_parallel_size_local is None:
                 # Infer data parallel size local for internal dplb:
                 self.data_parallel_size_local = max(

@@ -1868,6 +1868,61 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
 
 
+@pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
+@pytest.mark.parametrize("use_ep", [False, True])
+def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
+    monkeypatch: pytest.MonkeyPatch, backend_name: str, use_ep: bool
+):
+    """Global routing cannot index local expert weights, even without all-to-all."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        backend_to_kernel_cls,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticTensorSym,
+        kMxfp4Static,
+    )
+
+    experts_cls = backend_to_kernel_cls(Mxfp4MoeBackend[backend_name])[0]
+    monkeypatch.setattr(experts_cls, "_supports_current_device", lambda: True)
+    config = make_dummy_moe_config(
+        num_experts=256,
+        num_local_experts=64 if use_ep else 256,
+        experts_per_token=6,
+        hidden_dim=4096,
+        intermediate_size=2048,
+        activation=MoEActivation.SWIGLUOAI,
+    )
+    config = replace(
+        config,
+        routing_method=RoutingMethodType.Renormalize,
+        moe_parallel_config=replace(
+            config.moe_parallel_config,
+            tp_size=1 if use_ep else 4,
+            ep_size=4 if use_ep else 1,
+            use_ep=use_ep,
+        ),
+    )
+    assert not config.moe_parallel_config.use_all2all_kernels
+    supported, reason = experts_cls.is_supported_config(
+        experts_cls,
+        config,
+        kMxfp4Static,
+        kFp8StaticTensorSym if backend_name == "AITER_MXFP4_FP8" else None,
+        FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported is not use_ep
+    if use_ep:
+        assert "parallel config" in reason
+
+
 # Every activation-quantizing OCP MX scheme must map to a `quant_dtype` that
 # `moe_kernel_quantize_input` actually dispatches on. Its final `else` returns
 # the activation untouched, so a name it does not know (e.g. "mxfp6" instead of

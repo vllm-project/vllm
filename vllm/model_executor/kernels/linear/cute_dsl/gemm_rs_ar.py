@@ -1,18 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""SM100 BF16 GEMM with fused tensor-parallel reduce-scatter/all-reduce."""
+"""SM100 BF16/MXFP8 GEMM with fused tensor-parallel reduce-scatter/all-reduce.
+
+Model-neutral: any row-parallel projection whose output is reduced across TP
+(Kimi-K3 ``o_proj``/``down_proj``, DeepSeek-V4.1 ``wo_b``) can bind to the
+process-wide workspace through ``maybe_init_gemm_rs_ar`` + ``GemmRsAr.apply``.
+"""
 
 # Based on CUTLASS's Blackwell distributed GEMM-RS example at dcf215a.
 # See https://github.com/NVIDIA/cutlass/issues/3117 for memory semantics.
+# The MXFP8 path follows the block-scaled SM100 GEMM template from
+# https://github.com/gau-nernst/gn-kernels (sm100_mm_mxfp8.py).
 
 from functools import cache
+from typing import TYPE_CHECKING
 
 import cutlass
 import torch
 import torch.distributed._symmetric_memory as symm_mem
 from cuda.bindings.driver import CUstream
-from cutlass import BFloat16, Int32, Int64, Uint16, cute, utils
+from cutlass import (
+    BFloat16,
+    Float8E4M3FN,
+    Float8E8M0FNU,
+    Int32,
+    Int64,
+    Uint16,
+    Uint64,
+    cute,
+    utils,
+)
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, nvvm, vector
 from cutlass.cute.nvgpu import cpasync, tcgen05
@@ -24,6 +42,10 @@ from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -88,24 +110,31 @@ def multimem_st_16B(dst: cute.Tensor, value: cute.Tensor, *, loc=None, ip=None) 
     )
 
 
-class Sm100GemmRsArBF16:
+class Sm100GemmRsAr:
     def __init__(
         self,
         rank: int,
         num_ranks: int,
-        BN: int = 128,
         cta_group: int = 1,
         all_reduce: bool = False,
+        dtype: str = "bf16",
     ) -> None:
+        assert dtype in ("bf16", "mxfp8")
         self.rank = rank
         self.num_ranks = num_ranks
-        BM, BK = 128, 64
+        BM = 128
+        BN = 128
+        BK = {"bf16": 64, "mxfp8": 128}[dtype]  # 128B
         self.cta_tile = (BM, BN, BK)
         self.cta_group = cta_group
         self.all_reduce = all_reduce
+        self.dtype = dtype
 
         smem_bytes = get_smem_capacity_in_bytes()
-        self.stage_size = (BM + (BN // cta_group)) * BK * 2
+        if dtype == "bf16":
+            self.stage_size = (BM + (BN // cta_group)) * BK * 2
+        elif dtype == "mxfp8":
+            self.stage_size = (BM + (BN // cta_group)) * BK + (BM + BN) * (BK // 32)
         self.num_stages = smem_bytes // self.stage_size
 
     @cute.jit
@@ -125,10 +154,35 @@ class Sm100GemmRsArBF16:
         return cpasync.make_tiled_tma_atom(tma_op, tensor, layout, (BM, BK))
 
     @cute.jit
+    def prepare_sf_tma(
+        self,
+        SF: cute.Tensor,
+        R: Int32,
+        Ksf: Int32,
+        BR: cutlass.Constexpr,
+        BKsf: cutlass.Constexpr,
+    ) -> cpasync.TmaInfo:
+        tma_group = (
+            tcgen05.CtaGroup.TWO if self.cta_group == 2 else tcgen05.CtaGroup.ONE
+        )
+        tma_op = cpasync.CopyBulkTensorTileG2SOp(cta_group=tma_group)
+        # NVIDIA SF gmem layout: an [R, Ksf] scale grid padded to R % 128 == 0
+        # and permuted as [R/128, Ksf/4, 32, 4, 4]. The trailing [32, 4, 4]
+        # atom is the opaque 512B block tcgen05 expects, so treat it as bytes.
+        # The Int64 recast keeps the TMA boxDim <= 256.
+        g_layout = cute.make_layout((Ksf * 128, cute.ceil_div(R, 128)))
+        SF_i64 = cute.recast_tensor(cute.make_tensor(SF.iterator, g_layout), Int64)
+        tiler = (128 * BKsf // 8, BR // 128)
+        layout = cute.make_layout((*tiler, self.num_stages))
+        return cpasync.make_tiled_tma_atom(tma_op, SF_i64, layout, tiler)
+
+    @cute.jit
     def __call__(
         self,
         A: cute.Tensor,
         B: cute.Tensor,
+        SFA: cute.Tensor,
+        SFB: cute.Tensor,
         partial_uc: cute.Tensor,
         partial_mc_ptr: cute.Pointer,
         output: cute.Tensor,
@@ -138,10 +192,17 @@ class Sm100GemmRsArBF16:
         grid_size: Int32,
         stream: CUstream,
     ) -> None:
+        M, K = A.shape
         N = B.shape[0]
         BM, BN, BK = self.cta_tile
         A_tma = self.prepare_tma(A, BM, BK)
         B_tma = self.prepare_tma(B, BN // self.cta_group, BK)
+        if cutlass.const_expr(self.dtype == "mxfp8"):
+            SFA_tma = self.prepare_sf_tma(SFA, M, K // 32, BM, BK // 32)
+            SFB_tma = self.prepare_sf_tma(SFB, N, K // 32, BN, BK // 32)
+        else:
+            SFA_tma = None
+            SFB_tma = None
         padded_M = partial_uc.shape[0]
         partial_mc = cute.make_tensor(
             partial_mc_ptr,
@@ -158,6 +219,8 @@ class Sm100GemmRsArBF16:
         self.kernel(
             A_tma,
             B_tma,
+            SFA_tma,
+            SFB_tma,
             partial_uc,
             partial_mc,
             output,
@@ -171,6 +234,8 @@ class Sm100GemmRsArBF16:
         self,
         A_tma: cpasync.TmaInfo,
         B_tma: cpasync.TmaInfo,
+        SFA_tma: cpasync.TmaInfo,
+        SFB_tma: cpasync.TmaInfo,
         partial_uc: cute.Tensor,
         partial_mc: cute.Tensor,
         output: cute.Tensor,
@@ -190,25 +255,33 @@ class Sm100GemmRsArBF16:
 
         is_2cta = cta_group == 2
         cta_rank = raw_bid % self.cta_group
-        num_tmem_stages = 512 // BN
+
+        # MXFP8 reserves the last 16 tmem columns (496-512) for the A/B scale
+        # factors.
+        num_tmem_stages = (496 if self.dtype == "mxfp8" else 512) // BN
 
         smem = utils.SmemAllocator()
         sA = smem.allocate_tensor(
-            BFloat16,
+            A_tma.atom.value_type,
             A_tma.smem_layout.outer,
             byte_alignment=128,
             swizzle=A_tma.smem_layout.inner,
         )
         sB = smem.allocate_tensor(
-            BFloat16,
+            B_tma.atom.value_type,
             B_tma.smem_layout.outer,
             byte_alignment=128,
             swizzle=B_tma.smem_layout.inner,
         )
+        if cutlass.const_expr(self.dtype == "mxfp8"):
+            sSFA = smem.allocate_tensor(Int64, SFA_tma.smem_layout, byte_alignment=128)
+            sSFB = smem.allocate_tensor(Int64, SFB_tma.smem_layout, byte_alignment=128)
+
         tma_full_mbar = smem.allocate_array(Int64, num_stages)
         tma_empty_mbar = smem.allocate_array(Int64, num_stages)
         tmem_full_mbar = smem.allocate_array(Int64, num_tmem_stages)
         tmem_empty_mbar = smem.allocate_array(Int64, num_tmem_stages)
+
         taddr = smem.allocate(Int32, 4)
 
         # Named barriers
@@ -238,6 +311,9 @@ class Sm100GemmRsArBF16:
         elif warp_id == 1:
             cpasync.prefetch_descriptor(A_tma.atom)
             cpasync.prefetch_descriptor(B_tma.atom)
+            if cutlass.const_expr(self.dtype == "mxfp8"):
+                cpasync.prefetch_descriptor(SFA_tma.atom)
+                cpasync.prefetch_descriptor(SFB_tma.atom)
 
         if cutlass.const_expr(is_2cta):
             cute.arch.cluster_arrive_relaxed()
@@ -261,12 +337,22 @@ class Sm100GemmRsArBF16:
             # [(BM, BK), (M/BM, K/BK)]
             gA_tiles = cute.zipped_divide(A_tma.tma_tensor, (BM, BK))
             gB_tiles = cute.zipped_divide(B_tma.tma_tensor, (BN // cta_group, BK))
+            if cutlass.const_expr(self.dtype == "mxfp8"):
+                BKsf = BK // 32
+                gSFA_tiles = cute.zipped_divide(
+                    SFA_tma.tma_tensor, (128 * BKsf // 8, BM // 128)
+                )
+                gSFB_tiles = cute.zipped_divide(
+                    SFB_tma.tma_tensor, (128 * BKsf // 8, BN // 128)
+                )
 
             for bid in range(raw_bid, total_tiles, num_bids):
                 bid_m = bid % grid_m
                 bid_n = bid // grid_m
                 if cutlass.const_expr(cta_group == 2):
-                    bid_n = bid_n * cta_group + cta_rank
+                    bid_n_b = bid_n * cta_group + cta_rank
+                else:
+                    bid_n_b = bid_n
 
                 for iter_k in cutlass.range(cute.ceil_div(K, BK), unroll=1):
                     mbar = tma_full_mbar_ + tma_stage
@@ -282,10 +368,23 @@ class Sm100GemmRsArBF16:
                     )
                     simple_tma_copy(
                         B_tma.atom,
-                        gB_tiles[None, (bid_n, iter_k)],
+                        gB_tiles[None, (bid_n_b, iter_k)],
                         sB[None, None, tma_stage],
                         mbar,
                     )
+                    if cutlass.const_expr(self.dtype == "mxfp8"):
+                        simple_tma_copy(
+                            SFA_tma.atom,
+                            gSFA_tiles[None, (iter_k, bid_m)],
+                            sSFA[None, None, tma_stage],
+                            mbar,
+                        )
+                        simple_tma_copy(
+                            SFB_tma.atom,
+                            gSFB_tiles[None, (iter_k, bid_n)],
+                            sSFB[None, None, tma_stage],
+                            mbar,
+                        )
 
                     tma_stage = (tma_stage + 1) % num_stages
                     if tma_stage == 0:
@@ -303,8 +402,15 @@ class Sm100GemmRsArBF16:
 
                 MMA_M = BM * cta_group
                 MMA_N = BN
-                idesc = _tcgen05.make_bf16_idesc(MMA_M, MMA_N)
                 sdesc = _tcgen05.make_sdesc_128B_swizzle(0)
+                if cutlass.const_expr(self.dtype == "mxfp8"):
+                    # SF smem descriptor: no swizzle, SBO = 8 * 16 bytes.
+                    sdesc_sf = Uint64((8 << 32) | (1 << 46))
+                    sfa_tmem = 496
+                    sfb_tmem = sfa_tmem + 4
+                    idesc = _tcgen05.make_mxfp8_idesc(MMA_M, MMA_N)
+                else:
+                    idesc = _tcgen05.make_bf16_idesc(MMA_M, MMA_N)
                 multicast_mask = Uint16((1 << self.cta_group) - 1)
 
                 for bid in range(raw_bid, total_tiles, num_bids):
@@ -319,17 +425,54 @@ class Sm100GemmRsArBF16:
                         b_addr = sB[None, None, tma_stage].iterator.toint()
                         a_desc = sdesc | (a_addr >> 4)
                         b_desc = sdesc | (b_addr >> 4)
+                        if cutlass.const_expr(self.dtype == "mxfp8"):
+                            sfa_desc = sdesc_sf | (
+                                sSFA[None, None, tma_stage].iterator.toint() >> 4
+                            )
+                            sfb_desc = sdesc_sf | (
+                                sSFB[None, None, tma_stage].iterator.toint() >> 4
+                            )
 
                         cute.arch.mbarrier_wait(
                             tma_full_mbar + tma_stage, tma_full_parity
                         )
                         _tcgen05.fence_after_thread_sync()
 
-                        for mma_k in cutlass.range_constexpr(BK // 16):
-                            enable_d = iter_k > 0 or mma_k > 0
-                            _tcgen05.mma_f16(
-                                d_tmem, a_desc, b_desc, idesc, enable_d, cta_group
+                        # load SF from smem->tmem
+                        if cutlass.const_expr(self.dtype == "mxfp8"):
+                            _tcgen05.cp(
+                                sfa_tmem, sfa_desc, "32x128b", "warpx4", cta_group
                             )
+                            for j in cutlass.range_constexpr(BN // 128):
+                                _tcgen05.cp(
+                                    sfb_tmem + j * 4,
+                                    sfb_desc,
+                                    "32x128b",
+                                    "warpx4",
+                                    cta_group,
+                                )
+                                sfb_desc += (128 * 4) >> 4
+
+                        # 4 = 128B / 32B
+                        for mma_k in cutlass.range_constexpr(4):
+                            enable_d = iter_k > 0 or mma_k > 0
+                            if cutlass.const_expr(self.dtype == "mxfp8"):
+                                # select SF IDs
+                                idesc_k = idesc + ((mma_k << 4) | (mma_k << 29))
+                                _tcgen05.mma_mxfp8(
+                                    d_tmem,
+                                    a_desc,
+                                    b_desc,
+                                    idesc_k,
+                                    sfa_tmem,
+                                    sfb_tmem,
+                                    enable_d,
+                                    cta_group,
+                                )
+                            else:
+                                _tcgen05.mma_f16(
+                                    d_tmem, a_desc, b_desc, idesc, enable_d, cta_group
+                                )
                             a_desc += 32 >> 4
                             b_desc += 32 >> 4
                         _tcgen05.commit(
@@ -638,9 +781,9 @@ class Sm100GemmRsArBF16:
     def compile(
         rank: int,
         num_ranks: int,
-        BN: int,
         cta_group: int,
         all_reduce: bool = False,
+        dtype: str = "bf16",
     ):
         M = cute.sym_int()
         padded_M = cute.sym_int()
@@ -649,12 +792,37 @@ class Sm100GemmRsArBF16:
         local_M = cute.sym_int()
         num_flags = cute.sym_int()
 
+        ab_dtype = Float8E4M3FN if dtype == "mxfp8" else BFloat16
+        # Row stride must keep rows 16B-aligned: 8 BF16 or 16 FP8 elements.
+        row_div = 16 if dtype == "mxfp8" else 8
         A = make_fake_tensor(
-            BFloat16, (M, K), (cute.sym_int64(divisibility=8), 1), assumed_align=16
+            ab_dtype,
+            (M, K),
+            (cute.sym_int64(divisibility=row_div), 1),
+            assumed_align=16,
         )
         B = make_fake_tensor(
-            BFloat16, (N, K), (cute.sym_int64(divisibility=8), 1), assumed_align=16
+            ab_dtype,
+            (N, K),
+            (cute.sym_int64(divisibility=row_div), 1),
+            assumed_align=16,
         )
+        if dtype == "mxfp8":
+            SFA = make_fake_tensor(
+                Float8E8M0FNU,
+                (cute.sym_int(divisibility=512),),
+                (1,),
+                assumed_align=16,
+            )
+            SFB = make_fake_tensor(
+                Float8E8M0FNU,
+                (cute.sym_int(divisibility=512),),
+                (1,),
+                assumed_align=16,
+            )
+        else:
+            SFA = None
+            SFB = None
         partial = make_fake_tensor(
             BFloat16,
             (padded_M, N),
@@ -677,13 +845,15 @@ class Sm100GemmRsArBF16:
         peer_flag_ptr = nullptr(Int64, cute.AddressSpace.gmem, assumed_align=8)
 
         stream = make_fake_stream(use_tvm_ffi_env_stream=True)
-        kernel = Sm100GemmRsArBF16(
-            rank, num_ranks, BN, cta_group, all_reduce=all_reduce
+        kernel = Sm100GemmRsAr(
+            rank, num_ranks, cta_group, all_reduce=all_reduce, dtype=dtype
         )
         return cute.compile(
             kernel,
             A,
             B,
+            SFA,
+            SFB,
             partial,
             partial_mc_ptr,
             output,
@@ -697,7 +867,7 @@ class Sm100GemmRsArBF16:
 
 
 class GemmRsAr:
-    """Own the symmetric workspace for Kimi-K3 GEMM-RS/AR launches.
+    """Own the symmetric workspace for GEMM-RS/AR launches.
 
     All TP ranks must belong to one NVLink domain for multimem instructions.
 
@@ -727,6 +897,7 @@ class GemmRsAr:
         self.N = N
         self.device = device
         self.all_reduce = all_reduce
+        self.dtypes: set[str] = set()
 
         self.partial = symm_mem.empty((max_M, N), dtype=torch.bfloat16, device=device)
         self.partial_handle = symm_mem.rendezvous(self.partial, group)
@@ -766,21 +937,40 @@ class GemmRsAr:
         tp_group.barrier()
 
     def can_run(self, linear: LinearBase) -> bool:
-        # Validate projection-invariant requirements once during model init.
-        # only supports BF16 for now
-        if not isinstance(linear.quant_method, UnquantizedLinearMethod):
-            return False
-        w = linear.weight
-        if w.ndim != 2:
-            return False
-        K = w.shape[1]
-        return (
-            w.shape == (self.N, K)
-            and K % 64 == 0
-            and w.dtype == torch.bfloat16
-            and w.device == self.device
-            and w.is_contiguous()
+        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+            FlashInferCutedslMxfp8LinearKernel,
+            FlashInferCutlassMxfp8LinearKernel,
         )
+
+        # Called before weight loading; online quantization starts on meta.
+        if isinstance(linear.quant_method, UnquantizedLinearMethod):
+            dtype, k_alignment = "bf16", 64
+            if linear.weight.dtype != torch.bfloat16:
+                return False
+        else:
+            method = getattr(linear, "scheme", linear.quant_method)
+            kernel = getattr(method, "kernel", None)
+            if not isinstance(
+                kernel,
+                (
+                    FlashInferCutedslMxfp8LinearKernel,
+                    FlashInferCutlassMxfp8LinearKernel,
+                ),
+            ):
+                return False
+            dtype, k_alignment = "mxfp8", 128
+
+        w = linear.weight
+        if (
+            w.ndim != 2
+            or w.shape[0] != self.N
+            or w.shape[1] % k_alignment != 0
+            or (w.device != self.device and not w.is_meta)
+            or not w.is_contiguous()
+        ):
+            return False
+        self.dtypes.add(dtype)
+        return True
 
     def warn_incompatible_projection(self) -> None:
         logger.warning_once(
@@ -794,18 +984,51 @@ class GemmRsAr:
         # supported but faster on the existing LL path.
         return x.shape[0] >= 128
 
-    def __call__(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, linear: LinearBase) -> torch.Tensor:
+        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+            FlashInferCutedslMxfp8LinearKernel,
+        )
+
+        method = getattr(linear, "scheme", linear.quant_method)
+        w = linear.weight
+        if isinstance(
+            getattr(method, "kernel", None), FlashInferCutedslMxfp8LinearKernel
+        ):
+            # This backend stores a column-major [K, N] view after loading.
+            w = w.t()
+        w_sf = getattr(linear, "weight_scale", None)
+
         assert x.ndim == 2
         M, K = x.shape
         assert 0 < M <= self.max_M
-        assert w.shape == (self.N, K) and K % 64 == 0
-        assert w.dtype == torch.bfloat16
-        assert w.device == self.device
-        assert w.is_contiguous()
         assert x.dtype == torch.bfloat16
         assert x.device == self.device
         assert x.is_contiguous()
-        N = w.shape[0]
+        assert w.device == self.device
+        N = self.N
+        dtype = "mxfp8" if w.dtype == torch.float8_e4m3fn else "bf16"
+        x_sf = None
+        if dtype == "mxfp8":
+            from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+                mxfp8_e4m3_quantize,
+            )
+
+            assert w_sf is not None
+            assert w_sf.dtype == torch.uint8 and w_sf.device == self.device
+            assert w_sf.ndim == 1 and w_sf.is_contiguous()
+            assert w_sf.numel() == N * (K // 32)
+            assert w.shape == (N, K) and K % 128 == 0
+            assert w.is_contiguous()
+            x, x_sf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)
+            # The kernel declares the scales as E8M0; the stored/quantized
+            # tensors carry the same bits as uint8.
+            x_sf = x_sf.view(torch.float8_e8m0fnu)
+            w_sf = w_sf.view(torch.float8_e8m0fnu)
+        else:
+            assert w_sf is None
+            assert w.shape == (N, K) and K % 64 == 0
+            assert w.dtype == torch.bfloat16
+            assert w.is_contiguous()
         padded_M = (M + self.world_size - 1) // self.world_size
         padded_M *= self.world_size
         local_M = padded_M // self.world_size
@@ -814,10 +1037,8 @@ class GemmRsAr:
         # Avoid padding small odd grids; 2-CTA wins consistently for M >= 1024.
         cta_group = 2 if M >= 1024 or grid_m % 2 == 0 else 1
         grid_m = (grid_m + cta_group - 1) // cta_group * cta_group
-        BN = 256 if M * K >= 24 * 1024 * 1024 else 128
-        assert N % BN == 0
 
-        num_tiles = grid_m * (N // BN)
+        num_tiles = grid_m * (N // 128)
         num_ctas = min(num_tiles, self.num_sms)
         num_ctas = num_ctas // cta_group * cta_group
         assert self.flags.numel() >= num_tiles + num_ctas
@@ -825,16 +1046,26 @@ class GemmRsAr:
         output = None
         if not self.all_reduce:
             output = torch.empty((local_M, N), dtype=torch.bfloat16, device=self.device)
-        compiled = Sm100GemmRsArBF16.compile(
+            # The kernel never touches rows at or beyond M. Callers that hand
+            # in an unpadded M (DeepSeek-V4.1 slices the SP all-gather back to
+            # the real token count) expect the same zero padding rows that
+            # ``sp_reduce_scatter`` produces, so clear them here. This is a
+            # no-op whenever M is already a multiple of the TP size.
+            valid_rows = min(max(M - self.rank * local_M, 0), local_M)
+            if valid_rows < local_M:
+                output[valid_rows:].zero_()
+        compiled = Sm100GemmRsAr.compile(
             self.rank,
             self.world_size,
-            BN,
             cta_group,
             self.all_reduce,
+            dtype=dtype,
         )
         compiled(
             x,
             w,
+            x_sf,
+            w_sf,
             self.partial[:padded_M],
             self.partial_mc_ptr,
             output,
@@ -871,22 +1102,74 @@ def init_gemm_rs_ar(max_M: int, N: int, *, all_reduce: bool = False) -> None:
     _gemm_rs_ar = GemmRsAr(max_M=max_M, N=N, all_reduce=all_reduce)
 
 
+def maybe_init_gemm_rs_ar(
+    vllm_config: "VllmConfig", *, N: int, all_reduce: bool
+) -> bool:
+    """Collectively initialize the mode-bound GEMM-RS/AR state if supported.
+
+    Callers gate on their own feature flag first; this checks the worker
+    topology (SM100-family CUDA, BF16 model dtype, no ubatching, a TP size in
+    2-16 that divides 128) and the NVLink multicast rendezvous. Returns whether
+    projections may bind to the kernel through ``get_gemm_rs_ar().can_run``.
+    """
+    mode = "GEMM-AR" if all_reduce else "GEMM-RS"
+    parallel_config = vllm_config.parallel_config
+    tp_size = parallel_config.tensor_parallel_size
+    if parallel_config.use_ubatching:
+        reason = "ubatching is enabled"
+    elif vllm_config.model_config.dtype != torch.bfloat16:
+        reason = "the model dtype is not BF16"
+    elif not current_platform.is_cuda():
+        reason = "the device is not CUDA"
+    elif not current_platform.is_device_capability_family(100):
+        reason = "the device is not SM100-family"
+    elif not 1 < tp_size <= 16:
+        reason = "TP size is not in the supported range 2-16"
+    elif 128 % tp_size != 0:
+        reason = "TP size does not divide 128"
+    elif N % 128 != 0:
+        reason = f"the output width {N} is not a multiple of 128"
+    else:
+        reason = None
+
+    if reason is not None:
+        logger.warning_once("%s is disabled because %s.", mode, reason)
+        return False
+
+    try:
+        init_gemm_rs_ar(
+            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
+            N=N,
+            all_reduce=all_reduce,
+        )
+    except RuntimeError as e:
+        logger.warning_once(
+            "%s is disabled because initialization failed: %s. This may mean "
+            "the TP ranks do not share one NVLink domain.",
+            mode,
+            e,
+        )
+        return False
+    logger.info_once("%s is enabled.", mode)
+    return True
+
+
 def warmup_gemm_rs_ar() -> int:
     """Compile every reachable dispatch for the initialized GEMM-RS/AR mode."""
     # Initialization can be disabled or fail when multicast is unavailable.
     if _gemm_rs_ar is None:
         return 0
-    # Keep these profiles in sync with the dispatch in GemmRsAr.__call__.
-    profiles = ((128, 1), (128, 2), (256, 2))
-    for BN, cta_group in profiles:
-        Sm100GemmRsArBF16.compile(
-            _gemm_rs_ar.rank,
-            _gemm_rs_ar.world_size,
-            BN,
-            cta_group,
-            _gemm_rs_ar.all_reduce,
-        )
-    return len(profiles)
+
+    for dtype in sorted(_gemm_rs_ar.dtypes):
+        for cta_group in (1, 2):
+            Sm100GemmRsAr.compile(
+                _gemm_rs_ar.rank,
+                _gemm_rs_ar.world_size,
+                cta_group,
+                _gemm_rs_ar.all_reduce,
+                dtype=dtype,
+            )
+    return 2 * len(_gemm_rs_ar.dtypes)
 
 
 def get_gemm_rs_ar() -> GemmRsAr:
