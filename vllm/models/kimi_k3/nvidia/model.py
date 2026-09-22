@@ -339,6 +339,7 @@ class KimiRoutedOutputTransform(nn.Module):
             residual: Optional tensor of the up-projection's output shape to
                 accumulate into. It is consumed in the GEMM's beta-add
                 epilogue, so adding it costs no extra kernel.
+
         """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
@@ -532,8 +533,10 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer,
             activation_clamp=activation_clamp,
             activation=self.activation,
-            situ_beta=self.activation_beta,
-            situ_linear_beta=self.activation_linear_beta,
+            # DeepGEMM names the SiTU gate tanh scale `activation_alpha` and the
+            # linear/up tanh scale `activation_beta`; beta=0 leaves up untouched.
+            activation_alpha=self.activation_beta or 1.0,
+            activation_beta=self.activation_linear_beta or 0.0,
             fast_math=fast_math,
         )
         return y
@@ -674,7 +677,7 @@ class KimiMoE(nn.Module):
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_down_proj",
             )
             self.routed_expert_norm = (
@@ -691,7 +694,7 @@ class KimiMoE(nn.Module):
                 self.moe_hidden_size,
                 hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_up_proj",
             )
 
@@ -758,6 +761,7 @@ class KimiMoE(nn.Module):
                 routed_input_transform=None,
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
+                skip_padding=True,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
@@ -794,6 +798,7 @@ class KimiMoE(nn.Module):
             ``router_output`` holds the grouped top-k weights and ``topk_ids``
             the selected experts; otherwise ``router_output`` holds the raw gate
             logits and ``topk_ids`` is ``None``.
+
         """
 
         def _router(
@@ -917,14 +922,12 @@ class KimiDecoderLayer(nn.Module):
                     aux_stream=aux_stream,
                     run_gemm_rs_ar=run_gemm_rs_ar,
                 )
-                self._self_attn_writes_output = False
             else:
                 self.self_attn = KimiLinearGatedDeltaNetAttention(
                     config,
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
                 )
-                self._self_attn_writes_output = True
         else:
             qk_nope_head_dim = config.qk_nope_head_dim
             qk_rope_head_dim = config.qk_rope_head_dim
@@ -954,7 +957,6 @@ class KimiDecoderLayer(nn.Module):
                 aux_stream=aux_stream,
                 run_gemm_rs_ar=run_gemm_rs_ar,
             )
-            self._self_attn_writes_output = False
 
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
@@ -1020,14 +1022,6 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if self._self_attn_writes_output:
-            output = torch.empty_like(hidden_states)
-            self.self_attn(
-                hidden_states=hidden_states,
-                positions=positions,
-                output=output,
-            )
-            return output
         return self.self_attn(
             hidden_states=hidden_states,
             positions=positions,

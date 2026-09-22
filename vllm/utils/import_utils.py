@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Contains helpers related to importing modules.
+"""Contains helpers related to importing modules.
 
 This is similar in concept to the `importlib` module.
 """
@@ -24,8 +23,7 @@ logger = init_logger(__name__)
 
 
 def import_pynvml():
-    """
-    Historical comments:
+    """Historical comments:
 
     libnvml.so is the library behind nvidia-smi, and
     pynvml is a Python wrapper around it. We use it to get GPU
@@ -57,8 +55,7 @@ def import_pynvml():
 
 @cache
 def import_triton_kernels():
-    """
-    For convenience, prioritize triton_kernels that is available in
+    """For convenience, prioritize triton_kernels that is available in
     `site-packages`. Use `vllm.third_party.triton_kernels` as a fall-back.
     """
     if _has_module("triton_kernels"):
@@ -83,8 +80,7 @@ def import_triton_kernels():
 
 
 def import_plugin(plugin_path: str) -> ModuleType | None:
-    """
-    Import a user-defined plugin.
+    """Import a user-defined plugin.
 
     Plugin can be either:
     * a module in site-packages
@@ -104,8 +100,7 @@ def import_plugin(plugin_path: str) -> ModuleType | None:
 
 
 def import_from_path(module_name: str, file_path: str | os.PathLike) -> ModuleType:
-    """
-    Import a Python file according to its file path.
+    """Import a Python file according to its file path.
 
     Based on the official recipe:
     https://docs.python.org/3/library/importlib.html#importing-a-source-file-directly
@@ -123,9 +118,7 @@ def import_from_path(module_name: str, file_path: str | os.PathLike) -> ModuleTy
 
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
-    """
-    Resolve an object by its fully-qualified class name.
-    """
+    """Resolve an object by its fully-qualified class name."""
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
@@ -148,8 +141,7 @@ def get_vllm_optional_dependencies():
 
 
 class _PlaceholderBase:
-    """
-    Disallows downstream usage of placeholder modules.
+    """Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
     [`__getattr__`][vllm.utils.import_utils._PlaceholderBase.__getattr__]
@@ -160,8 +152,7 @@ class _PlaceholderBase:
     """
 
     def __getattr__(self, key: str) -> Never:
-        """
-        The main class should implement this to throw an error
+        """The main class should implement this to throw an error
         for attribute accesses representing downstream usage.
         """
         raise NotImplementedError
@@ -304,8 +295,7 @@ class _PlaceholderBase:
 
 
 class PlaceholderModule(_PlaceholderBase):
-    """
-    A placeholder object to use when a module does not exist.
+    """A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
     of a module that does not exist.
@@ -360,8 +350,7 @@ class _PlaceholderModuleAttr(_PlaceholderBase):
 
 
 class LazyLoader(ModuleType):
-    """
-    `LazyLoader` module borrowed from [Tensorflow]
+    """`LazyLoader` module borrowed from [Tensorflow]
     (https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py)
     with an addition of "module caching".
 
@@ -523,6 +512,34 @@ def has_nixl_ep() -> bool:
     return _has_module("nixl_ep")
 
 
+def has_moonep() -> bool:
+    """Whether the optional `moonep` package is available."""
+    return _has_module("moonep")
+
+
+def check_moonep_system_support() -> None:
+    """Raise if the current device cannot run MoonEP.
+
+    MoonEP's symmetric-memory buffers require CUDA VMM plus NVSwitch multicast
+    (SHARP) on every EP rank; NVLink-only topologies without NVSwitch (e.g.
+    4x H100 NV6) fail deep inside ``moonep.Buffer`` otherwise.
+    """
+    if not has_moonep():
+        raise RuntimeError(
+            "MoonEP not available. Install it from "
+            "https://github.com/MoonshotAI/MoonEP."
+        )
+    from moonep._C import (  # type: ignore[import-not-found]
+        nvl_multicast_supported,
+    )
+
+    if not nvl_multicast_supported():
+        raise RuntimeError(
+            "MoonEP requires NVSwitch multicast (SHARP) support on the "
+            "current device; it is not supported on this GPU/topology."
+        )
+
+
 def is_numba_available() -> bool:
     """Whether the optional `numba` package is available."""
     return _has_module("numba")
@@ -536,6 +553,26 @@ def has_triton_kernels() -> bool:
     if is_available:
         import_triton_kernels()
     return is_available
+
+
+@cache
+def get_triton_kernels_version() -> str | None:
+    """The triton_kernels MoE-API generation ("3.5.1"/"3.6"/"3.8"), or None.
+
+    Inferred by capability since the package exposes no usable version: 3.8
+    replaced ``matmul_ogs`` with ``matmul``, and 3.5.1 predates ``SparseMatrix``.
+    """
+    if not has_triton_kernels():
+        return None
+    try:
+        import triton_kernels.matmul_ogs  # noqa: F401
+    except ImportError:
+        return "3.8"
+    try:
+        from triton_kernels.tensor import SparseMatrix  # noqa: F401
+    except ImportError:
+        return "3.5.1"
+    return "3.6"
 
 
 @cache
@@ -562,7 +599,6 @@ def has_tilelang() -> bool:
 
 def has_arctic_inference() -> bool:
     """Whether the optional `arctic_inference` package is available."""
-
     return _has_module("arctic_inference")
 
 
