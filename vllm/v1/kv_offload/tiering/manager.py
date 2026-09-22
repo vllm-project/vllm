@@ -52,6 +52,7 @@ from vllm.v1.kv_offload.tiering.base import (
     ParentManager,
     SecondaryTierManager,
     TransferJob,
+    config_info_prefix,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 
@@ -984,14 +985,14 @@ class TieringOffloadingManager(OffloadingManager):
         """Compose the config facts of the primary tier and every secondary.
 
         The primary tier passes through unprefixed, so a CPU fact reads the
-        same standalone and tiered. The secondary prefix mirrors the tier label
-        that TieringMetricsTracker.tier_label() builds, with "_" for ":".
+        same standalone and tiered. The label names match the names that
+        TieringOffloadingSpec.config_info_keys() declares.
         """
         info: dict[str, str | int | float | bool] = dict(
             self.primary_tier.config_info()
         )
         for tier_idx, tier in enumerate(self.secondary_tiers):
-            prefix = f"tier{tier_idx + 1}_{tier.tier_type}_"
+            prefix = config_info_prefix(tier_idx, tier.tier_type)
             info.update({prefix + k: v for k, v in tier.config_info().items()})
         return info
 

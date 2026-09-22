@@ -127,6 +127,24 @@ class ParentManager(ABC):
     def on_request_finished(self, req_context: ReqContext) -> None: ...
 
 
+def config_info_prefix(tier_idx: int, tier_type: str) -> str:
+    """Return the info metric label prefix of one secondary tier.
+
+    TieringOffloadingSpec prefixes the label names with this, and
+    TieringOffloadingManager prefixes the values, so both must call this one
+    function. The shape mirrors TieringMetricsTracker.tier_label().
+
+    Args:
+        tier_idx: Zero-based position of the tier in secondary_tiers.
+        tier_type: Tier type identifier, as the tier config names it.
+
+    Returns:
+        The prefix, which ends with "_".
+
+    """
+    return f"tier{tier_idx + 1}_{tier_type}_"
+
+
 class SecondaryTierManager(ABC):
     """Abstract interface for managing a single non-primary offloading tier.
 
@@ -359,11 +377,30 @@ class SecondaryTierManager(ABC):
         """Return and reset metric observations collected by this tier."""
         return None
 
+    @classmethod
+    def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names of this tier.
+
+        A tier cannot know its own index, so it declares every name unprefixed.
+        TieringOffloadingSpec adds the index and the tier type, the same way
+        TieringOffloadingManager adds them to the values. Every other rule
+        matches OffloadingSpec.config_info_keys().
+
+        Args:
+            tier_config: Configuration dict of this tier.
+
+        Returns:
+            Tuple of unprefixed label names. Empty by default.
+
+        """
+        return ()
+
     def config_info(self) -> Mapping[str, str | int | float | bool]:
         """Return static config facts to publish as info metric labels.
 
         A tier cannot know its own index, so TieringOffloadingManager prefixes
         these keys with the index and the tier type. Every other rule matches
-        OffloadingManager.config_info().
+        OffloadingManager.config_info(), including the name agreement with
+        TieringOffloadingSpec.config_info_keys().
         """
         return {}
