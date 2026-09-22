@@ -32,7 +32,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
@@ -239,6 +239,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
         )
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
@@ -277,7 +278,7 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen3ASRMultiModalProcessor(
-    Qwen3OmniMoeThinkerMultiModalProcessor,
+    Qwen3OmniMoeThinkerMultiModalProcessor[Qwen3ASRProcessingInfo]
 ):
     def _get_mm_fields_config(
         self,
@@ -319,6 +320,7 @@ class Qwen3ASRMultiModalProcessor(
             if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
+                assert audio is not None
                 raise ValueError(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model"
@@ -575,7 +577,10 @@ class Qwen3ASRForConditionalGeneration(
             offset = mm_feature.mm_position.offset
 
             # Get audio feature length from mm_feature data
-            audio_feature_length = mm_feature.data["audio_feature_lengths"].data
+            data = mm_feature.data
+            assert data is not None
+            audio_feature_lengths = data["audio_feature_lengths"]
+            audio_feature_length = audio_feature_lengths.data
             if isinstance(audio_feature_length, torch.Tensor):
                 audio_feature_length = audio_feature_length.item()
             audio_len = _get_feat_extract_output_lengths(

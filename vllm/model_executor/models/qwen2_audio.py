@@ -37,7 +37,7 @@ from transformers.models.qwen2_audio import (
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -224,6 +224,7 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
         num_audios = mm_counts.get("audio", 0)
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
@@ -290,6 +291,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
                 num_features = audio_output_lengths[item_idx]
             else:
                 audio_embeds = out_mm_data["audio_embeds"][item_idx]
+                assert isinstance(audio_embeds, torch.Tensor)
                 assert len(audio_embeds.shape) == 2, "audio_embeds must be a 2D tensor"
                 num_features = audio_embeds.shape[0]
 

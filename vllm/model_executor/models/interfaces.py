@@ -1221,7 +1221,7 @@ class SupportsRealtime(Protocol):
     Override in subclasses based on the model's expected output length."""
 
     @classmethod
-    async def buffer_realtime_audio(
+    def buffer_realtime_audio(
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],

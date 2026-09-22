@@ -5,6 +5,8 @@
 # The model architecture and weights are fully compatible with InternVLChatModel,
 # only the config model_type / architectures strings differ.
 
+from typing import Any, cast
+
 from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -37,7 +39,7 @@ class QianfanOCRProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        image_processor = InternVLImageProcessor(**kwargs)
+        image_processor = InternVLImageProcessor(**cast(dict[str, Any], kwargs))
         image_size = image_processor.image_size
         patch_size = vision_config.patch_size
         downsample_ratio = config.downsample_ratio

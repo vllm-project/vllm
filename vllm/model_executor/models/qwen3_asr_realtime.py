@@ -36,7 +36,7 @@ from vllm.model_executor.models.qwen3_asr import (
     _get_feat_extract_output_lengths,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalKwargsOptionalItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing.processor import (
@@ -104,8 +104,8 @@ class Qwen3ASRRealtimeBuffer:
 class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
     def __init__(
         self,
-        info: _I,
-        dummy_inputs: BaseDummyInputsBuilder[_I],
+        info: Qwen3ASRProcessingInfo,
+        dummy_inputs: BaseDummyInputsBuilder[Qwen3ASRProcessingInfo],
         *,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
@@ -124,6 +124,7 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
         )
 
         audio_data = audios[0]
+        assert audio_data is not None
         audio_feature_lengths = audio_data.get("audio_feature_lengths")
         if audio_feature_lengths is not None:
             if isinstance(audio_feature_lengths.data, torch.Tensor):
