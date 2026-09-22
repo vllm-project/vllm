@@ -20,7 +20,6 @@ where::
 from typing import Any, NamedTuple
 
 import torch
-from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -275,6 +274,10 @@ class FusedMMInputNorm(CustomOp):
             )
 
     @property
+    def input_dtype(self) -> torch.dtype | None:
+        return None if self.is_identity else torch.uint8
+
+    @property
     def compute_dtype(self) -> torch.dtype:
         """The dtype used for internal computation (may differ from output)."""
         return self._compute_dtype
@@ -356,7 +359,7 @@ class FusedMMInputNorm(CustomOp):
         )
 
     @classmethod
-    def from_model_config(cls, model_config: "ModelConfig") -> nn.Module:
+    def from_model_config(cls, model_config: "ModelConfig") -> "FusedMMInputNorm":
         mm_config = getattr(model_config, "multimodal_config", None)
         if not getattr(mm_config, "mm_device_do_normalize", False):
             return cls.identity()

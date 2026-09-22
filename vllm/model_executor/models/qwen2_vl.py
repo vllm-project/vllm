@@ -534,7 +534,7 @@ class Qwen2VisionTransformer(nn.Module):
         vision_config: Qwen2VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        input_norm: nn.Module | None = None,
+        input_norm: FusedMMInputNorm | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
