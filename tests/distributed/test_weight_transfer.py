@@ -1234,9 +1234,11 @@ class TestTrainerClients:
     def test_http_client_sends_the_checksum_option(self, monkeypatch):
         """The option is a body field on the finish call, not on the update."""
         captured = {}
+        # In call order: a finish that did not ask reports no digests, and one
+        # that asked reports them.
         replies: list[dict] = [
-            {"message": "Weight update finished", "checksums": {"dp0:tp0:w": "a"}},
             {"message": "Weight update finished"},
+            {"message": "Weight update finished", "checksums": {"dp0:tp0:w": "a"}},
         ]
 
         def fake_post(self, path, json=None):
@@ -1250,11 +1252,13 @@ class TestTrainerClients:
         # Without the option the body stays what it always was, so a server
         # that predates the option sees no change.
         assert client.finish_weight_update("step-42") is None
+        assert captured["path"] == "finish_weight_update"
         assert captured["json"] == {"weight_version": "step-42"}
 
         assert client.finish_weight_update(checksum=True) == {"dp0:tp0:w": "a"}
         assert captured["path"] == "finish_weight_update"
         assert captured["json"] == {"checksum": True}
+        assert replies == []
 
     def test_finish_tolerates_a_response_without_checksums(self, monkeypatch):
         """A server that was not asked, or predates the option, omits the key."""

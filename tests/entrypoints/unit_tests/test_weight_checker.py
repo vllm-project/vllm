@@ -5,6 +5,7 @@ model or GPU."""
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -100,27 +101,51 @@ def test_merge_finish_checksums_rejects_duplicate_keys():
         merge_finish_checksums([{"dp0:tp0:w": "a"}, {"dp0:tp0:w": "a"}])
 
 
+def _dense_worker(dp_rank: int) -> Worker:
+    """A Worker stubbed just enough to build its checksum key prefix.
+
+    `_weight_checksum_key_prefix` reads `self.parallel_config` and
+    `model_config.is_moe`. `WorkerBase.__init__` sets `parallel_config` as its
+    own instance attribute rather than reading it back off `vllm_config`, so a
+    worker built with `object.__new__` has to supply both.
+    """
+    worker = object.__new__(Worker)
+    config = VllmConfig()
+    config.parallel_config = ParallelConfig(
+        data_parallel_size=2, data_parallel_rank=dp_rank
+    )
+    config.model_config = SimpleNamespace(is_moe=False)
+    worker.vllm_config = config
+    worker.parallel_config = config.parallel_config
+    return worker
+
+
 def test_dense_dp_ranks_get_distinct_key_prefixes(single_rank_groups):
     """Dense DP ranks must not collide, or merging rejects their results.
 
     reconfigure_for_independent_dp_rank() zeroes data_parallel_rank for dense
     models, which is why the prefix has to come from data_parallel_index.
     """
-
-    def prefix_for(dp_rank: int) -> str:
-        worker = object.__new__(Worker)
-        config = VllmConfig()
-        config.parallel_config = ParallelConfig(
-            data_parallel_size=2, data_parallel_rank=dp_rank
-        )
-        worker.vllm_config = config
+    prefixes = []
+    for dp_rank in (0, 1):
+        worker = _dense_worker(dp_rank)
         # Dense: a DP rank is reconfigured into an independent engine.
-        config.parallel_config.reconfigure_for_independent_dp_rank()
-        assert config.parallel_config.data_parallel_rank == 0
-        return Worker._weight_checksum_key_prefix(worker)
+        worker.parallel_config.reconfigure_for_independent_dp_rank()
+        assert worker.parallel_config.data_parallel_rank == 0
+        prefixes.append(Worker._weight_checksum_key_prefix(worker))
 
-    first, second = prefix_for(0), prefix_for(1)
-    assert first != second, f"dense DP ranks share a key prefix: {first}"
+    assert prefixes[0] != prefixes[1], (
+        f"dense DP ranks share a key prefix: {prefixes[0]}"
+    )
+    # The zeroed rank must not have leaked into the prefix.
+    assert prefixes == ["dp0:pp0:pcp0:tp0:ep0:", "dp1:pp0:pcp0:tp0:ep0:"]
+
+
+def test_workers_on_the_same_rank_agree_on_the_key_prefix(single_rank_groups):
+    """Two engines holding the same rank describe it with the same prefix."""
+    first = Worker._weight_checksum_key_prefix(_dense_worker(1))
+    second = Worker._weight_checksum_key_prefix(_dense_worker(1))
+    assert first == second == "dp1:pp0:pcp0:tp0:ep0:"
 
 
 @pytest.mark.parametrize(
