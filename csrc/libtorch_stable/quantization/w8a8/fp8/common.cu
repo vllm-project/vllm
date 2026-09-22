@@ -20,13 +20,9 @@ constexpr int kFp8QuantBlockSize = 256;
 template <typename T>
 using fp8_quant_vec_t = vec_n_t<T, kFp8QuantVecSize>;
 
-// True when every row of a [tokens, hidden] view starts on a
-// fp8_quant_vec_t<T> boundary, so rows can be read or written as whole vectors.
 template <typename T>
-bool rows_vec_aligned(const T* ptr, int64_t row_stride) {
-  constexpr size_t kAlign = alignof(fp8_quant_vec_t<T>);
-  return reinterpret_cast<uintptr_t>(ptr) % kAlign == 0 &&
-         (row_stride * sizeof(T)) % kAlign == 0;
+bool ptr_vec_aligned(const T* ptr) {
+  return reinterpret_cast<uintptr_t>(ptr) % alignof(fp8_quant_vec_t<T>) == 0;
 }
 
 __device__ __forceinline__ float warp_reduce_max(float v) {
@@ -437,7 +433,7 @@ void dynamic_scaled_fp8_quant(torch::stable::Tensor& out,          // [..., d]
               const scalar_t* in_ptr = input.const_data_ptr<scalar_t>();
               const bool flat = in_row_stride == hidden_size &&
                                 hidden_size % vllm::kFp8QuantVecSize == 0 &&
-                                vllm::rows_vec_aligned(in_ptr, in_row_stride);
+                                vllm::ptr_vec_aligned(in_ptr);
               if (flat) {
                 const int64_t num_vecs = input.numel() / vllm::kFp8QuantVecSize;
                 const int64_t max_blocks =
