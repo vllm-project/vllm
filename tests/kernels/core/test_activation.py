@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -275,14 +276,27 @@ def test_silu_and_mul_with_clamp(
         compile_native=False,
     )
     if current_platform.is_rocm():
-        expected_method = (
-            layer.forward_hip if alpha == 1.0 and beta == 0.0 else layer.forward_native
-        )
-        assert layer._forward_method == expected_method
+        # forward_hip is always dispatched; the alpha/beta gate is checked
+        # inside it at call time rather than picked at construction time, so
+        # verify the actual routing by spying on the two candidate methods.
+        assert layer._forward_method == layer.forward_hip
+        with (
+            patch.object(layer, "forward_cuda", wraps=layer.forward_cuda) as cuda_spy,
+            patch.object(
+                layer, "forward_native", wraps=layer.forward_native
+            ) as native_spy,
+        ):
+            out = layer(x)
+        if alpha == 1.0 and beta == 0.0:
+            cuda_spy.assert_called_once()
+            native_spy.assert_not_called()
+        else:
+            native_spy.assert_called_once()
+            cuda_spy.assert_not_called()
     else:
         assert layer._forward_method == layer.forward_cuda
+        out = layer(x)
 
-    out = layer(x)
     ref_out = layer.forward_native(x)
 
     rtol = {
