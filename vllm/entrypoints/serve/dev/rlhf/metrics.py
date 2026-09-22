@@ -42,7 +42,7 @@ from threading import Lock
 from time import perf_counter
 from typing import Literal
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram
 
 Operation = Literal["init", "start", "start_draft", "update", "finish", "set_version"]
 
@@ -51,6 +51,12 @@ _OPERATION_HELP = (
     "dispatched engine call. 'finish' covers only finish_weight_update(); the "
     "weight-version handshake is counted separately as 'set_version'."
 )
+
+_OPERATIONS_NAME = "vllm:rl_weight_update_operations_total"
+_DURATION_NAME = "vllm:rl_weight_update_operation_duration_seconds"
+_IN_FLIGHT_NAME = "vllm:rl_weight_update_operations_in_flight"
+
+_BUCKETS = (0.01, 0.1, 1, 10, 30, 60, 120, 300, 600)
 
 
 class WeightOperationMetrics:
@@ -66,26 +72,58 @@ class WeightOperationMetrics:
     """
 
     def __init__(self, registry: CollectorRegistry | None = None):
-        self.operations = Counter(
-            "vllm:rl_weight_update_operations_total",
-            _OPERATION_HELP,
-            ["operation", "status"],
-            registry=registry,
-        )
-        self.duration = Histogram(
-            "vllm:rl_weight_update_operation_duration_seconds",
-            "Duration of one logical frontend weight operation.",
-            ["operation"],
-            registry=registry,
-            buckets=(0.01, 0.1, 1, 10, 30, 60, 120, 300, 600),
-        )
-        self.in_flight = Gauge(
-            "vllm:rl_weight_update_operations_in_flight",
-            "Logical frontend weight operations currently awaited.",
-            ["operation"],
-            registry=registry,
-            multiprocess_mode="livesum",
-        )
+        # Passing ``registry=None`` explicitly means "do not register" to
+        # prometheus_client, so the default has to be the registry object itself.
+        try:
+            if registry is None:
+                self.operations = Counter(
+                    _OPERATIONS_NAME, _OPERATION_HELP, ["operation", "status"]
+                )
+                self.duration = Histogram(
+                    _DURATION_NAME,
+                    "Duration of one logical frontend weight operation.",
+                    ["operation"],
+                    buckets=_BUCKETS,
+                )
+                self.in_flight = Gauge(
+                    _IN_FLIGHT_NAME,
+                    "Logical frontend weight operations currently awaited.",
+                    ["operation"],
+                    multiprocess_mode="livesum",
+                )
+            else:
+                self.operations = Counter(
+                    _OPERATIONS_NAME,
+                    _OPERATION_HELP,
+                    ["operation", "status"],
+                    registry=registry,
+                )
+                self.duration = Histogram(
+                    _DURATION_NAME,
+                    "Duration of one logical frontend weight operation.",
+                    ["operation"],
+                    registry=registry,
+                    buckets=_BUCKETS,
+                )
+                self.in_flight = Gauge(
+                    _IN_FLIGHT_NAME,
+                    "Logical frontend weight operations currently awaited.",
+                    ["operation"],
+                    registry=registry,
+                    multiprocess_mode="livesum",
+                )
+        except ValueError:
+            # The collectors are already registered (module reload, or a test that
+            # resets the singleton). The default registry keeps one collector per
+            # sample name for the process lifetime, so adopt the existing ones.
+            if registry is not None:
+                raise
+            self._adopt_registered_collectors()
+
+    def _adopt_registered_collectors(self) -> None:
+        self.operations = REGISTRY._names_to_collectors[_OPERATIONS_NAME]
+        self.duration = REGISTRY._names_to_collectors[_DURATION_NAME]
+        self.in_flight = REGISTRY._names_to_collectors[_IN_FLIGHT_NAME]
 
     @contextmanager
     def record(self, operation: Operation) -> Iterator[None]:

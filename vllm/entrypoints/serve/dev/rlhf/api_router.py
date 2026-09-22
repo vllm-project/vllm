@@ -171,6 +171,13 @@ async def init_weight_transfer_engine(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'init_info' in request body",
         )
+    # Shape validation must happen before the recorder, and must match the Rust
+    # frontend, so a malformed payload is never counted as a failed operation.
+    if not isinstance(init_info, dict):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="'init_info' must be a JSON object",
+        )
     with _weight_metrics().record("init"):
         await engine_client(raw_request).init_weight_transfer_engine(
             WeightTransferInitRequest(init_info=init_info)
@@ -203,6 +210,20 @@ async def update_weights(raw_request: Request):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'update_info' in request body",
+        )
+    # Mirrors the Rust frontend: an object, or a list of per-worker objects.
+    # Checked before the recorder so invalid input is not counted.
+    valid_update_info = isinstance(update_info, dict) or (
+        isinstance(update_info, list)
+        and all(isinstance(item, dict) for item in update_info)
+    )
+    if not valid_update_info:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=(
+                "'update_info' must be a JSON object or a list of per-worker "
+                "JSON objects"
+            ),
         )
     with _weight_metrics().record("update"):
         await engine_client(raw_request).update_weights(

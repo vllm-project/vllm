@@ -106,9 +106,17 @@ def test_finish_and_set_version_are_distinct_operations():
     )
 
 
-def test_metrics_are_created_lazily():
-    """Nothing is registered at import time - only on first use."""
+def test_metrics_are_created_lazily(monkeypatch):
+    """Nothing is registered at import time - only on first use.
+
+    The reset keeps this independent of other tests that exercise the production
+    singleton in the same process.
+    """
+    monkeypatch.setattr(rlhf_metrics, "_metrics", None)
     assert rlhf_metrics._metrics is None
+
+    created = rlhf_metrics.weight_operation_metrics()
+    assert created is not None
 
 
 def test_recorder_is_created_once(monkeypatch):
