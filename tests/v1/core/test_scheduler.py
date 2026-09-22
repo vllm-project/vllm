@@ -6872,3 +6872,158 @@ def test_update_draft_token_ids_in_output_strips_padding():
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
+@pytest.mark.parametrize("lookahead", [0, 1, 3])
+def test_cpu_encoder_inputs_release_only_confirmed_consumed_occurrences(lookahead):
+    """Chunking/rollback cannot release a future occurrence of the same hash."""
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.use_v2_model_runner = True
+    scheduler.num_prefill_lookahead = lookahead
+    scheduler._released_encoder_input_ids = {}
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=64,
+        mm_hashes_list=[["same", "same"]],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=8),
+                PlaceholderRange(offset=32, length=8),
+            ]
+        ],
+    )
+    req_id = request.request_id
+    scheduler.requests = {req_id: request}
+    request.num_output_placeholders = 4
+    request.num_computed_tokens = 11 + lookahead
+    assert scheduler._get_consumed_encoder_input_ids({req_id: 1}, [], {}) == {}
+    request.num_computed_tokens += 1
+    request.num_in_flight_tokens = request.num_computed_tokens
+    assert scheduler._get_consumed_encoder_input_ids({req_id: 1}, [], {}) == {}
+    request.num_in_flight_tokens = 0
+    assert scheduler._get_consumed_encoder_input_ids({req_id: 1}, [], {}) == {
+        req_id: [0]
+    }
+    assert scheduler._get_consumed_encoder_input_ids({req_id: 1}, [], {}) == {}
+    assert all(feature.data is not None for feature in request.mm_features)
+    # A resumed or streaming request reinstalls all inputs, including a prefix hit.
+    new_request = SimpleNamespace(req_id=req_id)
+    assert scheduler._get_consumed_encoder_input_ids(
+        {req_id: 1}, [new_request], {}
+    ) == {req_id: [0]}
+    request.num_computed_tokens = 44 + lookahead
+    # Never clear an input that this very step needs to encode.
+    assert (
+        scheduler._get_consumed_encoder_input_ids({req_id: 1}, [], {req_id: [1]}) == {}
+    )
+    assert scheduler._get_consumed_encoder_input_ids({req_id: 1}, [], {}) == {
+        req_id: [1]
+    }
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_cpu_encoder_input_release_schedule_resume_and_abort(async_scheduling):
+    """Exercise SchedulerOutput events and their reset on preemption/abort."""
+    import time
+
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_v2_model_runner=True,
+        async_scheduling=async_scheduling,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        mm_positions=[[PlaceholderRange(offset=0, length=100)]],
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    assert first.free_encoder_input_ids == {}
+    # Model finished prefill, but the request is still decoding.
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    second = scheduler.schedule()
+    assert second.free_encoder_input_ids == {request.request_id: [0]}
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, time.monotonic())
+    assert request.request_id not in scheduler._released_encoder_input_ids
+    # Drain the old in-flight decode before the scheduler can resume this request.
+    scheduler.update_from_output(
+        second,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[2]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    resumed = scheduler.schedule()
+    assert resumed.free_encoder_input_ids == {}
+    assert resumed.scheduled_new_reqs[0].mm_features[0].data is not None
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in scheduler._released_encoder_input_ids
+
+
+def test_cpu_encoder_input_rollback_reinstalls_only_released_input():
+    """A failed KV load can rewind a running request without preempting it."""
+    from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.use_v2_model_runner = True
+    scheduler.num_prefill_lookahead = 0
+    scheduler._released_encoder_input_ids = {}
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=64,
+        mm_positions=[[PlaceholderRange(offset=0, length=8)]],
+    )
+    req_id = request.request_id
+    scheduler.requests = {req_id: request}
+    cache = EncoderCache()
+    cache.add_request(req_id, request.mm_features)
+    request.num_computed_tokens = 16
+    released = scheduler._get_consumed_encoder_input_ids({req_id: 1}, [], {})
+    cache.free_encoder_inputs(req_id, released[req_id])
+    assert cache.mm_features[req_id][0].data is None
+    request.num_computed_tokens = 0
+    restored = scheduler._get_encoder_input_reloads({req_id: [0]})
+    cache.restore_encoder_inputs(req_id, restored[req_id])
+    assert cache.mm_features[req_id][0].data is request.mm_features[0].data
+    assert scheduler._get_encoder_input_reloads({req_id: [0]}) == {}
+    request.num_computed_tokens = 16
+    assert scheduler._get_consumed_encoder_input_ids({req_id: 1}, [], {}) == {
+        req_id: [0]
+    }
+
+
+def test_cpu_encoder_input_does_not_release_address_only_processor_cache():
+    """An SHM cache address is not EngineCore-owned replayable pixel data."""
+    from vllm.multimodal.cache import ShmObjectStoreSenderCache
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.use_v2_model_runner = True
+    scheduler.num_prefill_lookahead = 0
+    scheduler._released_encoder_input_ids = {}
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=64,
+        mm_positions=[[PlaceholderRange(offset=0, length=8)]],
+    )
+    sender = ShmObjectStoreSenderCache.__new__(ShmObjectStoreSenderCache)
+    request.mm_features[0].data = sender.address_as_item(0, 0)
+    request.num_computed_tokens = 16
+    scheduler.requests = {request.request_id: request}
+    assert (
+        scheduler._get_consumed_encoder_input_ids({request.request_id: 1}, [], {}) == {}
+    )

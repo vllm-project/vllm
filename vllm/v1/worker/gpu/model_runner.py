@@ -1647,6 +1647,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.free_states(scheduler_output)
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
+            if self.encoder_cache is not None:
+                for (
+                    req_id,
+                    restored_inputs,
+                ) in scheduler_output.restore_encoder_inputs.items():
+                    self.encoder_cache.restore_encoder_inputs(req_id, restored_inputs)
+                for (
+                    req_id,
+                    released_input_ids,
+                ) in scheduler_output.free_encoder_input_ids.items():
+                    self.encoder_cache.free_encoder_inputs(req_id, released_input_ids)
             self.block_tables.apply_staged_writes()
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
