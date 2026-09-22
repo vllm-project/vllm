@@ -916,6 +916,26 @@ def _patch_inductor_fallback_allow_list() -> None:
 
 _patch_inductor_fallback_allow_list()
 
+
+def _patch_inductor_pattern_matcher() -> None:
+    """Allow custom ops and functionalization wrappers with unsupported dtypes."""
+    from torch._inductor import pattern_matcher
+    from torch._inductor.lowering import fallback_node_due_to_unsupported_type
+
+    def fallback_for_builtin(node, allow_cpu_inputs=True):
+        return (
+            isinstance(node.target, torch._ops.OpOverload)
+            and torch._library.utils.is_builtin(node.target)
+            and fallback_node_due_to_unsupported_type(node, allow_cpu_inputs)
+        )
+
+    pattern_matcher.fallback_node_due_to_unsupported_type = fallback_for_builtin
+
+
+# Remove once the minimum supported torch includes
+# https://github.com/pytorch/pytorch/pull/196013.
+_patch_inductor_pattern_matcher()
+
 # ============================================================
 # Triton Autotuner determinism
 # ============================================================
