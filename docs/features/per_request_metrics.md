@@ -135,21 +135,19 @@ accumulated across all turns.
 
 ## Output Token Metrics
 
-Output-token metrics are experimental and subject to change. Enable them with a
-parser configuration that supports output-token classification:
+Output-token metrics are experimental and subject to change. Enable them for a
+reasoning model with a compatible output parser:
 
 ```bash
 vllm serve openai/gpt-oss-20b \
-  --reasoning-parser openai_gptoss \
   --enable-per-request-output-token-metrics
 ```
 
-The selected parser configuration must support complete token classification.
-ParserEngine-backed reasoning parsers and unified parsers such as the Harmony
-parser used by gpt-oss are supported. Legacy reasoning parsers and separately
-configured reasoning/tool parser combinations are rejected because token-count
-support alone does not guarantee reliable reasoning, content, and control-token
-classification for every output shape they accept.
+vLLM automatically selects its built-in Harmony parser for gpt-oss models.
+Other reasoning models must be started with a compatible `--reasoning-parser`,
+such as `gemma4` or `nemotron_v3`. If the selected parser configuration cannot
+fully classify reasoning, final content, and control tokens, vLLM rejects the
+configuration at startup instead of returning incomplete metrics.
 
 This option does not require `--enable-per-request-metrics`; it includes the
 aggregate timing metrics and adds a nested `output_token_metrics` object to
@@ -184,14 +182,10 @@ Responses and Chat Completions responses:
 }
 ```
 
-Both category TTFT values use the request's scheduled time as their common
-origin. For each category, generation time is the elapsed time between its
-first and last observed token batches. Mean ITL is that interval divided by
-`token_count - 1`, and throughput is its reciprocal. The latter two values are
-`null` for categories with fewer than two tokens or a zero-length measured
-interval. If a category has zero tokens, its object is present with
-`token_count: 0` and `null` timing fields. If the parser cannot classify output
-tokens reliably, `output_token_metrics` is omitted.
+Each category uses the same timing concepts as the aggregate metrics, scoped to
+tokens in that category. Both category TTFT values use the request's scheduled
+time as their common origin. A zero-token category remains present with
+`token_count: 0` and `null` timing fields.
 
 Token timing has engine output-batch resolution. When one output batch contains
 multiple tokens, including tokens on both sides of a reasoning/content
@@ -199,16 +193,18 @@ boundary, those tokens share a timestamp; vLLM does not infer per-token timing
 within the batch. Consequently, category mean ITL and throughput are `null` if
 a category receives a multi-token batch. Multiple segments of the same category
 are aggregated, so their generation interval includes time between segments.
-`reasoning.token_count` uses the same parser count as the endpoint's existing
-reasoning-token usage field. It therefore equals
+
+`reasoning.token_count` uses the same parser classification as the endpoint's
+existing reasoning-token usage field. It therefore equals
 `usage.output_tokens_details.reasoning_tokens` for Responses and
 `usage.completion_tokens_details.reasoning_tokens` for Chat Completions. For
 Harmony, this follows the existing usage convention in which analysis and
-addressed commentary or tool-call tokens count as reasoning. `content.token_count`
-represents final-answer payload tokens. Remaining boundary, framing, and other
-parser-control tokens are reported by `unclassified_token_count`. For every
-classified response, the category counts reconcile to the existing total
-output-token count:
+addressed commentary or tool-call tokens count as reasoning.
+
+`content.token_count` represents final-answer payload tokens.
+`unclassified_token_count` contains remaining boundary, framing, and other
+parser-control tokens. For every classified response, the three counts
+reconcile to the existing total output-token count:
 
 ```text
 reasoning.token_count + content.token_count + unclassified_token_count
