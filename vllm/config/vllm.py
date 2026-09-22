@@ -1376,7 +1376,10 @@ class VllmConfig:
                 f"to the NIXL transfer parallel size={transfer_tp_size}."
             )
             if self.model_config is not None:
-                assert self.model_config.use_mla or dcp_size == 1, (
+                # Short-circuit on dcp_size == 1 first: reading use_mla is
+                # unsafe while a multimodal model's text submodule config is
+                # still being resolved (its architecture list is empty).
+                assert dcp_size == 1 or self.model_config.use_mla, (
                     "PD with decode_context_parallel_size > 1 is only "
                     "supported for MLA models."
                 )

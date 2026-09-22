@@ -289,6 +289,49 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
         VllmConfig.validate_block_size(config)
 
 
+def test_nixl_dcp_check_short_circuits_with_dcp_size_1(monkeypatch):
+    # Reading use_mla is unsafe while a multimodal model's text submodule
+    # config is still being resolved, so the NIXL DCP check must not read it
+    # when decode_context_parallel_size == 1.
+    def _raise(self):
+        raise AssertionError("use_mla must not be read when dcp_size == 1")
+
+    # The CPU platform also reads use_mla; skip platform-specific updates so
+    # the only potential reader is the NIXL DCP check under test.
+    monkeypatch.setattr(
+        current_platform, "check_and_update_config", lambda vllm_config: None
+    )
+    monkeypatch.setattr(ModelConfig, "use_mla", property(_raise))
+    VllmConfig(
+        model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),
+        device_config=DeviceConfig(device="cpu"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+    )
+
+
+def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
+    # Pretend the model has a single KV head so the DCP feasibility checks
+    # pass and the MLA-only assert is what actually fires.
+    monkeypatch.setattr(ModelConfig, "get_total_num_kv_heads", lambda self: 1)
+    with pytest.raises(ValidationError, match="only supported for MLA models"):
+        VllmConfig(
+            model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+                distributed_executor_backend="mp",
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="NixlConnector",
+                kv_role="kv_both",
+            ),
+        )
+
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
