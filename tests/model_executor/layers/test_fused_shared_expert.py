@@ -416,6 +416,41 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
     assert reason is None
 
 
+@pytest.mark.parametrize(
+    "layout", ["owned", "view", "strided_output", "strided_result", "cast"]
+)
+def test_aiter_experts_output_binding_preserves_storage_contract(layout: str) -> None:
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+
+    result = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    output = torch.empty_like(result)
+    backing = None
+    if layout == "view":
+        backing = torch.full((4, 4), -1.0)
+        output = backing[:3]
+    elif layout == "strided_output":
+        output = torch.empty_strided((3, 4), (1, 3))
+    elif layout == "strided_result":
+        result = torch.arange(12, dtype=torch.float32).reshape(4, 3).t()
+    elif layout == "cast":
+        output = torch.empty_like(result, dtype=torch.bfloat16)
+    original_ptr = output.data_ptr()
+
+    AiterExperts._bind_output(output, result)
+
+    torch.testing.assert_close(output, result.to(output.dtype))
+    if layout == "owned":
+        assert output.data_ptr() == result.data_ptr()
+    else:
+        assert output.data_ptr() == original_ptr
+        assert output.data_ptr() != result.data_ptr()
+    if backing is not None:
+        torch.testing.assert_close(backing[:3], result)
+        assert torch.all(backing[3] == -1)
+
+
 def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
     from vllm.models.deepseek_v4.amd.model import _prepare_native_fp8_shared_expert
 
@@ -578,8 +613,9 @@ def test_deepseek_v4_heterogeneous_fhmoe_shards_dp_shared_expert() -> None:
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
+@pytest.mark.parametrize("local_tokens", [0, 2, 5])
 def test_deepseek_v4_heterogeneous_fhmoe_uses_modular_kernel(
-    monkeypatch: pytest.MonkeyPatch, use_fused: bool
+    monkeypatch: pytest.MonkeyPatch, use_fused: bool, local_tokens: int
 ) -> None:
     from vllm.models.deepseek_v4.amd import model as deepseek_v4_model
 
@@ -597,24 +633,33 @@ def test_deepseek_v4_heterogeneous_fhmoe_uses_modular_kernel(
 
     shared_expert = FakeSharedExpert()
     quant_method = FakeQuantMethod()
+    chunk_sizes = [0, 2, 5, 1, 3, 4, 2, 1]
+    checked_tokens: list[int] = []
+
+    def supports_fhmoe(num_tokens: int) -> bool:
+        checked_tokens.append(num_tokens)
+        return num_tokens <= (sum(chunk_sizes) if use_fused else 8)
+
     monkeypatch.setattr(
         deepseek_v4_model,
         "get_forward_context",
         lambda: SimpleNamespace(
-            dp_metadata=SimpleNamespace(get_chunk_sizes_across_dp_rank=lambda: [2, 2])
+            dp_metadata=SimpleNamespace(
+                get_chunk_sizes_across_dp_rank=lambda: chunk_sizes
+            )
         ),
     )
     monkeypatch.setattr(
-        deepseek_v4_model,
-        "_use_heterogeneous_fhmoe",
-        lambda num_tokens: use_fused,
+        deepseek_v4_model.rocm_aiter_ops,
+        "fused_moe_supports_heterogeneous_shared_expert",
+        supports_fhmoe,
     )
 
     layer = deepseek_v4_model.DeepseekV4HeterogeneousSharedRoutedExperts.__new__(
         deepseek_v4_model.DeepseekV4HeterogeneousSharedRoutedExperts
     )
     nn.Module.__init__(layer)
-    layer.moe_config = SimpleNamespace(dp_size=2, experts_per_token=1)
+    layer.moe_config = SimpleNamespace(dp_size=8, experts_per_token=1)
     layer.shared_w1 = torch.ones(1)
     layer.shared_w2 = torch.ones(1)
     layer.shared_w1_scale = torch.ones(1)
@@ -624,14 +669,15 @@ def test_deepseek_v4_heterogeneous_fhmoe_uses_modular_kernel(
     layer._routed_quant_config = object()
     layer._shared_expert_ref = lambda: shared_expert
 
-    x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
-    topk_weights = torch.ones((2, 2), dtype=torch.float32)
-    topk_ids = torch.zeros((2, 2), dtype=torch.int32)
+    x = torch.arange(local_tokens * 4, dtype=torch.float32).reshape(local_tokens, 4)
+    topk_weights = torch.ones((local_tokens, 2), dtype=torch.float32)
+    topk_ids = torch.zeros((local_tokens, 2), dtype=torch.int32)
     output = layer.forward_modular(x, topk_weights, topk_ids)
 
     expected = 2 * x if use_fused else 12 * x
     torch.testing.assert_close(output, expected)
     assert quant_method.route_columns == [2 if use_fused else 1]
+    assert checked_tokens == [sum(chunk_sizes)]
 
 
 @pytest.mark.parametrize("use_shared_route", [False, True])

@@ -581,7 +581,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output_dtype=output.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
         )
-        # avoid redundant copy when output is a view of the result
+        self._bind_output(output, result)
+
+    @staticmethod
+    def _bind_output(output: torch.Tensor, result: torch.Tensor) -> None:
         if (
             output.shape == result.shape
             and output.dtype == result.dtype
@@ -716,14 +719,4 @@ class DeepseekV4HeterogeneousAiterExperts(AiterExperts):
             shared_w2_scale=shared_w2_scale,
             shared_expert_id=shared_expert_id,
         )
-        if (
-            output.shape == result.shape
-            and output.dtype == result.dtype
-            and output.device == result.device
-            and output.is_contiguous()
-            and result.is_contiguous()
-            and output._base is None
-        ):
-            output.set_(result)
-        else:
-            output.copy_(result)
+        self._bind_output(output, result)
