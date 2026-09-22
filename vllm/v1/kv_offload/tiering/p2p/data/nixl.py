@@ -1,6 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL."""
+"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
+
+Threading: the agent is reached from the scheduler thread and, when the tiering
+manager runs one, from its control-plane thread. The manager's lock serializes
+them strictly -- one Python thread inside any agent call at a time, with a full
+memory barrier between -- which is sufficient only if libnixl and UCX keep no
+state tied to the creating thread.
+
+That is an assumption, not a verified fact, and worth knowing when debugging
+transfer corruption or hangs. nixl_agent picks NIXL_THREAD_SYNC_STRICT only when
+``enable_listen`` is set, which this transport does not set, so the agent runs
+with NIXL_THREAD_SYNC_NONE and does no internal locking; the config exposes no
+way to request STRICT without also starting NIXL's listen thread. If a thread
+affinity problem does surface, the contained fix is to funnel every ``_agent``
+call in this class through a single-worker executor, as the NIXL connector's
+worker already does for its handshakes, so one OS thread owns the agent
+regardless of which caller initiated the work.
+"""
 
 from __future__ import annotations
 
