@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use serde_json::{Map, Value, json};
 use vllm_tokenizer::Tokenizer;
 
+use super::super::MediaPartSource;
+use crate::EffortValue;
 use crate::error::{Error, Result};
+use crate::reasoning::ReasoningControl;
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
 };
@@ -29,6 +32,7 @@ const VALID_THINKING_EFFORTS: &[&str] = &["low", "high", "max"];
 pub(super) struct K3TokenWriter<'a> {
     tokenizer: &'a dyn Tokenizer,
     token_ids: Vec<u32>,
+    media_order: Vec<MediaPartSource>,
 }
 
 impl<'a> K3TokenWriter<'a> {
@@ -36,6 +40,7 @@ impl<'a> K3TokenWriter<'a> {
         Self {
             tokenizer,
             token_ids: Vec::new(),
+            media_order: Vec::new(),
         }
     }
 
@@ -55,15 +60,28 @@ impl<'a> K3TokenWriter<'a> {
         Ok(())
     }
 
-    pub(super) fn finish(self) -> Vec<u32> {
-        self.token_ids
+    fn image(&mut self, message_index: usize, content_part_index: usize) -> Result<()> {
+        self.control(IMAGE_PLACEHOLDER)?;
+        self.media_order.push(MediaPartSource {
+            message_index,
+            content_part_index,
+        });
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> (Vec<u32>, Vec<MediaPartSource>) {
+        (self.token_ids, self.media_order)
     }
 }
 
-/// Render and tokenize one chat request using K3's segment-aware contract.
-pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -> Result<Vec<u32>> {
-    let thinking = thinking_enabled(request)?;
-    let thinking_effort = thinking.then(|| thinking_effort(request)).transpose()?;
+/// Render and tokenize one chat request while recording media in placeholder order.
+pub(super) fn render_request_with_media_order(
+    request: &ChatRequest,
+    tokenizer: &dyn Tokenizer,
+    reasoning: &ReasoningControl,
+) -> Result<(Vec<u32>, Vec<MediaPartSource>)> {
+    let thinking = reasoning.is_enabled();
+    let thinking_effort = reasoning.effort().and_then(EffortValue::as_str);
     let tools = request_tools(request);
     let mut out = K3TokenWriter::new(tokenizer);
 
@@ -126,7 +144,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
             resolved.sort_by_key(|item| (item.0, item.1));
         }
 
-        for (position, _, content, name) in resolved {
+        for (position, message_index, content, name) in resolved {
             let tool_name = name.as_deref().ok_or_else(|| {
                 Error::ChatTemplate(
                     "Kimi K3 tool messages need a resolvable tool name: \
@@ -135,7 +153,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
                         .to_string(),
                 )
             })?;
-            write_tool_message(out, tool_name, position, &content)?;
+            write_tool_message(out, tool_name, position, message_index, &content)?;
         }
         Ok(())
     };
@@ -161,14 +179,14 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
             } if !local_tools.is_empty() => {
                 write_tool_declare(&mut out, local_tools, true)?;
                 if !content_is_empty(content) {
-                    write_role_message(&mut out, "system", None, content)?;
+                    write_role_message(&mut out, "system", None, message_index, content)?;
                 }
             }
             ChatMessage::System { content } | ChatMessage::Developer { content, .. } => {
-                write_role_message(&mut out, "system", None, content)?;
+                write_role_message(&mut out, "system", None, message_index, content)?;
             }
             ChatMessage::User { content } => {
-                write_role_message(&mut out, "user", None, content)?;
+                write_role_message(&mut out, "user", None, message_index, content)?;
             }
             ChatMessage::Assistant { content } => {
                 tool_call_id_index.clear();
@@ -229,45 +247,26 @@ fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     request.initial_tools()
 }
 
-fn thinking_enabled(request: &ChatRequest) -> Result<bool> {
-    if let Some(thinking) = request.parse_template_bool("thinking")? {
-        return Ok(thinking);
-    }
-    if let Some(enable_thinking) = request.parse_template_bool("enable_thinking")? {
-        return Ok(enable_thinking);
-    }
-    Ok(request
-        .chat_options
-        .reasoning_effort
-        .map(|effort| effort != crate::request::ReasoningEffort::None)
-        .unwrap_or(true))
-}
-
-fn thinking_effort(request: &ChatRequest) -> Result<String> {
-    let effort = if let Some(value) = request.chat_options.template_kwargs.get("thinking_effort") {
-        value.as_str().ok_or_else(|| {
-            Error::ChatTemplate(format!(
-                "template kwarg `thinking_effort` must be a string, got {value}"
+/// Resolve standard reasoning controls and validate K3's supported effort grades.
+pub(super) fn resolve_reasoning(
+    request: &ChatRequest,
+    defaults: &HashMap<String, Value>,
+) -> Result<ReasoningControl> {
+    let reasoning = ReasoningControl::resolve(request, defaults)?
+        .fallback(ReasoningControl::enabled(DEFAULT_THINKING_EFFORT));
+    if let Some(value) = reasoning.effort() {
+        let effort = value.as_str().ok_or_else(|| {
+            Error::InvalidReasoningEffort(format!(
+                "Kimi K3 reasoning_effort must be a string, got {value}"
             ))
-        })?
-    } else if let Some(effort) = request.chat_options.reasoning_effort {
-        effort.as_str()
-    } else if let Some(value) = request.chat_options.template_kwargs.get("reasoning_effort") {
-        value.as_str().ok_or_else(|| {
-            Error::ChatTemplate(format!(
-                "template kwarg `reasoning_effort` must be a string, got {value}"
-            ))
-        })?
-    } else {
-        DEFAULT_THINKING_EFFORT
-    };
-
-    if !VALID_THINKING_EFFORTS.contains(&effort) {
-        return Err(Error::ChatTemplate(format!(
-            "unsupported thinking_effort={effort:?}; supported values are `low`, `high`, and `max`"
-        )));
+        })?;
+        if !VALID_THINKING_EFFORTS.contains(&effort) {
+            return Err(Error::InvalidReasoningEffort(format!(
+                "unsupported reasoning_effort={effort:?}; supported values are `low`, `high`, and `max`"
+            )));
+        }
     }
-    Ok(effort.to_string())
+    Ok(reasoning)
 }
 
 fn content_is_empty(content: &ChatContent) -> bool {
@@ -351,6 +350,7 @@ fn write_role_message(
     out: &mut K3TokenWriter<'_>,
     role: &str,
     name: Option<&str>,
+    message_index: usize,
     content: &ChatContent,
 ) -> Result<()> {
     let mut attrs = vec![("role", role.to_string())];
@@ -359,7 +359,7 @@ fn write_role_message(
     }
     let attr_refs: Vec<(&str, &str)> = attrs.iter().map(|(k, v)| (*k, v.as_str())).collect();
     write_open_tag(out, "message", &attr_refs)?;
-    write_content(out, content)?;
+    write_content(out, message_index, content)?;
     write_close_tag(out, "message")?;
     out.control(END_OF_MSG)
 }
@@ -368,6 +368,7 @@ fn write_tool_message(
     out: &mut K3TokenWriter<'_>,
     tool_name: &str,
     index: usize,
+    message_index: usize,
     content: &ChatContent,
 ) -> Result<()> {
     let index_str = index.to_string();
@@ -376,7 +377,7 @@ fn write_tool_message(
         "message",
         &[("role", "tool"), ("tool", tool_name), ("index", &index_str)],
     )?;
-    write_content(out, content)?;
+    write_content(out, message_index, content)?;
     write_close_tag(out, "message")?;
     out.control(END_OF_MSG)
 }
@@ -458,14 +459,20 @@ fn write_assistant_tool_call(
     write_close_tag(out, "call")
 }
 
-fn write_content(out: &mut K3TokenWriter<'_>, content: &ChatContent) -> Result<()> {
+fn write_content(
+    out: &mut K3TokenWriter<'_>,
+    message_index: usize,
+    content: &ChatContent,
+) -> Result<()> {
     match content {
         ChatContent::Text(text) => write_text_with_images(out, text),
         ChatContent::Parts(parts) => {
-            for part in parts {
+            for (content_part_index, part) in parts.iter().enumerate() {
                 match part {
                     ChatContentPart::Text { text } => write_text_with_images(out, text)?,
-                    ChatContentPart::ImageUrl { .. } => out.control(IMAGE_PLACEHOLDER)?,
+                    ChatContentPart::ImageUrl { .. } => {
+                        out.image(message_index, content_part_index)?;
+                    }
                     ChatContentPart::VideoUrl { .. } => {
                         return Err(Error::UnsupportedMultimodalContent("video_url"));
                     }

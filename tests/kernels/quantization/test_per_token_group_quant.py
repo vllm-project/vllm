@@ -11,26 +11,49 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
-    "shape", [(31, 128), (32, 128), (63, 256), (64, 256), (16, 512)]
+    "shape",
+    [
+        (0, 128),
+        (1, 128),
+        (3, 384),
+        (5, 384),
+        (7, 384),
+        (15, 384),
+        (31, 128),
+        (32, 128),
+        (63, 256),
+        (64, 256),
+        (16, 512),
+        (3, 2688),
+        (3, 5376),
+    ],
 )
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("column_major", [False, True])
 @pytest.mark.parametrize("tma_aligned", [False, True])
 @pytest.mark.parametrize("scale_ue8m0", [False, True])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test on CUDA/ROCm."
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Only test on CUDA/ROCm/XPU.",
 )
 def test_per_token_group_quant_fp8(
-    shape, column_major: bool, tma_aligned: bool, scale_ue8m0: bool, group_size: int
+    shape,
+    dtype,
+    column_major: bool,
+    tma_aligned: bool,
+    scale_ue8m0: bool,
+    group_size: int,
 ):
-    device = "cuda"
+    """Tail groups preserve FP8 values and scales in every supported layout."""
+    device = current_platform.device_type
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
-    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=dtype) * 8
 
-    # cuda path
+    # native kernel path
     out_q, scale = fp8_utils.per_token_group_quant_fp8(
         x,
         group_size,
@@ -40,7 +63,10 @@ def test_per_token_group_quant_fp8(
     )
 
     # triton ref
-    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
+    with (
+        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False),
+        patch("vllm.platforms.current_platform.is_xpu", return_value=False),
+    ):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
             x,
             group_size,
@@ -76,6 +102,11 @@ def test_per_token_group_quant_fp8(
         # Larger shapes with padding
         (127, 7168, 128),
         (253, 640, 128),
+        (1, 32, 32),
+        (3, 64, 32),
+        (7, 160, 32),
+        (32, 512, 32),
+        (127, 4096, 32),
     ],
 )
 @pytest.mark.parametrize("poisoned_scales", [False, True])
@@ -88,7 +119,6 @@ def test_per_token_group_quant_fp8_packed(
 ):
     """Test the packed DeepGEMM quantization kernel against the Triton
     reference (row-major, UE8M0 scales)."""
-
     device = "cuda"
     torch.manual_seed(42)
 
@@ -175,7 +205,6 @@ def test_per_token_group_quant_fp8_packed_all_zero():
     For all-zero input, eps/fp8_max < 1e-10, so the inner fmax clamps back to
     1e-10, giving exp2(ceil(log2(1e-10))) = exp2(-33) => UE8M0 byte 0x5E (94).
     """
-
     device = "cuda"
     num_tokens, hidden_dim, group_size = 4, 7168, 128
     x = torch.zeros((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16)
@@ -228,7 +257,6 @@ def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     """Inputs whose absmax/max_8bit produces a non-power-of-2 force the
     mantissa-rounding-up branch (exp_byte += 1). Locks down this behavior
     before optimization."""
-
     device = "cuda"
     num_tokens, hidden_dim, group_size = 4, 7168, 128
 
@@ -301,7 +329,6 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
     """When output_q is allocated with shape (tma_aligned_mn, k) instead of
     (mn, k), the kernel must overwrite the padded mn rows with zeros so
     callers can use ``torch.empty`` instead of ``torch.zeros``."""
-
     device = "cuda"
     group_size = 128
     torch.manual_seed(42)
@@ -365,7 +392,6 @@ def test_per_token_group_quant_fp8_packed_large_mn():
     This is a differential test that compares fp8 output against Triton output
     reference when token size sits just above the gridDim.y 2^16 - 1 limit.
     """
-
     device = "cuda"
     group_size = 128
     # hidden 2048 -> 2048/128 = 16 groups per row -> kx=16, ry=1: one grid row per mn
@@ -402,16 +428,34 @@ def test_per_token_group_quant_fp8_packed_large_mn():
     assert torch.equal(out_s_packed.cpu(), expected.cpu()), "Packed scale mismatch"
 
 
-@pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (0, 128),
+        (1, 128),
+        (3, 384),
+        (5, 384),
+        (7, 384),
+        (15, 384),
+        (32, 128),
+        (64, 256),
+        (16, 512),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("group_size", [64, 128])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_per_token_group_quant_int8(shape, group_size: int):
-    device = "cuda"
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Only test on CUDA/ROCm/XPU.",
+)
+def test_per_token_group_quant_int8(shape, dtype, group_size: int):
+    """The shared launch policy also handles INT8 tail groups."""
+    device = current_platform.device_type
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
-    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=dtype) * 8
 
     # cuda path
     out_q, scale = int8_utils.per_token_group_quant_int8(
