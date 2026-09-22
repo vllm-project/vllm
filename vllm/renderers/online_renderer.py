@@ -104,17 +104,30 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     """Return the pre-tokenized prompt attached to a chat request, if any.
 
     ``prompt_token_ids`` is the public request field. Disaggregated serving may
-    instead forward the prefill stage's ids in ``kv_transfer_params`` so the
-    decode stage can skip re-tokenizing; that key is popped to keep the id list
-    out of the engine's sampling metadata. ``ChatCompletionRequest`` rejects the
-    two disagreeing.
+    instead forward the prefill stage's ids in ``kv_transfer_params``; that key
+    is popped to keep the id list out of the engine's sampling metadata.
+    ``ChatCompletionRequest`` copies the key into the field, so its schema has
+    validated both spellings; other request types carry the key unvalidated
+    and are checked here.
     """
-    ids = (
-        request.prompt_token_ids if isinstance(request, ChatCompletionRequest) else None
-    )
     kv = getattr(request, "kv_transfer_params", None)
     kv_ids = kv.pop("prompt_token_ids", None) if isinstance(kv, dict) else None
-    return ids or kv_ids or None
+    if isinstance(request, ChatCompletionRequest):
+        return request.prompt_token_ids
+    if kv_ids is None:
+        return None
+    # bool is an int subclass, hence the exact type check
+    if (
+        not isinstance(kv_ids, list)
+        or not kv_ids
+        or any(type(x) is not int or x < 0 for x in kv_ids)
+    ):
+        raise VLLMValidationError(
+            "`kv_transfer_params['prompt_token_ids']` must be a non-empty list "
+            "of non-negative integers.",
+            parameter="kv_transfer_params",
+        )
+    return kv_ids
 
 
 class OnlineRenderer:

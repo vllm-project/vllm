@@ -90,7 +90,12 @@ It can send the ids in the `prompt_token_ids` field of a regular
 skips templating and tokenization and uses the ids verbatim, while tool and
 reasoning parsing, streaming, and the chat-shaped response are unchanged.
 `messages` is still required and multimodal content is not supported with
-`prompt_token_ids`.
+`prompt_token_ids`. Template parameters are not applied to the ids:
+`continue_final_message`, `chat_template` and `documents` have no effect,
+`add_generation_prompt` still selects the response role, and
+`chat_template_kwargs` is still passed to the reasoning parser. `echo` is
+rejected and `return_prompt_text` returns no text. The Rust frontend
+(`VLLM_USE_RUST_FRONTEND=1`) rejects the field.
 
 ## Multimodal Render Features
 

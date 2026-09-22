@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -50,7 +51,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import HarmonyParser
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.mistral import MistralRenderer
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.online_renderer import OnlineRenderer, _reused_prompt_token_ids
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -2610,7 +2611,7 @@ async def test_chat_kv_transfer_prompt_token_ids_are_validated():
         await serving_chat.render_chat_request(request)
 
 
-@pytest.mark.parametrize("prompt_token_ids", [[], [-1]])
+@pytest.mark.parametrize("prompt_token_ids", [[], [-1], [1.5], "abc"])
 def test_chat_prompt_token_ids_rejects_invalid_ids(prompt_token_ids):
     with pytest.raises(ValidationError):
         ChatCompletionRequest(
@@ -2618,6 +2619,40 @@ def test_chat_prompt_token_ids_rejects_invalid_ids(prompt_token_ids):
             messages=PROMPT_TOKEN_IDS_MESSAGES,
             prompt_token_ids=prompt_token_ids,
         )
+
+
+@pytest.mark.parametrize("prompt_token_ids", [[], [-1], [1.5], "abc"])
+def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(prompt_token_ids):
+    """The alias is copied into the field, so its schema rejects the same values."""
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=PROMPT_TOKEN_IDS_MESSAGES,
+            kv_transfer_params={"prompt_token_ids": prompt_token_ids},
+        )
+
+
+def test_chat_kv_transfer_prompt_token_ids_fills_the_field():
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=PROMPT_TOKEN_IDS_MESSAGES,
+        kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+    )
+    assert request.prompt_token_ids == [10, 20, 30]
+
+
+@pytest.mark.parametrize("kv_ids", [[], [-1], [1.5], [True], "abc"])
+def test_reused_prompt_token_ids_guards_the_alias_on_other_requests(kv_ids):
+    """Requests without the chat schema still cannot pass untyped ids on."""
+    request = SimpleNamespace(kv_transfer_params={"prompt_token_ids": kv_ids})
+    with pytest.raises(VLLMValidationError):
+        _reused_prompt_token_ids(request)
+
+
+def test_reused_prompt_token_ids_pops_the_alias_on_other_requests():
+    request = SimpleNamespace(kv_transfer_params={"prompt_token_ids": [10, 20]})
+    assert _reused_prompt_token_ids(request) == [10, 20]
+    assert "prompt_token_ids" not in request.kv_transfer_params
 
 
 @pytest.mark.parametrize(
@@ -2647,6 +2682,20 @@ def test_chat_prompt_token_ids_rejects_multimodal_content(content):
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": content}],
+            prompt_token_ids=[10, 20, 30],
+        )
+
+
+def test_chat_prompt_token_ids_rejects_unknown_part_type_by_name():
+    with pytest.raises(VLLMValidationError, match="'hologram'"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "hologram", "hologram": "https://a/b.holo"}],
+                }
+            ],
             prompt_token_ids=[10, 20, 30],
         )
 

@@ -160,20 +160,30 @@ async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> Non
         )
 
 
-# Decode-side token reuse for disaggregated serving. The router forwards the
-# prefill stage's prompt token ids in kv_transfer_params so the decode stage
-# skips re-tokenizing.
+# Pre-tokenized prompts. A router, or the decode stage of disaggregated
+# serving, sends the ids it already has so the server skips re-tokenizing:
+# in the public ``prompt_token_ids`` field, or in the older
+# ``kv_transfer_params`` spelling.
 
 TOKEN_IN_MESSAGES = [{"role": "user", "content": "Hello, how are you today?"}]
 DECODE_MESSAGES = [{"role": "user", "content": "unrelated decode-side text"}]
 
 
-@pytest.mark.asyncio
-async def test_kv_transfer_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
-    """Ids forwarded in kv_transfer_params are used verbatim, skipping tokenize.
+def _pretokenized(spelling: str, ids: list[int]) -> dict:
+    if spelling == "prompt_token_ids":
+        return {"prompt_token_ids": ids}
+    return {"kv_transfer_params": {"prompt_token_ids": ids}}
 
-    The decode request carries different messages, so a response whose
-    prompt_token_ids match the forwarded ids proves the ids were used rather
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spelling", ["prompt_token_ids", "kv_transfer_params"])
+async def test_kv_transfer_prompt_token_ids_round_trip(
+    client: openai.AsyncOpenAI, spelling: str
+):
+    """Supplied ids are used verbatim, skipping tokenize.
+
+    The second request carries different messages, so a response whose
+    prompt_token_ids match the supplied ids proves the ids were used rather
     than the request's own messages. Generated text is not compared across
     requests because vLLM greedy decoding is not bitwise-reproducible.
     """
@@ -192,21 +202,22 @@ async def test_kv_transfer_prompt_token_ids_round_trip(client: openai.AsyncOpenA
         messages=DECODE_MESSAGES,
         max_completion_tokens=16,
         temperature=0,
-        extra_body={
-            "kv_transfer_params": {"prompt_token_ids": reused_ids},
-            "return_token_ids": True,
-        },
+        extra_body={**_pretokenized(spelling, reused_ids), "return_token_ids": True},
     )
 
-    # The engine saw the forwarded ids, not the decode request's own messages.
+    # The engine saw the supplied ids, not the request's own messages.
     assert decode.prompt_token_ids == reused_ids
+    assert decode.usage.prompt_tokens == len(reused_ids)
     # text-out: reuse still yields a detokenized message.
     assert decode.choices[0].message.content
 
 
 @pytest.mark.asyncio
-async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
-    """Decode-side token reuse streams chat-formatted text-out."""
+@pytest.mark.parametrize("spelling", ["prompt_token_ids", "kv_transfer_params"])
+async def test_kv_transfer_prompt_token_ids_streaming(
+    client: openai.AsyncOpenAI, spelling: str
+):
+    """A pre-tokenized prompt streams chat-formatted text-out."""
     baseline = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=TOKEN_IN_MESSAGES,
@@ -223,10 +234,7 @@ async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI
         max_completion_tokens=16,
         temperature=0,
         stream=True,
-        extra_body={
-            "kv_transfer_params": {"prompt_token_ids": reused_ids},
-            "return_token_ids": True,
-        },
+        extra_body={**_pretokenized(spelling, reused_ids), "return_token_ids": True},
     )
 
     content = ""
@@ -247,34 +255,3 @@ async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI
     # streamed text-out, reconstructed from deltas, with generated token ids.
     assert content
     assert delta_token_ids
-
-
-@pytest.mark.asyncio
-async def test_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
-    """A top-level ``prompt_token_ids`` is used verbatim, skipping tokenize.
-
-    Mirrors the kv_transfer_params round trip above, using the public field.
-    """
-    baseline = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=TOKEN_IN_MESSAGES,
-        max_completion_tokens=16,
-        temperature=0,
-        extra_body={"return_token_ids": True},
-    )
-    ids = baseline.prompt_token_ids
-    assert ids
-
-    reused = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=DECODE_MESSAGES,
-        max_completion_tokens=16,
-        temperature=0,
-        extra_body={"prompt_token_ids": ids, "return_token_ids": True},
-    )
-
-    # The engine saw the supplied ids, not the request's own messages.
-    assert reused.prompt_token_ids == ids
-    assert reused.usage.prompt_tokens == len(ids)
-    # text-out: the response is still a detokenized chat message.
-    assert reused.choices[0].message.content

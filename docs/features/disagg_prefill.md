@@ -79,7 +79,7 @@ decode = client.chat.completions.create(
 
 Setting `kv_transfer_params["prompt_token_ids"]` instead is still accepted for compatibility with existing proxies. If both are set they must contain the same ids.
 
-Either spelling is validated the same way. The ids are checked against the model's context length and are truncated when `truncate_prompt_tokens` is set, exactly as a prompt tokenized by the server would be, so an over-long prompt is rejected rather than silently reducing the number of output tokens. Because the prompt is no longer rendered from `messages`, a request that also carries non-text message content or sets `echo` is rejected instead of silently dropping them.
+Either spelling is validated the same way: the ids must be a non-empty list of non-negative integers, they are checked against the model's context length, and they are truncated when `truncate_prompt_tokens` is set, exactly as a prompt tokenized by the server would be, so an over-long prompt is rejected rather than silently reducing the number of output tokens. Because the prompt is no longer rendered from `messages`, a request that also carries non-text message content or sets `echo` is rejected instead of silently dropping them. Media cannot ride along with the ids because a token list carries none of the multimodal hashes the prefix cache keys its blocks on, so two prompts with the same text and different images would share cached KV. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not implement pre-tokenized prompts: it rejects `prompt_token_ids`, and it does not read the `kv_transfer_params` spelling, tokenizing `messages` as usual and forwarding `kv_transfer_params` to the engine unchanged.
 
 ## Development
 

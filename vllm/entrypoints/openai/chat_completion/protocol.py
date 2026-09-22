@@ -1026,9 +1026,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         A pre-tokenized prompt skips rendering, so anything derived from the
         rendered prompt is unavailable: non-text parts of ``messages`` would
         never reach the multimodal processor, and ``echo`` has no prompt text
-        to echo. Both spellings are checked, the field and the older
-        ``kv_transfer_params`` key. Runs before validation because the media
-        keys of a content part written without a ``type`` do not survive it.
+        to echo. The older ``kv_transfer_params`` spelling is copied into the
+        field so both go through its schema. Runs before validation because
+        the media keys of a content part written without a ``type`` do not
+        survive it.
         """
         if not isinstance(data, dict):
             return data
@@ -1042,11 +1043,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_token_ids is None and kv_ids is None:
             return data
 
-        if (
-            isinstance(kv_ids, list | tuple)
-            and isinstance(prompt_token_ids, list | tuple)
-            and list(kv_ids) != list(prompt_token_ids)
-        ):
+        if prompt_token_ids is None:
+            data["prompt_token_ids"] = kv_ids
+        elif kv_ids is not None and kv_ids != prompt_token_ids:
             raise VLLMValidationError(
                 "`prompt_token_ids` and `kv_transfer_params['prompt_token_ids']` "
                 "must match when both are set.",
