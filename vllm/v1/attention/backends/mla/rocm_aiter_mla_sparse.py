@@ -167,8 +167,7 @@ def triton_convert_req_index_to_global_index(
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
 ):
-    """
-    out[token_id, indice_id] =
+    """out[token_id, indice_id] =
         block_table[req_id[token_id],
             token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
         + token_indices[token_id, indice_id] % BLOCK_SIZE
@@ -808,6 +807,11 @@ class ROCMAiterMLASparseImpl(
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
             (q_concat_shape, vllm_config.model_config.dtype),
         )
+
+    def record_logical_topk_ready(self) -> None:
+        # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
+        # but does not participate in sparse-MLA index groups.
+        pass
 
     def _forward_mla(
         self,

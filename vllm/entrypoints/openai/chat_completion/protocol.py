@@ -453,18 +453,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    return_assistant_tokens_mask: bool = Field(
-        default=False,
-        description=(
-            "If true, the /render response will include an "
-            "``assistant_tokens_mask`` field — a per-token list of 0/1 "
-            "values indicating which tokens were assistant-generated. "
-            "Requires the chat template to use ``{% generation %}`` "
-            "tags.  When the template does not support it, "
-            "``assistant_tokens_mask`` will be ``null``."
-        ),
-    )
-
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -605,7 +593,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
-            return_assistant_tokens_mask=bool(self.return_assistant_tokens_mask),
             # No-tools requests default to tool_choice="none" at the API
             # layer. Collapse that default before rendering, so K3 emits a
             # model-visible tool-choice instruction only for requests with a
@@ -659,6 +646,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             temperature=temperature,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            skip_special_tokens=self.skip_special_tokens,
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
