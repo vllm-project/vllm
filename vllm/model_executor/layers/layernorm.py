@@ -195,13 +195,15 @@ class GemmaRMSNorm(CustomOp):
 
 
 @CustomOp.register("layer_norm")
-class StandardLayerNorm(CustomOp):
+class LayerNorm(CustomOp):
     """Standard (mean-centered) LayerNorm.
 
-    Drop-in for a bare `nn.LayerNorm` that dispatches to a fused XPU SYCL
-    kernel (vllm-xpu-kernels `layer_norm`, PR #577); falls back to the native
-    implementation off XPU or when the op isn't in the installed
-    vllm-xpu-kernels package.
+    Drop-in for a bare `nn.LayerNorm` that dispatches to a fused XPU kernel
+    when one is available, and to the native implementation otherwise.
+
+    Normalization runs in the wider of the input and parameter dtypes and the
+    result is cast back to the input dtype, so `dtype=torch.float32` gives an
+    fp32 reduction for a lower-precision input.
     """
 
     def __init__(
@@ -223,7 +225,21 @@ class StandardLayerNorm(CustomOp):
             if bias:
                 self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=weight_dtype))
 
+    def _compute_dtype(self, x: torch.Tensor) -> torch.dtype:
+        if self.weight is None:
+            return x.dtype
+        return torch.promote_types(x.dtype, self.weight.dtype)
+
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        compute_dtype = self._compute_dtype(x)
+        if compute_dtype != x.dtype:
+            return F.layer_norm(
+                x.to(compute_dtype),
+                self.normalized_shape,
+                self.weight,
+                self.bias,
+                self.eps,
+            ).type_as(x)
         return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
@@ -236,6 +252,9 @@ class StandardLayerNorm(CustomOp):
             self.weight is None
             or self.bias is None
             or not hasattr(torch.ops._C, "layer_norm")
+            # The kernel reduces in the input dtype, so a widened reduction
+            # takes the native path.
+            or self._compute_dtype(x) != x.dtype
         ):
             return self.forward_native(x)
         # empty_like preserves x's strides, but the kernel requires a
@@ -387,19 +406,3 @@ class RMSNormGated(CustomOp):
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.forward_cuda(x, z)
-
-
-class LayerNorm(nn.Module):
-    """Layer Normalization."""
-
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
-
-    def forward(self, x: torch.Tensor):
-        return F.layer_norm(
-            x.float(), (self.dim,), self.weight, self.bias, self.eps
-        ).type_as(x)

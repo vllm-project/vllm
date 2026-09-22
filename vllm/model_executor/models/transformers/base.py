@@ -467,7 +467,7 @@ class Base(
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
         - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
-        - `nn.LayerNorm` with vLLM's `StandardLayerNorm`
+        - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
         tp_plan = self.model.tp_plan or {}
 
@@ -493,7 +493,7 @@ class Base(
 
         orig_to_new_stacked: dict[str, tuple[str, ShardId]] = {}
 
-        # OlmoForCausalLM regresses on XPU (-3.1% throughput); others gain, exclude it.
+        # OlmoForCausalLM does not benefit from the swap; exclude it.
         arch = self.config.architectures[0].lower()
         swap_layernorm = "olmoforcausallm" not in arch
 
