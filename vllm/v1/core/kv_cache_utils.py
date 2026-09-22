@@ -1552,6 +1552,17 @@ def _get_kv_cache_groups_uniform_page_size(
         # layers while accommodating speculative decoding drafters that add
         # extra layers to one attention type.
         group_size = max_num_layers
+    if group_size == 1 and max_num_layers > 1:
+        # A single-layer bucket (e.g. a drafter layer) would otherwise force
+        # per-layer groups. Pick the multi-layer group size with the least
+        # padding instead, preferring fewer groups on ties.
+        group_size = min(
+            range(2, max_num_layers + 1),
+            key=lambda size: (
+                sum(-len(layers) % size for layers in layer_buckets),
+                sum(cdiv(len(layers), size) for layers in layer_buckets),
+            ),
+        )
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size

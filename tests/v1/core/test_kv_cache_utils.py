@@ -3084,6 +3084,18 @@ def _grouping_config():
     )
 
 
+def test_single_layer_bucket_does_not_force_per_layer_groups():
+    # A lone drafter layer used to force one group per layer (41 groups).
+    specs = {
+        **{f"full.{i}": new_kv_cache_spec() for i in range(10)},
+        **{f"sw.{i}": new_sliding_window_spec() for i in range(30)},
+        "draft.0": new_sliding_window_spec(sliding_window=1024),
+    }
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+    assert len(groups) == 21
+    assert max(len(group.layer_names) for group in groups) == 2
+
+
 def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     block_size = 544
     full_spec = FullAttentionSpec(
