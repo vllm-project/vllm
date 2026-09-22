@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
@@ -38,7 +39,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             if speculative_config.kv_cache_dtype is not None
             else vllm_config.cache_config
         ),
-        load_config=get_pp_safe_draft_load_config(vllm_config.load_config),
+        load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
     with set_model_tag("dflash_head"):
         dflash_model = get_model(
