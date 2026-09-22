@@ -43,18 +43,6 @@ steps:
   commands:
     - pytest -v -s v1/attention/sparse_mla
 
-- label: ":nvidia: (B200) V1 Attention / MLA Backends"
-  key: v1-attention-b200-mla-backends
-  timeout_in_minutes: 45
-  device: b200-k8s
-  source_file_dependencies:
-    - vllm/config/attention.py
-    - vllm/model_executor/layers/attention
-    - vllm/v1/attention
-    - tests/v1/attention
-  commands:
-    - pytest -v -s v1/attention/mla/backends
-
 - label: ":nvidia: (B200) V1 Attention / MLA Correctness Shard %N"
   key: v1-attention-b200-mla-correctness
   timeout_in_minutes: 45
@@ -80,8 +68,8 @@ steps:
   commands:
     - pytest -v -s v1/attention/dense v1/attention/ssm
 
-- label: ":nvidia: (B200) V1 Attention / Decode Context Parallelism"
-  key: v1-attention-b200-dcp
+- label: ":nvidia: (B200) V1 Attention / DCP, MLA Backends and ROCm"
+  key: v1-attention-b200-dcp-mla-backends-rocm
   timeout_in_minutes: 45
   device: b200-k8s
   source_file_dependencies:
@@ -90,16 +78,8 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
+    # Three short coverage units share one worker. Each keeps its own pytest
+    # process so a failure still names the unit it came from.
     - pytest -v -s v1/attention/dcp
-
-- label: ":nvidia: (B200) V1 Attention / ROCm Compatibility"
-  key: v1-attention-b200-rocm-compatibility
-  timeout_in_minutes: 45
-  device: b200-k8s
-  source_file_dependencies:
-    - vllm/config/attention.py
-    - vllm/model_executor/layers/attention
-    - vllm/v1/attention
-    - tests/v1/attention
-  commands:
+    - pytest -v -s v1/attention/mla/backends
     - pytest -v -s v1/attention/rocm
