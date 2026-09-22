@@ -18,7 +18,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdatePayload,
     WeightTransferUpdateRequest,
 )
-from vllm.utils.weight_checksum import merge_finish_checksums
 
 if TYPE_CHECKING:
     from ray.actor import ActorHandle
@@ -68,14 +67,13 @@ class HTTPVLLMWeightSyncClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def _post(self, path: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _post(self, path: str, json: dict[str, Any] | None = None) -> None:
         import requests
 
         response = requests.post(
             f"{self.base_url}/{path}", json=json, timeout=self.timeout
         )
         response.raise_for_status()
-        return response.json() if response.content else {}
 
     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
         self._post("init_weight_transfer_engine", {"init_info": init_info})
@@ -83,24 +81,16 @@ class HTTPVLLMWeightSyncClient:
     def start_weight_update(self) -> None:
         self._post("start_weight_update")
 
-    def update_weights(
-        self, update_info: WeightTransferUpdatePayload, checksum: bool = False
-    ) -> None:
-        body: dict[str, Any] = {"update_info": _json_safe_update_payload(update_info)}
-        if checksum:
-            body["checksum"] = True
-        self._post("update_weights", body)
+    def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
+        self._post(
+            "update_weights", {"update_info": _json_safe_update_payload(update_info)}
+        )
 
-    def finish_weight_update(
-        self, weight_version: str | None = None
-    ) -> dict[str, str] | None:
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
         json = (
             {"weight_version": weight_version} if weight_version is not None else None
         )
-        # A server that was not asked for digests, or one predating the option,
-        # answers without the field.
-        response = self._post("finish_weight_update", json) or {}
-        return response.get("checksums")
+        self._post("finish_weight_update", json)
 
 
 class RayVLLMWeightSyncClient:
@@ -124,24 +114,17 @@ class RayVLLMWeightSyncClient:
 
         ray.get([h.start_weight_update.remote() for h in self.handles])
 
-    def update_weights(
-        self, update_info: WeightTransferUpdatePayload, checksum: bool = False
-    ) -> None:
+    def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
         import ray
 
-        request = WeightTransferUpdateRequest(
-            update_info=update_info, checksum=checksum
-        )
+        request = WeightTransferUpdateRequest(update_info=update_info)
         ray.get([h.update_weights.remote(request) for h in self.handles])
 
-    def finish_weight_update(
-        self, weight_version: str | None = None
-    ) -> dict[str, str] | None:
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
         import ray
 
-        per_actor = ray.get([h.finish_weight_update.remote() for h in self.handles])
+        ray.get([h.finish_weight_update.remote() for h in self.handles])
         if weight_version is not None:
             ray.get(
                 [h.update_weight_version.remote(weight_version) for h in self.handles]
             )
-        return merge_finish_checksums(per_actor)

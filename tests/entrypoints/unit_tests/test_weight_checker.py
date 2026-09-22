@@ -14,7 +14,6 @@ from vllm.entrypoints.serve.dev.rlhf.weight_checker import handle_weight_checker
 from vllm.utils.weight_checksum import (
     combine_weight_checksums,
     compare_weight_checksum_reports,
-    merge_finish_checksums,
     split_checksum_key,
 )
 from vllm.v1.worker import gpu_worker
@@ -73,31 +72,6 @@ def test_merge_rejects_duplicate_rank_keys_even_when_values_match():
 def test_merge_preserves_identically_named_weights_on_distinct_ranks():
     shards = [{"dp0:tp0:w": "a"}, {"dp1:tp0:w": "b"}]
     assert combine_weight_checksums(shards) == {"dp0:tp0:w": "a", "dp1:tp0:w": "b"}
-
-
-@pytest.mark.parametrize(
-    "per_worker, expected",
-    [
-        # No worker was asked, so the session reports nothing rather than an
-        # empty map a caller could mistake for a successful empty check.
-        ([None, None], None),
-        ([], None),
-        ([{"dp0:tp0:w": "a"}], {"dp0:tp0:w": "a"}),
-        ([None, {"dp0:tp0:w": "a"}], {"dp0:tp0:w": "a"}),
-        (
-            [{"dp0:tp0:w": "a"}, {"dp0:tp1:w": "b"}],
-            {"dp0:tp0:w": "a", "dp0:tp1:w": "b"},
-        ),
-    ],
-)
-def test_merge_finish_checksums(per_worker, expected):
-    assert merge_finish_checksums(per_worker) == expected
-
-
-def test_merge_finish_checksums_rejects_duplicate_keys():
-    """A worker that forgot its rank prefix must not be silently merged away."""
-    with pytest.raises(RuntimeError, match="Duplicate weight checksum keys"):
-        merge_finish_checksums([{"dp0:tp0:w": "a"}, {"dp0:tp0:w": "a"}])
 
 
 def test_dense_dp_ranks_get_distinct_key_prefixes(single_rank_groups):

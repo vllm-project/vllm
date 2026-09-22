@@ -221,7 +221,6 @@ class Worker(WorkerBase):
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
         self._weight_update_is_draft = False
-        self._weight_update_checksum = False
 
         # Worker profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -1460,9 +1459,7 @@ class Worker(WorkerBase):
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
 
-    def update_weights(
-        self, update_info: dict | list[dict], checksum: bool = False
-    ) -> None:
+    def update_weights(self, update_info: dict | list[dict]) -> None:
         """Receive one weight update chunk from the trainer.
 
         start_weight_update must be called before update_weights and
@@ -1473,8 +1470,6 @@ class Worker(WorkerBase):
         Args:
             update_info: Backend-specific update info, or a list indexed by
                 global worker rank across data parallel replicas.
-            checksum: Whether finish_weight_update should return this worker's
-                weight digests. Recorded per session, so any chunk can set it.
 
         """
         self._check_weight_transfer_engine()
@@ -1484,9 +1479,6 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 "start_weight_update must be called before update_weights."
             )
-
-        if checksum:
-            self._weight_update_checksum = True
 
         with set_current_vllm_config(self.vllm_config):
             try:
@@ -1504,14 +1496,8 @@ class Worker(WorkerBase):
                 self.weight_transfer_engine.reset_weight_update_target()
                 raise
 
-    def finish_weight_update(self) -> dict[str, str] | None:
-        """Finish the current weight update session.
-
-        Returns:
-            This worker's rank-qualified weight digests when the session asked
-            for them, otherwise None. The digests are taken after the transfer
-            engine has finished, so they describe the weights as committed.
-        """
+    def finish_weight_update(self) -> None:
+        """Finish the current weight update session."""
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1519,9 +1505,6 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 "finish_weight_update called without a matching start_weight_update."
             )
-
-        wants_checksum = self._weight_update_checksum
-        self._weight_update_checksum = False
 
         with set_current_vllm_config(self.vllm_config):
             self.weight_transfer_engine.finish_weight_update()
@@ -1531,10 +1514,6 @@ class Worker(WorkerBase):
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
             self.model_runner.reset_lora_state()
-
-        if not wants_checksum:
-            return None
-        return self.compute_weight_checksums()
 
     def shutdown(self) -> None:
         gc.unfreeze()

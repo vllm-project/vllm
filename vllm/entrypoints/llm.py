@@ -51,7 +51,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
-from vllm.utils.weight_checksum import merge_finish_checksums
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -896,35 +895,22 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         """Update the weights of the model.
 
         Args:
-            request: Weight update request with backend-specific update info.
-                ``checksum`` asks finish_weight_update to return weight digests.
+            request: Weight update request with backend-specific update info
 
         """
-        if isinstance(request, dict):
-            update_info_dict = request["update_info"]
-            checksum = bool(request.get("checksum", False))
-        else:
-            update_info_dict = request.update_info
-            checksum = request.checksum
-
-        self.llm_engine.collective_rpc(
-            "update_weights",
-            kwargs={"update_info": update_info_dict, "checksum": checksum},
+        update_info_dict = (
+            request["update_info"] if isinstance(request, dict) else request.update_info
         )
 
-    def finish_weight_update(
-        self, weight_version: str | None = None
-    ) -> dict[str, str] | None:
-        """Finish the weight update and set its version if provided.
+        self.llm_engine.collective_rpc(
+            "update_weights", kwargs={"update_info": update_info_dict}
+        )
 
-        Returns:
-            Rank-qualified weight digests when the update asked for them by
-            passing ``checksum=True``, otherwise None.
-        """
-        per_worker = self.llm_engine.collective_rpc("finish_weight_update")
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
+        self.llm_engine.collective_rpc("finish_weight_update")
         if weight_version is not None:
             self.llm_engine.set_weight_version(weight_version)
-        return merge_finish_checksums(per_worker)
 
     def update_weight_version(self, new_version: str) -> None:
         """Set the weight version without updating weights."""

@@ -68,7 +68,6 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
-    worker._weight_update_checksum = False
     worker.model_runner = _RecordingModelRunner()
     return worker
 
@@ -198,60 +197,6 @@ def test_finish_without_start_raises():
     worker = _make_worker(_RecordingEngine())
     with pytest.raises(RuntimeError, match="without a matching"):
         Worker.finish_weight_update(worker)
-
-
-def test_finish_returns_no_checksums_unless_requested():
-    """Hashing every weight is opt-in, so the default session pays nothing."""
-    worker = _make_worker(_RecordingEngine())
-    calls: list[dict[str, str]] = []
-
-    def compute() -> dict[str, str]:
-        calls.append({})
-        return {"dp0:pp0:pcp0:tp0:ep0:w": "a"}
-
-    worker.compute_weight_checksums = compute
-
-    Worker.start_weight_update(worker)
-    Worker.update_weights(worker, {"names": ["w"]})
-    assert Worker.finish_weight_update(worker) is None
-    assert calls == []
-
-
-def test_finish_returns_checksums_when_the_update_requested_them():
-    """The digests come back after the transfer engine has committed."""
-    engine = _RecordingEngine()
-    worker = _make_worker(engine)
-    seen_after_finish: list[bool] = []
-    digests = {"dp0:pp0:pcp0:tp0:ep0:w": "a"}
-
-    def compute() -> dict[str, str]:
-        seen_after_finish.append(engine.finished)
-        return digests
-
-    worker.compute_weight_checksums = compute
-
-    Worker.start_weight_update(worker)
-    Worker.update_weights(worker, {"names": ["w"]}, checksum=True)
-    assert Worker.finish_weight_update(worker) == digests
-    assert seen_after_finish == [True]
-
-
-def test_checksum_request_does_not_leak_into_the_next_session():
-    """The flag is per session, so it cannot make a later update hash."""
-    engine = _RecordingEngine()
-    worker = _make_worker(engine)
-    calls: list[int] = []
-    worker.compute_weight_checksums = lambda: calls.append(1) or {}
-
-    Worker.start_weight_update(worker)
-    Worker.update_weights(worker, {"names": ["w"]}, checksum=True)
-    assert Worker.finish_weight_update(worker) == {}
-    assert calls == [1]
-
-    Worker.start_weight_update(worker)
-    Worker.update_weights(worker, {"names": ["w"]})
-    assert Worker.finish_weight_update(worker) is None
-    assert calls == [1]
 
 
 def test_update_resets_active_on_error():

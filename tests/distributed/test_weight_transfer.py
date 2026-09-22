@@ -1148,9 +1148,6 @@ class RecordingClient:
         self.order: list[str] = []
         self.last_init_info: dict | None = None
         self.last_update_info: dict | None = None
-        self.last_checksum_requested: bool | None = None
-        # Digests reported by finish_weight_update when one is requested.
-        self.checksums: dict[str, str] | None = None
 
     def init_weight_transfer_engine(self, init_info: dict) -> None:
         self.order.append("init")
@@ -1159,16 +1156,12 @@ class RecordingClient:
     def start_weight_update(self) -> None:
         self.order.append("start")
 
-    def update_weights(self, update_info: dict, checksum: bool = False) -> None:
+    def update_weights(self, update_info: dict) -> None:
         self.order.append("update")
         self.last_update_info = update_info
-        self.last_checksum_requested = checksum
 
-    def finish_weight_update(
-        self, weight_version: str | None = None
-    ) -> dict[str, str] | None:
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
         self.order.append("finish")
-        return self.checksums if self.last_checksum_requested else None
 
 
 def _module_with(*pairs):
@@ -1226,50 +1219,6 @@ class TestTrainerClients:
         client.finish_weight_update("step-42")
         handle.finish_weight_update.remote.assert_called_once_with()
         handle.update_weight_version.remote.assert_called_once_with("step-42")
-
-    def test_clients_forward_the_checksum_flag(self, monkeypatch):
-        """Asking for digests is opt-in, and only then is it put on the wire."""
-        import ray
-
-        monkeypatch.setattr(ray, "get", lambda refs: None)
-        handle = MagicMock()
-        RayVLLMWeightSyncClient(handle).update_weights({"names": ["w"]}, checksum=True)
-        (request,), _ = handle.update_weights.remote.call_args
-        assert request.checksum is True
-
-        captured = {}
-
-        def fake_post(self, path, json=None):
-            captured["path"] = path
-            captured["json"] = json
-
-        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
-        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
-
-        client.update_weights({"names": ["w"]})
-        assert "checksum" not in captured["json"]
-        client.update_weights({"names": ["w"]}, checksum=True)
-        assert captured["json"]["checksum"] is True
-
-    def test_finish_returns_the_digests_the_server_reported(self, monkeypatch):
-        """The HTTP client surfaces checksums, and tolerates their absence."""
-        monkeypatch.setattr(
-            HTTPVLLMWeightSyncClient,
-            "_post",
-            lambda self, path, json=None: {
-                "message": "Weight update finished",
-                "checksums": {"dp0:tp0:w": "a"},
-            },
-        )
-        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
-        assert client.finish_weight_update() == {"dp0:tp0:w": "a"}
-
-        monkeypatch.setattr(
-            HTTPVLLMWeightSyncClient,
-            "_post",
-            lambda self, path, json=None: {"message": "Weight update finished"},
-        )
-        assert client.finish_weight_update() is None
 
     def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
         """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""
