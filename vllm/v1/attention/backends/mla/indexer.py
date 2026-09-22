@@ -84,12 +84,27 @@ def aiter_mxfp4_available() -> bool:
                 function = getattr(module, prefix + name + suffix)
                 if not required.issubset(inspect.signature(function).parameters):
                     return False
-        prefill_params = inspect.signature(
-            prefill.flydsl_pa_mqa_logits_fp4_prefill
-        ).parameters
-        return {"cta_info", "n_ctas"}.issubset(prefill_params) and callable(
-            getattr(prefill, "compute_prefill_schedule", None)
-        )
+        for function, parameters in (
+            (decode.flydsl_pa_mqa_logits_fp4, {"cta_info", "total_ctas"}),
+            (prefill.flydsl_pa_mqa_logits_fp4_prefill, {"cta_info", "n_ctas"}),
+            (
+                decode.compute_varctx_schedule,
+                {
+                    "block_k",
+                    "parallel_unit_num",
+                    "max_seq_len",
+                    "next_n",
+                    "cta_info_out",
+                },
+            ),
+            (
+                prefill.compute_prefill_schedule,
+                {"block_k", "parallel_unit_num", "max_seq_len"},
+            ),
+        ):
+            if not parameters.issubset(inspect.signature(function).parameters):
+                return False
+        return True
     except (ImportError, AttributeError, TypeError, ValueError):
         return False
 
@@ -117,7 +132,7 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         if not aiter_mxfp4_available():
             logger.warning(
                 "indexer_kv_dtype='mxfp4' was requested, but the installed "
-                "AITER build lacks the required stride/rebase or prefill "
+                "AITER build lacks the required stride/rebase or decode/prefill "
                 "schedule ABI; falling back to the fp8 indexer."
             )
             return False
@@ -1297,6 +1312,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 chunks.append((req_slice, slice(q_off, q_off + sub_m)))
 
         return chunks
+
     @staticmethod
     def _split_fp4_indexer_prefill_chunks(
         compressed_seq_lens_cpu: torch.Tensor,

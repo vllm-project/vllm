@@ -342,8 +342,6 @@ def _rocm_fp4_cache_views(
     return values, scales
 
 
-
-
 def _rocm_fp4_sparse_attn_indexer(
     kv_cache,
     q_quant,
