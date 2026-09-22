@@ -7,6 +7,7 @@ import asyncio
 import pytest
 from prometheus_client import CollectorRegistry
 
+from vllm.entrypoints.serve.dev.rlhf import metrics as rlhf_metrics
 from vllm.entrypoints.serve.dev.rlhf.metrics import WeightOperationMetrics
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -63,3 +64,35 @@ def test_overlapping_requests_do_not_clear_each_others_gauge():
         )
         == 2
     )
+
+
+def test_metrics_bind_to_the_registry_returned_by_the_factory(monkeypatch):
+    """Import-time creation would bind to whatever registry was default then."""
+    registry = CollectorRegistry()
+    monkeypatch.setattr(rlhf_metrics, "get_prometheus_registry", lambda: registry)
+    monkeypatch.setattr(rlhf_metrics, "_metrics", None)
+
+    metrics = rlhf_metrics.weight_operation_metrics()
+
+    assert isinstance(metrics, WeightOperationMetrics)
+    assert PREFIX + "requests_total" in registry._names_to_collectors
+    assert PREFIX + "request_duration_seconds" in registry._names_to_collectors
+    assert PREFIX + "requests_in_flight" in registry._names_to_collectors
+
+
+def test_recorder_is_created_once(monkeypatch):
+    registries = []
+    registry = CollectorRegistry()
+
+    def factory():
+        registries.append(registry)
+        return registry
+
+    monkeypatch.setattr(rlhf_metrics, "get_prometheus_registry", factory)
+    monkeypatch.setattr(rlhf_metrics, "_metrics", None)
+
+    assert (
+        rlhf_metrics.weight_operation_metrics()
+        is rlhf_metrics.weight_operation_metrics()
+    )
+    assert len(registries) == 1

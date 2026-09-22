@@ -156,13 +156,17 @@ pub async fn finish_weight_update(
         .finish_weight_update()
         .await
         .map_err(|error| utility_call_error("finish_weight_update", error))?;
+    recorder.success();
+    // Version bookkeeping is a separate operation: a failure here must not be
+    // reported as a failed finish, and the Python frontend records it the same way.
     if let Some(version) = request.weight_version {
+        let recorder = METRICS.api_server.record_weight_operation("set_version");
         client
             .set_weight_version(&version)
             .await
             .map_err(|error| utility_call_error("set_weight_version", error))?;
+        recorder.success();
     }
-    recorder.success();
 
     Ok(Json(MessageResponse {
         message: "Weight update finished",
@@ -175,11 +179,14 @@ pub async fn update_weight_version(
     body: Result<Json<UpdateWeightVersionRequest>, JsonRejection>,
 ) -> Result<Json<UpdateWeightVersionResponse>, ApiError> {
     let Json(body) = body?;
+
+    let recorder = METRICS.api_server.record_weight_operation("set_version");
     state
         .engine_core_client()
         .set_weight_version(&body.new_version)
         .await
         .map_err(|error| utility_call_error("set_weight_version", error))?;
+    recorder.success();
 
     Ok(Json(UpdateWeightVersionResponse {
         success: true,

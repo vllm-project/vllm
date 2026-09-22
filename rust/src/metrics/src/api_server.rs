@@ -100,7 +100,8 @@ impl ApiServerMetrics {
         let weight_operation_requests = WeightOperationCounterFamily::default();
         registry.register(
             "vllm:rl_weight_update_requests",
-            "Dispatched HTTP weight operations by outcome.",
+            "Dispatched HTTP weight operations by outcome. 'finish' excludes the \
+             weight-version handshake, which is counted separately as 'set_version'.",
             weight_operation_requests.clone(),
         );
 

@@ -22,7 +22,7 @@ logger = init_logger(__name__)
 def _weight_metrics():
     from vllm.entrypoints.serve.dev.rlhf.metrics import weight_operation_metrics
 
-    return weight_operation_metrics
+    return weight_operation_metrics()
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -216,8 +216,13 @@ async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
 ):
+    # Finishing and version bookkeeping are separate operations, mirroring the
+    # Rust frontend: a version failure must not be reported as a failed finish.
     with _weight_metrics().record("finish"):
-        await engine_client(raw_request).finish_weight_update(weight_version)
+        await engine_client(raw_request).finish_weight_update()
+    if weight_version is not None:
+        with _weight_metrics().record("set_version"):
+            await engine_client(raw_request).update_weight_version(weight_version)
     return JSONResponse(content={"message": "Weight update finished"})
 
 
@@ -226,7 +231,8 @@ async def update_weight_version(
     raw_request: Request,
     new_version: Annotated[str, Body(embed=True)],
 ):
-    await engine_client(raw_request).update_weight_version(new_version)
+    with _weight_metrics().record("set_version"):
+        await engine_client(raw_request).update_weight_version(new_version)
     return JSONResponse(content={"success": True, "new_version": new_version})
 
 
