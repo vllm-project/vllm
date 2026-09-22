@@ -107,7 +107,19 @@ class CacheConfig:
     per-instance limit, and only applies to the current vLLM instance. It does
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
-    set the GPU memory utilization to 0.5 for each instance."""
+    set the GPU memory utilization to 0.5 for each instance. On non-GPU
+    installs, this value controls the corresponding device memory utilization.
+    """
+
+    @property
+    def device_memory_utilization(self) -> float:
+        """Device-neutral alias for ``gpu_memory_utilization``."""
+        return self.gpu_memory_utilization
+
+    @device_memory_utilization.setter
+    def device_memory_utilization(self, value: float) -> None:
+        self.gpu_memory_utilization = value
+
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
@@ -184,7 +196,7 @@ class CacheConfig:
       when the token is at position i * block_size. This is the default when prefix
       caching is enabled.
     """
-    enable_mamba_fine_grained_prefix_cache: bool = False
+    enable_mamba_shared_prefix_checkpoint: bool = False
     """Also register a Mamba "align" checkpoint at the shared-prefix junction --
     where an EAGLE/MTP sibling was observed to resume -- instead of only at the
     prompt tail. Off by default; only takes effect with `mamba_cache_mode`
@@ -211,6 +223,8 @@ class CacheConfig:
     """The number of blocks to allocate for CPU memory."""
 
     # Set after KV cache initialization.
+    effective_attention_block_size: int | None = field(default=None, init=False)
+    """Full-attention block size in tokens, including DCP, or None if unavailable."""
     kv_cache_size_tokens: int | None = field(default=None, init=False)
     """Per-DP-engine KV cache capacity in tokens (group-aware). Uses
     group-aware capacity since num_gpu_blocks * block_size can be wrong
@@ -224,6 +238,11 @@ class CacheConfig:
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
+
+    swa_bounded_replay: bool = True
+    """Keep the sliding-window KV of models that support it (DeepSeek-V4.1)
+    out of prefix caching and rebuild it after a prefix hit by recomputing the
+    hit's last window. Requires model runner V2."""
 
     kv_cache_memory_bytes: int | None = None
     """Size of KV Cache per GPU in bytes. By default, this is set to None
@@ -246,8 +265,7 @@ class CacheConfig:
     KV offloading is only activated when kv_offloading_size is set."""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -268,7 +286,7 @@ class CacheConfig:
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
-            "enable_mamba_fine_grained_prefix_cache",
+            "enable_mamba_shared_prefix_checkpoint",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
@@ -277,10 +295,12 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
-            # WIP feature toggle not impacting compiled graph shape
+            # Feature toggles not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            "swa_bounded_replay",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 import torch.nn as nn
 
@@ -10,6 +9,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -41,12 +41,46 @@ def _skip_aiter_sampler_on_gfx1250() -> bool:
     return on_gfx1250()
 
 
+def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
+    """Return why FlashInfer JIT codegen cannot target the current GPU, or
+    None if it can.
+
+    FlashInfer swallows arch-detection errors when building its compilation
+    context (e.g. SM 12.x with a CUDA toolkit older than 12.9), leaving an
+    empty target-arch set that makes every JIT spec fail with a misleading
+    "requires sm75 or higher" error at first use — killing the engine during
+    startup profiling (https://github.com/vllm-project/vllm/issues/42393).
+    """
+    try:
+        from flashinfer.jit.core import check_cuda_arch
+    except ImportError:
+        return None
+    try:
+        check_cuda_arch()
+        return None
+    except RuntimeError as e:
+        reason = str(e)
+    try:
+        # Re-derive the real error that FlashInfer swallowed during arch
+        # detection, e.g. "SM 12.x requires CUDA >= 12.9".
+        from flashinfer.compilation_context import CompilationContext
+
+        CompilationContext._normalize_cuda_arch(capability.major, capability.minor)
+    except RuntimeError as e:
+        reason = str(e)
+    except Exception:
+        # FlashInfer internals changed; keep the original error message.
+        pass
+    return reason
+
+
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
     Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
     is 0, when the platform isn't CUDA, when the GPU's compute capability is
-    unsupported. Raises ``RuntimeError`` if the user explicitly opted in
+    unsupported, or when FlashInfer cannot JIT-compile for the current
+    GPU/CUDA toolchain. Raises ``RuntimeError`` if the user explicitly opted in
     via the env var but FlashInfer is unavailable.
 
     Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
@@ -73,6 +107,8 @@ def flashinfer_sampler_supported() -> bool:
         unsupported_reason = (
             f"unsupported compute capability {capability.as_version_str()}"
         )
+    else:
+        unsupported_reason = _flashinfer_jit_unsupported_reason(capability)
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
@@ -90,9 +126,71 @@ def flashinfer_sampler_supported() -> bool:
     return False
 
 
-class TopKTopPSampler(nn.Module):
+def xpu_sampler_supported() -> bool:
+    """Decide whether the fused XPU top-k/top-p sampler kernel can be used.
+
+    Returns False (with appropriate logging) when the platform isn't XPU, when
+    ``VLLM_XPU_USE_SAMPLER_KERNEL`` is 0.
+
+    Note: callers must additionally ensure no request needs a per-request seed
+    or greedy sampling, since the kernel draws from the device's default
+    generator and always samples randomly.
     """
-    Module that performs optional top-k and top-p filtering followed by
+    if not current_platform.is_xpu():
+        return False
+    if not envs.VLLM_XPU_USE_SAMPLER_KERNEL:
+        logger.info_once(
+            "Fused XPU top-p/top-k sampling disabled via VLLM_XPU_USE_SAMPLER_KERNEL=0."
+        )
+        return False
+
+    logger.info_once("Using the fused XPU kernel for top-p & top-k sampling.")
+    return True
+
+
+def xpu_sample(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    logprobs_mode: LogprobsMode = "raw_logprobs",
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Sample from the logits using the fused XPU top-k/top-p kernel.
+
+    Statistically equivalent to `random_sample`, but avoids sorting the vocab
+    and never materializes the probability tensor. The noise comes from the
+    device's default generator, so per-request generators aren't supported.
+
+    Returns the sampled token ids and, for processed logprobs modes, the
+    post-top-k/top-p logits (or logprobs); otherwise None.
+    """
+    logits = logits.to(dtype=torch.float32).contiguous()
+    sampled = torch.empty(logits.shape[0], dtype=torch.int64, device=logits.device)
+    logits_to_return = (
+        torch.empty_like(logits) if logprobs_mode in PROCESSED_LOGPROBS_MODES else None
+    )
+
+    generator = torch.xpu.default_generators[logits.device.index]
+    state = generator.get_state()
+    seed, offset = state.view(torch.int64).tolist()
+    seeds = torch.tensor([seed, offset], dtype=torch.int64, device="cpu")
+    # The XPU kernel expects k as int64 (Long), but the input batch
+    # stores top_k as int32. Cast here to avoid dtype mismatch.
+    if k is not None:
+        k = k.to(torch.int64)
+    torch.ops.vllm.xpu_topk_topp_sampler(
+        sampled, logits_to_return, logits, k, p, logprobs_mode, seeds
+    )
+    # The custom XPU sampler kernel consumes RNG values internally, so advance
+    # the default generator's offset to keep future draws deterministic.
+    # pytorch: offset must be multiple of 4
+    offset = (offset + logits.numel() + 3) // 4 * 4
+    state.view(torch.int64)[1] = offset
+    generator.set_state(state)
+    return sampled, logits_to_return
+
+
+class TopKTopPSampler(nn.Module):
+    """Module that performs optional top-k and top-p filtering followed by
     weighted random sampling of logits.
 
     Implementations may update the logits tensor in-place.
@@ -126,9 +224,14 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_cpu
         elif current_platform.is_xpu():
-            if envs.VLLM_XPU_USE_SAMPLER_KERNEL:
+            if xpu_sampler_supported() and not envs.VLLM_BATCH_INVARIANT:
                 self.forward = self.forward_xpu
             else:
+                if envs.VLLM_BATCH_INVARIANT:
+                    logger.info_once(
+                        "VLLM_BATCH_INVARIANT is enabled. Using the "
+                        "PyTorch-native sampler on XPU."
+                    )
                 self.forward = self.forward_native
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
@@ -154,8 +257,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        PyTorch-native implementation of top-k and top-p sampling.
+        """PyTorch-native implementation of top-k and top-p sampling.
 
         The logits tensor may be updated in-place.
         """
@@ -207,8 +309,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        PyTorch-native implementation of top-k and top-p sampling for CPU.
+        """PyTorch-native implementation of top-k and top-p sampling for CPU.
 
         The logits tensor may be updated in-place.
         """
@@ -322,37 +423,7 @@ class TopKTopPSampler(nn.Module):
                 "PyTorch-native implementation."
             )
             return self.forward_native(logits, generators, k, p)
-        random_sampled = torch.empty(
-            logits.shape[0], dtype=torch.int64, device=logits.device
-        )
-        logits_to_return = None
-        if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
-            logits_to_return = torch.empty_like(logits)
-
-        assert len(generators) != logits.shape[0], (
-            "xpu kernel topk_topp_sampler does not support batch-wise generators."
-        )
-        generator = torch.xpu.default_generators[logits.device.index]
-
-        state = generator.get_state()
-        seed, offset = state.view(torch.int64)
-        seeds = torch.tensor(
-            [seed, offset], dtype=torch.int64, device=torch.device("cpu")
-        )
-        # The XPU kernel expects k as int64 (Long), but the input batch
-        # stores top_k as int32. Cast here to avoid dtype mismatch.
-        if k is not None:
-            k = k.to(torch.int64)
-        torch.ops.vllm.xpu_topk_topp_sampler(
-            random_sampled, logits_to_return, logits, k, p, self.logprobs_mode, seeds
-        )
-        # The custom XPU sampler kernel consumes RNG values internally, so advance
-        # the default generator's offset to keep future draws deterministic.
-        # pytorch: offset must be multiple of 4
-        offset = (offset + logits.numel() + 3) // 4 * 4
-        state.view(torch.int64)[1] = offset
-        generator.set_state(state)
-        return random_sampled, logits_to_return
+        return xpu_sample(logits, k, p, self.logprobs_mode)
 
 
 # Note: this is a workaround for
@@ -423,8 +494,7 @@ def apply_top_k_top_p_pytorch(
 
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-    """
-    Apply top-k mask to the logits.
+    """Apply top-k mask to the logits.
 
     This implementation doesn't involve sorting the entire vocab.
     Note however that it involves a GPU->CPU sync which can be detrimental for
