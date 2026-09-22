@@ -33,9 +33,12 @@ class NoRepeatNGramState(LogitsProcessor):
     """
 
     def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
+        if vllm_config.speculative_config is not None:
+            raise ValueError(
+                "no-repeat n-gram masking does not support speculative decoding"
+            )
         self.req_states = req_states
         self.max_model_len = req_states.all_token_ids.gpu.shape[1]
-        self.speculative = getattr(vllm_config, "speculative_config", None) is not None
         self.ngram_sizes = UvaBackedTensor(req_states.max_num_reqs, dtype=torch.int32)
         self.window_sizes = UvaBackedTensor(req_states.max_num_reqs, dtype=torch.int32)
         self.whitelist_lens = UvaBackedTensor(
@@ -49,7 +52,6 @@ class NoRepeatNGramState(LogitsProcessor):
         self.ngram_sizes.np.fill(0)
         self.window_sizes.np.fill(0)
         self.whitelist_lens.np.fill(0)
-        self._ever_enabled = False
 
     @classmethod
     def validate_params(cls, sampling_params: SamplingParams) -> None:
@@ -89,7 +91,6 @@ class NoRepeatNGramState(LogitsProcessor):
                 )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
-        self.validate_params(sampling_params)
         extra_args = sampling_params.extra_args or {}
         native_size = extra_args.get("no_repeat_ngram_size")
         compatible_size = extra_args.get("ngram_size")
@@ -110,10 +111,6 @@ class NoRepeatNGramState(LogitsProcessor):
             return False
         if raw_size > self.max_model_len:
             raise ValueError("ngram size cannot exceed the configured max model length")
-        if self.speculative:
-            raise ValueError(
-                "no-repeat n-gram masking does not support speculative decoding"
-            )
         window_size = extra_args.get("window_size", 100)
         whitelist = sorted(set(extra_args.get("whitelist_token_ids") or []))
         if whitelist and (
@@ -125,25 +122,20 @@ class NoRepeatNGramState(LogitsProcessor):
         self.whitelist_lens.np[req_idx] = len(whitelist)
         if whitelist:
             self.whitelist_token_ids.stage_write(req_idx, 0, whitelist)
-        self._ever_enabled = True
         return True
 
     def apply_staged_writes(self) -> None:
-        if self._ever_enabled:
-            self.ngram_sizes.copy_to_uva()
-            self.window_sizes.copy_to_uva()
-            self.whitelist_lens.copy_to_uva()
-            self.whitelist_token_ids.apply_write()
+        self.ngram_sizes.copy_to_uva()
+        self.window_sizes.copy_to_uva()
+        self.whitelist_lens.copy_to_uva()
+        self.whitelist_token_ids.apply_write()
 
     def apply(
         self,
         logits: torch.Tensor,
         ctx: LogitsContext,
     ) -> torch.Tensor:
-        if (
-            not self._ever_enabled
-            or not (self.ngram_sizes.np[ctx.idx_mapping_np] >= 1).any()
-        ):
+        if not (self.ngram_sizes.np[ctx.idx_mapping_np] >= 1).any():
             return logits
         apply_no_repeat_ngram(
             logits,

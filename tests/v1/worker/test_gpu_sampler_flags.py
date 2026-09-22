@@ -16,7 +16,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcessor,
+    LogitsProcRequestState,
 )
+from vllm.v1.worker.gpu.sample.no_repeat_ngram import NoRepeatNGramState
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -30,7 +32,9 @@ class MockReasoningConfig:
     natural_reasoning_end_token_ids = [91]
 
 
-def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> Sampler:
+def _make_sampler(
+    custom_logits_processors: Sequence[LogitsProcessor] | None = None,
+) -> Sampler:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -39,8 +43,14 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
     )
+    vllm_config = SimpleNamespace(
+        reasoning_config=MockReasoningConfig(), speculative_config=None
+    )
+    if custom_logits_processors is None:
+        lp_req_state = LogitsProcRequestState.from_request_state(req_states)
+        custom_logits_processors = [NoRepeatNGramState(vllm_config, lp_req_state)]
     return Sampler(
-        vllm_config=SimpleNamespace(reasoning_config=MockReasoningConfig()),
+        vllm_config=vllm_config,
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
@@ -107,6 +117,22 @@ def test_no_repeat_ngram_state_is_cleared_when_slot_is_reused():
     sampler.add_request(3, SamplingParams())
 
     assert not sampler.needs_logits_processing[3]
+
+
+def test_no_repeat_ngram_rejects_speculative_decoding_at_initialization():
+    req_states = RequestState(
+        max_num_reqs=1,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        num_speculative_steps=1,
+        vocab_size=VOCAB_SIZE,
+        device=DEVICE,
+    )
+    vllm_config = SimpleNamespace(speculative_config=object())
+    lp_req_state = LogitsProcRequestState.from_request_state(req_states)
+
+    with pytest.raises(ValueError, match="does not support speculative decoding"):
+        NoRepeatNGramState(vllm_config, lp_req_state)
 
 
 class _GateProcessor(LogitsProcessor):

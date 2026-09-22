@@ -23,6 +23,10 @@ from vllm.multimodal.image import convert_image_mode
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+NO_REPEAT_NGRAM_PROCESSOR = (
+    "vllm.v1.worker.gpu.sample.no_repeat_ngram:NoRepeatNGramState"
+)
+
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
@@ -194,6 +198,7 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         limit_mm_per_prompt={modality: 1},
+        logits_processors=[NO_REPEAT_NGRAM_PROCESSOR],
     )
 
     # deepseek-ocr use plain prompt template
@@ -201,7 +206,7 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
 
     # The following sampling params config is taken from
     # the official Deepseek-OCR inference example.
-    # (IMPORTANT) Use the built-in no-repeat n-gram constraint and avoid
+    # (IMPORTANT) Use the GPU no-repeat n-gram processor and avoid
     # skipping special tokens for this model for the optimal OCR performance.
     sampling_params = [
         SamplingParams(
@@ -234,6 +239,7 @@ def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         limit_mm_per_prompt={modality: 1},
+        logits_processors=[NO_REPEAT_NGRAM_PROCESSOR],
     )
 
     # deepseek-ocr use plain prompt template
@@ -241,7 +247,7 @@ def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
 
     # The following sampling params config is taken from
     # the official Deepseek-OCR inference example.
-    # (IMPORTANT) Use the built-in no-repeat n-gram constraint and avoid
+    # (IMPORTANT) Use the GPU no-repeat n-gram processor and avoid
     # skipping special tokens for this model for the optimal OCR performance.
     sampling_params = [
         SamplingParams(

@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark an OpenAI-compatible generative OCR server on page images."""
+"""Benchmark an OpenAI-compatible generative OCR server on page images.
+
+Start the server with the no-repeat n-gram processor enabled:
+
+    vllm serve MODEL --logits-processors \
+        vllm.v1.worker.gpu.sample.no_repeat_ngram:NoRepeatNGramState
+"""
 
 import argparse
 import concurrent.futures
