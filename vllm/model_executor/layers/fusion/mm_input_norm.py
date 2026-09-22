@@ -496,7 +496,7 @@ class FusedMMInputNorm(CustomOp):
 
         # Materialize a contiguous copy once if needed; the kernel
         # requires contiguous inputs.
-        x = grid_thw if grid_thw.is_contiguous() else grid_thw.contiguous()
+        x = grid_thw.contiguous()
         x3 = x.view(patches, self.channel, patch_size)
 
         # The Triton kernel writes in-place into a destination buffer, so
