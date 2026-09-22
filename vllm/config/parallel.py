@@ -51,6 +51,7 @@ All2AllBackend = Literal[
     "mori_low_latency",
     "moonep",
     "nixl_ep",
+    "mooncake_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
@@ -728,6 +729,7 @@ class ParallelConfig:
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
+                "mooncake_ep",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
@@ -749,6 +751,7 @@ class ParallelConfig:
             in (
                 "deepep_low_latency",
                 "nixl_ep",
+                "mooncake_ep",
             )
             and self.enable_expert_parallel
             and self.data_parallel_size > 1

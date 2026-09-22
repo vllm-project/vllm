@@ -538,6 +538,9 @@ def check_moonep_system_support() -> None:
             "MoonEP requires NVSwitch multicast (SHARP) support on the "
             "current device; it is not supported on this GPU/topology."
         )
+def has_mooncake_ep() -> bool:
+    """Whether the optional Mooncake EP package is available."""
+    return _has_module("mooncake") and _has_module("mooncake.mooncake_ep_buffer")
 
 
 def is_numba_available() -> bool:
