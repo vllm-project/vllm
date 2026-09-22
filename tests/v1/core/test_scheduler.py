@@ -5301,6 +5301,49 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
     scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
 
 
+@pytest.mark.parametrize("skipped", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_keep_pause_drains_remote_kv_without_scheduling_tokens(
+    skipped, async_scheduling
+):
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=True),
+        async_scheduling=async_scheduling,
+    )
+    request = create_requests(num_requests=1, num_tokens=64)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    if not skipped:
+        scheduler.skipped_waiting.remove_requests([request])
+        scheduler.waiting.add_request(request)
+
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    assert not scheduler.has_unfinished_requests()
+    assert scheduler.has_requests()
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens == 0
+    assert output.kv_connector_metadata is not None
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            kv_connector_output=KVConnectorOutput(
+                finished_recving={request.request_id}
+            ),
+        ),
+    )
+    assert request.request_id in scheduler.finished_recving_kv_req_ids
+    assert not scheduler.has_requests()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert scheduler.has_requests()
+    assert scheduler.schedule().total_num_scheduled_tokens > 0
+
+
 def test_abort_request_waiting_for_remote_kvs():
     scheduler = create_scheduler(use_kv_connector=True)
 

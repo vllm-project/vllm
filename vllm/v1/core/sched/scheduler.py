@@ -2675,6 +2675,18 @@ class Scheduler(SchedulerInterface):
         return len(self.requests) > num_in_queues
 
     def has_requests(self) -> bool:
+        # Receive polling can send completion notifications that unblock P.
+        # Keep zero-token connector steps alive until these loads finish.
+        if (
+            self.connector is not None
+            and self._pause_state == PauseState.PAUSED_ALL
+            and any(
+                request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                and request.request_id not in self.finished_recving_kv_req_ids
+                for request in itertools.chain(self.waiting, self.skipped_waiting)
+            )
+        ):
+            return True
         # Override the interface default to also keep the engine alive while a
         # connector still has pending push work (e.g. push-mode WRITE transfers
         # in flight after all "live" requests have finished). Without this hook
