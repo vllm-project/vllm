@@ -22,7 +22,6 @@ use llm_multimodal::{
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
     ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
     PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
-    VisionProcessorRegistry,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -55,8 +54,8 @@ pub use self::timing::{mm_request_span, mm_timing_layer};
 #[derive(Clone)]
 pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
-    image: Option<ModalitySupport>,
-    video: Option<ModalitySupport>,
+    image: Option<VisionModalitySupport>,
+    video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
     media_connector: Arc<MediaConnector>,
     /// Maximum number of input items allowed per prompt for each modality.
@@ -133,13 +132,16 @@ impl MultimodalModelContext {
         REGISTRY.lookup(&self.metadata())
     }
 
-    /// Resolve a static vision preprocessor for one loaded model.
-    ///
-    /// The vision preprocessor serves both the image and video modalities.
-    fn resolve_vision_processor(&self) -> Option<&'static dyn VisionPreProcessor> {
-        static REGISTRY: LazyLock<VisionProcessorRegistry> =
-            LazyLock::new(VisionProcessorRegistry::with_defaults);
-        REGISTRY.find(&self.model_id, self.model_type.as_deref())
+    /// Build a vision preprocessor for one loaded model and modality.
+    fn resolve_vision_processor(
+        &self,
+        model_spec: &'static dyn ModelProcessorSpec,
+        preprocessor_config: &PreProcessorConfig,
+        modality: Modality,
+    ) -> Option<Arc<dyn VisionPreProcessor>> {
+        model_spec
+            .vision_processor(&self.metadata(), preprocessor_config, modality)
+            .map(Arc::from)
     }
 
     /// Resolve an audio preprocessor for one loaded model.
@@ -148,7 +150,7 @@ impl MultimodalModelContext {
         model_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: &PreProcessorConfig,
     ) -> Option<Arc<dyn AudioPreProcessor>> {
-        model_spec.audio_processor(&self.config, preprocessor_config).map(Arc::from)
+        model_spec.audio_processor(&self.metadata(), preprocessor_config).map(Arc::from)
     }
 }
 
@@ -242,17 +244,16 @@ impl ResolvedPlaceholder {
     }
 }
 
-/// Static per-modality vision preprocessor plus its loaded config, resolved
-/// placeholder tokens, and the model's shared tensor-layout spec.
+/// Model-owned vision preprocessor plus resolved placeholder tokens and
+/// the model's shared tensor-layout spec.
 #[derive(Clone)]
-struct ModalitySupport {
+struct VisionModalitySupport {
     spec: ResolvedMultimodalSpec,
     placeholder: ResolvedPlaceholder,
-    processor: &'static dyn VisionPreProcessor,
-    config: PreProcessorConfig,
+    processor: Arc<dyn VisionPreProcessor>,
 }
 
-/// Static audio preprocessor plus the resolved model contract for its output.
+/// Model-owned audio preprocessor plus the resolved model contract for its output.
 #[derive(Clone)]
 struct AudioModalitySupport {
     spec: ResolvedMultimodalSpec,
@@ -434,21 +435,12 @@ impl MultimodalModelInfo {
         context: &MultimodalModelContext,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
-    ) -> (Option<ModalitySupport>, Option<ModalitySupport>) {
+    ) -> (Option<VisionModalitySupport>, Option<VisionModalitySupport>) {
         let Some(raw_spec) = context.resolve_model_spec() else {
             warn!(
                 model_id = context.model_id,
                 model_type = context.model_type,
                 "multimodal model spec is not registered; disabling image/video support for this model"
-            );
-            return (None, None);
-        };
-
-        let Some(processor) = context.resolve_vision_processor() else {
-            warn!(
-                model_id = context.model_id,
-                model_type = context.model_type,
-                "vision processor is not registered; disabling image/video support for this model"
             );
             return (None, None);
         };
@@ -468,11 +460,17 @@ impl MultimodalModelInfo {
                 }
             };
 
-        let image = resolve_placeholder(Modality::Image).map(|placeholder| ModalitySupport {
-            spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Image),
-            placeholder,
-            processor,
-            config: preprocessor_config.clone(),
+        let image = resolve_placeholder(Modality::Image).and_then(|placeholder| {
+            let processor = context.resolve_vision_processor(
+                raw_spec,
+                &preprocessor_config,
+                Modality::Image,
+            )?;
+            Some(VisionModalitySupport {
+                spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Image),
+                placeholder,
+                processor,
+            })
         });
 
         let video = resolve_placeholder(Modality::Video).and_then(|placeholder| {
@@ -487,11 +485,11 @@ impl MultimodalModelInfo {
                 );
                 None
             } else {
-                Some(ModalitySupport {
+                let processor = context.resolve_vision_processor(raw_spec, &video_preprocessor_config, Modality::Video)?;
+                Some(VisionModalitySupport {
                     spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Video),
                     placeholder,
                     processor,
-                    config: video_preprocessor_config,
                 })
             }
         });
