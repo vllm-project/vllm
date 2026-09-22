@@ -35,6 +35,7 @@ def fill_markers(doc_path: str, blocks: dict[str, str]) -> None:
         FileNotFoundError: If the source page does not exist.
         ValueError: If an expected marker is missing, or any `gen:` marker is
             left unsubstituted after filling.
+
     """
     source = DOCS_DIR / doc_path
     if not source.exists():
