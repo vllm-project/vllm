@@ -165,6 +165,9 @@ class SimpleCPUOffloadScheduler:
             kv_cache_config, offload_capacity
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
+        self.prefix_cacheable_group_ids = (
+            self.cpu_kv_cache_config.prefix_cacheable_group_ids
+        )
         self.kv_event_medium = MEDIUM_STORAGE if disk_capacity_bytes > 0 else MEDIUM_CPU
         # Find the full attention kv group for prefix cache matching.
         self.fa_gidx = -1
@@ -297,7 +300,7 @@ class SimpleCPUOffloadScheduler:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
-        for g in kv_cache_config.kv_cache_groups:
+        for g in kv_cache_config.prefix_cacheable_groups:
             spec = g.kv_cache_spec
             # Only full attention is sharded across DCP ranks; replicated specs
             # (mamba, sliding window, chunked-local) keep their own block size.
@@ -321,7 +324,6 @@ class SimpleCPUOffloadScheduler:
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         """Return (num_new_tokens, is_async) from consecutive CPU cache hits."""
-
         # Pins found CPU blocks so they survive LRU eviction until
         # update_state_after_alloc() consumes them. Any pin from an earlier
         # call on the same request (e.g. retry after a failed allocate_slots)
@@ -443,6 +445,9 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
+            if g not in self.prefix_cacheable_group_ids:
+                cpu_hit_blocks.append([])
+                continue
             g_block_size = self.group_block_sizes[g]
             n_take_g = cdiv(num_external_tokens, g_block_size)
             cpu_hit_blocks.append(cpu_hit_blocks_full[g][:n_take_g])
@@ -636,8 +641,8 @@ class SimpleCPUOffloadScheduler:
         Returns:
             (gpu_block_ids, cpu_block_ids, req_ids, block_meta) for the store
             event. ``block_meta`` is None when kv cache events are disabled.
-        """
 
+        """
         merged_gpu_block_ids: list[int] = []
         merged_cpu_block_ids: list[int] = []
         req_ids: list[str] = []
@@ -829,6 +834,8 @@ class SimpleCPUOffloadScheduler:
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
+            if g not in self.prefix_cacheable_group_ids:
+                continue
             if len(gpu_block_ids) >= num_free:
                 break
             group_manager = self.cpu_coordinator.single_type_managers[g]
@@ -1330,7 +1337,6 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
-
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
         for transfer in self._pending_finished_stores:
             self._release_transfer_refs(transfer)

@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -295,6 +295,7 @@ class Moondream3VisionEncoder(nn.Module):
 
         Returns:
             patches: (batch, num_patches, patch_dim)
+
         """
         patch_size = self.config.enc_patch_size
         batch, channels, height, width = images.shape
@@ -321,6 +322,7 @@ class Moondream3VisionEncoder(nn.Module):
 
         Returns:
             features: (batch, num_patches, hidden_size)
+
         """
         # Create patches and embed
         patches = self.create_patches(pixel_values)
@@ -489,7 +491,6 @@ class Moondream3TextMoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with expert parallelism and custom GeGLU activation."""
-
         # Get router logits and compute top-k
         router_logits, _ = self.gate(x)  # [num_tokens, num_experts]
         topk_logits, topk_ids = torch.topk(
@@ -942,15 +943,14 @@ class Moondream3DummyInputsBuilder(BaseDummyInputsBuilder[Moondream3ProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
         mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         return {
             "image": self._get_dummy_images(
                 width=378,
                 height=378,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
             )
         }
 
@@ -1318,7 +1318,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights with remapping from HuggingFace format."""
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
