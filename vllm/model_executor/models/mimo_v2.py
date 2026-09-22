@@ -886,6 +886,13 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             return True
 
         prefix, qkv_kind = name.rsplit(".", 1)
+        if f"{prefix}.weight" not in params_dict:
+            # The layer is not in this model instance (e.g. the checkpoint
+            # carries more layers than ``num_hidden_layers`` after an
+            # ``--hf-overrides`` truncation). The other branches of
+            # ``load_weights`` skip such tensors; skip them here too instead
+            # of failing in ``get_submodule`` below.
+            return True
         entry = fp8_qkv_proj_dict.setdefault(prefix, {})
         entry[qkv_kind] = tensor
         if "weight" not in entry or "weight_scale_inv" not in entry:
