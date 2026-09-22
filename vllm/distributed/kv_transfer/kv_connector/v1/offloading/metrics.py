@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingMetricMetadata,
+    OffloadingSpec,
 )
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
@@ -26,9 +27,9 @@ KV_OFFLOAD_CONFIG_INFO = "vllm:kv_offload_config_info"
 
 _INFO_METRIC_HELP = (
     "Static configuration of the KV offload managers of this engine instance. "
-    "The label names depend on the configured offloading spec. The metric "
-    "appears from the first scheduler step, so an idle engine exposes no series. "
-    "Each engine reports its own configuration, not the instance total."
+    "The configured offloading spec declares the label names, and each manager "
+    "fills the values, so a series appears from the first scheduler step of its "
+    "engine. Each engine reports its own configuration, not the instance total."
 )
 
 
@@ -333,7 +334,9 @@ class OffloadingConnectorStats(KVConnectorStats):
         Args:
             info: Mapping of info metric label name to label value, as
                 OffloadingManager.config_info() returns it. An empty mapping
-                still yields the metric, with no manager labels.
+                still yields the metric, with an empty value on every label
+                the spec declared.
+
         """
         self.data[_StatsKey.INFO] = dict(info)
 
@@ -365,20 +368,23 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         extra_config = kv_transfer_config.kv_connector_extra_config
-        spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
+        self._spec_cls: type[OffloadingSpec] = OffloadingSpecFactory.get_spec_cls(
+            extra_config
+        )
+        # The spec declares the info label names here; a manager fills the
+        # values later, and _observe_info() aligns the two.
+        self._info_keys: tuple[str, ...] = self._spec_cls.config_info_keys(extra_config)
         self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
-            **spec_cls.build_metric_definitions(extra_config),
+            **self._spec_cls.build_metric_definitions(extra_config),
             **get_connector_metric_definitions(),
+            KV_OFFLOAD_CONFIG_INFO: OffloadingGaugeMetadata(
+                documentation=_INFO_METRIC_HELP, labelnames=self._info_keys
+            ),
         }
         from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
-        self._observe_deprecated_metrics = issubclass(spec_cls, CPUOffloadingSpec)
+        self._observe_deprecated_metrics = issubclass(self._spec_cls, CPUOffloadingSpec)
         self._offloading_metric_defs: dict[str, PromMetricT] = {}
-        # The info metric is the one metric this process cannot declare here:
-        # only a manager knows the label names, and no manager runs in the
-        # API-server process. _observe_info() creates it on the first payload.
-        self._info_metric: PromMetricT | None = None
-        self._info_keys: tuple[str, ...] | None = None
         # (engine_idx, metric_name, labelvalues) -> metric with bound labels
         self.offloading_metrics: dict[
             tuple[int, str, tuple[str, ...]], PromMetricT
@@ -528,44 +534,36 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
     def _observe_info(self, info: dict[str, Any], engine_idx: int) -> None:
         """Publish the static config facts of one engine.
 
-        The label names arrive with the first payload, so the gauge is created
-        here rather than in __init__. Every engine of one instance runs one
-        offloading config, so the first key set stands for all of them.
+        The spec declared the label names in __init__, so this only aligns one
+        payload with them: it reads every declared name out of the payload,
+        which makes the payload order irrelevant. A declared name the payload
+        does not hold gets an empty value, and a payload name the spec did not
+        declare is dropped, because the label names of a live Prometheus
+        metric cannot change. Both gaps mean the spec and the manager disagree,
+        so each one is logged.
 
         Args:
-            info: Mapping of label name to label value, in the order the
-                manager declared. msgpack keeps the insertion order, so the
-                order is stable across the process boundary.
+            info: Mapping of label name to label value, as
+                OffloadingManager.config_info() returns it.
             engine_idx: Index of the reporting engine.
+
         """
-        keys = tuple(info)
-        if self._info_metric is None:
-            self._info_metric = self._create_metric(
-                KV_OFFLOAD_CONFIG_INFO,
-                OffloadingGaugeMetadata(
-                    documentation=_INFO_METRIC_HELP, labelnames=keys
-                ),
-            )
-            self._info_keys = keys
-        elif keys != self._info_keys:
-            # A Prometheus metric binds its label names once, so a second key
-            # set cannot join the same metric. Report the config and go on,
-            # because this code runs on the engine output path of the API
-            # server, where an exception ends the output handler.
+        empty = tuple(key for key in self._info_keys if key not in info)
+        dropped = tuple(key for key in info if key not in self._info_keys)
+        if empty or dropped:
             logger.warning_once(
-                "Engine %d reports the KV offload config labels %s, but %s "
-                "already uses %s. The engine %d labels are dropped.",
-                engine_idx,
-                keys,
+                "%s: spec %s and the manager of engine %d disagree on the KV "
+                "offload config labels. Declared but not filled, so empty: %s. "
+                "Filled but not declared, so dropped: %s.",
                 KV_OFFLOAD_CONFIG_INFO,
-                self._info_keys,
+                self._spec_cls.__name__,
                 engine_idx,
+                empty,
+                dropped,
             )
-            return
-        engine_labelvalues = self.per_engine_labelvalues[engine_idx]
-        self._info_metric.labels(
-            *(engine_labelvalues + [str(value) for value in info.values()])
-        ).set(1)
+
+        labelvalues = tuple(str(info.get(key, "")) for key in self._info_keys)
+        self._set_gauge(KV_OFFLOAD_CONFIG_INFO, 1, labelvalues, engine_idx)
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """Observe transfer statistics."""

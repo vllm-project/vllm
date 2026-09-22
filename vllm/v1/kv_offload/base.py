@@ -413,11 +413,15 @@ class OffloadingManager(ABC):
 
         The scheduler reads this once, after the manager is built, so the
         values must stay fixed for the process lifetime.
+        OffloadingSpec.config_info_keys() declares which names reach
+        Prometheus: a declared name that is absent here becomes an empty label
+        value, and a name added here that the spec did not declare is dropped.
 
         Returns:
             Mapping of label name to value. The frontend renders each value
             with str(), so a value must be a scalar that msgpack carries, not
             an enum or an object. Empty by default.
+
         """
         return {}
 
@@ -606,6 +610,30 @@ class OffloadingSpec(ABC):
     ) -> dict[str, "OffloadingMetricMetadata"]:
         """Return Prometheus metric definitions emitted by this spec."""
         return {}
+
+    @classmethod
+    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names of this spec.
+
+        The spec declares the names, and OffloadingManager.config_info() of
+        the matching manager fills the values. Only the spec runs in the
+        API-server process, which must declare the gauge before the first
+        payload, so the two sides must agree on the names. They need not agree
+        on the order: the frontend reads each declared name out of the
+        payload. A declared name a manager does not fill becomes an empty
+        label value, and a name a manager adds is dropped, with one log line
+        for either gap.
+
+        Args:
+            extra_config: kv_connector_extra_config of this instance, the same
+                mapping the spec itself receives.
+
+        Returns:
+            Tuple of label names. The default empty tuple gives the metric no
+            manager labels, and still publishes it.
+
+        """
+        return ()
 
     def __init__(self, config: OffloadingConfig):
         self.config = config
