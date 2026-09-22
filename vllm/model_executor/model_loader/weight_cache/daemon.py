@@ -17,8 +17,9 @@ Engines then load from the daemons with:
     vllm serve /path/to/model --tensor-parallel-size 4 \\
         --load-format ipc_cache
 
-Only tensor and expert parallelism are supported; pipeline and data parallelism
-are rejected at launch.
+Tensor and pipeline parallelism are supported; data and expert parallelism
+are rejected at launch. The daemon launches one rank per TP×PP worker, using
+the same TP-inner rank layout as the engine.
 
 For multi-node tensor parallelism, run one launcher per node with a shared
 rendezvous so the global TP group forms across nodes (CUDA IPC handles are
@@ -40,7 +41,9 @@ node-local, so each node serves only its local GPUs' shards). Reuse the same
 The global TP rank of local GPU ``i`` on node ``r`` is
 ``r * (tp_size // nnodes) + i``, matching vLLM's contiguous per-node rank
 assignment, so each engine worker maps its shard from the daemon on its own
-node.
+node. With pipeline parallelism each node additionally runs one daemon per PP
+stage; the global rank is ``pp_rank * tp_size + tp_rank``.
+
 """
 
 import contextlib
@@ -155,19 +158,24 @@ def get_daemon_model(vllm_config: VllmConfig) -> torch.nn.Module:
 
 
 class WeightCacheDaemon:
-    """Per-GPU process that loads one TP shard and serves CUDA IPC handles."""
+    """Per-GPU process that loads one TP/PP shard and serves CUDA IPC handles."""
 
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tp_rank: int,
+        global_rank: int,
         local_rank: int,
         distributed_init_method: str,
         socket_dir: str | None = None,
     ):
+        parallel_config = vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        pp_size = parallel_config.pipeline_parallel_size
         self.vllm_config = vllm_config
-        self.tp_rank = tp_rank
+        self.global_rank = global_rank
         self.local_rank = local_rank
+        self.tp_rank = global_rank % tp_size
+        self.pp_rank = global_rank // tp_size
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
         self.model: torch.nn.Module | None = None
@@ -175,26 +183,29 @@ class WeightCacheDaemon:
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
             vllm_config.model_config,
-            tp_size=vllm_config.parallel_config.tensor_parallel_size,
-            tp_rank=tp_rank,
+            tp_size=tp_size,
+            tp_rank=self.tp_rank,
+            pp_size=pp_size,
+            pp_rank=self.pp_rank,
         )
 
     def load_model(self) -> None:
         tp_size = self.cache_config.tp_size
+        pp_size = self.cache_config.pp_size
         torch.accelerator.set_device_index(self.local_rank)
         init_distributed_environment(
-            world_size=tp_size,
-            rank=self.tp_rank,
+            world_size=tp_size * pp_size,
+            rank=self.global_rank,
             distributed_init_method=self.distributed_init_method,
             local_rank=self.local_rank,
             backend=current_platform.dist_backend,
         )
         with set_current_vllm_config(self.vllm_config):
-            ensure_model_parallel_initialized(tp_size, 1)
+            ensure_model_parallel_initialized(tp_size, pp_size)
             self.model = get_daemon_model(self.vllm_config)
         logger.info(
             "Weight cache daemon rank %d loaded model",
-            self.tp_rank,
+            self.global_rank,
         )
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
@@ -223,7 +234,7 @@ class WeightCacheDaemon:
         os.chmod(socket_path, 0o600)
         server.listen()
         logger.info(
-            "Weight cache daemon rank %d serving on %s", self.tp_rank, socket_path
+            "Weight cache daemon rank %d serving on %s", self.global_rank, socket_path
         )
         if ready_callback is not None:
             ready_callback()
@@ -316,12 +327,14 @@ class WeightCacheDaemon:
     def _handle_release(self, conn: socket.socket) -> None:
         self.model = None
         torch.accelerator.empty_cache()
-        logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
+        logger.info(
+            "Weight cache daemon rank %d released cached weights", self.global_rank
+        )
         send_msg(conn, {"status": "ok"})
 
 
 def _run_daemon(
-    tp_rank: int,
+    global_rank: int,
     local_rank: int,
     vllm_config: VllmConfig,
     distributed_init_method: str,
@@ -329,29 +342,29 @@ def _run_daemon(
     ready_queue: "multiprocessing.Queue[int]",
 ) -> None:
     daemon = WeightCacheDaemon(
-        vllm_config, tp_rank, local_rank, distributed_init_method, socket_dir
+        vllm_config, global_rank, local_rank, distributed_init_method, socket_dir
     )
     daemon.load_model()
-    daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
+    daemon.serve_forever(ready_callback=lambda: ready_queue.put(global_rank))
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
-    """Reject parallelism modes other than tensor/expert parallelism."""
+    """Reject parallelism modes other than tensor/pipeline parallelism."""
     unsupported = {
-        "pipeline parallelism": parallel_config.pipeline_parallel_size > 1,
         "data parallelism": parallel_config.data_parallel_size > 1,
+        "expert parallelism": parallel_config.enable_expert_parallel,
     }
     for name, enabled in unsupported.items():
         if enabled:
             raise ValueError(
-                f"The weight cache daemon only supports tensor and expert "
+                f"The weight cache daemon only supports tensor and pipeline "
                 f"parallelism; {name} is not supported"
             )
 
 
 def main() -> None:
     parser = FlexibleArgumentParser(
-        description="Launch weight cache daemons (one per TP rank)."
+        description="Launch weight cache daemons (one per TP/PP rank)."
     )
     EngineArgs.add_cli_args(parser)
     parser.add_argument(
@@ -383,10 +396,12 @@ def main() -> None:
     parallel_config = vllm_config.parallel_config
     _reject_unsupported_parallelism(parallel_config)
     tp_size = parallel_config.tensor_parallel_size
+    pp_size = parallel_config.pipeline_parallel_size
 
     nnodes = parallel_config.nnodes
     node_rank = parallel_config.node_rank
-    local_world_size = tp_size // nnodes
+    local_tp_size = tp_size // nnodes
+    local_world_size = local_tp_size * pp_size
 
     # The daemon forms its own TP group and holds it open while serving, so it
     # needs a rendezvous port distinct from the engine's --master-port. All
@@ -400,10 +415,13 @@ def main() -> None:
 
     ctx = multiprocessing.get_context("spawn")
     ready_queue: multiprocessing.Queue[int] = ctx.Queue()
-    # Global TP rank of local GPU i on this node; local index == device index.
+    # Global rank of local GPU i on this node, in the engine's TP-inner
+    # layout: this node holds the contiguous TP ranks
+    # [node_rank * local_tp_size, (node_rank + 1) * local_tp_size) for every
+    # PP stage; local index == device index.
     global_ranks = [
-        node_rank * local_world_size + local_rank
-        for local_rank in range(local_world_size)
+        (i // local_tp_size) * tp_size + node_rank * local_tp_size + i % local_tp_size
+        for i in range(local_world_size)
     ]
     procs = [
         ctx.Process(
