@@ -554,15 +554,21 @@ def _get_sliding_window_configs(
 ) -> set[tuple[int, int] | None]:
     """Get the set of all sliding window configs used in the model.
 
-    Only inspects FlashAttentionImpl layers. Other backends (e.g.
-    TurboQuant, MLA) use their own metadata builders and are skipped.
+    Only inspects FlashAttentionImpl layers, including implementations wrapped
+    by a composite backend. Other backends (e.g. TurboQuant, MLA) use their own
+    metadata builders and are skipped.
     """
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        if not isinstance(layer.impl, FlashAttentionImpl):
-            continue
-        sliding_window_configs.add(layer.impl.sliding_window)
+        impls = (
+            layer.impl.get_impl_variants()
+            if hasattr(layer.impl, "get_impl_variants")
+            else (layer.impl,)
+        )
+        for impl in impls:
+            if isinstance(impl, FlashAttentionImpl):
+                sliding_window_configs.add(impl.sliding_window)
     return sliding_window_configs
 
 

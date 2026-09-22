@@ -216,10 +216,9 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
         On SM90 with FP8 KV cache, use FA3 for supported layers and let the generic
         FlashAttention selector upgrade larger head dimensions to FA4.
-        When multimodal-prefix attention is active with FP8 KV cache on SM90, use
-        Triton for all layers because the per-layer selector would otherwise mix
-        Triton and FA4 backends with incompatible KV-cache block-size requirements.
-        For other configurations, force FA4 for all layers to avoid the mixed
+        The multimodal-prefix composite routes image masks to Triton and causal
+        requests to this per-layer FA3/FA4 selection. For other configurations,
+        force FA4 for all layers to avoid the mixed
         FA3+FA4 penalty.
         When FA4 is not available, fall back to Triton.
         """
@@ -249,22 +248,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 use_per_layer_fa = current_platform.is_device_capability_family(
                     90
                 ) and vllm_config.cache_config.cache_dtype.startswith("fp8")
-                if (
-                    use_per_layer_fa
-                    and model_config.is_mm_prefix_lm
-                    and vllm_config.attention_config.backend is None
-                ):
-                    vllm_config.attention_config.backend = (
-                        AttentionBackendEnum.TRITON_ATTN
-                    )
-                    logger.info(
-                        "Gemma4 model has heterogeneous head dimensions %s and "
-                        "multimodal-prefix attention enabled. Using TRITON_ATTN for "
-                        "all layers with FP8 KV cache on SM90 to avoid incompatible "
-                        "mixed Triton/FA4 KV-cache block sizes.",
-                        head_dims,
-                    )
-                elif use_per_layer_fa:
+                if use_per_layer_fa:
                     logger.info(
                         "Gemma4 model has heterogeneous head dimensions %s. Using "
                         "per-layer FA3/FA4 selection for FP8 KV cache on SM90.",

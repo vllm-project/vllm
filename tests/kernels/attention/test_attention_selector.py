@@ -926,7 +926,7 @@ def hopper_selection():
 def test_hopper_mm_prefix_selects_triton_flash_attn(
     use_mm_prefix, flash_attn_version, hopper_selection
 ):
-    """Hopper selects the composite only when its causal route resolves FA4."""
+    """Hopper selects the composite when its causal route resolves FA3 or FA4."""
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
@@ -938,12 +938,25 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
         backend = get_attn_backend(
             256, torch.bfloat16, None, use_mm_prefix=use_mm_prefix
         )
-    fa4_resolved = config.attention_config.flash_attn_version == 4
-    if use_mm_prefix:
-        expected = "TRITON_FLASH_ATTN" if fa4_resolved else "TRITON_ATTN"
-    else:
-        expected = "FLASH_ATTN"
+    expected = "TRITON_FLASH_ATTN" if use_mm_prefix else "FLASH_ATTN"
     assert backend.get_name() == expected
+
+
+@blackwell_only
+@pytest.mark.parametrize("head_size", [256, 512])
+def test_hopper_fp8_mm_prefix_selects_triton_flash_attn(head_size, hopper_selection):
+    """SM90 FP8 uses FA3 for d256 and FA4 for d512 causal requests."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        kv_cache_dtype="fp8",
+    ).create_engine_config()
+    with set_current_vllm_config(config):
+        backend = get_attn_backend(head_size, torch.bfloat16, "fp8", use_mm_prefix=True)
+    assert config.attention_config.flash_attn_version is None
+    assert backend.get_name() == "TRITON_FLASH_ATTN"
 
 
 @blackwell_only
