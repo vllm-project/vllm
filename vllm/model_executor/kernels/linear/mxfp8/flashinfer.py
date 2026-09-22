@@ -62,6 +62,11 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
                 f"mm_mxfp8 requires N >= 128, got N={N}. "
                 f"out_features is too small for mm_mxfp8.",
             )
+        if current_platform.is_device_capability_family(120) and N % 32 != 0:
+            return (
+                False,
+                f"mm_mxfp8 on SM12x requires N to be divisible by 32, got N={N}.",
+            )
         return True, None
 
     def input_quant_key(self) -> QuantKey:
