@@ -119,6 +119,8 @@ steps:
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
       commands:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
       # The two kernels/ files the NVIDIA job adds are CUDA-only (they import
