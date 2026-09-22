@@ -6,7 +6,7 @@ import copy
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -325,7 +325,7 @@ def test_hisparse_reports_when_context_is_fully_resident():
 
 
 def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
-    """Keep indexer-only imports host-backed in the resident block table."""
+    """Restore the final host page when completing an indexer-only import."""
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
@@ -360,11 +360,15 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
-    # The local prefix is adopted from shadow pages (GPU-resident), while the
-    # externally imported page stays host-backed until its tail allocation.
     assert not any(block.is_null for block in resident[:2])
-    assert resident[2].is_null
+    assert not resident[2].is_null
     assert not resident[3].is_null
+    coordinator = get_hisparse_coordinator(manager)
+    assert not coordinator.build_offload_command().page_transfers
+    coordinator.finish_host_import(resumed.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 1 and transfers[0].restore
+    assert transfers[0].resident_block_ids == (resident[2].block_id,)
 
 
 def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
@@ -465,7 +469,8 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
     )
     allocated = manager.get_blocks(resumed.request_id).blocks
     assert len(allocated[0]) == host_blocks
-    assert allocated[2][1].is_null == (external > 0)
+    assert allocated[2][1].is_null == (host_blocks > 2)
+    assert not allocated[2][-1].is_null
     manager.free(resumed)
 
     # A surviving indexer offload must not make absent host KV look computed.
@@ -488,6 +493,87 @@ def allocate_external_prefix(
         delay_cache_blocks=True,
         full_sequence_must_fit=True,
     )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 15, 16, 17, 31, 32, 33, 127])
+def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
+    """Import every real token and restore the page used by last-token replay."""
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    config = create_vllm_config(block_size=HISPARSE_BLOCK_SIZE)
+    connector = NixlPullConnectorScheduler(config, "test", manager.kv_cache_config)
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    request.kv_transfer_params = {"do_remote_prefill": True}
+    count, is_async = connector.get_num_new_matched_tokens(request, 0)
+    assert count == num_tokens and is_async
+    assert allocate_external_prefix(manager, request, count) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    assert len(source) == len(resident) == (num_tokens + 15) // 16
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
+    coordinator = get_hisparse_coordinator(manager)
+    assert not coordinator.build_offload_command().page_transfers
+
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 1
+    restore = transfers[0]
+    assert restore.restore and not restore.after_forward
+    assert restore.host_block_id == source[-1].block_id
+    assert restore.resident_block_ids == (resident[-1].block_id,)
+    request.num_computed_tokens = count
+    scheduler = SimpleNamespace(
+        connector=connector,
+        kv_cache_manager=manager,
+        failed_recving_kv_req_ids=set(),
+        finished_recving_kv_req_ids={request.request_id},
+        prefix_replay_tokens=0,
+    )
+    scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
+    Scheduler._update_waiting_for_remote_kv(scheduler, request)
+    assert request.num_tokens - request.num_computed_tokens == 1
+    assert manager.allocate_slots(request, num_new_tokens=1) is not None
+    assert coordinator.build_row_mirrors([(request.request_id, num_tokens - 1, 1)])
+    # A pending restore must not expose uninitialized GPU copies to prefix hits.
+    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
+
+    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    assert resident[-1].ref_cnt == 2
+    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
+    coordinator.update_spills({}, {restore.transfer_id: 1})
+    assert resident[-1].ref_cnt == 1
+    assert coordinator.request_states[request.request_id].valid_pages == set(
+        range(num_tokens // HISPARSE_BLOCK_SIZE)
+    )
+    if num_tokens % HISPARSE_BLOCK_SIZE:
+        assert source[-1].block_hash is None
+    else:
+        assert coordinator.copies[source[-1].block_hash] == (resident[-1],)
+
+
+def test_hisparse_aborted_tail_restore_retains_both_endpoints():
+    """An abort cannot recycle storage still used by a queued tail restore."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    request = make_request("import", list(range(17)), HISPARSE_BLOCK_SIZE, sha256)
+    assert allocate_external_prefix(manager, request, 17) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    host_tail, gpu_tail = source[-1], resident[-1]
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.finish_host_import(request.request_id, failed=False)
+    restore = coordinator.build_offload_command().page_transfers[0]
+    manager.free(request)
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
+    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
+    coordinator.update_spills({}, {restore.transfer_id: 1})
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 0
+    assert not coordinator.has_pending_work()
 
 
 @pytest.mark.parametrize("enable_caching", [False, True])
@@ -669,7 +755,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
 def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     """An in-flight host import must reserve its unwritten resident pages."""
     manager = make_hisparse_kv_cache_manager(
-        11,
+        12,
         16,
         transfer_device_cache=True,
     )
@@ -1127,9 +1213,10 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
     assert len(source) == num_prompt_blocks
     assert len(indexer) == num_prompt_blocks
     assert len(resident) == num_prompt_blocks
-    assert all(block.is_null for block in resident)
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
     assert len(hot) == 2
-    assert manager.block_pool.get_num_free_blocks() == 1
+    assert manager.block_pool.get_num_free_blocks() == 0
 
 
 def test_hisparse_external_import_survives_capacity_retry():
@@ -1149,7 +1236,8 @@ def test_hisparse_external_import_survives_capacity_retry():
     manager.free(first)
     assert allocate_external_prefix(manager, second, len(tokens)) is not None
     _, _, resident, hot = manager.get_blocks(second.request_id).blocks
-    assert all(block.is_null for block in resident)
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
     assert len(hot) == 2
 
 
@@ -2181,7 +2269,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         use_eagle_block_drop=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
-        mamba_fine_grained_prefix_cache=False,
+        mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
@@ -5849,3 +5937,29 @@ def test_device_eviction_keeps_host_prefix():
     assert host_block.block_hash is not None, (
         "Device eviction invalidated unrelated host KV"
     )
+
+
+def test_get_unhashed_block_ids_all_groups():
+    """Unhashed, non-null block ids are reported per KV cache group.
+    A group with no unhashed blocks reports an empty list, not a missing entry.
+    """
+
+    def hashed(block_id: int, group_id: int) -> KVCacheBlock:
+        block = KVCacheBlock(block_id=block_id)
+        block.set_block_hash(make_block_hash_with_group_id(BlockHash(b"h"), group_id))
+        return block
+
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=1),  # unhashed
+                hashed(2, group_id=0),  # cached
+                KVCacheBlock(block_id=3, is_null=True),  # null padding
+                KVCacheBlock(block_id=4),  # unhashed
+            ],
+            # No unhashed blocks in this group.
+            [hashed(5, group_id=1), KVCacheBlock(block_id=6, is_null=True)],
+        )
+    )
+
+    assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
