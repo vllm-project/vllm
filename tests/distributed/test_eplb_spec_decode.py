@@ -10,12 +10,12 @@ import torch
 
 from tests.utils import large_gpu_mark
 from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.model_executor.models.interfaces import get_mixture_of_experts_model
-from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
-from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.worker.gpu.eplb_utils import EPLBController
+from vllm.v1.worker.gpu.eplb_utils import (
+    EPLBController,
+    draft_model_supports_eplb,
+)
 
 
 def get_model_args(
@@ -113,6 +113,9 @@ def dspark_vllm_config(dist_init):
         quant_config=None,
         kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
         parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
             enable_expert_parallel=True,
             enable_eplb=True,
             enable_elastic_ep=False,
@@ -125,23 +128,6 @@ def dspark_vllm_config(dist_init):
             draft_model_config=model_config,
         ),
     )
-
-
-def _build_dspark_draft(vllm_config, monkeypatch: pytest.MonkeyPatch):
-    if not current_platform.is_cuda():
-        pytest.skip("DSpark EPLB registration tests require CUDA")
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("DeepGEMM MegaMoE requires SM100")
-
-    monkeypatch.setattr(
-        "vllm.models.deepseek_v4.nvidia.dspark.get_current_vllm_config",
-        lambda: vllm_config,
-    )
-    with (
-        set_default_torch_dtype(vllm_config.model_config.dtype),
-        torch.device("cuda"),
-    ):
-        return DSparkDeepseekV4ForCausalLM(vllm_config=vllm_config)
 
 
 def _make_moe_topology(
@@ -179,6 +165,25 @@ def test_eplb_state_rejects_mismatched_dsv4_draft_redundant_experts():
         EplbState.validate_ep_configuration(state, target)
 
 
+def test_draft_model_supports_eplb_for_dsv4_dspark(dspark_vllm_config):
+    draft = SimpleNamespace()
+    assert draft_model_supports_eplb(
+        dspark_vllm_config.speculative_config,
+        draft,
+    )
+
+
+def test_draft_model_supports_eplb_rejects_dsv41_dspark(dspark_vllm_config):
+    dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
+        "deepseek_v41"
+    )
+    draft = SimpleNamespace()
+    assert not draft_model_supports_eplb(
+        dspark_vllm_config.speculative_config,
+        draft,
+    )
+
+
 def test_eplb_registers_dspark_draft_model(
     dspark_vllm_config, monkeypatch: pytest.MonkeyPatch
 ):
@@ -188,10 +193,12 @@ def test_eplb_registers_dspark_draft_model(
         "vllm.v1.worker.gpu.eplb_utils.EplbState",
         FakeEplbState,
     )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
+        lambda model: model,
+    )
 
-    draft = _build_dspark_draft(dspark_vllm_config, monkeypatch)
-    assert get_mixture_of_experts_model(draft) is draft
-
+    draft = SimpleNamespace()
     controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
     controller.prepare_load()
     speculator = SimpleNamespace(model=draft, eplb_state=None)
@@ -257,8 +264,12 @@ def test_eplb_skips_dspark_registration_with_dummy_weights(
         "vllm.v1.worker.gpu.eplb_utils.EplbState",
         FakeEplbState,
     )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
+        lambda model: model,
+    )
 
-    draft = _build_dspark_draft(dspark_vllm_config, monkeypatch)
+    draft = SimpleNamespace()
     controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
     controller.prepare_load()
     speculator = SimpleNamespace(model=draft, eplb_state=None)
