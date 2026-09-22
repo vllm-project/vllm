@@ -6,6 +6,7 @@ robust and flexible configuration of the various loggers used by vLLM.
 For `vllm serve`, configure logging with CLI arguments:
 
 - Use the built-in configuration, optionally with `--log-level`.
+- Emit structured JSON with `--logging-config.formatter json`.
 - Use a custom Python logging configuration file with
   `--logging-config.pylogging_config_file`.
 - Disable vLLM logging configuration with
@@ -14,7 +15,7 @@ For `vllm serve`, configure logging with CLI arguments:
 ## CLI logging configuration
 
 `--logging-config` accepts a JSON object. Its fields are `log_level`,
-`configure_logging`, and `pylogging_config_file`. For example:
+`formatter`, `configure_logging`, and `pylogging_config_file`. For example:
 
 ```bash
 vllm serve mistralai/Mistral-7B-v0.1 \
@@ -27,6 +28,24 @@ Fields can also be set individually with dotted arguments:
 vllm serve mistralai/Mistral-7B-v0.1 \
     --logging-config.log_level DEBUG
 ```
+
+The built-in `text` formatter is selected by default. To emit one JSON object
+per vLLM log record, select the built-in `json` formatter:
+
+```bash
+vllm serve mistralai/Mistral-7B-v0.1 \
+    --logging-config.formatter json
+```
+
+The built-in JSON output includes `asctime`, `levelname`, `name`,
+`processName`, `process`, `message`, and `vllm_process_name`. `processName` is
+Python's process name, `vllm_process_name` identifies vLLM's logical process
+(including worker ranks where applicable), and `process` is the
+operating-system PID.
+
+The built-in profile formats records emitted through vLLM's Python loggers. It
+does not reconfigure Uvicorn or convert direct writes to `stdout` or `stderr`.
+Use a custom configuration when those sources must also emit JSON.
 
 `--log-level` is a shortcut for `--logging-config.log_level` and takes
 precedence if both are supplied. It sets the level of vLLM's built-in logging
@@ -41,11 +60,11 @@ The custom logging configuration file must be JSON following Python's [logging
 configuration dictionary
 schema](https://docs.python.org/3/library/logging.config.html#dictionary-schema-details).
 
-!!! note "Custom configurations override `--log-level`"
+!!! note "Custom configurations override built-in formatter settings"
     When `pylogging_config_file` is set, vLLM loads that JSON file and replaces
-    its built-in `dictConfig`; it does not merge the two. Therefore,
-    `--log-level` applies only when no custom configuration file is provided.
-    Set logger and handler levels in the custom file itself. vLLM applies the
+    its built-in `dictConfig`; it does not merge the two. Therefore, `log_level`
+    and `formatter` apply only when no custom configuration file is provided.
+    Set levels and formatters in the custom file itself. vLLM applies the
     resolved configuration in its child processes as well.
 
 ## Environment variables
@@ -62,7 +81,7 @@ for those settings.
 
 ### Example 1: Customize vLLM root logger
 
-For this example, we will customize the vLLM root logger to use
+For more control over fields and handlers, customize the vLLM root logger with
 [`python-json-logger`](https://github.com/nhairs/python-json-logger)
 (which is part of the container image) to log to
 STDOUT of the console in JSON format with a log level of `INFO`.
@@ -105,11 +124,10 @@ vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
     --logging-config.pylogging_config_file /path/to/logging_config.json
 ```
 
-Each vLLM log record is one JSON object and includes `vllm_process_name`, which
-identifies vLLM's logical process (including worker ranks where applicable).
-The standard `process` record attribute contains the operating-system PID.
-vLLM avoids altering `stdout` or `stderr`, so no text is prepended to JSON
-log records.
+With this custom configuration, each vLLM log record is one JSON object. The
+example selects `vllm_process_name` and `process` explicitly; both fields are
+also present in the built-in JSON output described above. vLLM avoids altering
+`stdout` or `stderr`, so no text is prepended to JSON log records.
 
 This applies to records emitted through the configured Python loggers. A JSON
 formatter cannot convert unrelated output into JSON, such as a third-party
