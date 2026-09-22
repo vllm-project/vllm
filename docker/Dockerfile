@@ -477,6 +477,24 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 #################### EXTENSIONS BUILD IMAGE ####################
 # Build DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
+# Kernel symbol map for CI test selection: which source file produced each GPU
+# kernel symbol, read from the objects this stage just compiled. Only when
+# VLLM_KERNEL_SYMBOL_MAP=1 (nightly), and placed after the compile layers so
+# their cache is untouched. Never fails the build; an empty map is a signal.
+ARG VLLM_KERNEL_SYMBOL_MAP=""
+ARG buildkite_commit=""
+COPY tools/ci/kernel_symbol_map.py tools/ci/kernel_symbol_map.py
+RUN if [ "${VLLM_KERNEL_SYMBOL_MAP}" = "1" ]; then \
+        mkdir -p dist && python3 tools/ci/kernel_symbol_map.py \
+            --build-root build --source-root . --commit "${buildkite_commit}" \
+            --out dist/kernel_symbol_map.json.gz; \
+    else echo "Skipping kernel symbol map (VLLM_KERNEL_SYMBOL_MAP != 1)"; fi
+
+# Exported on its own by the CI bake target of the same name (ci-infra
+# docker/ci.hcl) with output=type=local, so the map becomes a build artifact.
+FROM scratch AS kernel-symbol-map
+COPY --from=csrc-build /workspace/dist/kernel_symbol_map.json.gz /kernel_symbol_map.json.gz
+
 FROM base AS extensions-build
 ARG TARGETARCH
 ARG CUDA_VERSION
@@ -1063,6 +1081,10 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
+# Expose the Rust frontend bundled in the wheel on the container's PATH.
+RUN ln -s "$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/vllm/vllm-rs" /usr/local/bin/vllm-rs \
+    && vllm-rs --version
+
 RUN --mount=type=cache,target=/opt/uv/cache \
 . /etc/environment && \
 uv pip list
@@ -1242,7 +1264,8 @@ ENV UV_HTTP_TIMEOUT=500
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    set -eu; \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
     CUDA_HOME=/usr/local/cuda; \
@@ -1251,11 +1274,19 @@ RUN --mount=type=cache,target=/opt/uv/cache \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+        KV_REQUIREMENTS=/tmp/vllm-requirements/kv_connectors.txt; \
+        if [ "${CUDA_MAJOR}" = "12" ]; then \
+            KV_REQUIREMENTS=/tmp/vllm-requirements/kv_connectors_cu12.txt; \
+        fi; \
+        # Preserve the stack used to compile vLLM when resolving optional dependencies. \
+        uv pip freeze --system > /tmp/kv-installed.txt; \
+        grep -E '^(torch|torchaudio|torchvision|triton|cuda-bindings|cuda-python|cuda-toolkit)==' \
+            /tmp/kv-installed.txt > /tmp/kv-constraints.txt; \
+        uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
@@ -1266,8 +1297,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
         if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
-            uv pip install --system "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
+            uv pip install --system -c /tmp/kv-constraints.txt "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
         fi; \
+        rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt; \
     fi
 
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
