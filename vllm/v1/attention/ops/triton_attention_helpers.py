@@ -28,12 +28,16 @@ def cdiv_fn(x, y):
 def apply_softcap(S, x):
     """Softcap (aka tanh-style clamp) used to bound attention scores.
 
-    ``x * tanh(S / x)`` rewritten to avoid a direct ``tanh`` call.
+    ``x * tanh(S / x)`` computed without a direct ``tanh`` call.
+
+    Use ``tanh(y) = 1 - 2 / (exp(2y) + 1)`` rather than
+    ``(exp(y) - exp(-y)) / (exp(y) + exp(-y))``. The symmetric-exponential
+    form overflows to ``inf`` for ``|y| > ~88`` and then evaluates to
+    ``inf / inf = NaN``, poisoning the attention row. The single-exponential
+    form saturates cleanly at +/-1 for either sign.
     """
-    Sdiv = S / x
-    p1 = tl.exp(Sdiv)
-    p2 = tl.exp(-Sdiv)
-    return x * (p1 - p2) / (p1 + p2)
+    y = S / x
+    return x * (1.0 - 2.0 / (tl.exp(2.0 * y) + 1.0))
 
 
 # ===========================================================================
