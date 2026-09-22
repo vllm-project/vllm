@@ -89,6 +89,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, can_share_engram_tables, gather_engram_hashes
+from .ops.mega_mhc import NO_FP8_OUTPUTS
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     mhc_pre_delayed_overlap,
@@ -212,6 +213,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_stream = mhc_stream
         self.fuse_mhc_all_reduce = fuse_mhc_all_reduce
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
+        # Decided by the attention layer once it exists (see below).
+        self.use_deepgemm_fp8_chain = False
 
         self.engram: Engram | None = None
         if engram_layout is not None:
@@ -233,7 +236,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
             candidate_block_buffer=candidate_block_buffer,
+            sequence_parallel=self.use_sequence_parallel,
         )
+        self.use_deepgemm_fp8_chain = bool(
+            getattr(self.attn, "use_deepgemm_fp8_chain", False)
+        )
+        self.wqa_fp8_chain = bool(getattr(self.attn, "wqa_fp8_chain", False))
         if self.use_sequence_parallel or fuse_mhc_all_reduce:
             self.attn.wo_b.reduce_results = False
         self.ffn = DeepseekV4MoE(
@@ -381,6 +389,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         torch.Tensor | None,
     ]:
         previous_aux: torch.Tensor | None = None
+        attn_fp8 = NO_FP8_OUTPUTS
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
@@ -465,39 +474,48 @@ class DeepseekV4DecoderLayer(nn.Module):
         else:
             # The collapse already reads the post-mapped streams, so the mean
             # aux consumers want comes out of the same kernel.
-            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
-                x,
-                residual,
-                post_mix,
-                res_mix,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=pre_mix,
-                norm_weight=self.attn_norm.weight,
-                norm_eps=self.attn_norm.variance_epsilon,
-                capture_aux=capture_previous_aux,
-                stream=mhc_stream,
-                reduce_results=self.fuse_mhc_all_reduce,
+            residual, post_mix, res_mix, x, attn_pre, aux, attn_fp8 = (
+                mhc_shifted_post_pre(
+                    x,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                    capture_aux=capture_previous_aux,
+                    stream=mhc_stream,
+                    reduce_results=self.fuse_mhc_all_reduce,
+                    fp8_gemm_output=self.wqa_fp8_chain,
+                )
             )
             if capture_previous_aux:
                 previous_aux = aux
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
+            assert attn_fp8.gemm_input is None  # per-rank; not gathered
 
-        x = self.attn(positions, x, None)
+        x = self.attn(positions, x, None, hidden_states_q=attn_fp8.gemm_input)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
-        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
+        moe_target = (
+            self.ffn.experts.fp8_input_target(x.shape[0])
+            if self.use_deepgemm_fp8_chain and self.ffn.use_mega_moe
+            else None
+        )
+        residual, post_mix, res_mix, x, ffn_pre, _, ffn_fp8 = mhc_shifted_post_pre(
             x,
             residual,
             post_mix,
@@ -515,8 +533,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=self.ffn_norm.variance_epsilon,
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
+            moe_target=moe_target,
         )
-        x = self.ffn(x, input_ids, mega_gate_metadata)
+        x = self.ffn(x, input_ids, mega_gate_metadata, staged=ffn_fp8.moe_staged)
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux

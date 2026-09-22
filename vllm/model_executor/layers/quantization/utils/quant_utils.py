@@ -243,6 +243,16 @@ kMxfp4Dynamic = QuantKey(FP4_DTYPE, scale=kMxfp4DynamicGroupScale, symmetric=Tru
 kMxfp8DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
 kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=True)
 
+# MXFP8 activations whose UE8M0 group scales are packed four to an int32 in
+# DeepGEMM's MN-major, TMA-aligned layout (what `fp8_gemm_nt` with recipe
+# (1, 1, 32) consumes and what `mega_mhc` / `fp8_einsum` emit). The distinct
+# scale dtype keeps producers of FlashInfer's swizzled uint8 layout
+# (`kMxfp8Dynamic`) from being routed to a DeepGEMM consumer, and vice versa.
+kMxfp8DynamicPackedScale = ScaleDesc(torch.int32, False, GroupShape(1, 32))
+kMxfp8DynamicDeepGemm = QuantKey(
+    FP8_DTYPE, scale=kMxfp8DynamicPackedScale, symmetric=True
+)
+
 kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 

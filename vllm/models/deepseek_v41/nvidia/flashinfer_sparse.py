@@ -256,6 +256,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             o_lora_rank=self.o_lora_rank,
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
+            fp8_z=self.use_deepgemm_fp8_chain,
         )
 
     def __init__(self, *args, **kwargs) -> None:
@@ -635,6 +636,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             o_lora_rank=self.o_lora_rank,
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
+            fp8_z=self.use_deepgemm_fp8_chain,
         )
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:

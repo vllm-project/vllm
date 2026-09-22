@@ -25,6 +25,7 @@ from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.models.deepseek_v4.nvidia.ops.o_proj import wo_a_einsum_then_wo_b
 from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
@@ -41,7 +42,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     FlashMLAMegaAttnBackend,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
+from vllm.utils.deep_gemm import get_tma_aligned_size
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -213,19 +214,16 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         einsum consumes the kernel's output with no repacking.
         """
         groups = self.n_local_groups
-        z = torch.empty(
-            (attn_out.data.shape[0], groups, self.o_lora_rank),
-            dtype=torch.bfloat16,
-            device=attn_out.data.device,
-        )
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (attn_out.data[:, :groups], attn_out.scale[:, :groups]),
-            (self.wo_a.weight, self.wo_a.weight_scale),
-            z,
+        return wo_a_einsum_then_wo_b(
+            attn_out.data[:, :groups],
+            attn_out.scale[:, :groups],
+            self.wo_a,
+            self.wo_b,
+            n_groups=groups,
+            o_lora_rank=self.o_lora_rank,
             recipe=self._einsum_recipe,
+            fp8_z=self.use_deepgemm_fp8_chain,
         )
-        return self.wo_b(z.flatten(1))
 
     # ---- weights -----------------------------------------------------------
 

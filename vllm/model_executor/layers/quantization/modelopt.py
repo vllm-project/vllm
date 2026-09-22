@@ -2533,6 +2533,13 @@ class ModelOptLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer) -> None:
         if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
             self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
+        elif self.spec.weight == kMxfp8Static and getattr(
+            layer, "deep_gemm_activations", False
+        ):
+            # The model routes this layer's activations through DeepGEMM's
+            # packed-scale FP8 layout; the consumer kernel changes with it.
+            self.kernel = init_mxfp8_linear_kernel(deep_gemm_activations=True)
+            expose_input_quant_key(layer, self.kernel)
         if is_weights_pre_processed():
             if not self.supports_pre_processed_weights:
                 raise RuntimeError(

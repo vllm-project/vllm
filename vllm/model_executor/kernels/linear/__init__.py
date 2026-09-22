@@ -111,6 +111,7 @@ from vllm.model_executor.kernels.linear.mxfp8.b12x import (
 )
 from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
     DeepGemmMxfp8BmmLinearKernel,
+    DeepGemmMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
@@ -314,6 +315,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "deep_gemm": {
         DeepGemmFp8BlockScaledMMKernel,
         DeepGemmMxfp8BmmLinearKernel,
+        DeepGemmMxfp8LinearKernel,
     },
     "torch": {
         PerTensorTorchFP8ScaledMMLinearKernel,
@@ -884,10 +886,14 @@ def choose_mp_linear_kernel(
     )
 
 
-def init_mxfp8_linear_kernel(*, bmm_batch_size: int | None = None) -> Mxfp8LinearKernel:
+def init_mxfp8_linear_kernel(
+    *, bmm_batch_size: int | None = None, deep_gemm_activations: bool = False
+) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform."""
-    config = Mxfp8LinearLayerConfig(bmm_batch_size=bmm_batch_size)
+    config = Mxfp8LinearLayerConfig(
+        bmm_batch_size=bmm_batch_size, deep_gemm_activations=deep_gemm_activations
+    )
 
     platform = current_platform._enum
     possible: list[type[Mxfp8LinearKernel]]
@@ -897,6 +903,8 @@ def init_mxfp8_linear_kernel(*, bmm_batch_size: int | None = None) -> Mxfp8Linea
             if current_platform.is_cuda()
             else []
         )
+    elif deep_gemm_activations:
+        possible = [DeepGemmMxfp8LinearKernel] if current_platform.is_cuda() else []
     else:
         possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 

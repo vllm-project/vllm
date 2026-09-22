@@ -17,9 +17,14 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 from .mega_mhc import (
+    NO_FP8_OUTPUTS,
+    MegaMhcFp8Outputs,
     can_use_mega_mhc,
     mhc_shifted_post_pre_deep_gemm,
 )
+
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import MegaMoeFp8Target
 
 if TYPE_CHECKING:
     from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
@@ -170,12 +175,25 @@ def mhc_shifted_post_pre(
     *,
     stream: torch.cuda.Stream | None = None,
     reduce_results: bool = False,
+    fp8_gemm_output: bool = False,
+    moe_target: "MegaMoeFp8Target | None" = None,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    MegaMhcFp8Outputs,
 ]:
     """Dispatch shifted post/pre to overlap, Mega-mHC, or fused TileLang.
 
     When stream is supplied, join it before consuming the returned coefficients.
+
+    ``fp8_gemm_output`` / ``moe_target`` ask the Mega-mHC path to also emit
+    the normalized output as MXFP8 (see ``mhc_shifted_post_pre_deep_gemm``).
+    The last element reports what was produced; it is empty when another path
+    ran and the consumer must quantize itself.
     """
     layer_input = None
     if reduce_results:
@@ -224,11 +242,18 @@ def mhc_shifted_post_pre(
             stream=stream,
             layer_input=layer_input,
         )
-        return residual, *pre_outputs, aux
+        return residual, *pre_outputs, aux, NO_FP8_OUTPUTS
 
     if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
         assert pre_mix is not None and norm_weight is not None
-        outputs = mhc_shifted_post_pre_deep_gemm(
+        (
+            new_residual,
+            new_post_mix,
+            new_comb_res_mix,
+            y_bf16,
+            new_prev_mix,
+            fp8_outputs,
+        ) = mhc_shifted_post_pre_deep_gemm(
             x,
             residual,
             pre_mix,
@@ -244,10 +269,20 @@ def mhc_shifted_post_pre(
             sinkhorn_repeat,
             norm_weight,
             norm_eps,
+            fp8_gemm_output=fp8_gemm_output,
+            moe_target=moe_target,
         )
-        return *outputs, x.new_empty(0, x.shape[1])
+        return (
+            new_residual,
+            new_post_mix,
+            new_comb_res_mix,
+            y_bf16,
+            new_prev_mix,
+            x.new_empty(0, x.shape[1]),
+            fp8_outputs,
+        )
 
-    return mhc_fused_post_pre_delayed_tilelang(
+    tl_outputs = mhc_fused_post_pre_delayed_tilelang(
         x,
         residual,
         post_layer_mix,
@@ -265,3 +300,4 @@ def mhc_shifted_post_pre(
         norm_eps=norm_eps,
         capture_aux=capture_aux,
     )
+    return *tl_outputs, NO_FP8_OUTPUTS
