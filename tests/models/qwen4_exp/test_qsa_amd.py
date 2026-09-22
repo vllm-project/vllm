@@ -10,20 +10,20 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.models.qwen4_exp.amd import indexer_qsa
 from vllm.models.qwen4_exp.amd import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.amd import ple_layer as ple_layer_module
-from vllm.models.qwen4_exp.amd.indexer_qsa import (
-    QSAIndexer,
-    apply_qsa_rmsnorm,
-    apply_qsa_rope,
-)
+from vllm.models.qwen4_exp.amd import qsa_indexer
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
     qsa_prepare,
     supports_fused_pre_indexer,
+)
+from vllm.models.qwen4_exp.amd.qsa_indexer import (
+    QSAIndexer,
+    apply_qsa_rmsnorm,
+    apply_qsa_rope,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -208,7 +208,7 @@ def test_qsa_fused_prepare_replaces_the_unfused_chain(
         calls.append((args, kwargs))
         return main_outputs
 
-    monkeypatch.setattr(indexer_qsa, "qsa_prepare", fake_prepare)
+    monkeypatch.setattr(qsa_indexer, "qsa_prepare", fake_prepare)
     monkeypatch.setattr(
         QSAIndexer,
         "_update_and_compress",
@@ -262,7 +262,7 @@ def test_qsa_unsupported_config_keeps_the_unfused_chain(
 ) -> None:
     indexer = _make_indexer(use_fused=False)
     monkeypatch.setattr(
-        indexer_qsa,
+        qsa_indexer,
         "qsa_prepare",
         lambda *args, **kwargs: pytest.fail("unfused path ran the fused kernel"),
     )

@@ -63,8 +63,8 @@ from vllm.v1.kv_cache_interface import (
 
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
-from .indexer_qsa import QSAIndexer
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
+from .qsa_indexer import QSAIndexer
 
 
 class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):

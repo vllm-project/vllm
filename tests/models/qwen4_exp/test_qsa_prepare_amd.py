@@ -6,12 +6,12 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.models.qwen4_exp.amd.indexer_qsa import apply_qsa_rope
 from vllm.models.qwen4_exp.amd.ops.qsa import (
     qsa_compress_groups_with_ratio,
     qsa_store_cache_rows,
 )
 from vllm.models.qwen4_exp.amd.ops.qsa_prepare import qsa_prepare
+from vllm.models.qwen4_exp.amd.qsa_indexer import apply_qsa_rope
 from vllm.models.qwen4_exp.common.qsa_cache import (
     canonical_qsa_rope_positions,
     circular_qsa_slot_mapping,

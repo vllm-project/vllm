@@ -60,7 +60,7 @@ from vllm.v1.worker.workspace import (
 
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
-from .indexer_qsa import QSAIndexer
+from .qsa_indexer import QSAIndexer
 
 
 def _octave_mid_o_capacity(vllm_config: VllmConfig) -> int:
