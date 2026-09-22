@@ -28,16 +28,17 @@ use vllm_llm::{
 
 use self::convert::{ResponseOptions, prepare_generate_request};
 use self::types::{
-    GenerateLogprob, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
-    GenerateStreamResponse, MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
-    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
+    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
+    GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
+    MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo, SpeculativeDecodingMetrics,
+    StreamingSpeculativeDecodingMetrics,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
-use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb, Usage};
+use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response};
@@ -215,7 +216,7 @@ async fn generate_chunk_stream(
                             "raw generate stream requested logprobs but generation returned none"
                         )
                     })?;
-                    Some(raw_logprobs_to_openai_chat(logprobs)?)
+                    Some(raw_logprobs_to_generate(logprobs)?)
                 } else {
                     None
                 };
@@ -290,7 +291,7 @@ fn collect_generate(
                 "raw generate response requested logprobs but generation returned none".to_string(),
             )
         })?;
-        Some(raw_logprobs_to_openai_chat(logprobs)?)
+        Some(raw_logprobs_to_generate(logprobs)?)
     } else {
         None
     };
@@ -361,14 +362,14 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
     Some(placeholders)
 }
 
-fn raw_logprobs_to_openai_chat(logprobs: &Logprobs) -> Result<ChatLogProbs, ApiError> {
+fn raw_logprobs_to_generate(logprobs: &Logprobs) -> Result<GenerateLogProbs, ApiError> {
     let content = logprobs
         .positions
         .iter()
-        .map(position_to_chat_logprobs_content)
+        .map(position_to_generate_logprobs_content)
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ChatLogProbs {
+    Ok(GenerateLogProbs {
         content: Some(content),
     })
 }
@@ -386,30 +387,26 @@ fn raw_prompt_logprobs_to_maps(
         .collect()
 }
 
-fn position_to_chat_logprobs_content(
+fn position_to_generate_logprobs_content(
     position: &PositionLogprobs,
-) -> Result<ChatLogProbsContent, ApiError> {
+) -> Result<GenerateLogProbsContent, ApiError> {
     let chosen = position.entries.first().ok_or_else(|| {
         ApiError::server_error(
             "raw generate logprobs position unexpectedly had no token candidates".to_string(),
         )
     })?;
-    let token = format_token_id(chosen.token_id);
 
-    Ok(ChatLogProbsContent {
-        token: token.clone(),
+    Ok(GenerateLogProbsContent {
+        token_id: chosen.token_id,
         logprob: clamp_logprob(chosen.logprob),
-        bytes: Some(token.as_bytes().to_vec()),
+        rank: Some(chosen.rank),
         top_logprobs: position
             .entries
             .iter()
-            .map(|entry| {
-                let token = format_token_id(entry.token_id);
-                TopLogProb {
-                    token: token.clone(),
-                    logprob: clamp_logprob(entry.logprob),
-                    bytes: Some(token.into_bytes()),
-                }
+            .map(|entry| GenerateLogProb {
+                token_id: entry.token_id,
+                logprob: clamp_logprob(entry.logprob),
+                rank: Some(entry.rank),
             })
             .collect(),
     })

@@ -346,26 +346,17 @@ def format_token_id_placeholder(token_id: int) -> str:
     return f"token_id:{token_id}"
 
 
-def resolve_token_id_placeholder(
-    token: str, tokenizer: TokenizerLike
+def decode_token_id(
+    token_id: int, tokenizer: TokenizerLike
 ) -> tuple[str, list[int] | None]:
-    """Decode a 'token_id:N' placeholder back to a token string and UTF-8 bytes.
+    """Decode a single token id to its token string and UTF-8 bytes.
 
-    Returns (token, None) unchanged if token is not a placeholder.
-    This is the inverse of format_token_id_placeholder / _get_decoded_token
-    when return_as_token_id=True.
+    Returns ("", None) if the id has no vocab entry.
     """
-    suffix = token.removeprefix("token_id:")
-    if suffix == token:
-        return token, None
-    try:
-        token_id = int(suffix)
-    except ValueError:
-        return token, None
     token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]
     if token_repr is None:
         logger.warning_once(
-            "resolve_token_id_placeholder: token_id %d has no vocab entry; "
+            "decode_token_id: token_id %d has no vocab entry; "
             "substituting empty string",
             token_id,
         )

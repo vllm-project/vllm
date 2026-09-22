@@ -80,6 +80,51 @@ for the existing authentication boundaries.
 
 For the post processing counterpart that turns generated token IDs back into OpenAI compatible responses, see the [Derenderer APIs](derenderer.md).
 
+## Generate Output Logprobs
+
+`/inference/v1/generate` is a token in / token out API, so its output logprobs
+identify tokens by integer ID rather than by the OpenAI string token. With
+`sampling_params.logprobs` set, each choice carries a `GenerateLogProbs`:
+
+```json
+{
+  "logprobs": {
+    "content": [
+      {
+        "token_id": 262,
+        "logprob": -0.10,
+        "rank": 1,
+        "top_logprobs": [
+          {"token_id": 262, "logprob": -0.10, "rank": 1},
+          {"token_id": 257, "logprob": -1.20, "rank": 2}
+        ]
+      }
+    ]
+  }
+}
+```
+
+- `content` has one entry per generated token, in generation order. `content:
+  null` is the normal state when no per-token candidates were requested, not an
+  error.
+- `top_logprobs` is a list in rank order, not a dict: JSON turns dict keys into
+  strings and the ordering would be implicit.
+- There is no `token` or `bytes` field. The generate server has no tokenizer;
+  [derender](derenderer.md) fills those in when it converts the response to the
+  OpenAI shapes.
+- `prompt_logprobs` on the same response is unchanged
+  (`list[dict[int, Logprob] | None]`).
+
+!!! warning "Changed in this release"
+    Output logprobs used to be `ChatCompletionLogProbs` with every token written
+    as a `"token_id:N"` placeholder string, and `bytes` set to the UTF-8 bytes of
+    that placeholder by the Rust frontend but left unset by the Python one.
+    Clients that read only `content[i].logprob` are unaffected. Clients that
+    parsed the placeholder should read `content[i].token_id` instead.
+    `return_tokens_as_token_ids` on `/v1/chat/completions` and `/v1/completions`
+    is unchanged: it is a user-facing OpenAI option and still uses the
+    `token_id:N` format.
+
 ## Multimodal Render Features
 
 Multimodal render responses include a `features` object with per-modality

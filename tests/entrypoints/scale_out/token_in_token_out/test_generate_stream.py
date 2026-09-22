@@ -1022,7 +1022,8 @@ async def test_stream_with_logprobs():
         lp = dc["choices"][0]["logprobs"]
         assert lp is not None
         assert len(lp["content"]) == 1
-        assert lp["content"][0]["token"].startswith("token_id:")
+        assert isinstance(lp["content"][0]["token_id"], int)
+        assert "token" not in lp["content"][0]
 
 
 @pytest.mark.asyncio

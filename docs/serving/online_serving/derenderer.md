@@ -98,7 +98,7 @@ The server keeps no state between calls. Everything the next call needs is in `s
 - **Send the same context on every call.** `chat_request` and `prompt_token_ids` aren't kept between calls, so they go with every chunk including the usage chunk. Both are required when a tool or reasoning parser is configured. `prompt_token_ids` is the `token_ids` of the `GenerateRequest` returned by `/render`.
 - **Don't forward `[DONE]`.** It marks the end of the generate stream and isn't a chunk.
 
-Streaming chunks don't carry logprobs yet, so `logprobs` on a generate chunk are dropped. The non-streaming endpoints do resolve them, including `token_id:N` placeholders.
+Streaming chunks don't carry logprobs yet, so `logprobs` on a generate chunk are dropped. The non-streaming endpoints do decode them: `/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction.
 
 ## Streaming cost
 

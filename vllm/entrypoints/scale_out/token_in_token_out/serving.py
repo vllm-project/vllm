@@ -21,11 +21,6 @@ from vllm.entrypoints.generate.base.serving import (
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionLogProb,
-    ChatCompletionLogProbs,
-    ChatCompletionLogProbsContent,
-)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
@@ -53,6 +48,9 @@ from .mm_features import (
     placeholder_ranges_from_engine_input,
 )
 from .protocol import (
+    GenerateLogProb,
+    GenerateLogProbs,
+    GenerateLogProbsContent,
     GenerateRequest,
     GenerateResponse,
     GenerateResponseChoice,
@@ -561,41 +559,38 @@ class ServingTokens(GenerateBaseServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int | None = None,
-    ) -> ChatCompletionLogProbs:
-        """Create OpenAI-style logprobs."""
-        logprobs_content: list[ChatCompletionLogProbsContent] = []
+    ) -> GenerateLogProbs:
+        """Create generate-shaped logprobs (integer token ids, no tokenizer)."""
+        logprobs_content: list[GenerateLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
-            token = f"token_id:{token_id}"
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
-                logprobs_content.append(
-                    ChatCompletionLogProbsContent(
-                        token=token,
-                    )
-                )
+                logprobs_content.append(GenerateLogProbsContent(token_id=token_id))
             else:
                 step_token = step_top_logprobs[token_id]
 
                 logprobs_content.append(
-                    ChatCompletionLogProbsContent(
-                        token=token,
+                    GenerateLogProbsContent(
+                        token_id=token_id,
                         logprob=max(step_token.logprob, -9999.0),
+                        rank=step_token.rank,
                         top_logprobs=[
-                            ChatCompletionLogProb(
-                                token=f"token_id:{token_id}",
-                                logprob=max(logprob.logprob, -9999.0),
+                            GenerateLogProb(
+                                token_id=top_token_id,
+                                logprob=max(top_logprob.logprob, -9999.0),
+                                rank=top_logprob.rank,
                             )
-                            for i, (token_id, logprob) in enumerate(
+                            for rank_index, (top_token_id, top_logprob) in enumerate(
                                 step_top_logprobs.items()
                             )
                             if num_output_top_logprobs is not None
                             and (
                                 num_output_top_logprobs == -1
-                                or i < max(num_output_top_logprobs, 1)
+                                or rank_index < max(num_output_top_logprobs, 1)
                             )
                         ],
                     )
                 )
 
-        return ChatCompletionLogProbs(content=logprobs_content)
+        return GenerateLogProbs(content=logprobs_content)
