@@ -1502,7 +1502,9 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
         [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
     )
     FlashKDAPrefillCheckpointExporter().export(
-        MambaPrefillCheckpointMetadata(checkpoint_offsets, checkpoint_state_indices),
+        MambaPrefillCheckpointMetadata(
+            checkpoint_offsets, checkpoint_state_indices, [16, 31]
+        ),
         raw_qkv=conv_input,
         conv_state=conv_state,
         recurrent_checkpoint=checkpoint_state,

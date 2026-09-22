@@ -7,8 +7,8 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.mamba.checkpoint import (
-    compute_mamba_prefill_checkpoints,
+from vllm.model_executor.layers.mamba.mamba2_checkpoint import (
+    Mamba2PrefillCheckpointBuilder,
 )
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -136,6 +136,9 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
+        self.checkpoint_builder = Mamba2PrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
 
     def build(
         self,
@@ -171,39 +174,17 @@ class Mamba2AttentionMetadataBuilder(
                 prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
             checkpoint_offsets_p = None
-            cache_config = self.vllm_config.cache_config
-            if (
-                cache_config.mamba_cache_mode == "align"
-                and self.kv_cache_spec.num_prefill_checkpoint_blocks
-            ):
-                # Offsets feed the chunk split below so a chunk ends on the
-                # checkpoint; block_idx is compacted to the rows that take one.
-                spec_config = self.vllm_config.speculative_config
-                block_size = self.kv_cache_spec.block_size
+            if self.vllm_config.cache_config.mamba_cache_mode == "align":
                 first = common.num_reqs - common.num_prefills
-                seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-                assert seq_lens_cpu is not None
-                _, qsl = self._prefill_cpu_metadata(common, common_attn_metadata)
-                offsets, cols = compute_mamba_prefill_checkpoints(
-                    seq_lens_cpu[first : first + common.num_prefills].tolist(),
-                    (qsl[1:] - qsl[:-1]).tolist(),
-                    hash_block_size=cache_config.prefix_match_unit or block_size,
-                    mamba_block_size=block_size,
-                    checkpoint_alignment=(
-                        self.kv_cache_spec.prefill_checkpoint_alignment
-                    ),
-                    drop_eagle_block=(
-                        spec_config is not None and spec_config.use_eagle_block_drop()
-                    ),
+                checkpoint = self.checkpoint_builder.build(
+                    common_attn_metadata,
+                    list(range(first, common.num_reqs)),
                 )
-                rows = [i for i, offset in enumerate(offsets) if offset]
-                if rows:
-                    checkpoint_offsets_p = offsets
-                    dev = common_attn_metadata.query_start_loc.device
-                    checkpoint_block_idx = common_attn_metadata.block_table_tensor[
-                        async_tensor_h2d([first + i for i in rows], dev),
-                        async_tensor_h2d([cols[i] for i in rows], dev),
-                    ]
+                if checkpoint is not None:
+                    # Offsets place the chunk boundary below; state_indices is
+                    # compacted to the rows that take a checkpoint.
+                    checkpoint_offsets_p = checkpoint.offsets
+                    checkpoint_block_idx = checkpoint.state_indices
 
             (
                 cu_chunk_seqlen_p,

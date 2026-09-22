@@ -62,6 +62,11 @@ def compute_mamba_prefill_checkpoints(
 class MambaPrefillCheckpointMetadata:
     checkpoint_offsets: torch.Tensor
     state_indices: torch.Tensor
+    # Host copy of the per-row offsets, in ``request_rows`` order and
+    # never compacted. Backends that must place the checkpoint before the
+    # tensors exist need it: Mamba2 feeds it to the SSD chunk layout so a
+    # logical chunk ends on the checkpoint.
+    offsets: list[int]
 
 
 class MambaPrefillCheckpointBuilder:
@@ -120,6 +125,7 @@ class MambaPrefillCheckpointBuilder:
         return MambaPrefillCheckpointMetadata(
             checkpoint_offsets_tensor,
             checkpoint_state_indices,
+            checkpoint_offsets,
         )
 
 
