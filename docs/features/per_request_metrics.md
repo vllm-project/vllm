@@ -189,10 +189,13 @@ time as their common origin. A zero-token category remains present with
 
 Token timing has engine output-batch resolution. When one output batch contains
 multiple tokens, including tokens on both sides of a reasoning/content
-boundary, those tokens share a timestamp; vLLM does not infer per-token timing
-within the batch. Consequently, category mean ITL and throughput are `null` if
-a category receives a multi-token batch. Multiple segments of the same category
-are aggregated, so their generation interval includes time between segments.
+boundary, those tokens share a timestamp. Category mean ITL and throughput are
+averages over the interval between the first and last observed batches; vLLM
+does not infer individual timestamps for tokens within a batch. These fields
+remain `null` when there are fewer than two category tokens or no measurable
+interval between the first and last observations. Multiple segments of the same
+category are aggregated, so their generation interval includes time between
+segments.
 
 `reasoning.token_count` uses the same parser classification as the endpoint's
 existing reasoning-token usage field. It therefore equals

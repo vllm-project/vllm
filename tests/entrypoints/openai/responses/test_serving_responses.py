@@ -1297,7 +1297,7 @@ def test_output_token_metrics_tracker_uses_common_origin_and_category_intervals(
     assert metrics.unclassified_token_count == 1
 
 
-def test_output_token_metrics_tracker_does_not_infer_intra_batch_itl():
+def test_output_token_metrics_tracker_averages_across_multi_token_batches():
     tracker = OutputTokenMetricsTracker()
     tracker.update(_stats_at(2.0), TokenPhaseCounts(2, 0, 0))
     tracker.update(_stats_at(2.5), TokenPhaseCounts(3, 0, 0))
@@ -1308,8 +1308,8 @@ def test_output_token_metrics_tracker_does_not_infer_intra_batch_itl():
     reasoning = metrics.reasoning
     assert reasoning.token_count == 3
     assert reasoning.generation_time_ms == pytest.approx(500.0)
-    assert reasoning.mean_itl_ms is None
-    assert reasoning.tokens_per_second is None
+    assert reasoning.mean_itl_ms == pytest.approx(250.0)
+    assert reasoning.tokens_per_second == pytest.approx(4.0)
 
 
 def test_output_token_metrics_tracker_accepts_boundary_count_corrections():

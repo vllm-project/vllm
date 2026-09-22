@@ -174,7 +174,6 @@ class OutputTokenMetricsTracker:
 
         first_token_ts = 0.0
         last_token_ts = 0.0
-        has_multi_token_batch = False
         if state.token_count > 0:
             # Use the last point below each threshold. This discards provisional
             # classifications that a parser later corrects after seeing a
@@ -191,22 +190,11 @@ class OutputTokenMetricsTracker:
             if last_index < len(state.observations):
                 last_token_ts = state.observations[last_index][1]
 
-            previous_count = 0
-            for count, _ in state.observations[first_index : last_index + 1]:
-                effective_count = min(count, state.token_count)
-                if effective_count - previous_count > 1:
-                    has_multi_token_batch = True
-                previous_count = max(previous_count, effective_count)
-
         if self.scheduled_ts > 0 and first_token_ts > 0:
             ttft_ms = (first_token_ts - self.scheduled_ts) * 1000
         if first_token_ts > 0 and last_token_ts > 0:
             generation_time_ms = (last_token_ts - first_token_ts) * 1000
-            if (
-                state.token_count > 1
-                and generation_time_ms > 0
-                and not has_multi_token_batch
-            ):
+            if state.token_count > 1 and generation_time_ms > 0:
                 mean_itl_ms = generation_time_ms / (state.token_count - 1)
                 tokens_per_second = (state.token_count - 1) / generation_time_ms * 1000
 
