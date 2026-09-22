@@ -262,6 +262,7 @@ class KVCacheManager:
 
         Returns:
             The number of cached tokens, or 0 if lookup is disabled.
+
         """
         if not self.prefix_cache_lookup_enabled(request):
             return 0
