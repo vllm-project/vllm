@@ -74,6 +74,7 @@ import signal
 import socket
 import sys
 from collections.abc import Callable
+from itertools import product
 
 import torch
 
@@ -573,30 +574,33 @@ def main() -> None:
 
     ctx = multiprocessing.get_context("spawn")
     ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
-    procs = []
-    expected_ready: set[tuple[str, int]] = set()
-    for is_draft, config, init_method in groups:
-        role = format_daemon_role(is_draft)
-        # Local index == device index.
-        for local_rank, dp_rank, tp_rank in placements:
-            global_rank = dp_rank * tp_size + tp_rank
-            expected_ready.add((role, global_rank))
-            procs.append(
-                ctx.Process(
-                    target=_run_daemon,
-                    args=(
-                        tp_rank,
-                        local_rank,
-                        config,
-                        init_method,
-                        args.weight_cache_socket_dir,
-                        ready_queue,
-                        is_draft,
-                        dp_rank,
-                    ),
-                    name=f"vllm-weight-cache-{role}-{global_rank}",
-                )
-            )
+    # Local index == device index; global rank enumerates DP then TP.
+    expected_ready = {
+        (format_daemon_role(is_draft), dp_rank * tp_size + tp_rank)
+        for (is_draft, _, _), (_, dp_rank, tp_rank) in product(groups, placements)
+    }
+    procs = [
+        ctx.Process(
+            target=_run_daemon,
+            args=(
+                tp_rank,
+                local_rank,
+                config,
+                init_method,
+                args.weight_cache_socket_dir,
+                ready_queue,
+                is_draft,
+                dp_rank,
+            ),
+            name=f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
+            f"{dp_rank * tp_size + tp_rank}",
+        )
+        for (is_draft, config, init_method), (
+            local_rank,
+            dp_rank,
+            tp_rank,
+        ) in product(groups, placements)
+    ]
     for proc in procs:
         proc.start()
 
