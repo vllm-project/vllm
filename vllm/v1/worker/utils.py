@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, LoadConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
@@ -530,13 +530,45 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
-def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
+def request_memory(
+    init_snapshot: MemorySnapshot,
+    cache_config: CacheConfig,
+    load_config: LoadConfig | None = None,
+) -> int:
     """Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
+
+    Weights mapped zero-copy from a weight cache daemon never appear in this
+    process's usage, so memory already in use at startup is charged against
+    the budget in their place. Assumes it all belongs to the daemon.
     """
     requested_memory = math.ceil(
         init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
+
+    if load_config is not None and load_config.weights_held_by_ipc_daemon:
+        daemon_held_memory = init_snapshot.total_memory - init_snapshot.free_memory
+        engine_memory = requested_memory - daemon_held_memory
+        if engine_memory <= 0:
+            raise ValueError(
+                f"Memory already in use on device {init_snapshot.device_} "
+                f"({format_gib(daemon_held_memory)}/"
+                f"{format_gib(init_snapshot.total_memory)} GiB) on startup, "
+                "including the weight cache daemon's weights, exceeds the "
+                "desired GPU memory utilization "
+                f"({cache_config.gpu_memory_utilization}, "
+                f"{format_gib(requested_memory)} GiB). Increase GPU memory "
+                "utilization or reduce GPU memory used by other processes."
+            )
+        logger.info_once(
+            "Weights are mapped from the weight cache daemon: of the %s GiB "
+            "utilization budget, %s GiB is already in use on the device and "
+            "%s GiB remains for the engine's own allocations.",
+            format_gib(requested_memory),
+            format_gib(daemon_held_memory),
+            format_gib(engine_memory),
+        )
+        return engine_memory
 
     if init_snapshot.free_memory < requested_memory:
         raise ValueError(
