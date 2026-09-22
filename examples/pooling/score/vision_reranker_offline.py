@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""This example shows how to use vLLM for running offline inference with
+"""
+This example shows how to use vLLM for running offline inference with
 vision language reranker models for multimodal scoring tasks.
 
 Vision language rerankers score the relevance between a text query and

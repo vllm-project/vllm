@@ -40,7 +40,6 @@ from vllm.multimodal.inputs import (
     ImageItem,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalKwargsItem,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -60,7 +59,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -125,12 +123,13 @@ def smart_resize(
 
 
 class KeyeImagePixelInputs(TensorSchema):
-    """Dimensions:
-    - bnp: Batch size * Number of patches
-    - c: Number of channels
-    - ps: Patch size
-    - ni: Number of images
-    - g: Grid dimensions (3 for t, h, w)
+    """
+    Dimensions:
+        - bnp: Batch size * Number of patches
+        - c: Number of channels
+        - ps: Patch size
+        - ni: Number of images
+        - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["pixel_values"]
@@ -141,12 +140,13 @@ class KeyeImagePixelInputs(TensorSchema):
 
 
 class KeyeImageEmbeddingInputs(TensorSchema):
-    """Dimensions:
-    - nf: Number of image features
-    - hs: Hidden size (must match the hidden size of language model
-      backbone)
-    - ni: Number of images
-    - g: Grid dimensions (3 for t, h, w)
+    """
+    Dimensions:
+        - nf: Number of image features
+        - hs: Hidden size (must match the hidden size of language model
+          backbone)
+        - ni: Number of images
+        - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["image_embeds"]
@@ -158,12 +158,13 @@ KeyeImageInputs: TypeAlias = KeyeImagePixelInputs | KeyeImageEmbeddingInputs
 
 
 class KeyeVideoPixelInputs(TensorSchema):
-    """Dimensions:
-    - bnp: Batch size * Number of patches
-    - c: Number of channels
-    - ps: Patch size
-    - ni: Number of images
-    - g: Grid dimensions (3 for t, h, w)
+    """
+    Dimensions:
+        - bnp: Batch size * Number of patches
+        - c: Number of channels
+        - ps: Patch size
+        - ni: Number of images
+        - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["pixel_values_videos"]
@@ -174,12 +175,13 @@ class KeyeVideoPixelInputs(TensorSchema):
 
 
 class KeyeVideoEmbeddingInputs(TensorSchema):
-    """Dimensions:
-    - nf: Number of video features
-    - hs: Hidden size (must match the hidden size of language model
-      backbone)
-    - nv: Number of videos
-    - g: Grid dimensions (3 for t, h, w)
+    """
+    Dimensions:
+        - nf: Number of video features
+        - hs: Hidden size (must match the hidden size of language model
+          backbone)
+        - nv: Number of videos
+        - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["video_embeds"]
@@ -606,9 +608,7 @@ class KeyeSiglipEncoder(nn.Module):
                 [height_position_ids, width_position_ids],
                 dim=-1,
             )
-            # The ids are built from the grids above, so `h`/`w` bound them
-            # and the table size is known on the host.
-            max_grid_size = max(max(h, w) for _, h, w in flatten_image_grid_thw)
+            max_grid_size = pids.max() + 1
             rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
             rope_emb = rope_emb_max_grid[pids].flatten(1)
             rope_emb = rope_emb.repeat(1, 2)
@@ -694,19 +694,19 @@ class KeyeSiglipVisionTransformer(nn.Module):
 
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
+        sample_hidden_state = list()
         if cu_seqlens is None:
             raise ValueError(
                 "cu_seqlens cannot be None for "
                 "SiglipVisionTransformer output processing."
             )
-        # `cu_seqlens` is the running sum of the per-image `t * h * w`, so the
-        # split sizes are known on the host and slicing needs no device read.
-        split_sizes = [
-            int(np.prod(thw)) for thw in self.encoder.flatten_list(image_grid_thw)
-        ]
-        return [
-            tensor.squeeze(0) for tensor in last_hidden_state.split(split_sizes, dim=1)
-        ]
+        for i in range(cu_seqlens.shape[0] - 1):
+            start = cu_seqlens[i]
+            end = cu_seqlens[i + 1]
+            tensor = last_hidden_state[:, start:end, :].squeeze(0)
+            sample_hidden_state.append(tensor)
+
+        return sample_hidden_state
 
 
 class KeyeSiglipVisionModel(nn.Module):
@@ -718,8 +718,7 @@ class KeyeSiglipVisionModel(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        },
-        orig_to_new_prefix={"vision_model.head.": None},
+        }
     )
 
     def __init__(
@@ -780,7 +779,7 @@ class KeyeSiglipVisionModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_prefixes=["vision_model.head."])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
@@ -934,7 +933,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return KeyeMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_supported_mm_limits(
@@ -1159,8 +1158,16 @@ class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]):
 
 
 class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override to use the text path instead of token path to use the
+        # video-specific logic in processing_keye.py
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
     def _get_prompt_updates(
         self,
@@ -1224,8 +1231,6 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             "model.": "language_model.model.",
         }
     )
-
-    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1302,29 +1307,13 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             )
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            # These are all built on the host; concat straight into pinned
-            # buffers so the H2D copies stay non-blocking.
-            siglip_position_ids = torch.concat(
-                siglip_position_ids,
-                dim=0,
-                out=torch.empty(
-                    sum(t.numel() for t in siglip_position_ids),
-                    dtype=torch.int64,
-                    pin_memory=PIN_MEMORY,
-                ),
-            ).to(pixel_values.device, non_blocking=True)
-            cu_seqlens = async_tensor_h2d(
-                cu_seqlens, dtype=torch.int32, device=pixel_values.device
+            siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
+                pixel_values.device
             )
-            sample_indices = torch.concat(
-                sample_indices,
-                dim=0,
-                out=torch.empty(
-                    sum(t.numel() for t in sample_indices),
-                    dtype=torch.int64,
-                    pin_memory=PIN_MEMORY,
-                ),
-            ).to(pixel_values.device, non_blocking=True)
+            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(
+                pixel_values.device
+            )
+            sample_indices = torch.concat(sample_indices, dim=0).to(pixel_values.device)
 
             image_embeds = self.visual(
                 pixel_values=pixel_values,
@@ -1368,29 +1357,15 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             )
         else:
             pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
-            # These are host-built; concat straight into pinned buffers so
-            # the H2D copies stay non-blocking.
-            siglip_position_ids = torch.concat(
-                siglip_position_ids,
-                dim=0,
-                out=torch.empty(
-                    sum(t.numel() for t in siglip_position_ids),
-                    dtype=torch.int64,
-                    pin_memory=PIN_MEMORY,
-                ),
-            ).to(pixel_values_videos.device, non_blocking=True)
-            cu_seqlens = async_tensor_h2d(
-                cu_seqlens, dtype=torch.int32, device=pixel_values_videos.device
+            siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
+                pixel_values_videos.device
             )
-            sample_indices = torch.concat(
-                sample_indices,
-                dim=0,
-                out=torch.empty(
-                    sum(t.numel() for t in sample_indices),
-                    dtype=torch.int64,
-                    pin_memory=PIN_MEMORY,
-                ),
-            ).to(pixel_values_videos.device, non_blocking=True)
+            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(
+                pixel_values_videos.device
+            )
+            sample_indices = torch.concat(sample_indices, dim=0).to(
+                pixel_values_videos.device
+            )
 
             video_embeds = self.visual(
                 pixel_values=pixel_values_videos,
@@ -1461,9 +1436,6 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
                 otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
-            **kwargs: Multimodal inputs for this batch, forwarded to the
-                multimodal embedding path.
-
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -1495,16 +1467,13 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             tower_model="visual.",
         )
 
-    def get_mm_lora_token_counts(
-        self,
-        *,
-        modality: str,
-        mm_kwargs: MultiModalKwargsItem | None,
-        num_mm_embeds: int,
-    ) -> tuple[int, int | None]:
-        del modality, mm_kwargs
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         merge_size = self.config.vision_config.spatial_merge_size
-        return num_mm_embeds * merge_size**2, num_mm_embeds
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        merge_size = self.config.vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1587,7 +1556,8 @@ class KeyeForConditionalGeneration(
     def _split_video_grid_thw(
         grid_thw: torch.Tensor | list[list[int]] | list[int],
     ) -> list[list[int]]:
-        """Split video grid_thw along the t dimension into per-frame rows.
+        """
+        Split video grid_thw along the t dimension into per-frame rows.
 
         This preserves Keye's current M-RoPE behavior, where a video is emitted
         as consecutive frame-level multimodal blocks rather than a single block

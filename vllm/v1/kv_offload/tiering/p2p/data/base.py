@@ -87,7 +87,6 @@ class PollResult(NamedTuple):
     Attributes:
         done: Transfer IDs that completed successfully.
         failed: Transfer IDs that failed (error, timeout, etc.).
-
     """
 
     done: Sequence[int]
@@ -175,7 +174,6 @@ class DataTransport(ABC):
             base_addr: Base address of the peer's block memory region.
             num_blocks: Number of blocks in the peer's region.
             block_len: Size of each block (must match local block_len).
-
         """
         ...
 
@@ -205,7 +203,6 @@ class DataTransport(ABC):
         Returns:
             A unique transfer_id (int) to track this transfer, or
             None if the peer is not registered or submission failed.
-
         """
         ...
 
@@ -227,7 +224,6 @@ class DataTransport(ABC):
             Completed/failed transfers are removed from the inflight set.
 
         Must be called periodically to drive progress checking.
-
         """
         ...
 
@@ -259,7 +255,6 @@ class DataTransport(ABC):
             For mode="wait", the subset of *transfer_ids* still
             tracked as inflight after the cancel attempt. For
             mode="immediate", always [].
-
         """
         ...
 

@@ -23,6 +23,7 @@ MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
 def evil_method(self, *args, **kwargs):
     """Evil method that raises an exception."""
+
     if get_tensor_model_parallel_rank() == 0:
         raise Exception("Simulated Error in startup!")
 

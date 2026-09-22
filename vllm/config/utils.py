@@ -64,9 +64,7 @@ def config(
         cls: The class to decorate
         config: The pydantic ConfigDict to use. If provided, it will be merged with
             the default config.
-        **kwargs: Additional arguments to pass to pydantic.dataclass.
-
-    """
+        **kwargs: Additional arguments to pass to pydantic.dataclass."""
     # Extra fields are forbidden by default
     merged_config = ConfigDict(extra="forbid")
     if config is not None:
@@ -136,7 +134,8 @@ def getattr_iter(
     default_factory: Callable[[], Any] | None = None,
     warn: bool = False,
 ) -> Any:
-    """A helper function that retrieves an attribute from an object which may
+    """
+    A helper function that retrieves an attribute from an object which may
     have multiple possible names. This is useful when fetching attributes from
     arbitrary `transformers.PretrainedConfig` instances.
 
@@ -159,10 +158,12 @@ def getattr_iter(
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
-    """Get any docstrings placed after attribute assignments in a class body.
+    """
+    Get any docstrings placed after attribute assignments in a class body.
 
     https://davidism.com/mit-license/
     """
+
     cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
 
     if not isinstance(cls_node, ast.ClassDef):
@@ -384,7 +385,8 @@ def hash_factors(items: dict[str, object]) -> str:
 
 @dataclass
 class Range:
-    """A range of numbers.
+    """
+    A range of numbers.
     Inclusive of start, inclusive of end.
     """
 
@@ -443,7 +445,8 @@ def get_from_deprecated_env_if_set(
     removal_version: str,
     field_name: str | None = None,
 ) -> str | None:
-    """Get value from deprecated environment variable with warning.
+    """
+    Get value from deprecated environment variable with warning.
 
     Args:
         env_name: Name of the deprecated environment variable
@@ -452,7 +455,6 @@ def get_from_deprecated_env_if_set(
 
     Returns:
         The environment variable value if set, None otherwise
-
     """
     if envs.is_set(env_name):
         value = os.environ.get(env_name)
@@ -475,7 +477,8 @@ def set_from_deprecated_env_if_set(
     to_bool: bool = False,
     to_int: bool = False,
 ) -> None:
-    """Set object field from deprecated environment variable with warning.
+    """
+    Set object field from deprecated environment variable with warning.
 
     Args:
         config: Config object to set the field on
@@ -486,7 +489,6 @@ def set_from_deprecated_env_if_set(
         to_int: Whether to convert the environment variable value to integer
     Returns:
         None
-
     """
     if to_bool and to_int:
         raise ValueError("Cannot convert to both boolean and integer.")

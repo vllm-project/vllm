@@ -456,7 +456,6 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
-            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
@@ -649,5 +648,8 @@ class MiniCPMForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
         return loader.load_weights(weights)

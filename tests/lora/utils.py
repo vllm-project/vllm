@@ -116,7 +116,8 @@ class PunicaTensors:
     token_lora_mapping: torch.Tensor
 
     def meta(self) -> tuple[int, int]:
-        """Infer max_seq_length and token_nums from the tensors
+        """
+        Infer max_seq_length and token_nums from the tensors
         and return them.
         """
         max_seq_length = self.seq_len_tensor.max()

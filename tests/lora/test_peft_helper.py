@@ -20,7 +20,7 @@ ERROR_CASES = [
     (
         "test_modules_to_save",
         {"modules_to_save": ["lm_head"]},
-        "Unsupported modules_to_save",
+        "only supports modules_to_save being None",
     ),
     ("test_rank_zero", {"r": 0}, "must be a positive integer"),
     ("test_rank_negative", {"r": -8}, "must be a positive integer"),

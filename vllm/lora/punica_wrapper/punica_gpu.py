@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Based on:
+"""
+Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
 Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Any, final
+from typing import final
 
 import torch
 
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 
 if HAS_TRITON:
@@ -31,7 +31,8 @@ from .punica_base import PunicaWrapperBase
 
 @final
 class PunicaWrapperGPU(PunicaWrapperBase):
-    """PunicaWrapperGPU is designed to manage and provide metadata for the punica
+    """
+    PunicaWrapperGPU is designed to manage and provide metadata for the punica
     kernel. The main function is to maintain the state information for
     Multi-LoRA, and to provide the interface for the punica triton kernel.
     """
@@ -82,11 +83,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
-        # TODO avoid gpu<->cpu sync here
-        with gpu_sync_allowed():
-            # Prepare cuda kernel metadata tensors
-            self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
-            self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+        # Prepare cuda kernel metadata tensors
+        self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
+        self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def add_shrink(
         self,
@@ -94,9 +93,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
-        **kwargs: Any,
+        **kwargs,
     ):
-        """Performs GEMM  for multiple slices of lora_a.
+        """
+        Performs GEMM  for multiple slices of lora_a.
 
         Semantics:
         for i in range(len(lora_a_stacked)):
@@ -107,9 +107,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
-            **kwargs: Unused; accepted for compatibility with the base class signature.
-
         """
+
         x = x.view(-1, x.shape[-1])
         lora_shrink(
             x,
@@ -129,9 +128,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
-        """Performs GEMM for multiple slices of lora_b.
+        """
+        Performs GEMM for multiple slices of lora_b.
 
         Semantics:
             for i in range(len(lora_b_stacked)):
@@ -144,12 +144,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensors
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
             output_slices (tuple[int, ...]): Every slice's size
-            offset_start (int): The starting position of y, defaults to 0.
             add_inputs (bool): If True, add LoRA output to y; if False, write
                 LoRA-only output to y (used for dual-stream when base and LoRA
                 run on different CUDA streams). Defaults to True.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
-
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
@@ -177,9 +174,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_b_stacked: torch.Tensor,
         add_inputs: bool = True,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
-        """Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
+        """
+        Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
 
         Semantics:
             y += x @ lora_b_stacked
@@ -189,9 +187,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
-
         """
+
         lora_expand(
             x.unsqueeze(dim=0),
             (lora_b_stacked,),
@@ -213,9 +210,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         *,
         buffer: torch.Tensor | None = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
-        """Applicable to linear-related lora.
+        """
+        Applicable to linear-related lora.
 
         Semantics:
             for i in range(len(lora_a_stacked)):
@@ -225,7 +223,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                     @ lora_b_stacked[indices[i], layer_idx, :, :]
                     * scale
                     ).squeeze(0)
-
         Args:
             y (torch.Tensor): Output tensor. Will be changed in-place.
             x (torch.Tensor): Input tensor
@@ -234,10 +231,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
-            **kwargs: Accepts `add_inputs` (bool, defaults to True); any other
-                keys are ignored.
-
         """
+
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
         assert buffer is None, (
@@ -277,9 +272,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         scale,
         *,
         buffer: torch.Tensor | None = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
-        """Applies lora  specifically for LogitsProcessorWithLoRA.
+        """
+        Applies lora  specifically for LogitsProcessorWithLoRA.
 
         Semantics:
             buffer = (x @ lora_a_stacked) * scale
@@ -292,8 +288,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]): Default to None.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
-
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
@@ -330,33 +324,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
         y = y.view_as(y_org)
 
-    def apply_lora_full_linear(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        weight_stacked: torch.Tensor,
-        bias_stacked: torch.Tensor,
-        module_enabled: torch.Tensor,
-    ) -> None:
-        adapter_y = torch.empty(
-            (x.size(0), weight_stacked.size(-2)),
-            dtype=torch.float32,
-            device=x.device,
-        )
-        lora_shrink(
-            x,
-            [weight_stacked],
-            adapter_y.unsqueeze(0),
-            *self.prompt_mapping_meta.meta_args(
-                x.size(0), self.lora_config.specialize_active_lora
-            ),
-            1.0,
-        )
-        result = self._select_full_linear_output(
-            y, adapter_y, bias_stacked, module_enabled
-        )
-        y.copy_(result)
-
     def moe_lora_align_block_size(
         self,
         topk_ids: torch.Tensor,
@@ -370,7 +337,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         naive_block_assignment: bool = False,
         token_lora_mapping: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Aligns tokens and experts into block-sized chunks for LoRA-based
+        """
+        Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
 
         When `token_lora_mapping` is provided, it overrides the global mapping
@@ -469,7 +437,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         token_lora_mapping: torch.Tensor | None = None,
         add_inputs: bool = True,
     ):
-        """Perform a fused forward computation for a LoRA MoE layer."""
+        """
+        Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
+        """
         (
             token_lora_mapping_meta,
             _,

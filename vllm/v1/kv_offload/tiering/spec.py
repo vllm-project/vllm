@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
+"""
+TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
 
 This spec creates a TieringOffloadingManager with a CPU primary tier
 and configurable secondary tiers (e.g., Storage, Network).
 
 Configuration via kv_connector_extra_config:
   - cpu_bytes_to_use: (required) Bytes to allocate for CPU primary tier
-  - block_size: (optional) Tokens per offloaded chunk (default: GPU block size)
+  - block_size: (optional) Block size for offloaded blocks (default: GPU block size)
   - eviction_policy: (optional) Primary tier eviction policy: built-in "lru"/
     "arc", or the name of a policy registered via CachePolicyFactory, or an
     out-of-tree CachePolicy class name paired with cache_policy_module_path
@@ -81,7 +82,8 @@ logger = init_logger(__name__)
 
 
 class TieringOffloadingSpec(CPUOffloadingSpec):
-    """Spec for multi-tier KV cache offloading.
+    """
+    Spec for multi-tier KV cache offloading.
 
     Creates a TieringOffloadingManager with:
     - Primary tier: CPU (LRU or ARC eviction policy)
@@ -103,7 +105,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of blocking time spent in a per-chunk tier lookup "
+                    "Histogram of blocking time spent in a per-block tier lookup "
                     "that resolved as a hit or miss, labeled by tier, in seconds."
                 ),
                 labelnames=("tier",),
@@ -125,7 +127,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of wall-clock time from a per-chunk tier lookup "
+                    "Histogram of wall-clock time from a per-block tier lookup "
                     "first returning retry until that same tier lookup resolves "
                     "as a hit or miss, labeled by tier, in seconds."
                 ),
@@ -189,14 +191,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 labelnames=("tier",),
             )
         )
-        metrics[TieringOffloadingMetrics.CHUNK_QUERIES] = OffloadingCounterMetadata(
+        metrics[TieringOffloadingMetrics.BLOCK_QUERIES] = OffloadingCounterMetadata(
             documentation=(
-                "Number of chunk lookup queries sent to a tier, labeled by tier."
+                "Number of block lookup queries sent to a tier, labeled by tier."
             ),
             labelnames=("tier",),
         )
-        metrics[TieringOffloadingMetrics.CHUNK_HITS] = OffloadingCounterMetadata(
-            documentation="Number of chunk lookup hits in a tier, labeled by tier.",
+        metrics[TieringOffloadingMetrics.BLOCK_HITS] = OffloadingCounterMetadata(
+            documentation="Number of block lookup hits in a tier, labeled by tier.",
             labelnames=("tier",),
         )
         metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES] = (
@@ -274,7 +276,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def get_manager(self) -> OffloadingManager:
-        """Get the TieringOffloadingManager.
+        """
+        Get the TieringOffloadingManager.
 
         Creates a TieringOffloadingManager with:
         - Primary tier: CPU (LRU or ARC)
@@ -282,7 +285,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         Returns:
             TieringOffloadingManager instance
-
         """
         if not self._manager:
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
@@ -298,16 +300,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # primary tier can eagerly create a memoryview over _base.
                 scheduler_mmap = SharedOffloadRegion(
                     engine_id=self._engine_id,
-                    num_chunks=self.num_chunks,
+                    num_blocks=self.num_blocks,
                     rank=None,
-                    kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                    kv_bytes_per_block=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
-                    num_chunks=self.num_chunks,
+                    num_blocks=self.num_blocks,
                     cache_policy=self.eviction_policy,
                     cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
@@ -365,9 +367,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             logger.info(
                 "Created TieringOffloadingManager with primary tier "
-                "(%s, %s chunks) and %s secondary tier(s)",
+                "(%s, %s blocks) and %s secondary tier(s)",
                 self.eviction_policy,
-                self.num_chunks,
+                self.num_blocks,
                 len(secondary_tiers),
             )
 
@@ -391,9 +393,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
-            num_chunks=self.num_chunks,
+            num_blocks=self.num_blocks,
             rank=rank,
-            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+            kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         try:
@@ -402,7 +404,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
-                num_cpu_chunks=self.num_chunks,
+                num_cpu_blocks=self.num_blocks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
             )

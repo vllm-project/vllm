@@ -3,21 +3,19 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
+use vllm_chat::ReasoningEffort;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
-use vllm_text::TruncationSide;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, ReasoningEffort, StreamOptions,
-    StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage,
-    default_true, deserialize_request_top_k, validate_messages, validate_stop,
-    validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
+    ToolCallDelta, ToolChoice, UNKNOWN_MODEL_ID, Usage, default_true, validate_messages,
+    validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -35,7 +33,8 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
 
     /// ID of the model to use
-    pub model: Option<String>,
+    #[serde(default = "default_model")]
+    pub model: String,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
     /// on their existing frequency in the text so far
@@ -116,16 +115,11 @@ pub struct ChatCompletionRequest {
     pub user: Option<String>,
 
     // -------- vLLM Sampling Parameters --------
-    /// Whether to apply the engine's configured watermark to this request.
-    #[serde(default = "default_true")]
-    pub watermarking: bool,
-
     /// Use beam search instead of sampling
     #[serde(default)]
     pub use_beam_search: bool,
 
     /// Top-k sampling parameter
-    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
@@ -151,6 +145,7 @@ pub struct ChatCompletionRequest {
     pub ignore_eos: bool,
 
     /// Minimum number of tokens to generate
+    #[validate(range(min = 1))]
     pub min_tokens: Option<u32>,
 
     /// Skip special tokens during detokenization
@@ -163,9 +158,6 @@ pub struct ChatCompletionRequest {
 
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
-
-    /// Which side to truncate from when truncate_prompt_tokens is active
-    pub truncation_side: Option<TruncationSide>,
 
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
@@ -241,7 +233,6 @@ pub struct ChatCompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
-    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
     /// KV transfer parameters for disaggregated serving
@@ -263,7 +254,7 @@ impl Default for ChatCompletionRequest {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
-            model: None,
+            model: default_model(),
             frequency_penalty: None,
             logit_bias: None,
             logprobs: false,
@@ -286,7 +277,6 @@ impl Default for ChatCompletionRequest {
             include_reasoning: true,
             parallel_tool_calls: None,
             user: None,
-            watermarking: true,
             use_beam_search: false,
             top_k: None,
             min_p: None,
@@ -299,7 +289,6 @@ impl Default for ChatCompletionRequest {
             skip_special_tokens: true,
             spaces_between_special_tokens: true,
             truncate_prompt_tokens: None,
-            truncation_side: None,
             prompt_logprobs: None,
             allowed_token_ids: None,
             bad_words: None,
@@ -352,7 +341,7 @@ pub(super) struct ChatCompletionResponse {
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
-    pub prompt_logprobs: Option<PromptLogprobs>,
+    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -394,8 +383,10 @@ pub(super) struct ChatCompletionMessage {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionStreamResponse {
-    #[serde(flatten)]
-    pub envelope: Arc<StreamResponseEnvelope>,
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
@@ -403,9 +394,12 @@ pub(super) struct ChatCompletionStreamResponse {
 
 impl ChatCompletionStreamResponse {
     /// Create a stream response with the standard envelope fields pre-filled.
-    pub fn new(envelope: &Arc<StreamResponseEnvelope>) -> Self {
+    pub fn new(id: &str, model: &str, created: u64) -> Self {
         Self {
-            envelope: Arc::clone(envelope),
+            id: id.to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created,
+            model: model.to_string(),
             choices: Vec::new(),
             usage: None,
             prompt_token_ids: None,
@@ -433,6 +427,10 @@ pub(super) struct ChatMessageDelta {
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
     pub reasoning: Option<String>,
+}
+
+fn default_model() -> String {
+    UNKNOWN_MODEL_ID.to_string()
 }
 
 /// Schema-level validation for cross-field dependencies

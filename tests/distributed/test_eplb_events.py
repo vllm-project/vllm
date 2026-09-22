@@ -4,17 +4,15 @@
 import threading
 import time
 
-import pytest
 import torch
 
-from vllm.distributed.eplb.eplb_utils import CpuGpuEvent, device_stream
-from vllm.platforms import current_platform
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 
 
 def test_wait_blocks_until_record():
     event = CpuGpuEvent()
-    record_stream = torch.Stream()
-    wait_stream = torch.Stream()
+    record_stream = torch.cuda.Stream()
+    wait_stream = torch.cuda.Stream()
     wait_returned = threading.Event()
 
     def waiter():
@@ -35,8 +33,8 @@ def test_wait_blocks_until_record():
 
 def test_reuse_across_multiple_cycles():
     wrapper = CpuGpuEvent()
-    record_stream = torch.Stream()
-    wait_stream = torch.Stream()
+    record_stream = torch.cuda.Stream()
+    wait_stream = torch.cuda.Stream()
     NUM_CYCLES = 8
     completed_cycles = []
     barriers = [threading.Barrier(2) for _ in range(NUM_CYCLES)]
@@ -58,18 +56,14 @@ def test_reuse_across_multiple_cycles():
     assert len(completed_cycles) == NUM_CYCLES
 
 
-@pytest.mark.parametrize("device", ["cuda", "xpu"])
-def test_producer_consumer(device):
-    """This test uses the CpuGpuEvent to synchronize reads and writes to/from
-    a shared GPU tensor on multiple CPU threads.
+def test_producer_consumer():
     """
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    if device == "xpu" and not current_platform.is_xpu():
-        pytest.skip("XPU not available")
-    worker_stream = torch.Stream()
+    This test uses the CpuGpuEvent to synchronize reads and writes to/from a shared GPU
+    tensor on multiple CPU threads.
+    """
+    worker_stream = torch.cuda.Stream()
     # Create a single element counter that will be shared between two threads
-    buf = torch.zeros(1, device=device)
+    buf = torch.zeros(1, device="cuda")
     NUM_ROUNDS = 5
 
     ready_cpu = [threading.Event() for _ in range(NUM_ROUNDS)]
@@ -83,7 +77,7 @@ def test_producer_consumer(device):
             if i > 0:
                 events[i - 1].wait(stream=worker_stream)
 
-            with device_stream(worker_stream):
+            with torch.cuda.stream(worker_stream):
                 buf.fill_(float(i + 1))
 
             worker_stream.synchronize()

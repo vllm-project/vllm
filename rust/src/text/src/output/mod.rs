@@ -3,13 +3,10 @@
 
 //! Output processing helpers shared by text and chat layers.
 
-pub use decoded::{
-    DecodedTextEvent, Finished, SampledDelta, TextDecodeOptions, decoded_text_event_stream,
-};
+pub use decoded::{DecodedTextEvent, Finished, TextDecodeOptions, decoded_text_event_stream};
 pub use logprobs::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
 };
-pub use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
 
 mod decoded;
 mod logprobs;
@@ -61,16 +58,13 @@ impl<T: TextOutputStream> T {
                         prompt_token_ids = start_prompt_token_ids;
                     }
                     DecodedTextEvent::TextDelta {
-                        decoded,
-                        sampled:
-                            SampledDelta {
-                                token_ids: delta_token_ids,
-                                logprobs: mut delta_logprobs,
-                            },
+                        delta,
+                        token_ids: delta_token_ids,
+                        logprobs: mut delta_logprobs,
                         finished,
                     } => {
                         if let Some(c) = collected.as_mut() {
-                            c.text.push_str(&decoded.text);
+                            c.text.push_str(&delta);
                             c.token_ids.extend(delta_token_ids);
                             if let Some(dlp) = delta_logprobs.as_mut() {
                                 if let Some(lp) = c.logprobs.as_mut() {
@@ -81,7 +75,7 @@ impl<T: TextOutputStream> T {
                             }
                         } else {
                             collected = Some(CollectedTextOutput {
-                                text: decoded.text,
+                                text: delta,
                                 prompt_token_ids: Arc::clone(&prompt_token_ids),
                                 prompt_logprobs: prompt_logprobs.take(),
                                 logprobs: delta_logprobs,
@@ -140,31 +134,29 @@ mod tests {
                 }),
             }),
             Ok(DecodedTextEvent::TextDelta {
-                decoded: DecodedText::unattributed("bc"),
-                sampled: SampledDelta {
-                    token_ids: vec![1, 2],
-                    logprobs: Some(DecodedLogprobs {
-                        positions: vec![
-                            DecodedPositionLogprobs {
-                                entries: vec![DecodedTokenLogprob {
-                                    token_id: 0,
-                                    token: "a".to_string(),
-                                    logprob: -0.2,
-                                    rank: 1,
-                                }],
-                            },
-                            DecodedPositionLogprobs {
-                                entries: vec![DecodedTokenLogprob {
-                                    token_id: 0,
-                                    token: "bc".to_string(),
-                                    logprob: -0.3,
-                                    rank: 1,
-                                }],
-                            },
-                        ],
-                    }),
-                },
-                finished: Some(Box::new(Finished {
+                delta: "bc".to_string(),
+                token_ids: vec![1, 2],
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![
+                        DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
+                                token: "a".to_string(),
+                                logprob: -0.2,
+                                rank: 1,
+                            }],
+                        },
+                        DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
+                                token: "bc".to_string(),
+                                logprob: -0.3,
+                                rank: 1,
+                            }],
+                        },
+                    ],
+                }),
+                finished: Some(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 2,
@@ -173,7 +165,7 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                })),
+                }),
             }),
         ]);
 
@@ -227,66 +219,62 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
-                decoded: DecodedText::unattributed("he"),
-                sampled: SampledDelta {
-                    token_ids: vec![1, 2],
-                    logprobs: Some(DecodedLogprobs {
-                        positions: vec![
-                            DecodedPositionLogprobs {
-                                entries: vec![DecodedTokenLogprob {
-                                    token_id: 0,
-                                    token: "h".to_string(),
-                                    logprob: -0.1,
-                                    rank: 1,
-                                }],
-                            },
-                            DecodedPositionLogprobs {
-                                entries: vec![DecodedTokenLogprob {
-                                    token_id: 0,
-                                    token: "e".to_string(),
-                                    logprob: -0.2,
-                                    rank: 1,
-                                }],
-                            },
-                        ],
-                    }),
-                },
+                delta: "he".to_string(),
+                token_ids: vec![1, 2],
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![
+                        DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
+                                token: "h".to_string(),
+                                logprob: -0.1,
+                                rank: 1,
+                            }],
+                        },
+                        DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
+                                token: "e".to_string(),
+                                logprob: -0.2,
+                                rank: 1,
+                            }],
+                        },
+                    ],
+                }),
                 finished: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
-                decoded: DecodedText::unattributed("llo"),
-                sampled: SampledDelta {
-                    token_ids: vec![3, 4, 5],
-                    logprobs: Some(DecodedLogprobs {
-                        positions: vec![
-                            DecodedPositionLogprobs {
-                                entries: vec![DecodedTokenLogprob {
-                                    token_id: 0,
-                                    token: "l".to_string(),
-                                    logprob: -0.3,
-                                    rank: 1,
-                                }],
-                            },
-                            DecodedPositionLogprobs {
-                                entries: vec![DecodedTokenLogprob {
-                                    token_id: 0,
-                                    token: "l".to_string(),
-                                    logprob: -0.4,
-                                    rank: 1,
-                                }],
-                            },
-                            DecodedPositionLogprobs {
-                                entries: vec![DecodedTokenLogprob {
-                                    token_id: 0,
-                                    token: "o".to_string(),
-                                    logprob: -0.5,
-                                    rank: 1,
-                                }],
-                            },
-                        ],
-                    }),
-                },
-                finished: Some(Box::new(Finished {
+                delta: "llo".to_string(),
+                token_ids: vec![3, 4, 5],
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![
+                        DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
+                                token: "l".to_string(),
+                                logprob: -0.3,
+                                rank: 1,
+                            }],
+                        },
+                        DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
+                                token: "l".to_string(),
+                                logprob: -0.4,
+                                rank: 1,
+                            }],
+                        },
+                        DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
+                                token: "o".to_string(),
+                                logprob: -0.5,
+                                rank: 1,
+                            }],
+                        },
+                    ],
+                }),
+                finished: Some(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 5,
@@ -295,7 +283,7 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                })),
+                }),
             }),
         ]);
 

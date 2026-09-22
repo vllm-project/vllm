@@ -98,7 +98,6 @@ class FPQuantLinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The FPQuant quantization config.
-
     """
 
     def __init__(self, quant_config: FPQuantConfig):

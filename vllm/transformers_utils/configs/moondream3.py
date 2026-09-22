@@ -148,6 +148,5 @@ class Moondream3Config(PretrainedConfig):
 
         Args:
             decoder: Ignored. Only used for encoder-decoder models.
-
         """
         return self.text_config

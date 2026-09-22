@@ -13,11 +13,10 @@ from vllm.utils.deep_gemm import _ceil_to_ue8m0, is_deep_gemm_e8m0_used
 from vllm.utils.math_utils import round_up
 
 FP8_DTYPE = current_platform.fp8_dtype()
-DEVICE = current_platform.device_type
 
 
 def as_float32_tensor(x: float | torch.Tensor) -> torch.Tensor:
-    return torch.as_tensor(x, dtype=torch.float32, device=DEVICE)
+    return torch.as_tensor(x, dtype=torch.float32, device="cuda")
 
 
 def ref_dynamic_per_token_quant(

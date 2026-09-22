@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shape configurations for IR op benchmarks."""
+"""
+Shape configurations for IR op benchmarks.
+"""
 
 import torch
 
@@ -18,11 +20,10 @@ COMMON_HIDDEN_SIZES = [
 # Each entry maps an op name to a list of kwarg dicts that will be passed
 # to that op's registered input generator via op.generate_inputs(**kwargs).
 SHAPE_CONFIGS: dict[str, list[dict]] = {
-    op_name: [
+    "rms_norm": [
         {"num_tokens": n, "hidden_size": d, "dtype": dtype}
         for dtype in [torch.float16, torch.bfloat16, torch.float32]
         for d in COMMON_HIDDEN_SIZES
         for n in NUM_TOKENS
-    ]
-    for op_name in ("rms_norm", "fused_add_rms_norm")
+    ],
 }

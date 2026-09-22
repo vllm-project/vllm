@@ -8,7 +8,6 @@ import torch
 from transformers import AutoModelForImageTextToText
 
 from vllm.platforms import current_platform
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from ....conftest import HfRunner, ImageTestAssets, VllmRunner
 from .vlm_utils import model_utils
@@ -31,9 +30,7 @@ def _install_prefill_hidden_capture(model):
     def forward(*args, **kwargs):
         hidden_states = original_forward(*args, **kwargs)
         if model._prefill_hidden is None and torch.is_tensor(hidden_states):
-            # Capturing hidden states for comparison is a deliberate D2H.
-            with gpu_sync_allowed():
-                model._prefill_hidden = hidden_states.detach().float().cpu()
+            model._prefill_hidden = hidden_states.detach().float().cpu()
         return hidden_states
 
     language_model.forward = forward

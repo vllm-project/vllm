@@ -30,10 +30,12 @@ WorkerType = Literal["existing", "new", "removing"]
 
 
 class ScaleUpExistingEngineState(enum.IntEnum):
-    PREPARE = 0
-    SYNC_KV_CACHE_MEMORY_SIZE = 1
-    COMMIT_SCALE_UP = 2  # Blocks forward passes.
-    COMPLETE = 3
+    CREATE_STANDBY_GROUPS = 0
+    STAGE_QUANT_METHODS = 1
+    TRANSFER_WEIGHTS = 2
+    SYNC_KV_CACHE_MEMORY_SIZE = 3
+    COMMIT_SCALE_UP = 4  # Blocks forward passes.
+    COMPLETE = 5
 
 
 class ScaleUpNewEngineState(enum.IntEnum):
@@ -93,7 +95,7 @@ class ElasticEPScalingState:
             self.state = (
                 ScaleUpNewEngineState.PRE_KV_INIT
                 if worker_type == "new"
-                else ScaleUpExistingEngineState.PREPARE
+                else ScaleUpExistingEngineState.CREATE_STANDBY_GROUPS
             )
         else:
             self.state = (
@@ -164,8 +166,20 @@ class ElasticEPScalingState:
         state = self.state
         assert self.old_dp_group is not None
 
-        if state == ScaleUpExistingEngineState.PREPARE:
-            if not self._prepare_workers():
+        if state == ScaleUpExistingEngineState.CREATE_STANDBY_GROUPS:
+            if not self._create_standby_groups():
+                return False
+            self.state = ScaleUpExistingEngineState.STAGE_QUANT_METHODS
+            return True
+
+        elif state == ScaleUpExistingEngineState.STAGE_QUANT_METHODS:
+            if not self._execute_async("stage_standby_moe_quant_methods"):
+                return False
+            self.state = ScaleUpExistingEngineState.TRANSFER_WEIGHTS
+            return True
+
+        elif state == ScaleUpExistingEngineState.TRANSFER_WEIGHTS:
+            if not self._transfer_weights():
                 return False
             self.state = ScaleUpExistingEngineState.SYNC_KV_CACHE_MEMORY_SIZE
             return True
@@ -196,7 +210,7 @@ class ElasticEPScalingState:
         assert self.new_dp_group is not None and self.new_dp_store is not None
 
         if state == ScaleUpNewEngineState.PRE_KV_INIT:
-            self._collective_rpc("elastic_ep_execute", args=("prepare_new_worker",))
+            self._collective_rpc("elastic_ep_execute", args=("receive_weights",))
             self.engine_core.available_gpu_memory_for_kv_cache = (
                 ParallelConfig.sync_kv_cache_memory_size(self.new_dp_group, -1)
             )
@@ -204,7 +218,7 @@ class ElasticEPScalingState:
             return True
 
         elif state == ScaleUpNewEngineState.PREPARE:
-            self._collective_rpc("elastic_ep_execute", args=("warmup_new_worker",))
+            self._collective_rpc("elastic_ep_execute", args=("warmup_local_kernels",))
             self._mark_ready_for_switch()
             tensor = torch.tensor([0, 0, 0], dtype=torch.int32, device="cpu")
             torch.distributed.all_reduce(
@@ -229,7 +243,7 @@ class ElasticEPScalingState:
         assert self.old_dp_group is not None
 
         if state == ScaleDownRemainingEngineState.PREPARE:
-            if self._prepare_workers():
+            if self._create_standby_groups():
                 self.state = ScaleDownRemainingEngineState.COMMIT_SCALE_DOWN
                 self._mark_ready_for_switch()
                 return True
@@ -314,18 +328,29 @@ class ElasticEPScalingState:
         self._prepare_future = None
         return True
 
-    def _prepare_workers(self) -> bool:
+    def _create_standby_groups(self) -> bool:
         assert self.old_dp_group is not None
         if not self._ensure_new_dp_group():
             return False
         if not self._execute_async(
-            "prepare_reconfiguration",
+            "create_standby_groups",
             self.reconfig_request,
             self.new_parallel_config.use_all2all,
         ):
             return False
         if self.old_dp_group.rank() == 0:
-            logger.info("[Elastic EP] Prepared reconfiguration")
+            logger.info("[Elastic EP] Created standby communication groups")
+        return True
+
+    def _transfer_weights(self) -> bool:
+        assert self.reconfig_request is not None and self.old_dp_group is not None
+        old_dp_size = self.old_dp_group.size()
+        new_dp_size = self.reconfig_request.new_data_parallel_size
+
+        if not self._execute_async("transfer_weights", old_dp_size, new_dp_size):
+            return False
+        if self.old_dp_group.rank() == 0:
+            logger.info("[Elastic EP] Transferred weights to new workers")
         return True
 
     def _sync_kv_cache_memory_size(self) -> bool:

@@ -27,8 +27,7 @@ use winnow::stream::{Partial, Stream};
 use winnow::token::literal;
 
 use super::utils::{
-    JsonObjectScanState, json_str, parse_buffered_event, safe_text_len, safe_text_len_mul,
-    take_json_object,
+    JsonObjectScanState, json_str, parse_buffered_event, safe_text_len, take_json_object,
 };
 use super::{Result, ToolCallDelta, ToolParserOutput};
 
@@ -38,12 +37,7 @@ pub(crate) type JsonToolInput<'i> = Partial<&'i str>;
 pub(crate) struct JsonToolCallConfig {
     pub parser_name: &'static str,
     pub start_marker: &'static str,
-    /// Start marker with its fixed preceding framing, matched alongside the
-    /// bare start marker.
-    pub framed_start_marker: Option<&'static str>,
     pub end_marker: &'static str,
-    /// Whitespace inside the tool-call markers: after the start marker and
-    /// before the end marker.
     pub marker_whitespace: JsonToolCallWhitespace,
     pub delimiter: Option<&'static str>,
     pub name_key: &'static str,
@@ -217,10 +211,7 @@ fn tool_call_start_event(
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
     seq!(
-        _: |input: &mut JsonToolInput<'_>| match config.framed_start_marker {
-            Some(marker) => alt((literal(marker), literal(config.start_marker))).void().parse_next(input),
-            None => literal(config.start_marker).void().parse_next(input),
-        },
+        _: literal(config.start_marker),
         _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
     )
     .value(JsonToolCallEvent::ToolCallStart)
@@ -378,11 +369,7 @@ fn safe_text_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
-    match config.framed_start_marker {
-        Some(marker) => safe_text_len_mul(input, &[marker, config.start_marker]),
-        None => safe_text_len(input, config.start_marker),
-    }
-    .map(|len| JsonToolCallEvent::Text { len })
+    safe_text_len(input, config.start_marker).map(|len| JsonToolCallEvent::Text { len })
 }
 
 #[cfg(test)]
@@ -395,7 +382,6 @@ mod tests {
     const DELIMITED_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Delimited JSON",
         start_marker: "<tool_calls>",
-        framed_start_marker: None,
         end_marker: "</tool_calls>",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some("<"),

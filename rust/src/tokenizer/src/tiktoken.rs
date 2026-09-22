@@ -964,16 +964,16 @@ mod tests {
             for &id in &ids {
                 decoder.push_token(id).unwrap();
                 if let Some(chunk) = decoder.next_chunk() {
-                    output.push_str(&chunk.text);
+                    output.push_str(&chunk);
                 }
             }
-            let (last_chunk, full) = decoder.flush(None).unwrap();
+            let (last_chunk, full_text) = decoder.flush(None).unwrap();
             if let Some(chunk) = last_chunk {
-                output.push_str(&chunk.text);
+                output.push_str(&chunk);
             }
 
             assert_eq!(output, text);
-            assert_eq!(full.text, text);
+            assert_eq!(full_text, text);
         }
     }
 
@@ -991,16 +991,16 @@ mod tests {
             for &id in &ids {
                 decoder.push_token(id).unwrap();
                 if let Some(chunk) = decoder.next_chunk() {
-                    output.push_str(&chunk.text);
+                    output.push_str(&chunk);
                 }
             }
-            let (last_chunk, full) = decoder.flush(None).unwrap();
+            let (last_chunk, full_text) = decoder.flush(None).unwrap();
             if let Some(chunk) = last_chunk {
-                output.push_str(&chunk.text);
+                output.push_str(&chunk);
             }
 
             assert_eq!(output, text);
-            assert_eq!(full.text, text);
+            assert_eq!(full_text, text);
         }
     }
 

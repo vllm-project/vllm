@@ -51,7 +51,8 @@ def test_tokenizer():
 
 
 class TestBaseThinkingReasoningParserInit:
-    """Test initialization and basic properties of
+    """
+    Test initialization and basic properties of
     BaseThinkingReasoningParser.
     """
 
@@ -273,7 +274,8 @@ class TestBaseThinkingReasoningParserStreaming:
 
     @pytest.mark.parametrize("streaming", [True, False])
     def test_simple_reasoning_extraction(self, test_tokenizer, streaming):
-        """Test basic reasoning extraction in both
+        """
+        Test basic reasoning extraction in both
         streaming and non-streaming modes.
         """
         parser = TestThinkingReasoningParser(test_tokenizer)
@@ -367,12 +369,14 @@ class TestBaseThinkingReasoningParserStreaming:
 
 
 class TestBaseThinkingReasoningParserMultipleImplementations:
-    """Test that multiple implementations of
+    """
+    Test that multiple implementations of
     BaseThinkingReasoningParser work correctly.
     """
 
     def test_different_token_implementations(self, test_tokenizer):
-        """Test that different implementations
+        """
+        Test that different implementations
         with different tokens work independently.
         """
         parser1 = TestThinkingReasoningParser(test_tokenizer)

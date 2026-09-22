@@ -91,13 +91,15 @@ class InternS1VisionEmbeddings(nn.Module):
     def interpolate_pos_encoding(
         self, embeddings: torch.Tensor, height: int, width: int
     ) -> torch.Tensor:
-        """This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher resolution
+        """
+        This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher resolution
         images. This method is also adapted to support torch.jit tracing.
 
         Adapted from:
         - https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174-L194, and
         - https://github.com/facebookresearch/dinov2/blob/e1277af2ba9496fbadf7aec6eba56e8d882d1e35/dinov2/models/vision_transformer.py#L179-L211
         """  # noqa: E501
+
         num_patches = embeddings.shape[1] - 1
         num_positions = self.position_embeddings.shape[1] - 1
 
@@ -162,7 +164,7 @@ class InternS1VisionEmbeddings(nn.Module):
 
 
 class InternSdpaAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper."""
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
         self,
@@ -223,7 +225,8 @@ class InternSdpaAttention(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """X shape: (B, N, C)."""
+        """x shape: (B, N, C)"""
+
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)

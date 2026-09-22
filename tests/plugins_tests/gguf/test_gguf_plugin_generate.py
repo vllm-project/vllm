@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""E2E tests for GGUF plugin functionality."""
+"""
+E2E tests for GGUF plugin functionality.
+"""
 
 import os
 from typing import NamedTuple

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""test that invalid blocks are evicted from prefix cache to prevent pollution.
+"""
+test that invalid blocks are evicted from prefix cache to prevent pollution.
 
 verifies that when sync-loading fails, invalid blocks are removed from the
 prefix cache hash table so future requests cannot match and reuse corrupted data.
@@ -38,7 +39,7 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def fail_scheduler():
-    """Scheduler with kv_load_failure_policy='fail'."""
+    """scheduler with kv_load_failure_policy='fail'"""
     vllm_config = create_vllm_config()
     vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
@@ -47,7 +48,8 @@ def fail_scheduler():
 def test_invalid_blocks_evicted_prevents_cache_pollution(
     fail_scheduler: Scheduler,
 ):
-    """Verify invalid blocks are evicted to prevent future cache hits.
+    """
+    verify invalid blocks are evicted to prevent future cache hits.
 
     scenario:
     1. request 1 loads externally-computed blocks (sync mode)

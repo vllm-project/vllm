@@ -170,7 +170,8 @@ class _StatsKey:
 
 @dataclass
 class OffloadingConnectorStats(KVConnectorStats):
-    """Offloading connector stats use flat metric names as keys.
+    """
+    Offloading connector stats use flat metric names as keys.
 
     The ``data`` dict is structured using ``_StatsKey`` / ``_MetricType``::
 
@@ -242,7 +243,8 @@ class OffloadingConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        """Reduce the observations collected during a time interval to one or
+        """
+        Reduce the observations collected during a time interval to one or
         more representative values (eg avg/median/sum of the series).
         This is meant to be called by the logger to produce a summary of the
         stats for the last time interval.

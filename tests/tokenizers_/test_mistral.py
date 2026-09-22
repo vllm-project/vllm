@@ -11,7 +11,6 @@ from mistral_common.guidance.grammar_factory import GrammarFactory
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.exceptions import VLLMValidationError
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _validate_apply_chat_template_args,
@@ -2280,20 +2279,8 @@ def test_validate_request_params_rejects_unsupported_effort() -> None:
         messages=[],
         reasoning_effort="medium",
     )
-    with pytest.raises(VLLMValidationError, match="reasoning_effort") as exc_info:
+    with pytest.raises(ValueError, match="reasoning_effort"):
         validate_request_params(request)
-    assert exc_info.value.parameter == "reasoning_effort"
-
-
-def test_validate_request_params_rejects_chat_template() -> None:
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        chat_template="{{ messages }}",
-    )
-    with pytest.raises(VLLMValidationError, match="chat_template") as exc_info:
-        validate_request_params(request)
-    assert exc_info.value.parameter == "chat_template"
 
 
 # ---------------------------------------------------------------------------

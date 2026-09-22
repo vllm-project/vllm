@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests compute_expert_num_tokens kernels."""
+"""
+Tests compute_expert_num_tokens kernels
+"""
 
 import dataclasses
 
@@ -8,14 +10,6 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
-from vllm.platforms import current_platform
-
-DEVICE = current_platform.device_type
-
-pytestmark = pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
-    reason="Triton MoE kernels require CUDA/ROCm/XPU.",
-)
 
 
 @dataclasses.dataclass
@@ -94,9 +88,9 @@ def do_test_compute_expert_num_tokens(
             (num_local_experts), device="cpu", dtype=torch.int32
         )
         ref_impl(tt_rank, ref_expert_num_tokens)
-        ref_expert_num_tokens = ref_expert_num_tokens.to(DEVICE)
+        ref_expert_num_tokens = ref_expert_num_tokens.to("cuda")
 
-        tt_rank.to_device(DEVICE)
+        tt_rank.to_device("cuda")
         # Test with expert_map
         triton_expert_num_tokens_w_emap = count_expert_num_tokens(
             tt_rank.topk_ids, num_local_experts, tt_rank.expert_map

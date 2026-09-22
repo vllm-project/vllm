@@ -29,16 +29,6 @@ def enable_pickle(monkeypatch):
 
 models = ["Qwen/Qwen2-VL-2B-Instruct"]
 target_dtype = "half"
-IMAGE_SIZE_FACTOR_GROUPS = (
-    (0.5,),
-    (0.5, 0.5),
-    (0.25, 0.5, 0.5),
-)
-VIDEO_SIZE_FACTOR_GROUPS = (
-    (0.5,),
-    (0.5, 0.5),
-    (0.25, 0.25, 0.5),
-)
 
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 VIDEO_PLACEHOLDER = "<|vision_start|><|video_pad|><|vision_end|>"
@@ -97,7 +87,7 @@ def batch_make_image_embeddings(
     processor,
     llm: VllmRunner,
 ) -> list[Qwen2VLPromptImageEmbeddingInput]:
-    """Batched image embeddings for Qwen2-VL.
+    """batched image embeddings for Qwen2-VL
 
     This will infer all images' embeddings in a single batch,
       and split the result according to input batches.
@@ -108,6 +98,7 @@ def batch_make_image_embeddings(
 
     returns: `list[Qwen2VLPromptImageEmbeddingInput]`
     """
+
     image_batches_: list[Any] = image_batches[:]
 
     # convert single-image batches to multiple-image batches
@@ -125,10 +116,8 @@ def batch_make_image_embeddings(
     # image to pixel values
     image_processor = processor.image_processor
 
-    mm_config = llm.get_llm().model_config.multimodal_config
-    mm_kwargs = mm_config.merge_mm_processor_kwargs({})
     preprocess_result = image_processor.preprocess(
-        images=images, return_tensors="pt", **mm_kwargs
+        images=images, return_tensors="pt"
     ).data
     pixel_values = preprocess_result["pixel_values"]
     image_grid_thw = preprocess_result["image_grid_thw"]
@@ -182,7 +171,7 @@ def batch_make_image_embeddings(
 def batch_make_video_embeddings(
     video_batches: PromptVideoInput, processor, llm: VllmRunner
 ) -> list[Qwen2VLPromptVideoEmbeddingInput]:
-    """Batched video embeddings for Qwen2-VL.
+    """batched video embeddings for Qwen2-VL
 
     A NDArray represents a single video's all frames.
 
@@ -193,6 +182,7 @@ def batch_make_video_embeddings(
       - Single-video batches: `list[NDArray]`
       - Multiple-video batches: `list[list[NDArray]]`
     """
+
     video_batches_: list[Any] = video_batches[:]
 
     for idx in range(len(video_batches_)):
@@ -210,10 +200,8 @@ def batch_make_video_embeddings(
     # video to pixel values
     video_processor = processor.video_processor
 
-    mm_config = llm.get_llm().model_config.multimodal_config
-    mm_kwargs = mm_config.merge_mm_processor_kwargs({})
     preprocess_result = video_processor.preprocess(
-        videos=videos, return_tensors="pt", **mm_kwargs
+        videos=videos, return_tensors="pt"
     ).data
     pixel_values = preprocess_result["pixel_values_videos"]
     video_grid_thw = preprocess_result["video_grid_thw"]
@@ -335,6 +323,17 @@ def run_embedding_input_test(
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # Single-scale
+        [0.5],
+        # Single-scale, batched
+        [0.5, 0.5],
+        # Multi-scale
+        [0.25, 0.5, 0.5],
+    ],
+)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
@@ -342,6 +341,7 @@ def test_qwen2_vl_image_embeddings_input(
     vllm_runner,
     image_assets,
     model,
+    size_factors,
     dtype,
     max_tokens,
     num_logprobs,
@@ -355,7 +355,6 @@ def test_qwen2_vl_image_embeddings_input(
             [rescale_image_size(image, factor) for factor in size_factors],
             [],
         )
-        for size_factors in IMAGE_SIZE_FACTOR_GROUPS
         for image, prompt in zip(images, IMAGE_PROMPTS)
     ]
 
@@ -373,6 +372,17 @@ def test_qwen2_vl_image_embeddings_input(
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # Single-scale
+        [0.5],
+        # Single-scale, batched
+        [0.5, 0.5],
+        # Multi-scale
+        [0.25, 0.5, 0.5],
+    ],
+)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
@@ -380,6 +390,7 @@ def test_qwen2_vl_multiple_image_embeddings_input(
     vllm_runner,
     image_assets,
     model,
+    size_factors,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -395,7 +406,6 @@ def test_qwen2_vl_multiple_image_embeddings_input(
             ],
             [],
         )
-        for size_factors in IMAGE_SIZE_FACTOR_GROUPS
     ]
 
     run_embedding_input_test(
@@ -412,6 +422,17 @@ def test_qwen2_vl_multiple_image_embeddings_input(
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # Single-scale
+        [0.5],
+        # Single-scale, batched
+        [0.5, 0.5],
+        # Multi-scale
+        [0.25, 0.25, 0.5],
+    ],
+)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
@@ -419,6 +440,7 @@ def test_qwen2_vl_video_embeddings_input(
     vllm_runner,
     video_assets,
     model,
+    size_factors,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -435,7 +457,6 @@ def test_qwen2_vl_video_embeddings_input(
             [],
             [rescale_video_size(video, factor) for factor in size_factors],
         )
-        for size_factors in VIDEO_SIZE_FACTOR_GROUPS
         for video, prompt in zip(sampled_vids, VIDEO_PROMPTS)
     ]
 

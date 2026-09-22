@@ -45,7 +45,8 @@ def unified_kv_cache_update(
     to_cache: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    """Returns a dummy that is passed to unified_attention to signal a side effect and
+    """
+    Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     forward_context = get_forward_context()
@@ -79,14 +80,14 @@ def dummy_attention(layer_name, _placeholder):
 
 def basic_cache(
     to_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
-    kv_cache: torch.Tensor,  # shape: [num_blocks, num_heads, block_size, head_size]
+    kv_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
     # Padding slots are -1; redirect them to the null block (block 0, never
     # allocated to a request) so the scatter stays branch-free and sync-free.
-    block_size = kv_cache.shape[2]
+    block_size = kv_cache.shape[1]
     slot_mapping = slot_mapping.clamp_min(0)
-    kv_cache[slot_mapping // block_size, :, slot_mapping % block_size] = to_cache
+    kv_cache[slot_mapping // block_size, slot_mapping % block_size] = to_cache
 
 
 ######### CacheOnlyAttentionBackend ########
@@ -121,6 +122,18 @@ class CacheOnlyAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["CacheOnlyAttentionImpl"]:
         return CacheOnlyAttentionImpl
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        # We set `num_kv_heads = num_hidden_layers` and `head_size = hidden_size`
+        # We also don't use a k/v (2) dim
+        return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_builder_cls() -> type["CacheOnlyAttentionMetadataBuilder"]:
@@ -230,7 +243,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         head_size: int,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ):
         super().__init__()
 
@@ -293,7 +306,6 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
 
         Returns:
             Dummy output tensor (not used)
-
         """
         # Note: we set num_heads to num_hidden_layers and
         # head_size to hidden_size for hidden states storage
@@ -329,9 +341,7 @@ class ExtractHiddenStatesModel(nn.Module):
         super().__init__()
 
         self.vllm_config = vllm_config
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        self.hf_config = speculative_config.draft_model_config.hf_config
+        self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
         self.hidden_size = vllm_config.model_config.get_hidden_size()
         self.target_num_hidden_layers = (
             vllm_config.model_config.get_total_num_hidden_layers()
@@ -373,8 +383,8 @@ class ExtractHiddenStatesModel(nn.Module):
 
         Returns:
             Tuple of (dummy_output, dummy_output) - both unused
-
         """
+
         # Call dummy attention layer to cache hidden states
         # Output is ignored - we only care about the KV cache side effects
         _ = self.cache_only_layers[str(self.target_num_hidden_layers)](hidden_states)

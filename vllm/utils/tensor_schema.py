@@ -161,6 +161,7 @@ class TensorSchema:
         dynamic_dims: set[str],
     ) -> None:
         """Validate that the actual tensor shape matches the expected shape."""
+
         if len(actual_shape) != len(expected_shape):
             raise ValueError(
                 f"{field_name} has rank {len(actual_shape)} "

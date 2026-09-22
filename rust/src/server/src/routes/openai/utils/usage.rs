@@ -12,8 +12,6 @@ use super::types::Usage;
 pub(crate) struct ContinuousUsage {
     prompt_tokens: usize,
     output_tokens: usize,
-    /// Running reasoning-token count, following the decoder clock.
-    reasoning_tokens: usize,
 }
 
 impl ContinuousUsage {
@@ -27,17 +25,6 @@ impl ContinuousUsage {
         self.output_tokens = self.output_tokens.saturating_add(output_tokens);
     }
 
-    /// Add the tokens attributed to one reasoning delta to the running count.
-    pub(crate) fn add_reasoning_tokens(&mut self, token_count: usize) {
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(token_count);
-    }
-
-    /// Converge the running reasoning count onto the authoritative terminal
-    /// value reported at stream end.
-    pub(crate) fn set_reasoning_tokens(&mut self, reasoning_tokens: usize) {
-        self.reasoning_tokens = reasoning_tokens;
-    }
-
     /// Replace the running counts with the final counts reported by generation.
     pub(crate) fn set_final_counts(&mut self, prompt_tokens: usize, output_tokens: usize) {
         self.prompt_tokens = prompt_tokens;
@@ -46,11 +33,6 @@ impl ContinuousUsage {
 
     /// Build a streaming usage snapshot without prompt cache details.
     pub(crate) fn to_usage(&self) -> Usage {
-        Usage::from_counts(
-            self.prompt_tokens,
-            self.output_tokens,
-            None,
-            self.reasoning_tokens,
-        )
+        Usage::from_counts(self.prompt_tokens, self.output_tokens, None)
     }
 }

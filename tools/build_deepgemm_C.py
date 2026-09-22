@@ -50,7 +50,7 @@ includes = [
     str(src / "deep_gemm/include"),
     str(src / "third-party/cutlass/include"),
     str(src / "third-party/cutlass/tools/util/include"),
-    str(src / "third-party/deep_jit/include"),
+    str(src / "third-party/fmt/include"),
     *cpp_extension.include_paths(device_type="cuda"),
 ]
 

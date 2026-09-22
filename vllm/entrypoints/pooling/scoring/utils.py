@@ -58,7 +58,8 @@ def truncate_text_to_tokens(
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
-    """Compute ColBERT MaxSim score.
+    """
+    Compute ColBERT MaxSim score.
 
     Args:
         q_emb: Query token embeddings [query_len, dim]
@@ -66,7 +67,6 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
 
     Returns:
         MaxSim score (sum over query tokens of max similarity to any doc token)
-
     """
     # compute in float32 for numerical stability
     # [query_len, doc_len]
@@ -249,7 +249,8 @@ def parse_score_data(
 
 
 def compress_token_type_ids(token_type_ids: list[int]) -> int:
-    """Return position of the first 1 or the length of the list
+    """
+    Return position of the first 1 or the length of the list
     if not found.
     """
     first_one = len(token_type_ids)

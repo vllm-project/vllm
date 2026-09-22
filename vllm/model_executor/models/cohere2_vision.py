@@ -40,7 +40,6 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
-    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -61,13 +60,14 @@ from .utils import (
 
 
 class Cohere2VisionImagePixelInputs(TensorSchema):
-    """Dimensions:
-    - np: The total number of patches over each image over each prompt in
-          the batch
-    - c: Number of channels
-    - h: Height of each image patch
-    - w: Width of each image patch
-    - bn: Batch size * number of images
+    """
+    Dimensions:
+        - np: The total number of patches over each image over each prompt in
+              the batch
+        - c: Number of channels
+        - h: Height of each image patch
+        - w: Width of each image patch
+        - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"]
@@ -133,7 +133,6 @@ class Cohere2VisionMultiModalProjector(nn.Module):
 
         Returns:
             Downsampled tensor with increased channel dimension
-
         """
         height = width = int(image_features.shape[1] ** 0.5)
         x = image_features.reshape(image_features.shape[0], width, height, -1)
@@ -175,7 +174,8 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         processor: Cohere2VisionProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> int:
-        """Calculate the number of image patches for a given image.
+        """
+        Calculate the number of image patches for a given image.
         Uses the HF processor to determine the actual number of patches.
         """
         image_processor: Cohere2VisionImageProcessorFast = processor.image_processor
@@ -222,23 +222,26 @@ class Cohere2VisionDummyInputsBuilder(
 class Cohere2VisionMultiModalProcessor(
     BaseMultiModalProcessor[Cohere2VisionProcessingInfo]
 ):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
-
-    def _postprocess_hf_mm_data(
+    def _call_hf_processor(
         self,
+        prompt: str,
         mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if not mm_data:
-            return processed_data
+        processed_outputs = super()._call_hf_processor(
+            prompt,
+            mm_data,
+            mm_kwargs,
+            tok_kwargs,
+        )
 
+        # Ensure num_patches is available for proper tensor splitting
         if (
-            "num_patches" not in processed_data
+            "num_patches" not in processed_outputs
             and (images := mm_data.get("images")) is not None
         ):
-            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+            hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
             # Fallback calculation if HF processor didn't provide num_patches
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
@@ -249,13 +252,13 @@ class Cohere2VisionMultiModalProcessor(
                     image_width=parsed_images.get_image_size(i).width,
                     image_height=parsed_images.get_image_size(i).height,
                     processor=hf_processor,
-                    mm_kwargs=hf_processor_mm_kwargs,
+                    mm_kwargs=mm_kwargs,
                 )
                 for i in range(len(parsed_images))
             ]
-            processed_data["num_patches"] = torch.tensor(num_patches)
+            processed_outputs["num_patches"] = torch.tensor(num_patches)
 
-        return processed_data
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -265,7 +268,7 @@ class Cohere2VisionMultiModalProcessor(
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            num_patches=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -277,12 +280,10 @@ class Cohere2VisionMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
-        image_token_id = hf_processor.image_token_id
         img_tokens_per_tile = int(hf_processor.patch_size**2)
         img_line_break_token = hf_processor.img_line_break_token
         boi_token = hf_processor.boi_token
         eoi_token = hf_processor.eoi_token
-        tokenizer = self.info.get_tokenizer()
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -297,13 +298,12 @@ class Cohere2VisionMultiModalProcessor(
             patch_tokens = image_token * img_tokens_per_tile + img_line_break_token
             repl = f"{boi_token}{patch_tokens * num_patches}{eoi_token}"
 
-            repl_ids = cached_encode(tokenizer, repl, add_special_tokens=False)
-            return PromptUpdateDetails.select_token_id(repl_ids, image_token_id)
+            return PromptUpdateDetails.select_text(repl, image_token)
 
         return [
             PromptReplacement(
                 modality="image",
-                target=[image_token_id],
+                target=image_token,
                 replacement=get_replacement,
             )
         ]
@@ -371,18 +371,16 @@ class Cohere2VisionForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _process_image_input(
-        self, image_input: Cohere2VisionImagePixelInputs, **kwargs: object
+        self, image_input: Cohere2VisionImagePixelInputs, **kwargs
     ) -> list[torch.Tensor]:
         """Process image pixels through vision tower and projector.
 
         Args:
             image_input: Validated image input containing pixel values and
                          patch counts
-            **kwargs: Unused; accepted for interface compatibility.
 
         Returns:
             List of flattened image embeddings, one per image
-
         """
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
@@ -418,7 +416,7 @@ class Cohere2VisionForConditionalGeneration(
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
+        self, config: PretrainedConfig, quant_config: QuantizationConfig
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back

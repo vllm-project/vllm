@@ -6,36 +6,39 @@ import torch
 import torch.nn as nn
 
 from vllm.config import ModelConfig
-from vllm.model_executor.models.interfaces import SupportsMRoPE
+from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsXDRoPE
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 
 class RopeState:
-    """State for multi-dimensional (M-RoPE) positions.
+    """Unified state for multi-dimensional RoPE variants (M-RoPE, XD-RoPE).
 
-    `num_dims` is the number of position channels the model consumes, which
-    the model config derives from its M-RoPE sections.
+    M-RoPE: 3 dims, uses position delta for decode.
+    XD-RoPE: 3 or 4 dims, delta is 0 (decode uses orig_pos for all dims).
 
     NOTE: `positions` is implemented with one additional dummy position on
     purpose to make it non-contiguous so that it can work with torch compile.
     See detailed explanation in
     https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
-    NOTE: For text-only inputs, each dimension has identical position IDs,
-    making M-RoPE functionally equivalent to 1D-RoPE.
+    NOTE: When M-RoPE is enabled, position ids are 3D regardless of the
+    modality of inputs. For text-only inputs, each dimension has identical
+    position IDs, making M-RoPE functionally equivalent to 1D-RoPE.
     See page 5 of https://arxiv.org/abs/2409.12191
     """
 
     def __init__(
         self,
         num_dims: int,
+        has_delta: bool,
         max_num_reqs: int,
         max_num_tokens: int,
         max_model_len: int,
         device: torch.device,
     ):
         self.num_dims = num_dims
+        self.has_delta = has_delta
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.max_model_len = max_model_len
@@ -53,6 +56,7 @@ class RopeState:
             (num_dims, max_num_tokens + 1), dtype=torch.int64, device=device
         )
 
+        # Delta is non-zero for M-RoPE, always 0 for XD-RoPE.
         self.prefill_delta = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
     def init_prefill_positions(
@@ -62,11 +66,17 @@ class RopeState:
         prefill_token_ids: list[int],
         mm_features: list,
     ) -> None:
-        mrope_model = cast(SupportsMRoPE, model)
-        prefill_positions, delta = mrope_model.get_mrope_input_positions(
-            prefill_token_ids, mm_features
-        )
-        self.prefill_delta.np[req_idx] = delta
+        if self.has_delta:
+            mrope_model = cast(SupportsMRoPE, model)
+            prefill_positions, delta = mrope_model.get_mrope_input_positions(
+                prefill_token_ids, mm_features
+            )
+            self.prefill_delta.np[req_idx] = delta
+        else:
+            xdrope_model = cast(SupportsXDRoPE, model)
+            prefill_positions = xdrope_model.get_xdrope_input_positions(
+                prefill_token_ids, mm_features
+            )
 
         for i in range(self.num_dims):
             pos = prefill_positions[i].tolist()
@@ -74,7 +84,8 @@ class RopeState:
 
     def apply_staged_writes(self) -> None:
         self.prefill_positions.apply_write()
-        self.prefill_delta.copy_to_uva()
+        if self.has_delta:
+            self.prefill_delta.copy_to_uva()
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]
@@ -93,7 +104,8 @@ class RopeState:
         self.prefill_positions.gpu[base : base + self.num_dims, :length].copy_(
             positions
         )
-        self.prefill_delta.np[req_idx] = delta
+        if self.has_delta:
+            self.prefill_delta.np[req_idx] = delta
 
     def prepare_positions(
         self,
@@ -128,17 +140,27 @@ def get_rope_state(
     device: torch.device,
 ) -> RopeState | None:
     """Create a RopeState if the model uses multi-dimensional RoPE."""
-    if not model_config.uses_mrope:
-        return None
-
-    assert isinstance(model, SupportsMRoPE)
-    return RopeState(
-        num_dims=model_config.mrope_num_dims,
-        max_num_reqs=max_num_reqs,
-        max_num_tokens=max_num_tokens,
-        max_model_len=max_model_len,
-        device=device,
-    )
+    if model_config.uses_mrope:
+        assert isinstance(model, SupportsMRoPE)
+        return RopeState(
+            num_dims=3,
+            has_delta=True,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            max_model_len=max_model_len,
+            device=device,
+        )
+    if model_config.uses_xdrope_dim > 0:
+        assert isinstance(model, SupportsXDRoPE)
+        return RopeState(
+            num_dims=model_config.uses_xdrope_dim,
+            has_delta=False,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            max_model_len=max_model_len,
+            device=device,
+        )
+    return None
 
 
 @triton.jit

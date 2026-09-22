@@ -158,9 +158,11 @@ class VLMTestInfo(NamedTuple):
     num_video_frames: int | tuple[int] = 16
     needs_video_metadata: bool = False
 
-    # Fixed image sizes / image size factors; most tests use image_size_factors.
-    # Each inner iterable defines one request batch. All batches are run against
-    # the same model instance.
+    # Fixed image sizes / image size factors; most tests use image_size_factors
+    # The values provided for these two fields will be stacked and expanded
+    # such that each model will consider each image size factor / image size
+    # once per tests (much like concatenating and wrapping in one parametrize
+    # call)
     image_size_factors: Iterable[Iterable[float]] = IMAGE_SIZE_FACTORS
     image_sizes: Iterable[Iterable[tuple[int, int]]] | None = None
 
@@ -209,8 +211,8 @@ class ExpandableVLMTestArgs(NamedTuple):
     num_logprobs: int
     dtype: str
     distributed_executor_backend: str | None
-    # Sizes are used for everything except audio and custom input tests.
-    size_wrappers: tuple[ImageSizeWrapper, ...] = ()
+    # Sizes are used for everything except for custom input tests
+    size_wrapper: ImageSizeWrapper | None = None
     # Video only
     num_video_frames: int | None = None
     needs_video_metadata: bool = False

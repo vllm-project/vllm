@@ -24,4 +24,3 @@ class SemanticEvent:
     type: EventType
     value: str = ""
     tool_index: int = -1
-    token_count: int = 0

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GSM8K correctness test for CPU KV offloading connectors.
+"""
+GSM8K correctness test for CPU KV offloading connectors.
 
 Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
@@ -132,7 +133,6 @@ MODELS = [
         connector="OffloadingConnector",
         # Baseline ~0.49 on 200 questions (measured on GB200).
         accuracy_threshold=0.39,
-        cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
         id="offloading-gemma-4-e4b-it",
@@ -140,7 +140,6 @@ MODELS = [
         connector="OffloadingConnector",
         # Baseline ~0.64 on 200 questions (measured on GB200).
         accuracy_threshold=0.55,
-        cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
         id="offloading-qwen3.5-35b",

@@ -12,10 +12,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MLAAttentionSpec,
-)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -244,7 +241,7 @@ def _write_task(layer_name: str, transfer_id: str = "xfer") -> Any:
             id="interleaved-kernel-axis-from-spec",
         ),
         pytest.param(
-            (8, 1, 4, 3),
+            (8, 4, 3),
             _mla_spec(),
             16,
             {
@@ -300,7 +297,7 @@ def test_mixed_layers_compute_distinct_offsets_per_layer():
     kv_caches = {
         "separated": torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16),
         "interleaved": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
-        "indexer": torch.empty((8, 1, 4, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
     }
     worker = _worker(
         kv_caches,
@@ -341,11 +338,11 @@ def test_mixed_layers_compute_distinct_offsets_per_layer():
     assert interleaved != indexer
 
 
-def test_write_transfer_plan_caches_offsets_per_layer_geometry():
+def test_write_transfer_plan_caches_offsets_per_geometry():
     kv_caches = {
         "dense0": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
         "dense1": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
-        "indexer": torch.empty((8, 1, 4, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
     }
     calls: list[str] = []
 
@@ -354,12 +351,7 @@ def test_write_transfer_plan_caches_offsets_per_layer_geometry():
         layer_name_to_local_kv_cache_metadata: dict[str, list[Any]]
 
         def _compute_block_transfer_offsets(
-            self,
-            layer_name,
-            local_block_ids,
-            remote_block_ids,
-            remote_moriio_meta,
-            remote_engine_id=None,
+            self, layer_name, local_block_ids, remote_block_ids, remote_moriio_meta
         ):
             calls.append(layer_name)
             call_id = len(calls)
@@ -374,26 +366,41 @@ def test_write_transfer_plan_caches_offsets_per_layer_geometry():
     remote_meta = _remote_meta()
 
     dense0_plan = writer._prepare_transfer_plan(
-        _write_task("dense0"),
+        SimpleNamespace(
+            layer_name="dense0",
+            local_block_ids=[1, 3],
+            request_id="req",
+            transfer_id="xfer",
+        ),
         request_info,
         remote_meta,
     )
     dense1_plan = writer._prepare_transfer_plan(
-        _write_task("dense1"),
+        SimpleNamespace(
+            layer_name="dense1",
+            local_block_ids=[1, 3],
+            request_id="req",
+            transfer_id="xfer",
+        ),
         request_info,
         remote_meta,
     )
     indexer_plan = writer._prepare_transfer_plan(
-        _write_task("indexer"),
+        SimpleNamespace(
+            layer_name="indexer",
+            local_block_ids=[1, 3],
+            request_id="req",
+            transfer_id="xfer",
+        ),
         request_info,
         remote_meta,
     )
 
-    assert calls == ["dense0", "dense1", "indexer"]
+    assert calls == ["dense0", "indexer"]
     assert dense0_plan.transfer_local_offsets == [1]
-    assert dense1_plan.transfer_local_offsets == [2]
-    assert indexer_plan.transfer_local_offsets == [3]
-    assert len(request_info.transfer_offsets) == 3
+    assert dense1_plan.transfer_local_offsets == [1]
+    assert indexer_plan.transfer_local_offsets == [2]
+    assert len(request_info.transfer_offsets) == 2
 
 
 def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
@@ -685,7 +692,7 @@ def test_empty_local_block_ids_is_free_only_noop():
 def test_registration_regions_do_not_split_interleaved_or_mla_cache():
     separated = torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16)
     interleaved = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
-    indexer = torch.empty((8, 1, 4, 3), dtype=torch.bfloat16)
+    indexer = torch.empty((8, 4, 3), dtype=torch.bfloat16)
     worker = _worker(
         {
             "separated": separated,
@@ -738,9 +745,7 @@ def test_registration_regions_use_layer_num_blocks():
 
 
 def test_unsupported_shape_raises_value_error():
-    # A 4-D view whose head/state/content dims all disagree with the spec (a
-    # standardized [B, H, N, C] view for _full_spec would be (8, 2, 4, 6)).
-    cache = torch.empty((8, 3, 5, 7), dtype=torch.bfloat16)
+    cache = torch.empty((8, 4, 2, 3), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
     with pytest.raises(ValueError, match="Unsupported MoRIIO K/V cache shape"):

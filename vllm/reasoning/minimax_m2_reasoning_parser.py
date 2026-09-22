@@ -4,7 +4,9 @@
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+)
 from vllm.parser.engine.registered_adapters import MinimaxM2ParserReasoningAdapter
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
@@ -15,7 +17,8 @@ if TYPE_CHECKING:
 
 
 class MiniMaxM2ReasoningParser(MinimaxM2ParserReasoningAdapter):  # type: ignore[valid-type, misc]
-    """Reasoning parser for MiniMax M2 model.
+    """
+    Reasoning parser for MiniMax M2 model.
 
     MiniMax M2 models don't generate <think> start token, only </think> end
     token. All content before </think> is reasoning, content after is the
@@ -24,7 +27,9 @@ class MiniMaxM2ReasoningParser(MinimaxM2ParserReasoningAdapter):  # type: ignore
 
 
 class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
-    """Reasoning parser for MiniMax M2 model."""
+    """
+    Reasoning parser for MiniMax M2 model.
+    """
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)

@@ -24,7 +24,7 @@
 # limitations under the License.
 """Inference-only HY V3 MTP model compatible with HuggingFace weights."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 import regex as re
 import torch
@@ -288,15 +288,7 @@ class HYV3MTP(nn.Module):
         num_kv_heads = getattr(
             self.config, "num_key_value_heads", self.config.num_attention_heads
         )
-        split_params_mapping: list[
-            tuple[
-                str,
-                str,
-                int,
-                list[tuple[str | int, int]],
-                Callable[[torch.Tensor], torch.Tensor] | None,
-            ]
-        ] = [
+        split_params_mapping = [
             (".gate_up_proj", ".gate_and_up_proj", 2, [(1, 1), (0, 1)], None),
             (
                 ".qkv_proj",
@@ -316,7 +308,7 @@ class HYV3MTP(nn.Module):
                 num_experts=self.config.num_experts,
             )
         else:
-            expert_params_mapping = []
+            expert_params_mapping = {}
 
         params_dict = dict(self.named_parameters())
 
@@ -362,10 +354,9 @@ class HYV3MTP(nn.Module):
             if name == "__skip__":
                 continue
             if "scale" in name:
-                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped_name is None:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
                     continue
-                name = remapped_name
             is_found = False
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

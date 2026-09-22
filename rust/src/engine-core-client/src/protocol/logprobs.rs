@@ -8,13 +8,11 @@ mod wire;
 
 use std::ops::{Deref, DerefMut};
 
-use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use self::wire::*;
 use crate::error::{Error, Result, bail_ext_value_decode};
-use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::protocol::tensor::{WireArrayData, WireNdArray};
 
 /// One token candidate and its logprob metadata for a single sequence position.
@@ -25,13 +23,10 @@ use crate::protocol::tensor::{WireArrayData, WireNdArray};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenLogprob {
     pub token_id: u32,
-    /// Preserves the engine's value, including NaN and infinities.
     pub logprob: f32,
     /// The sampled/selected token uses its actual vocab rank. Remaining entries
     /// use 1-based top-k ranks matching the engine's returned candidate
     /// order.
-    /// A sampled/selected rank of 0 occurs when its logprob is NaN: the engine's
-    /// `(logprobs >= selected_logprob).sum(-1)` counts no matching values.
     pub rank: u32,
 }
 
@@ -56,6 +51,10 @@ impl PositionLogprobs {
                 logprobs.len()
             );
         }
+        if sampled_rank == 0 {
+            bail_ext_value_decode!("token_ranks must be >= 1 for decoded engine-core logprobs");
+        }
+
         let mut entries = Vec::with_capacity(token_ids.len());
         for (index, (&token_id, &logprob)) in token_ids.iter().zip(logprobs.iter()).enumerate() {
             let rank = if index == 0 {
@@ -163,7 +162,10 @@ impl Serialize for MaybeWireLogprobs {
 impl MaybeWireLogprobs {
     /// Resolve the wire representation into decoded logprobs by looking up aux
     /// frames and decoding raw views as needed.
-    pub(super) fn resolve(self, frames: &[Bytes], field_prefix: &str) -> Result<Self> {
+    pub(super) fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Self>
+    where
+        Frame: AsRef<[u8]>,
+    {
         match self {
             Self::Direct(value) => Ok(Self::Direct(value)),
             Self::Wire(value) => value.resolve(frames, field_prefix).map(Self::Direct),
@@ -205,42 +207,35 @@ impl WireLogprobs {
 
         Ok(Self {
             logprob_token_ids: WireNdArray {
-                dtype: NumpyDtype::little(TensorDtype::I64),
+                dtype: "<i8".to_string(),
                 shape: vec![rows, cols],
                 data: WireArrayData::RawView(token_ids.into()),
             },
             logprobs: WireNdArray {
-                dtype: NumpyDtype::little(TensorDtype::F32),
+                dtype: "<f4".to_string(),
                 shape: vec![rows, cols],
                 data: WireArrayData::RawView(logprobs.into()),
             },
             token_ranks: WireNdArray {
-                dtype: NumpyDtype::little(TensorDtype::I64),
+                dtype: "<i8".to_string(),
                 shape: vec![rows],
                 data: WireArrayData::RawView(token_ranks.into()),
             },
             cu_num_generated_tokens: None,
-            cu_num_generated_tokens_tensor: None,
         })
     }
 
     /// Resolve the wire-format logprobs into semantic [`Logprobs`] records by
     /// looking up aux frames, decoding raw views, and grouping each row
     /// into one [`PositionLogprobs`].
-    fn resolve(self, frames: &[Bytes], field_prefix: &str) -> Result<Logprobs> {
+    fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Logprobs>
+    where
+        Frame: AsRef<[u8]>,
+    {
         if let Some(indices) = self.cu_num_generated_tokens {
             bail_ext_value_decode!(
                 "{field_prefix}.cu_num_generated_tokens: \
                  expected None for per-request engine-core logprobs payload, got {indices:?}"
-            );
-        }
-
-        // Unlike the sibling check above, don't Debug-print the payload:
-        // an opaque non-None value here may embed a full tensor blob.
-        if self.cu_num_generated_tokens_tensor.is_some() {
-            bail_ext_value_decode!(
-                "{field_prefix}.cu_num_generated_tokens_tensor: \
-                 expected None for per-request engine-core logprobs payload"
             );
         }
 

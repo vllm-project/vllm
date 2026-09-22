@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch
 
 from vllm.v1.core.kv_cache_utils import check_enough_kv_cache_memory
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -19,7 +18,7 @@ def test_kv_cache_oom_no_memory():
             block_size=16,
             num_kv_heads=8,
             head_size=128,
-            dtype=torch.float16,
+            dtype="float16",
         )
     }
 
@@ -47,7 +46,7 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
             block_size=16,
             num_kv_heads=8,
             head_size=128,
-            dtype=torch.float16,
+            dtype="float16",
         )
     }
 

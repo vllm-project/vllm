@@ -7,14 +7,13 @@ from unittest.mock import MagicMock
 import pytest
 
 import vllm.envs as envs
-from vllm.entrypoints.generate.base.serving import GenerateBaseServing
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing, GenerationError
 from vllm.envs import disable_envs_cache
-from vllm.exceptions import GenerationError
 
 
 @pytest.mark.asyncio
 async def test_raise_if_error_raises_generation_error():
-    """Test _raise_if_error raises GenerationError."""
+    """test _raise_if_error raises GenerationError"""
     # create a minimal GenerateBaseServing instance
     mock_engine = MagicMock()
     mock_engine.model_config = MagicMock()
@@ -42,7 +41,7 @@ async def test_raise_if_error_raises_generation_error():
 
 @pytest.mark.asyncio
 async def test_convert_generation_error_to_streaming_response():
-    """Test _convert_generation_error_to_streaming_response output."""
+    """test _convert_generation_error_to_streaming_response output"""
     mock_engine = MagicMock()
     mock_engine.model_config = MagicMock()
     mock_engine.model_config.max_model_len = 100

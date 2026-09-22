@@ -176,8 +176,7 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub tokenizer: Option<String>,
 
-    /// Tokenizer mode (auto, hf, slow, mistral). Accepted for Python CLI
-    /// compatibility; non-auto values are ignored with a warning.
+    /// Tokenizer mode (auto, hf, slow, mistral).
     #[arg(long, default_value = "auto")]
     pub tokenizer_mode: String,
 
@@ -536,16 +535,8 @@ pub struct BenchServeArgs {
 
     /// SPEED-Bench config/split (qualitative, throughput_1k, throughput_2k, throughput_8k,
     /// throughput_16k, throughput_32k).
-    #[arg(
-        long,
-        visible_alias = "speed-bench-dataset-subset",
-        default_value = "qualitative"
-    )]
+    #[arg(long, default_value = "qualitative")]
     pub speed_bench_config: SpeedBenchConfig,
-
-    /// Number of output tokens per request (SPEED-Bench dataset).
-    #[arg(long, default_value_t = 4096)]
-    pub speed_bench_output_len: usize,
 
     /// Filter SPEED-Bench by category (e.g. low_entropy, high_entropy, coding, math).
     #[arg(long)]
@@ -682,7 +673,7 @@ impl BenchServeArgs {
             BackendKind::OpenaiEmbeddings | BackendKind::OpenaiEmbeddingsChat => {
                 "/v1/embeddings".to_string()
             }
-            BackendKind::VllmPooling => "/pooling".to_string(),
+            BackendKind::VllmPooling => "/v1/pooling".to_string(),
             BackendKind::VllmRerank => "/v1/rerank".to_string(),
         }
     }

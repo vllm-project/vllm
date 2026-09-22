@@ -11,7 +11,8 @@ from vllm.platforms.interface import DeviceCapability
 
 @pytest.fixture
 def mock_cuda_platform():
-    """Fixture that returns a factory for creating mocked CUDA platforms.
+    """
+    Fixture that returns a factory for creating mocked CUDA platforms.
 
     Usage:
         def test_something(mock_cuda_platform):
@@ -50,7 +51,8 @@ def mock_cuda_platform():
 
 @pytest.fixture
 def mock_xpu_platform():
-    """Fixture that returns a factory for creating mocked XPU platforms.
+    """
+    Fixture that returns a factory for creating mocked XPU platforms.
 
     Usage:
         def test_something(mock_xpu_platform):

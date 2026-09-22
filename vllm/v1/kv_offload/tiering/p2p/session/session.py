@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""P2PSession — bidirectional session combining client + server roles.
+"""
+P2PSession — bidirectional session combining client + server roles.
 
 A single P2PSession per remote peer handles BOTH directions of the P2P
 protocol on one ControlConnection: it can request blocks from the peer
@@ -457,10 +458,9 @@ class P2PSession:
                 )
             if msg[ConnectMsg.HASH_SEED] != self._local_hash_seed:
                 raise ValueError(
-                    f"hash seed mismatch from {self.peer_id}: "
+                    f"PYTHONHASHSEED mismatch from {self.peer_id}: "
                     f"remote={msg[ConnectMsg.HASH_SEED]!r}, "
-                    f"local={self._local_hash_seed!r}. Ensure PYTHONHASHSEED "
-                    "(if set) matches on all P2P peers."
+                    f"local={self._local_hash_seed!r}"
                 )
             self._transport.add_remote_peer(
                 self.peer_id,

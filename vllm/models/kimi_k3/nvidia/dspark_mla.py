@@ -28,10 +28,6 @@ from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
-_GROUPED_KV_CACHE_DTYPES = frozenset(
-    {"auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2"}
-)
-
 
 def _duplicate_context_kv_weights(
     weights: Iterable[tuple[str, torch.Tensor]], num_layers: int
@@ -237,13 +233,6 @@ class K3DSparkModel(nn.Module):
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
-        self._context_kv_scales: torch.Tensor | None = None
-        if attn0.kv_cache_dtype in _GROUPED_KV_CACHE_DTYPES and is_quantized_kv_cache(
-            attn0.kv_cache_dtype
-        ):
-            self._context_kv_scales = torch.stack(
-                [attn._k_scale.reshape(()) for attn in attentions]
-            )
 
     def _precompute_fused_context_kv(
         self,
@@ -297,18 +286,16 @@ class K3DSparkModel(nn.Module):
             return
 
         cache_layers = [layer.self_attn for layer in self.layers]
-        cache_dtype = cache_layers[0].kv_cache_dtype
         if (
-            cache_dtype in _GROUPED_KV_CACHE_DTYPES
-            and all(cl.kv_cache_dtype == cache_dtype for cl in cache_layers)
+            not is_quantized_kv_cache(cache_layers[0].kv_cache_dtype)
             and self._has_uniform_block_layout(cache_layers)
             and (
                 isinstance(context_slot_mapping, torch.Tensor)
                 or all(s is not None for s in context_slot_mapping)
             )
         ):
-            # Grouped context KV insert assumes that all layers share the same
-            # cache dtype and block layout.
+            # Grouped context KV insert only supports unquantized (bf16) KV cache
+            # and assumes that all layers share the same block layout.
 
             if isinstance(context_slot_mapping, (list, tuple)):
                 per_layer_slot_mappings = [
@@ -334,8 +321,6 @@ class K3DSparkModel(nn.Module):
                 ref_cache.size(1),
                 ref_cache.stride(0),
                 ref_cache.stride(1),
-                self._context_kv_scales,
-                cache_dtype,
             )
             return
 
@@ -414,14 +399,9 @@ class K3DSparkForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
+    checkpoint_skip_substrs = ("confidence_head", "embed_tokens", "lm_head")
+
     hf_to_vllm_mapper = WeightsMapper(
-        # confidence_head is training-only. The frozen target embedding and LM
-        # head are shared after this draft-specific checkpoint is loaded.
-        orig_to_new_substr={
-            "confidence_head": None,
-            "embed_tokens": None,
-            "lm_head": None,
-        },
         orig_to_new_prefix={"": "model."},
         orig_to_new_stacked={
             ".gate_proj": (".gate_up_proj", 0),
@@ -436,7 +416,9 @@ class K3DSparkForCausalLM(nn.Module):
         assert vllm_config.speculative_config is not None
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
-        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
+        target_layer_num = vllm_config.model_config.get_num_layers(
+            vllm_config.parallel_config
+        )
         self.model = K3DSparkModel(
             vllm_config=vllm_config,
             start_layer_id=target_layer_num,
@@ -495,10 +477,14 @@ class K3DSparkForCausalLM(nn.Module):
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        # confidence_head is training-only. The frozen target embedding and LM
+        # head are shared after this draft-specific checkpoint is loaded.
+        loader = AutoWeightsLoader(
+            self,
+            skip_substrs=list(self.checkpoint_skip_substrs),
+        )
         # read: 1. all weights. 2. context kv weights
         weights = _duplicate_context_kv_weights(weights, len(self.model.layers))
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-    def process_weights_after_loading(self) -> None:
+        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.model._build_fused_context_kv_metadata()
+        return loaded_weights

@@ -14,7 +14,9 @@ from fastapi.responses import StreamingResponse
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager to handle startup and shutdown events."""
+    """
+    Lifespan context manager to handle startup and shutdown events.
+    """
     # Startup: Initialize clients
     prefiller_base_url = (
         f"http://{global_args.prefiller_host}:{global_args.prefiller_port}/v1"
@@ -104,7 +106,9 @@ app.state.decode_client = None
 async def send_request_to_service(
     client: httpx.AsyncClient, endpoint: str, req_data: dict
 ):
-    """Send a request to a service using a persistent client."""
+    """
+    Send a request to a service using a persistent client.
+    """
     req_data = req_data.copy()
     req_data["max_tokens"] = 1
     if "max_completion_tokens" in req_data:
@@ -124,7 +128,9 @@ async def send_request_to_service(
 async def stream_service_response(
     client: httpx.AsyncClient, endpoint: str, req_data: dict
 ):
-    """Asynchronously stream the response from a service using a persistent client."""
+    """
+    Asynchronously stream the response from a service using a persistent client.
+    """
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     async with client.stream(
         "POST", endpoint, json=req_data, headers=headers

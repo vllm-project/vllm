@@ -17,8 +17,6 @@ from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
 )
 from vllm.v1.attention.ops.prefix_prefill import context_attention_fwd
 
-pytestmark = pytest.mark.skip_global_cleanup
-
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
 HEAD_SIZES = [24, 128]
@@ -981,39 +979,29 @@ def test_contexted_kv_attention_alibi_f32(
     )
 
 
-# Hybrid mamba + full-attention models get a non-power-of-2 attention page.
-NONSTANDARD_BLOCK_SIZE_SHAPES = [
-    (64, 1, 128, 544),
-    (8, 4, 256, 1040),
-    (8, 4, 256, 1056),
-]
-
-
-@pytest.mark.parametrize(
-    "num_heads,num_queries_per_kv,head_size,block_size", NONSTANDARD_BLOCK_SIZE_SHAPES
-)
+@pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("op", OPS)
 @torch.inference_mode()
 def test_qwen3_nonstandard_block_size(
-    num_heads: int,
-    num_queries_per_kv: int,
     head_size: int,
-    block_size: int,
     dtype: torch.dtype,
     device: str,
     op: Callable,
 ) -> None:
-    """Non-power-of-2 pages must match, even when a tile straddles a page."""
+    """
+    A separate test function specifically added
+    for Qwen3-Next-80B (Block Size 544).
+    """
     if not current_platform.is_rocm():
-        pytest.skip("Non-power-of-2 block sizes are only exercised on ROCm CI.")
+        pytest.skip("544 block size optimization is only for ROCm.")
 
     test_contexted_kv_attention(
-        num_heads=num_heads,
-        num_queries_per_kv=num_queries_per_kv,
+        num_heads=64,
+        num_queries_per_kv=1,
         head_size=head_size,
-        block_size=block_size,
+        block_size=544,
         sliding_window=0,
         dtype=dtype,
         kv_cache_dtype="auto",

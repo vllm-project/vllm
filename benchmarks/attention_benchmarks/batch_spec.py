@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Simplified batch specification grammar for attention benchmarks.
+"""
+Simplified batch specification grammar for attention benchmarks.
 
 Grammar (underscore-separated segments):
   Format: (<count>?) q<q_len>(k?) (s<seq_len>(k?))?
@@ -23,7 +24,6 @@ Examples:
   q4s1k            -> [(4, 1024)]              # 4-token extend (spec decode)
   2q1k_32q1s1k     -> [(1024, 1024)] * 2 + [(1, 1024)] * 32  # Mixed batch
   16q4s1k          -> [(4, 1024)] * 16         # 16 spec decode requests
-
 """
 
 from collections import Counter
@@ -71,7 +71,8 @@ def _parse_size(size_str: str, k_suffix: str) -> int:
 
 
 def parse_batch_spec(spec: str) -> list[BatchRequest]:
-    """Parse batch specification string into list of BatchRequest objects.
+    """
+    Parse batch specification string into list of BatchRequest objects.
 
     Grammar: (<count>?) q<q_len>(k?) (s<seq_len>(k?))?
 
@@ -83,7 +84,6 @@ def parse_batch_spec(spec: str) -> list[BatchRequest]:
 
     Raises:
         ValueError: If spec format is invalid
-
     """
     requests = []
 
@@ -103,7 +103,8 @@ def parse_batch_spec(spec: str) -> list[BatchRequest]:
 
 
 def format_batch_spec(requests: list[BatchRequest]) -> str:
-    """Format list of BatchRequest into human-readable string.
+    """
+    Format list of BatchRequest into human-readable string.
 
     Groups requests by type and provides counts and sizes.
 
@@ -112,7 +113,6 @@ def format_batch_spec(requests: list[BatchRequest]) -> str:
 
     Returns:
         Formatted string describing the batch
-
     """
     kinds = {
         "prefill": [],
@@ -157,7 +157,8 @@ def format_batch_spec(requests: list[BatchRequest]) -> str:
 
 
 def reorder_for_flashinfer(requests: list[BatchRequest]) -> list[BatchRequest]:
-    """Reorder requests for FlashInfer: decode first, then prefill.
+    """
+    Reorder requests for FlashInfer: decode first, then prefill.
 
     FlashInfer expects decode requests before prefill requests for
     optimal performance.
@@ -167,7 +168,6 @@ def reorder_for_flashinfer(requests: list[BatchRequest]) -> list[BatchRequest]:
 
     Returns:
         Reordered list with decode requests first
-
     """
     decodes = [r for r in requests if r.is_decode]
     non_decodes = [r for r in requests if not r.is_decode]
@@ -177,14 +177,14 @@ def reorder_for_flashinfer(requests: list[BatchRequest]) -> list[BatchRequest]:
 def split_by_type(
     requests: list[BatchRequest],
 ) -> dict[str, list[BatchRequest]]:
-    """Split requests by type for analysis.
+    """
+    Split requests by type for analysis.
 
     Args:
         requests: List of BatchRequest
 
     Returns:
         Dict with keys: 'decode', 'prefill', 'extend'
-
     """
     result = {
         "decode": [],
@@ -204,14 +204,14 @@ def split_by_type(
 
 
 def get_batch_stats(requests: list[BatchRequest]) -> dict:
-    """Compute statistics about a batch.
+    """
+    Compute statistics about a batch.
 
     Args:
         requests: List of BatchRequest
 
     Returns:
         Dict with batch statistics
-
     """
     by_type = split_by_type(requests)
 
@@ -232,7 +232,8 @@ def get_batch_stats(requests: list[BatchRequest]) -> dict:
 
 
 def get_batch_type(batch_spec: str, spec_decode_threshold: int = 8) -> str:
-    """Classify a batch spec into a type string.
+    """
+    Classify a batch spec into a type string.
 
     Args:
         batch_spec: Batch specification string (e.g., "q2k", "8q1s1k", "2q2k_8q1s1k")
@@ -240,7 +241,6 @@ def get_batch_type(batch_spec: str, spec_decode_threshold: int = 8) -> str:
 
     Returns:
         Type string: "prefill", "decode", "spec-decode", "extend", or "mixed (types...)"
-
     """
     requests = parse_batch_spec(batch_spec)
 

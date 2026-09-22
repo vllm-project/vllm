@@ -14,7 +14,6 @@ import torch
 import zmq
 
 from vllm.config import KVTransferConfig, VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -42,7 +41,6 @@ Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
 TransferId = str
-TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype]
 
 
 class MoRIIOTransferAck(NamedTuple):
@@ -93,7 +91,7 @@ class RemoteAllocInfo:
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
-        TransferOffsetsKey,
+        tuple[tuple[int, ...], tuple[int, ...], torch.dtype],
         tuple[list[int], list[int], list[int]],
     ] = field(default_factory=dict)
 
@@ -445,8 +443,8 @@ class ReqMeta:
     """Metadata for a single request."""
 
     transfer_id: TransferId
-    local_block_ids: BlockIds
-    remote_block_ids: BlockIds
+    local_block_ids: list[int]
+    remote_block_ids: list[int]
     remote_host: str
     remote_port: int
     remote_handshake_port: int
@@ -482,7 +480,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def add_new_req(
         self,
         request_id: ReqId,
-        local_block_ids: BlockIds,
+        local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
@@ -588,7 +586,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket."""
+    """Context manager for a ZMQ socket"""
+
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")
 

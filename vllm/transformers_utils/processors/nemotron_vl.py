@@ -191,7 +191,8 @@ class LlamaNemotronNanoVLImageProcessor(InternVLImageProcessor):
 
 
 class LlamaNemotronNanoVLProcessor(InternVLProcessor):
-    """This model doesn't define its own HF processor,
+    """
+    This model doesn't define its own HF processor,
     so we implement our own one here.
 
     The image processor is given by:
@@ -286,7 +287,8 @@ class LlamaNemotronVLEmbedImageProcessor(InternVLImageProcessor):
 
 
 class LlamaNemotronVLEmbedProcessor(InternVLProcessor):
-    """Processor for LlamaNemotronVL embedding model.
+    """
+    Processor for LlamaNemotronVL embedding model.
 
     Inherits from NemotronVLProcessor and specializes it for embedding tasks:
     - Uses SigLIP transform with normalization instead of base transform

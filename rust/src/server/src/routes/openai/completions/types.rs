@@ -2,17 +2,15 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
-use vllm_text::{Prompt, TruncationSide};
+use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
-    LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
-    Usage, default_true, deserialize_request_top_k, validate_stop,
+    LogProbs, Normalizable, StreamOptions, StringOrArray, Usage, default_true, validate_stop,
 };
 
 /// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
@@ -32,7 +30,7 @@ fn default_completion_max_tokens() -> Option<u32> {
 pub struct CompletionRequest {
     // -------- Standard OpenAI API Parameters --------
     /// ID of the model to use
-    pub model: Option<String>,
+    pub model: String,
 
     /// The prompt(s) to generate completions for.
     ///
@@ -51,7 +49,7 @@ pub struct CompletionRequest {
     pub logit_bias: Option<HashMap<String, f32>>,
 
     /// Include the log probabilities on the logprobs most likely tokens
-    pub logprobs: Option<i32>,
+    pub logprobs: Option<u32>,
 
     /// The maximum number of tokens to generate (defaults to 16 when absent,
     /// matching the Python vLLM / OpenAI API convention)
@@ -90,10 +88,6 @@ pub struct CompletionRequest {
     pub user: Option<String>,
 
     // -------- vLLM Sampling Parameters --------
-    /// Whether to apply the engine's configured watermark to this request.
-    #[serde(default = "default_true")]
-    pub watermarking: bool,
-
     /// Options for streaming response
     pub stream_options: Option<StreamOptions>,
 
@@ -102,7 +96,6 @@ pub struct CompletionRequest {
     pub use_beam_search: bool,
 
     /// Top-k sampling parameter
-    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
@@ -141,9 +134,6 @@ pub struct CompletionRequest {
 
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
-
-    /// Which side to truncate from when truncate_prompt_tokens is active
-    pub truncation_side: Option<TruncationSide>,
 
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
@@ -185,7 +175,6 @@ pub struct CompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
-    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
     /// KV transfer parameters for disaggregated serving
@@ -240,7 +229,7 @@ pub(super) struct CompletionChoice {
     pub logprobs: Option<LogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
-    pub prompt_logprobs: Option<PromptLogprobs>,
+    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
 }
@@ -249,17 +238,22 @@ pub(super) struct CompletionChoice {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionStreamResponse {
-    #[serde(flatten)]
-    pub envelope: Arc<StreamResponseEnvelope>,
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
 }
 
 impl CompletionStreamResponse {
     /// Create a stream response with the standard envelope fields pre-filled.
-    pub fn new(envelope: &Arc<StreamResponseEnvelope>) -> Self {
+    pub fn new(id: &str, model: &str, created: u64) -> Self {
         Self {
-            envelope: Arc::clone(envelope),
+            id: id.to_string(),
+            object: "text_completion".to_string(),
+            created,
+            model: model.to_string(),
             choices: Vec::new(),
             usage: None,
         }

@@ -19,7 +19,9 @@ _CONFIG_FILENAME = "config.json"
 
 
 class FileMapper:
-    """FileMapper maps KV blocks (given by their hash) to file names."""
+    """
+    FileMapper maps KV blocks (given by their hash) to file names.
+    """
 
     def __init__(
         self,
@@ -39,7 +41,8 @@ class FileMapper:
         replicated_layout: bool = False,
         canonical_format: str | None = None,
     ):
-        """Initialize the file mapper. Each worker constructs its own, but
+        """
+        Initialize the file mapper. Each worker constructs its own, but
         `config.json` is shared across workers since rank lives outside the hash.
         When `parallel_agnostic=True`, tp/pp/pcp/dcp are forced to 1 and rank
         to 0 so multiple parallelism layouts collapse into the same folder.
@@ -91,10 +94,7 @@ class FileMapper:
             for group in config.groups
         ]
         parallel = config.parallel
-        canonical_format = None
-        if config.canonical_layout:
-            assert config.kv_cache_layout is not None
-            canonical_format = canonical_format_id(config.kv_cache_layout)
+        canonical_format = canonical_format_id() if config.canonical_layout else None
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,
@@ -133,7 +133,8 @@ class FileMapper:
 
     @staticmethod
     def _compute_base_path(root_dir: str, fields: dict) -> str:
-        """Layout: <root_dir>/<safe_model_name>_<sha256-prefix>/.
+        """
+        Layout: <root_dir>/<safe_model_name>_<sha256-prefix>/.
         safe_model_name replaces '/' with '_' so HuggingFace IDs don't nest.
         """
         canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))

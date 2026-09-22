@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark hidden state extraction throughput.
+"""
+Benchmark hidden state extraction throughput.
 
 Measures two modes:
   1. Baseline: bulk inference with max_tokens=1, no extraction.

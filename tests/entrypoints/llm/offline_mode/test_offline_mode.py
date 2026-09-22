@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for HF_HUB_OFFLINE mode."""
+"""Tests for HF_HUB_OFFLINE mode"""
 
 import importlib
 import sys
@@ -8,6 +8,9 @@ import sys
 import pytest
 import regex as re
 import urllib3
+
+from vllm import LLM
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_CONFIGS = [
     {
@@ -52,26 +55,19 @@ MODEL_CONFIGS = [
 ]
 
 
-def _create_runner(vllm_runner, model_config):
-    runner_config = model_config.copy()
-    model = runner_config.pop("model")
-    tokenizer_name = runner_config.pop("tokenizer", None)
-    return vllm_runner(model, tokenizer_name=tokenizer_name, **runner_config)
-
-
 @pytest.fixture(scope="module")
-def cache_models(vllm_runner):
+def cache_models():
     # Cache model files first
     for model_config in MODEL_CONFIGS:
-        with _create_runner(vllm_runner, model_config):
-            pass
+        LLM(**model_config)
+        cleanup_dist_env_and_memory()
 
     yield
 
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.usefixtures("cache_models")
-def test_offline_mode(monkeypatch: pytest.MonkeyPatch, vllm_runner):
+def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
     # Set HF to offline mode and ensure we can still construct an LLM
     with monkeypatch.context() as m:
         try:
@@ -97,8 +93,7 @@ def test_offline_mode(monkeypatch: pytest.MonkeyPatch, vllm_runner):
             _re_import_modules()
             # Cached model files should be used in offline mode
             for model_config in MODEL_CONFIGS:
-                with _create_runner(vllm_runner, model_config):
-                    pass
+                LLM(**model_config)
         finally:
             # Reset the environment after the test
             # NB: Assuming tests are run in online mode
@@ -141,7 +136,7 @@ def _re_import_modules():
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.usefixtures("cache_models")
-def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch, vllm_runner):
+def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
     # Set HF to offline mode and ensure we can still construct an LLM
     with monkeypatch.context() as m:
         try:
@@ -164,8 +159,7 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch, vllm_ru
             # Need to re-import huggingface_hub
             # and friends to set up offline mode
             _re_import_modules()
-            with vllm_runner("facebook/opt-125m"):
-                pass
+            LLM(model="facebook/opt-125m")
         finally:
             # Reset the environment after the test
             # NB: Assuming tests are run in online mode

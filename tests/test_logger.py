@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
-import io
 import json
 import logging
 import os
@@ -20,7 +19,6 @@ from vllm.logger import (
     _DATE_FORMAT,
     _FORMAT,
     _configure_vllm_root_logger,
-    _use_color,
     enable_trace_function_call,
     init_logger,
 )
@@ -72,27 +70,6 @@ def test_default_vllm_root_logger_configuration(monkeypatch):
     assert isinstance(formatter, NewLineFormatter)
     assert formatter._fmt == _FORMAT
     assert formatter.datefmt == _DATE_FORMAT
-
-
-def test_use_color_force_color(monkeypatch):
-    """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
-    explicit VLLM_LOGGING_COLOR=0 take precedence over it."""
-    monkeypatch.setattr(sys, "stdout", io.StringIO())
-    monkeypatch.setattr(sys, "stderr", io.StringIO())
-    for var in ("NO_COLOR", "FORCE_COLOR", "VLLM_LOGGING_COLOR"):
-        monkeypatch.delenv(var, raising=False)
-
-    assert not _use_color()
-
-    monkeypatch.setenv("FORCE_COLOR", "1")
-    assert _use_color()
-
-    monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
-    assert not _use_color()
-    monkeypatch.delenv("VLLM_LOGGING_COLOR")
-
-    monkeypatch.setenv("NO_COLOR", "1")
-    assert not _use_color()
 
 
 def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypatch):

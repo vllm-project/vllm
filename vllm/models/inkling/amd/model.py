@@ -656,9 +656,8 @@ def _load_inkling_weights(
 
             yield name, weight
 
-    mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
-    loader = AutoWeightsLoader(module)
-    loaded |= loader.load_weights(_iter_loadable_weights(), mapper=mapper)
+    loader = AutoWeightsLoader(module, skip_prefixes=["model.mtp."])
+    loaded |= loader.load_weights(_iter_loadable_weights())
 
     # Post-load MoE fixups (default input scales, zeroed EP-padding experts).
     for moe_name, moe in moe_modules.items():

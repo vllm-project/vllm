@@ -38,6 +38,7 @@ def cutlass_group_gemm_supported() -> bool:
     return ops.cutlass_group_gemm_supported(capability)
 
 
+CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
 CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
 

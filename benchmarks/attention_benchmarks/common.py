@@ -21,7 +21,8 @@ from vllm.triton_utils import triton
 
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
-    """Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
+    """
+    Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
 
     This ensures results are sorted by batch size first, then query length,
     then sequence length, rather than alphabetically.
@@ -353,13 +354,13 @@ class ResultsFormatter:
         backends: list[str],
         compare_to_fastest: bool = True,
     ):
-        """Print results as a rich table.
+        """
+        Print results as a rich table.
 
         Args:
             results: List of BenchmarkResult
             backends: List of backend names being compared
             compare_to_fastest: Show percentage comparison to fastest
-
         """
         # Group by batch spec, preserving first-occurrence order
         by_spec = {}
@@ -488,14 +489,14 @@ class ResultsFormatter:
 
 
 def setup_mla_dims(model_name: str = "deepseek-v3") -> dict:
-    """Get MLA dimensions for known models.
+    """
+    Get MLA dimensions for known models.
 
     Args:
         model_name: Model identifier
 
     Returns:
         Dict with MLA dimension configuration
-
     """
     configs = {
         "deepseek-v2": {
@@ -541,7 +542,8 @@ def get_attention_scale(head_dim: int) -> float:
 
 
 def is_mla_backend(backend: str) -> bool:
-    """Check if backend is an MLA backend using the AttentionBackendEnum.
+    """
+    Check if backend is an MLA backend using the AttentionBackendEnum.
 
     Args:
         backend: Backend name matching AttentionBackendEnum exactly
@@ -549,7 +551,6 @@ def is_mla_backend(backend: str) -> bool:
 
     Returns:
         True if the backend is an MLA backend, False otherwise
-
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

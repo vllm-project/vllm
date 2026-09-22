@@ -21,7 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -39,10 +38,8 @@ def extract_from_kv_cache(
     num_tokens: int,
 ) -> torch.Tensor:
     """Extract data from KV cache."""
-    block_size = kv_cache.shape[2]
-    return kv_cache[slot_mapping // block_size, :, slot_mapping % block_size][
-        :num_tokens
-    ]
+    block_size = kv_cache.shape[1]
+    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
 
 
 def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
@@ -57,7 +54,6 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
 
     Returns:
         Dict with "hidden_states" and "token_ids" tensors.
-
     """
     lock_path = path + ".lock"
     with open(lock_path) as lf:
@@ -97,11 +93,21 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
-    """Simple debug implementation of a HiddenStatesConnector.
+    """
+    Simple debug implementation of a HiddenStatesConnector.
 
     Simply extracts the hidden states from the kv cache and stores them to disk.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
+
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        """
+        Indicates whether this connector prefers KV blocks that hold KV data for all
+        layers, which can speed up KV data transfers. Defaults to False.
+        """
+        # Must be False so that drafter kv cache isn't merged with verifier's
+        return False
 
     @classmethod
     def _find_cache_kv_group_id(cls, kv_cache_config: "KVCacheConfig | None") -> int:
@@ -304,12 +310,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Block size must match the indexed buffer, else reads hit the wrong
         # slots. Raise (not assert) so the check survives `python -O`.
-        # Views are [num_blocks, num_heads, block_size, head_size], matching what
-        # extract_from_kv_cache() indexes.
-        if self._block_size != self._kv_cache.shape[2]:
+        if self._block_size != self._kv_cache.shape[1]:
             raise ValueError(
                 f"Hidden-states block-size mismatch: derived {self._block_size} "
-                f"but buffer block size is {self._kv_cache.shape[2]}; read slots "
+                f"but buffer block size is {self._kv_cache.shape[1]}; read slots "
                 "would be wrong (likely a hybrid block-size resolution bug)."
             )
 
@@ -378,11 +382,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         with torch.cuda.stream(copy_stream):
             # Move the CPU slot_mapping to GPU on the copy stream so the
             # implicit H2D inside fancy indexing doesn't sync the default
-            # stream. Deliberate bulk transfer in this reference connector.
-            with gpu_sync_allowed():
-                slot_mapping_gpu = slot_mapping.to(
-                    device=self._kv_cache.device, non_blocking=True
-                )
+            # stream.
+            slot_mapping_gpu = slot_mapping.to(
+                device=self._kv_cache.device, non_blocking=True
+            )
             hidden_states_gpu = extract_from_kv_cache(
                 self._kv_cache, slot_mapping_gpu, num_tokens
             )
@@ -436,7 +439,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """Get number of new tokens that can be loaded from the
+        """
+        Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -447,7 +451,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
-
         """
         # This connector is store-only, so we don't need to load any tokens
         return 0, False
@@ -471,7 +474,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
-
         """
         meta = ExampleHiddenStatesConnectorMetadata()
 
@@ -510,7 +512,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Called exactly once when a request has finished, before its blocks are
+        """
+        Called exactly once when a request has finished, before its blocks are
         freed.
 
         Returns True to delay block freeing until get_finished extracts
@@ -587,24 +590,24 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """Get the required KV cache layout for this connector.
-
+        """
+        Get the required KV cache layout for this connector.
         Args:
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
-
         """
+
         if cls is KVConnectorBase_V1:
             raise TypeError(
                 "get_required_kvcache_layout should not be called "
                 "on the abstract base class"
             )
-        # LBNHC means we have (num_tokens, num_heads)
-        # LBHNC means we have (num_heads, num_tokens)
-        # For now, we only support LBNHC layout since this keeps the
+        # NHD means we have (num_tokens, num_heads)
+        # HND means we have (num_heads, num_tokens)
+        # For now, we only support NHD layout since this keeps the
         # hidden states for each token together in memory.
-        # LBHNC is primarily used when sharding heads across devices.
-        return "LBNHC"
+        # HND is primarily used when sharding heads across devices.
+        return "NHD"

@@ -134,7 +134,8 @@ class CuMemBackend(SleepModeBackend):
 
     @classmethod
     def preserves_communicators(cls) -> bool:
-        # Comm identity/topology survive memory suspension; no reinit needed.
+        # Communicator buffers (e.g. NCCL) live outside CuMemAllocator's pool, so
+        # an allocator-level sleep leaves them intact (no reinit needed on resume).
         return True
 
 

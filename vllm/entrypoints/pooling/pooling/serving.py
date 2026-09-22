@@ -5,7 +5,6 @@ from typing import cast
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
@@ -61,9 +60,7 @@ class ServingPooling(PoolingBaseServing):
 
     def _verify_pooling_task(self, request: PoolingRequest) -> str:
         if getattr(request, "dimensions", None) is not None:
-            raise VLLMValidationError(
-                "dimensions is currently not supported", parameter="dimensions"
-            )
+            raise ValueError("dimensions is currently not supported")
 
         if request.task is None:
             request.task = self.pooling_task
@@ -74,28 +71,25 @@ class ServingPooling(PoolingBaseServing):
         assert request.task is not None
         pooling_task = request.task
 
-        # plugin task uses io_processor.parse_data to verify inputs
+        # plugin task uses io_processor.parse_request to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
             if pooling_task not in self.supported_tasks:
-                raise VLLMValidationError(
+                raise ValueError(
                     f"Unsupported task: {pooling_task!r} "
-                    f"Supported tasks: {self.supported_tasks}",
-                    parameter="task",
+                    f"Supported tasks: {self.supported_tasks}"
                 )
             else:
-                raise VLLMValidationError(
+                raise ValueError(
                     "Try switching the model's pooling_task "
-                    f"via --pooler-config.task {request.task}.",
-                    parameter="task",
+                    f"via --pooler-config.task {request.task}."
                 )
 
         if pooling_task == "plugin" and "plugin" not in self.io_processors:
-            raise VLLMValidationError(
+            raise ValueError(
                 "No IOProcessor plugin installed. Please refer "
                 "to the documentation and to the "
                 "'prithvi_geospatial_mae_io_processor' "
-                "offline inference example for more details.",
-                parameter="task",
+                "offline inference example for more details."
             )
 
         return pooling_task

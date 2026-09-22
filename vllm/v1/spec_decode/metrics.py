@@ -187,12 +187,12 @@ class SpecDecodingProm:
 
       1 + (
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-      rate(vllm:spec_decode_num_drafts_total[$interval]))
+      rate(vllm:spec_decode_num_drafts[$interval]))
 
     A per-position acceptance rate vector can be computed using
 
-      vllm:spec_decode_num_accepted_tokens_per_pos_total[$interval] /
-      vllm:spec_decode_num_drafts_total[$interval]
+      vllm:spec_decode_num_accepted_tokens_per_pos[$interval] /
+      vllm:spec_decode_num_drafts[$interval]
     """
 
     _counter_cls = prometheus_client.Counter

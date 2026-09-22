@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Disaggregated Prefill/Decode Proxy with Bidirectional KV Transfer.
+"""
+Disaggregated Prefill/Decode Proxy with Bidirectional KV Transfer
 
 This proxy sits between clients and a vLLM Prefill/Decode (P/D) deployment,
 routing multi-turn chat requests so that each turn reuses KV cache blocks
@@ -53,7 +54,7 @@ Benchmarking:
     it the benchmark sends OpenAI-schema-compliant payloads and every
     turn lands as a cache MISS in this proxy.
 
-Example:
+    Example:
         python benchmarks/multi_turn/benchmark_serving_multi_turn.py \\
             --model <MODEL> --served-model-name <NAME> \\
             --url http://<proxy_host>:8000 \\
@@ -66,7 +67,6 @@ Example:
 
 Dependencies:
     pip install fastapi uvicorn httpx
-
 """
 
 from __future__ import annotations

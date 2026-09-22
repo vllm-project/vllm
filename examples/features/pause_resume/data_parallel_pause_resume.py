@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test pause/resume with Data Parallel (DP) via HTTP API.
+"""
+Test pause/resume with Data Parallel (DP) via HTTP API.
 
 This example demonstrates coordinated pause/resume across multiple DP ranks.
 The pause synchronizes across all DP engines via all-reduce.

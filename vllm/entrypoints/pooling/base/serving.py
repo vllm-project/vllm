@@ -16,6 +16,7 @@ from vllm import PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
@@ -29,7 +30,6 @@ from vllm.tracing import (
 )
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
-from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 
@@ -108,15 +108,12 @@ class PoolingBaseServing(ABC, BaseServing):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ):
-        base_request_id = self._base_request_id(
-            raw_request, getattr(request, "request_id", None)
-        )
-        request_id = f"{self.request_id_prefix}-{base_request_id}"
+        model_name = self.models.model_name()
+        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
         await self._check_model(request)
 
         pooling_params = io_processor.create_pooling_params(request)
         lora_request = self._maybe_get_adapters(request)
-        model_name = self.models.model_name(lora_request)
         priorities = getattr(request, "priority", 0)
         prompt_extras = {
             k: v

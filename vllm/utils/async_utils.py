@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Contains helpers related to asynchronous code.
+"""
+Contains helpers related to asynchronous code.
 
 This is similar in concept to the `asyncio` module.
 """
@@ -28,7 +29,8 @@ def make_async(
     func: Callable[P, T],
     executor: Executor | None = None,
 ) -> Callable[P, Awaitable[T]]:
-    """Take a blocking function, and run it on in an executor thread.
+    """
+    Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
     asyncio event loop.
@@ -47,7 +49,8 @@ def make_async_with_semaphore(
     func: Callable[P, T],
     executor: ThreadPoolExecutor,
 ) -> Callable[P, Awaitable[T]]:
-    """Take a blocking function, and run it on in an executor thread.
+    """
+    Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
     asyncio event loop.
@@ -56,6 +59,7 @@ def make_async_with_semaphore(
     The function is wrapped in a semaphore to limit the number of
     concurrent executions making it easier to cancel tasks before they start.
     """
+
     semaphore = asyncio.Semaphore(executor._max_workers)
 
     async def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:

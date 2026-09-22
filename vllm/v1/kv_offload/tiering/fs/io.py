@@ -94,7 +94,9 @@ def _store_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """Store callback: write to a temp file then atomically replace the target."""
+    """
+    Store callback: Writes to a temp file then atomically replaces the destination.
+    """
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
         return
@@ -170,7 +172,8 @@ def batch_store_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """Store a batch of KV blocks from a shared buffer to disk in one call.
+    """
+    Store a batch of KV blocks from a shared buffer to disk in one call.
 
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
     to dest_paths[i] via a temp-file rename.  Raises on first error.
@@ -194,7 +197,8 @@ def batch_load_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """Load a batch of KV blocks from disk into a shared buffer in one call.
+    """
+    Load a batch of KV blocks from disk into a shared buffer in one call.
 
     Block i is read from source_paths[i] into view[offsets[i] : offsets[i]+block_size].
     Raises on first error (see _load_block for the delete-on-short-read policy).

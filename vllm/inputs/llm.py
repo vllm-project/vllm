@@ -62,7 +62,8 @@ The UUID will be used to identify the item for all caching purposes
 
 
 class _PromptOptions(TypedDict):
-    """Additional options available to all
+    """
+    Additional options available to all
     [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt] types.
     """
 
@@ -70,12 +71,6 @@ class _PromptOptions(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
-    """
-
-    media_io_kwargs: NotRequired[dict[str, dict[str, Any]] | None]
-    """
-    Optional per-modality media loading and decoding arguments.
-    Used only for hash derivation when using multi-modal UUIDs.
     """
 
     mm_processor_kwargs: NotRequired[dict[str, Any] | None]
@@ -188,11 +183,11 @@ Note:
 
 
 class ExplicitEncoderDecoderPrompt(TypedDict):
-    """Schema for a pair of encoder and decoder singleton prompts.
+    """
+    Schema for a pair of encoder and decoder singleton prompts.
 
     Note:
         This schema is not valid for decoder-only models.
-
     """
 
     encoder_prompt: EncoderPrompt
@@ -232,7 +227,8 @@ This is the input format accepted by most [`LLM`][vllm.entrypoints.llm.LLM] APIs
 
 
 class DataPrompt(_PromptOptions):
-    """Represents generic inputs that are converted to
+    """
+    Represents generic inputs that are converted to
     [`PromptType`][vllm.inputs.llm.PromptType] by IO processor plugins.
     """
 

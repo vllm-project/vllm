@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Orchestration-level integration tests for RayExecutorV2."""
+"""
+Orchestration-level integration tests for RayExecutorV2.
+"""
 
 import gc
 import os
@@ -156,7 +158,8 @@ def test_multi_replicas_with_bundle_indices(ray_init):
 
 
 def test_env_var_and_runtime_env_propagation():
-    """Verify env vars (NCCL_, HF_) and parallel_config.ray_runtime_env
+    """
+    Verify env vars (NCCL_, HF_) and parallel_config.ray_runtime_env
     propagate to RayWorkerProc actors.
     """
     sentinel_vars = {

@@ -25,7 +25,8 @@ SAMPLE_PROMPTS = (
 
 
 def check_vllm_server(url: str, timeout=5, retries=3) -> bool:
-    """Checks if the vLLM server is ready by sending a GET request to the
+    """
+    Checks if the vLLM server is ready by sending a GET request to the
     /health endpoint.
 
     Args:
@@ -35,7 +36,6 @@ def check_vllm_server(url: str, timeout=5, retries=3) -> bool:
 
     Returns:
         bool: True if the server is ready, False otherwise.
-
     """
     for attempt in range(retries):
         try:
@@ -81,7 +81,8 @@ def run_simple_prompt(
 
 
 def main():
-    """This script demonstrates how to accept two optional string arguments
+    """
+    This script demonstrates how to accept two optional string arguments
     ("service_url" and "file_name") from the command line, each with a
     default value of an empty string, using the argparse module.
     """

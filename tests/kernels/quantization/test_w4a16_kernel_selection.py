@@ -47,6 +47,7 @@ def test_choose_mp_linear_kernel_uint4b8():
         act_type=torch.float16,
         group_size=128,
         zero_points=False,
+        has_g_idx=False,
     )
 
     kernel_type = choose_mp_linear_kernel(config)
@@ -64,6 +65,7 @@ def test_choose_mp_linear_kernel_uint4_asymmetric():
         act_type=torch.bfloat16,
         group_size=64,
         zero_points=True,
+        has_g_idx=False,
     )
 
     kernel_type = choose_mp_linear_kernel(config)

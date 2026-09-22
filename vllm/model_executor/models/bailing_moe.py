@@ -509,14 +509,15 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
 
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
             if self.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.word_embeddings)
+                self.lm_head = self.model.word_embeddings
+            else:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
@@ -557,7 +558,10 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
+        )
         return loader.load_weights(self._normalize_lm_head(weights))
 
 

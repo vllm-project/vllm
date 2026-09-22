@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end correctness test for 2D MoE LoRA expert-parallel
+"""
+End-to-end correctness test for 2D MoE LoRA expert-parallel
 load-time slicing
 """
 

@@ -9,26 +9,6 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use super::tensor::WireTensor;
 
-/// Modalities represented by engine-ready multimodal features.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MmModality {
-    Image,
-    Audio,
-    Video,
-}
-
-impl MmModality {
-    /// The wire name, matching Python's modality strings.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Image => "image",
-            Self::Audio => "audio",
-            Self::Video => "video",
-        }
-    }
-}
-
 /// Multimodal feature payload accepted from higher-level frontend code.
 ///
 /// Original Python definition:
@@ -52,7 +32,7 @@ pub struct MmFeatureSpec {
     pub data: Option<MmKwargsItem>,
 
     /// The input modality, e.g., `"image"`, `"audio"`, `"video"`.
-    pub modality: MmModality,
+    pub modality: String,
 
     /// The hash for caching encoder outputs (with LoRA prefix if applicable).
     pub identifier: String,

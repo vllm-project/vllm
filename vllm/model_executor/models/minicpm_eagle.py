@@ -26,7 +26,6 @@
 
 import math
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -55,14 +54,6 @@ from .utils import (
     maybe_prefix,
     process_eagle_weight,
 )
-
-if TYPE_CHECKING:
-
-    class _EagleMiniCPMSupportsPP:
-        pass
-
-else:
-    _EagleMiniCPMSupportsPP = SupportsPP
 
 
 class EagleMiniCPMDecoderLayer(nn.Module):
@@ -158,9 +149,7 @@ class EagleMiniCPMModel(nn.Module):
     ):
         super().__init__()
 
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        config = speculative_config.draft_model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -302,9 +291,7 @@ class EagleMiniCPMModel(nn.Module):
         return loaded_params
 
 
-class EagleMiniCPMForCausalLM(
-    nn.Module, SupportsLoRA, _EagleMiniCPMSupportsPP, SupportsEagle
-):
+class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -325,9 +312,7 @@ class EagleMiniCPMForCausalLM(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        config = speculative_config.draft_model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -402,5 +387,8 @@ class EagleMiniCPMForCausalLM(
             process_eagle_weight(self, name)
             return name, loaded_weight
 
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
         return loader.load_weights(map(transform, weights))

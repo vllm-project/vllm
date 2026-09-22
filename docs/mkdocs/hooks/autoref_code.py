@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MkDocs hook to automatically convert inline code references to API doc links.
+"""
+MkDocs hook to automatically convert inline code references to API doc links.
 
 For example, `WeightTransferConfig` becomes
 [`WeightTransferConfig`][vllm.config.WeightTransferConfig]

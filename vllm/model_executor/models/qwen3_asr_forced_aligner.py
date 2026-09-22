@@ -59,8 +59,6 @@ class Qwen3ASRForcedAlignerForTokenClassification(
             "thinker.lm_head.": "classifier.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
-            "talker.": None,
-            "code2wav.": None,
         }
     )
 
@@ -115,5 +113,8 @@ class Qwen3ASRForcedAlignerForTokenClassification(
         return self.classifier(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=["talker.", "code2wav."],
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

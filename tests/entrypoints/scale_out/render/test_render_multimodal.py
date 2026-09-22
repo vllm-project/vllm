@@ -16,6 +16,7 @@ VISION_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 @pytest.fixture(scope="module")
 def vision_server():
     """Vision-capable server used for multimodal /render tests."""
+
     args = [
         "--enforce-eager",
         "--max-model-len",
@@ -26,10 +27,15 @@ def vision_server():
         "1",
         "--limit-mm-per-prompt.video",
         "0",
-        "--enable-scale-out",
     ]
 
-    with RemoteOpenAIServer(VISION_MODEL_NAME, args) as remote_server:
+    env_overrides: dict[str, str] = {}
+
+    with RemoteOpenAIServer(
+        VISION_MODEL_NAME,
+        args,
+        env_dict=env_overrides,
+    ) as remote_server:
         yield remote_server
 
 
@@ -47,6 +53,7 @@ async def test_chat_completion_render_with_base64_image_url(
     local_asset_server,
 ):
     """Render a multimodal chat request and verify tokens are returned."""
+
     image = local_asset_server.get_image_asset("RGBA_comp.png")
     data_url = encode_image_url(image, format="PNG")
 
@@ -110,6 +117,7 @@ async def test_tokenize_matches_render_for_multimodal_input(
     local_asset_server,
 ):
     """`/tokenize` should match `/v1/chat/completions/render` token output."""
+
     image = local_asset_server.get_image_asset("RGBA_comp.png")
     data_url = encode_image_url(image, format="PNG")
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GPQA evaluation using vLLM server and GPT-OSS evaluation package.
+"""
+GPQA evaluation using vLLM server and GPT-OSS evaluation package.
 
 Usage:
 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py \
@@ -47,6 +48,7 @@ def ensure_tiktoken_files():
 
 def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> float:
     """Run GPQA evaluation using the gpt-oss evaluation package."""
+
     # Build the command to run the evaluation
     cmd = [
         sys.executable,

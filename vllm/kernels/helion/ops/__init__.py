@@ -22,7 +22,6 @@ def import_all_kernels() -> list[str]:
 
     Returns:
         The fully-qualified module names that were imported.
-
     """
     imported: list[str] = []
     for module_info in pkgutil.iter_modules(__path__):

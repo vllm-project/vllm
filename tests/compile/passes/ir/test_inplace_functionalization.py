@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for IR inplace functionalization pass integration.
+"""
+Tests for IR inplace functionalization pass integration.
 
 This test suite verifies that the inplace functionalization pass, lowering pass,
 and clone cleanup pass work together correctly with donated buffer tracking.
@@ -107,7 +108,8 @@ class MixedModel(nn.Module):
 
 
 class ModelWithTritonAfterMaybeInplace(nn.Module):
-    """Model using maybe_inplace followed by a Triton kernel.
+    """
+    Model using maybe_inplace followed by a Triton kernel.
     Test clone elimination can handle Triton in the graph
     """
 
@@ -408,7 +410,8 @@ def with_dyn_arg(fn: Callable, arg_index: int, dim_index: int):
     reason="Only test on cuda and rocm platform",
 )
 def test_piecewise_compilation_with_donated_buffers(monkeypatch, fresh_vllm_cache):
-    """Test piecewise compilation with donated buffers across graph splits.
+    """
+    Test piecewise compilation with donated buffers across graph splits.
     Utilizes a custom splitting op. Uses fresh cache to avoid compilation caching.
     """
     torch.set_default_device(current_platform.device_type)

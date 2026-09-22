@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Retrieval Augmented Generation (RAG) Implementation with Langchain
+"""
+Retrieval Augmented Generation (RAG) Implementation with Langchain
 ==================================================================
 
 This script demonstrates a RAG implementation using LangChain, Milvus
@@ -34,7 +35,6 @@ Notes:
     - Ensure both vLLM services are running before executing
     - Default ports: 8000 (embedding), 8001 (chat)
     - First run may take time to download models
-
 """
 
 import argparse
@@ -52,7 +52,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 def load_and_split_documents(config: dict[str, Any]):
-    """Load and split documents from web URL."""
+    """
+    Load and split documents from web URL
+    """
     try:
         loader = WebBaseLoader(web_paths=(config["url"],))
         docs = loader.load()
@@ -68,7 +70,9 @@ def load_and_split_documents(config: dict[str, Any]):
 
 
 def init_vectorstore(config: dict[str, Any], documents: list[Document]):
-    """Initialize vector store with documents."""
+    """
+    Initialize vector store with documents
+    """
     return Milvus.from_documents(
         documents=documents,
         embedding=OpenAIEmbeddings(
@@ -82,7 +86,9 @@ def init_vectorstore(config: dict[str, Any], documents: list[Document]):
 
 
 def init_llm(config: dict[str, Any]):
-    """Initialize llm."""
+    """
+    Initialize llm
+    """
     return ChatOpenAI(
         model=config["chat_model"],
         openai_api_key=config["vllm_api_key"],
@@ -91,7 +97,9 @@ def init_llm(config: dict[str, Any]):
 
 
 def get_qa_prompt():
-    """Get question answering prompt template."""
+    """
+    Get question answering prompt template
+    """
     template = """You are an assistant for question-answering tasks.
 Use the following pieces of retrieved context to answer the question.
 If you don't know the answer, just say that you don't know.
@@ -104,12 +112,16 @@ Answer:
 
 
 def format_docs(docs: list[Document]):
-    """Format documents for prompt."""
+    """
+    Format documents for prompt
+    """
     return "\n\n".join(doc.page_content for doc in docs)
 
 
 def create_qa_chain(retriever: Any, llm: ChatOpenAI, prompt: PromptTemplate):
-    """Set up question answering chain."""
+    """
+    Set up question answering chain
+    """
     return (
         {
             "context": retriever | format_docs,
@@ -122,7 +134,9 @@ def create_qa_chain(retriever: Any, llm: ChatOpenAI, prompt: PromptTemplate):
 
 
 def get_parser() -> argparse.ArgumentParser:
-    """Parse command line arguments."""
+    """
+    Parse command line arguments
+    """
     parser = argparse.ArgumentParser(description="RAG with vLLM and langchain")
 
     # Add command line arguments
@@ -178,7 +192,10 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 def init_config(args: Namespace):
-    """Initialize configuration settings from command line arguments."""
+    """
+    Initialize configuration settings from command line arguments
+    """
+
     return {
         "vllm_api_key": args.vllm_api_key,
         "vllm_embedding_endpoint": args.vllm_embedding_endpoint,

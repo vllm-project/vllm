@@ -154,7 +154,6 @@ def generate_execution_code(
         consts is a list of non-primitive constant objects referenced
         by the generated code via __vllm_consts__. These objects are
         kept alive for the lifetime of the compiled function.
-
     """
     code, submod_names, consts = generate_execution_code_with_name(
         split_gm, "execution_fn", with_submod=True
@@ -182,7 +181,6 @@ def compile_execution_fn(
 
     Returns:
         A callable that executes the stitching logic.
-
     """
     trace_structured(
         "artifact",

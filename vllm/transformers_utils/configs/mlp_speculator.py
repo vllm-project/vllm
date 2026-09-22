@@ -24,7 +24,8 @@ class MLPSpeculatorConfig(PretrainedConfig):
         scale_input: bool = False,
         **kwargs,
     ):
-        """Initialize an MLPSpeculatorConfig.
+        """
+        Initialize an MLPSpeculatorConfig
 
         Args:
             vocab_size: int
@@ -51,7 +52,6 @@ class MLPSpeculatorConfig(PretrainedConfig):
             scale_input: bool
                 if True, will scale the initial hidden states from
                 the base model.
-
         """
         if top_k_tokens_per_head is None:
             top_k_tokens_per_head = [5, 4, 3]

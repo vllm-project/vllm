@@ -38,7 +38,7 @@ class CUDAGraphStat:
 
 
 class CUDAGraphLogging:
-    """Aggregate and log cudagraph metrics."""
+    """Aggregate and log cudagraph metrics"""
 
     COLUMN_HEADERS = [
         "Unpadded Tokens",
@@ -221,9 +221,7 @@ class CUDAGraphWrapper:
 
     def unwrap(self) -> Callable[..., Any]:
         # in case we need to access the original runnable.
-        runnable = self.runnable
-        # Recurse through nested wrappers.
-        return runnable.unwrap() if hasattr(runnable, "unwrap") else runnable
+        return self.runnable
 
     @property
     def cudagraph_wrapper(self) -> "CUDAGraphWrapper":

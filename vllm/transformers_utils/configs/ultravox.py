@@ -8,7 +8,8 @@ import transformers
 
 
 class UltravoxConfig(transformers.PretrainedConfig):
-    r"""This is the configuration class to store the configuration of a
+    r"""
+    This is the configuration class to store the configuration of a
     [`UltravoxForConditionalGeneration`]. It is used to instantiate an
     Ultravox model according to the specified arguments, defining the model
     architecture.
@@ -40,7 +41,6 @@ class UltravoxConfig(transformers.PretrainedConfig):
             Whether to apply layer normalization at the middle of the
             projector or at the end. Versions v0.4.1 and below
             use `False`, but v0.5 and above use `True`.
-
     """
 
     model_type = "ultravox"

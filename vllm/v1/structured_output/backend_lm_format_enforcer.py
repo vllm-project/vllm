@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 import torch
 from transformers import PreTrainedTokenizerBase
 
-from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -167,7 +166,7 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
                 so_params.regex,
             )
         except Exception as err:
-            raise VLLMValidationError(
+            raise ValueError(
                 f"Failed to compile regex for lm-format-enforcer: {err}"
             ) from err
         return
@@ -177,19 +176,19 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
                 # make sure schema is valid json
                 json.loads(so_params.json)
             except json.JSONDecodeError as e:
-                raise VLLMValidationError("Invalid JSON grammar specification.") from e
+                raise ValueError("Invalid JSON grammar specification.") from e
         else:
             try:
                 json.dumps(so_params.json)
             except Exception as e:
-                raise VLLMValidationError(
+                raise ValueError(
                     f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
         return
     elif so_params.choice:
         return
     elif so_params.grammar:
-        raise VLLMValidationError(
+        raise ValueError(
             "LM Format Enforcer structured outputs backend "
             "does not support grammar specifications"
         )

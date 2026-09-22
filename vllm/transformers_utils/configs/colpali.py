@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ColPali configuration that extends PaliGemmaConfig with embedding projection
+"""
+ColPali configuration that extends PaliGemmaConfig with embedding projection
 fields. This allows ColPali models to be loaded without trust_remote_code
 by mapping their custom model_type (colpali) to a standard config class
 that vLLM understands.

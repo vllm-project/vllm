@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Thread pool:
-Two queues (load, store) and two sets of threads:
-- Load-priority threads: drain the load queue first, then the store queue.
-- Store-priority threads: drain the store queue first, then the load queue.
-Load jobs are enqueued to the load queue; store jobs to the store queue.
+"""
+Thread pool:
+    Two queues (load, store) and two sets of threads:
+      - Load-priority threads: drain the load queue first, then the store queue.
+      - Store-priority threads: drain the store queue first, then the load queue.
+    Load jobs are enqueued to the load queue; store jobs to the store queue.
 """
 
 import threading
@@ -19,7 +20,8 @@ logger = init_logger(__name__)
 
 
 class JobState:
-    """Thread-safe completion tracker for a set of per-block I/O tasks.
+    """
+    Thread-safe completion tracker for a set of per-block I/O tasks.
 
     Each task calls task_done(success) when it finishes.
     """
@@ -48,7 +50,7 @@ class JobState:
     def task_done(
         self, success: bool, transfer_time: float
     ) -> tuple[bool, bool, float]:
-        """Returns if job completed and success flag."""
+        """Returns if job completed and success flag"""
         with self._lock:
             self._completed += 1
             self._transfer_time += transfer_time
@@ -58,7 +60,8 @@ class JobState:
 
 
 class DualQueueThreadPool:
-    """Thread pool with two task queues (load and store) and two thread groups.
+    """
+    Thread pool with two task queues (load and store) and two thread groups.
 
     Load-priority threads drain the load queue first, then fall back to the
     store queue.  Store-priority threads do the reverse.  Both queues share

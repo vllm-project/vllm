@@ -69,7 +69,8 @@ def _unwrap_scale_and_prepare_for_moe(
 
 
 class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
-    """Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
+    """
+    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
 
     Uses Torch AR/RS or AR for dispatch/combine operations, applied
     to the topk weights and ids.
@@ -120,6 +121,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         """Quantize and Dispatch Topk Weights and Topk Ids."""
+
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             assert topk == 1, (
@@ -208,7 +210,8 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
 
 
 class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
-    """Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
+    """
+    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
 
     Uses Torch AR/RS or AR for dispatch/combine operations, applied
     to the router logits (the MoE kernel runs the router internally).
@@ -247,6 +250,7 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         defer_input_quant: bool = False,
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
+
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
             a1, quant_config, defer_input_quant
         )

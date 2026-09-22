@@ -4,13 +4,15 @@
 import pytest
 import torch
 
+from vllm import LLM
+
 from ...utils import create_new_process_for_each_test
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("backend", ["mp", "ray"])
 @create_new_process_for_each_test()
-def test_collective_rpc(tp_size, backend, monkeypatch, vllm_runner):
+def test_collective_rpc(tp_size, backend, monkeypatch):
     if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
     if tp_size == 1 and backend == "ray":
@@ -24,11 +26,11 @@ def test_collective_rpc(tp_size, backend, monkeypatch, vllm_runner):
         return self.rank
 
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    with vllm_runner(
-        "hmellor/tiny-random-LlamaForCausalLM",
+    llm = LLM(
+        model="hmellor/tiny-random-LlamaForCausalLM",
         enforce_eager=True,
         load_format="dummy",
         tensor_parallel_size=tp_size,
         distributed_executor_backend=backend,
-    ) as runner:
-        assert runner.llm.collective_rpc(echo_rank) == list(range(tp_size))
+    )
+    assert llm.collective_rpc(echo_rank) == list(range(tp_size))

@@ -34,9 +34,6 @@ class EncoderOnlyModelState(DefaultModelState):
     the normal KV-backed path untouched.
     """
 
-    # The V2 pooling path is not wired for prompt embeds.
-    supports_prompt_embeds = False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -167,9 +164,7 @@ class EncoderOnlyModelState(DefaultModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
-        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
-        assert ubatch_idx == 0, "DBO is not supported"
         attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,

@@ -228,7 +228,7 @@ class TestGemma4ChatTemplate:
         assert not result.strip().endswith("<|turn>model\n")
 
     def test_reasoning_in_tool_chains(self, gemma4_template):
-        """Reasoning field on assistant with tool_calls after last user
+        """reasoning field on assistant with tool_calls after last user
         message emits <|channel>thought\\n...<channel|>."""
         messages = [
             {"role": "user", "content": "Calculate something"},
@@ -252,7 +252,7 @@ class TestGemma4ChatTemplate:
         assert "<channel|>" in result
 
     def test_reasoning_not_before_last_user(self, gemma4_template):
-        """Reasoning on assistant BEFORE the last user message is dropped."""
+        """reasoning on assistant BEFORE the last user message is dropped."""
         messages = [
             {"role": "user", "content": "First"},
             {

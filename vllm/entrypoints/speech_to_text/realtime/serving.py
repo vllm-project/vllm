@@ -68,7 +68,6 @@ class OpenAIServingRealtime(GenerateBaseServing):
 
         Yields:
             StreamingInput objects containing audio prompts for the engine
-
         """
         model_config = self.model_config
         renderer = self.renderer

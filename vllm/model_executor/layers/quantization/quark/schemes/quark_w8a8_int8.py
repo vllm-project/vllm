@@ -10,16 +10,6 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kInt8DynamicTensorAsym,
-    kInt8DynamicTensorSym,
-    kInt8DynamicTokenAsym,
-    kInt8DynamicTokenSym,
-    kInt8StaticChannelSym,
-    kInt8StaticTensorAsym,
-    kInt8StaticTensorSym,
-)
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -31,32 +21,15 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Int8(QuarkScheme):
-    supported_activation_quant_keys = [
-        kInt8StaticTensorSym,
-        kInt8StaticTensorAsym,
-        kInt8DynamicTensorSym,
-        kInt8DynamicTensorAsym,
-        kInt8DynamicTokenSym,
-        kInt8DynamicTokenAsym,
-    ]
-    supported_weight_quant_keys = [
-        kInt8StaticChannelSym,
-        kInt8StaticTensorSym,
-    ]
-
     def __init__(
         self,
-        weight_quant_key: QuantKey,
-        activation_quant_key: QuantKey | None,
+        qscheme: str,
+        is_static_input_scheme: bool | None,
+        input_symmetric: bool | None,
     ):
-        super().__init__(weight_quant_key, activation_quant_key)
-        self.qscheme = (
-            "per_channel" if weight_quant_key == kInt8StaticChannelSym else "per_tensor"
-        )
-
-        assert activation_quant_key is not None
-        self.is_static_input_scheme = activation_quant_key.scale.static
-        self.input_symmetric = activation_quant_key.symmetric
+        self.qscheme = qscheme
+        self.is_static_input_scheme = is_static_input_scheme
+        self.input_symmetric = input_symmetric
 
     @classmethod
     def get_min_capability(cls) -> int:

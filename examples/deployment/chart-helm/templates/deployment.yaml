@@ -1,21 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "chart.deployment-name" . | quote }}
+  name: "{{ .Release.Name }}-deployment-vllm"
   namespace: {{ .Release.Namespace }}
   labels:
   {{- include "chart.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   {{- include "chart.strategy" . | nindent 2 }}
-  selector:
+  selector:                                                                                                                                  
     matchLabels:
-      {{- include "chart.labels" . | nindent 6 }}
+      environment: "test"
+      release: "test"
   progressDeadlineSeconds: 1200
   template:
     metadata:
       labels:
-        {{- include "chart.labels" . | nindent 8 }}
+        environment: "test"
+        release: "test"
     spec:
       containers:
         - name: "vllm"
@@ -126,4 +128,4 @@ spec:
                   values:
                     {{- toYaml . | nindent 20 }}
                   {{- end }}
-      {{- end }}
+      {{- end }} 

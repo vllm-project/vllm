@@ -82,7 +82,6 @@ def get_metrics_snapshot() -> list[Metric]:
         ...         print(f"    count = {metric.count}")
         ...         for bucket_le, value in metrics.buckets.items():
         ...             print(f"    {bucket_le} = {value}")
-
     """
     collected: list[Metric] = []
     for metric in REGISTRY.collect():

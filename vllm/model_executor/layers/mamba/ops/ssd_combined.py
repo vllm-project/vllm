@@ -175,7 +175,8 @@ def mamba_chunk_scan_combined_varlen(
     return_intermediate_states=False,
     state_dtype=None,
 ):
-    """Argument:
+    """
+    Argument:
         x: (seqlen, nheads, headdim)
         dt: (seqlen, nheads)
         A: (nheads)
@@ -197,6 +198,7 @@ def mamba_chunk_scan_combined_varlen(
     Return:
         varlen_states: (batch, nheads, headdim, dstate)
     """
+
     assert cu_seqlens is not None, "cu_seqlens must be provided assuming varlen input"
     assert seq_idx is not None
 

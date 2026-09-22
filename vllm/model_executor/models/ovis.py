@@ -52,7 +52,6 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
-    cached_encode,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -200,7 +199,7 @@ class VisualTokenizer(torch.nn.Module):
         return features
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """[BatchSize, ImageShape] -> [BatchSize, Token, VocabSize]."""
+        """[BatchSize, ImageShape] -> [BatchSize, Token, VocabSize]"""
         features = self.encode(pixel_values)
         logits = self.head(features)
         tokens = self.tokenize(logits)
@@ -217,12 +216,13 @@ class VisualTokenizer(torch.nn.Module):
 
 
 class OvisImagePatchInputs(TensorSchema):
-    """Dimensions:
-    - bnp: Batch size * number of images * number of patches
-    - h: Height of each patch
-    - w: Width of each patch
-    - patch_indicators: Batch size * (number of patches + 1)
-    - bn: Batch size * number of images
+    """
+    Dimensions:
+        - bnp: Batch size * number of images * number of patches
+        - h: Height of each patch
+        - w: Width of each patch
+        - patch_indicators: Batch size * (number of patches + 1)
+        - bn: Batch size * number of images
     """
 
     type: Literal["image_patches"]
@@ -326,14 +326,12 @@ class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
 
 
 class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
-
     def image_indicators_to_visual_tokens(
         self,
         image_indicators: list[int],
     ) -> list[int]:
-        """Filter image indicators placeholders and convert them to corresponding
+        """
+        Filter image indicators placeholders and convert them to corresponding
         tokens in visual tokenizer.
         For example, [-301, -300, -302, -300, -303, -300, -304, -300, -305]
         should return [vocab_size-1, vocab_size-2, ..., vocab_size-5]
@@ -343,27 +341,43 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         # -300 is image_atom token, filter them out
         return [vte_vocab_size + x + 300 for x in image_indicators if x < -300]
 
-    def _postprocess_hf_mm_data(
+    def _call_hf_processor(
         self,
+        prompt: str,
         mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
-            return processed_data
+            # Avoid warning from HF logger for text-only input
+            tokenizer = self.info.get_tokenizer()
+            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
 
         hf_processor = self.info.get_hf_processor()
         image_indicators = [
             hf_processor.construct_image_indicators(grid)
-            for grid in processed_data["grids"]
+            for grid in processed_outputs["grids"]
         ]
         indicator_tokens = [
             self.image_indicators_to_visual_tokens(indicator)
             for indicator in image_indicators
         ]
-        processed_data["indicator_tokens"] = torch.tensor(indicator_tokens)
+        processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
+        return processed_outputs
 
-        return processed_data
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        return prompt_tokens
 
     def _get_mm_fields_config(
         self,
@@ -372,7 +386,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            grids=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            grids=MultiModalFieldConfig.batched("image"),
             indicator_tokens=MultiModalFieldConfig.batched("image"),
         )
 
@@ -382,8 +396,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
-        tokenizer = self.info.get_tokenizer()
-
         def get_replacement_ovis(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             grid = out_item["grids"].data
@@ -394,7 +406,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=cached_encode(tokenizer, IMAGE_TOKEN, add_special_tokens=False),
+                target=IMAGE_TOKEN,
                 replacement=get_replacement_ovis,
             ),
         ]

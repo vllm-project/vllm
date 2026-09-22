@@ -22,10 +22,6 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
 
-# The tensor-parallel cases build their distributed environment inside processes
-# spawned by torch.multiprocessing.spawn, so this process never has one to tear down.
-pytestmark = pytest.mark.skip_global_cleanup
-
 
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
@@ -41,7 +37,8 @@ def CEILDIV(x, y):
 
 
 def assign_loras_to_tokens(num_tokens: int, num_sequences: int, max_loras: int):
-    """Split `num_tokens` into `num_sequences` sequences.
+    """
+    Split `num_tokens` into `num_sequences` sequences.
     Each sequence randomly selects 1 LoRA index from [0, max_loras),
     and all tokens in that sequence are assigned this LoRA index.
 
@@ -53,7 +50,6 @@ def assign_loras_to_tokens(num_tokens: int, num_sequences: int, max_loras: int):
     Returns:
         torch.Tensor: 1D tensor of shape [num_tokens], where each value
                       is the LoRA index assigned to that token.
-
     """
     assert num_sequences > 0 and max_loras > 0
     assert num_tokens >= num_sequences, "num_tokens must be >= num_sequences"
@@ -81,8 +77,9 @@ def assign_loras_to_tokens(num_tokens: int, num_sequences: int, max_loras: int):
 
 
 def assign_experts_to_tokens(num_tokens: int, num_experts: int, top_k_num: int):
-    """For each token, randomly select `top_k_num` distinct experts out of
-    `num_experts`, and assign normalized random weights that sum to 1.
+    """
+    For each token, randomly select `top_k_num` distinct experts out of `num_experts`,
+    and assign normalized random weights that sum to 1.
 
     Args:
         num_tokens (int): Total number of tokens.
@@ -94,7 +91,6 @@ def assign_experts_to_tokens(num_tokens: int, num_experts: int, top_k_num: int):
                                        expert index for each token.
         expert_weights (torch.Tensor): shape [num_tokens, top_k_num],
                                        normalized weights (sum = 1 per row).
-
     """
     assert top_k_num <= num_experts, "top_k_num must be <= num_experts"
 
@@ -379,7 +375,8 @@ def use_fused_moe_lora_kernel_naive(
     offset=0,
     add_inputs=True,
 ):
-    """Test helper for naive_block_assignment path.
+    """
+    Test helper for naive_block_assignment path.
     Skips moe_lora_align_block_size and uses flattened topk_ids as expert_ids.
     """
     config = {
@@ -471,7 +468,8 @@ def test_fused_moe_lora_kernel_naive_block_assignment(
     device,
     seed,
 ):
-    """Test the naive_block_assignment path of the fused_moe_lora kernel.
+    """
+    Test the naive_block_assignment path of the fused_moe_lora kernel.
     This path is triggered when batch_size * top_k is much smaller than
     num_experts * max_loras, and skips the moe_lora_align_block_size kernel.
     """

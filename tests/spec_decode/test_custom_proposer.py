@@ -29,7 +29,6 @@ class DummyDraftProposer:
 
         Args:
             vllm_config: vLLM configuration containing model and speculative settings.
-
         """
         assert vllm_config.speculative_config is not None
         self.num_speculative_tokens = (
@@ -58,7 +57,6 @@ class DummyDraftProposer:
 
         Returns:
             List of draft token sequences for each request.
-
         """
         # Cross-process flag to prove this method was executed
         with open("proposer_called.flag", "w") as f:

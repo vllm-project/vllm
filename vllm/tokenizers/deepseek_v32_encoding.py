@@ -258,7 +258,7 @@ def render_message(
                 tool_calls=tool_calls_content,
             )
     else:
-        raise ValueError(f"Invalid role: {role}")
+        raise NotImplementedError(f"Unknown role: {role}")
 
     return prompt
 

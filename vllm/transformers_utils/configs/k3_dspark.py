@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers import DeepseekV3Config
+from transformers import DeepseekV2Config
 
 
-class K3DSparkConfig(DeepseekV3Config):
+class K3DSparkConfig(DeepseekV2Config):
     """Configuration for a dense MLA DSpark draft model."""
 
     model_type = "k3_dspark"
@@ -18,7 +18,7 @@ class K3DSparkConfig(DeepseekV3Config):
         rope_theta: float = 50000.0,
         **kwargs,
     ) -> None:
-        # DeepseekV3Config defaults to a MoE topology. Zero these fields so
+        # DeepseekV2Config defaults to a MoE topology. Zero these fields so
         # generic vLLM config logic also recognizes this draft as dense.
         kwargs.setdefault("n_routed_experts", 0)
         kwargs.setdefault("n_shared_experts", 0)

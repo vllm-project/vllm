@@ -531,18 +531,18 @@ class MiMoAudioTokenizerConfig(PretrainedConfig):
         kernel_size: int = 3,
         activation_function: str = "gelu",
         encoder_layers: int = 8,
-        encoder_skip_layer_id: int | None = None,
+        encoder_skip_layer_id: int = None,
         encoder_attention_heads: int = 12,
         encoder_ffn_dim: int = 3072,
         encoder_causal: bool = False,
-        encoder_attn_window_size: list[int] | None = None,
+        encoder_attn_window_size: list = None,
         decoder_layers: int = 8,
         decoder_attention_heads: int = 12,
         decoder_ffn_dim: int = 3072,
         decoder_kernel_size: int = 3,
         decoder_stride_size: int = 2,
         decoder_causal: bool = True,
-        decoder_attn_window_size: list[int] | None = None,
+        decoder_attn_window_size: list = None,
         nfft: int = 1024,
         vocoder_dim: int = 512,
         vocoder_intermediate_dim: int = 4096,
@@ -553,16 +553,16 @@ class MiMoAudioTokenizerConfig(PretrainedConfig):
         window_size: int = 1024,
         vocoder_padding: str = "same",
         fmin: int = 0,
-        fmax: int | None = None,
+        fmax: int = None,
         num_quantizers: int = 12,
-        codebook_size: list[int] | None = None,
+        codebook_size: list = None,
         threshold_ema_dead_code: int = 10,
         position_embedding_type: str = "rope",
         rope_theta: int = 10000,
         rope_type: str = "default",
         ln_type: str = "LayerNorm",
         vocoder_attention_heads: int = 4,
-        vocoder_attn_window_size: list[int] | None = None,
+        vocoder_attn_window_size: list = None,
         use_istft_only: bool = False,
         hybrid_attention: bool = False,
         hybrid_block_size: int = 8,
@@ -808,22 +808,17 @@ class AudioEncoder(nn.Module):
             config.rope_type,
         )
 
-        encoder_attn_window_size = config.encoder_attn_window_size
-        assert encoder_attn_window_size is not None
-        assert len(encoder_attn_window_size) == 2
-        attn_window_size = (
-            encoder_attn_window_size[0],
-            encoder_attn_window_size[1],
-        )
-        attn_window_sizes: list[tuple[int, int]] = []
+        attn_window_sizes = []
         if config.hybrid_attention:
             for i in range(config.encoder_layers):
                 if i % config.swa_per_block < config.swa_per_block - 1:
-                    attn_window_sizes.append(attn_window_size)
+                    attn_window_sizes.append(tuple(config.encoder_attn_window_size))
                 else:
                     attn_window_sizes.append((-1, -1))
         else:
-            attn_window_sizes = [attn_window_size] * config.encoder_layers
+            attn_window_sizes = [
+                tuple(config.encoder_attn_window_size)
+            ] * config.encoder_layers
 
         self.layers = nn.ModuleList(
             [
@@ -853,7 +848,6 @@ class AudioEncoder(nn.Module):
         else:
             self.down_sample_layer = None
 
-        self.quantizer: ResidualVectorQuantizer | None
         if config.num_quantizers != 0:
             self.quantizer = ResidualVectorQuantizer(
                 dimension=config.d_model,
@@ -982,7 +976,6 @@ class AudioEncoder(nn.Module):
 
     @torch.no_grad()
     def decode_vq(self, codes):
-        assert self.quantizer is not None
         self.quantizer.float()
         return self.quantizer.decode(codes)
 
@@ -1315,7 +1308,6 @@ class MimoAudioEncoder(nn.Module):
 
         Returns:
             [T//group_size, group_size, audio_channels]
-
         """
         T = audio.shape[0]
         audio = audio[:, : self.audio_channels]
@@ -1356,7 +1348,6 @@ class MimoAudioEncoder(nn.Module):
             Tuple of:
             - audio_embeds: [total_tokens, out_hidden_size] concatenated embeddings
             - item_token_lens: list of int, number of tokens per input item
-
         """
         if self.audio_tokenizer is None:
             raise RuntimeError(

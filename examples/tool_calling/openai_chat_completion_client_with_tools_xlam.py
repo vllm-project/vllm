@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
-"""Set up this example by starting a vLLM OpenAI-compatible server with tool call
+"""
+Set up this example by starting a vLLM OpenAI-compatible server with tool call
 options enabled for xLAM-2 models:
 
 vllm serve --model Salesforce/Llama-xLAM-2-8b-fc-r --enable-auto-tool-choice --tool-call-parser xlam
@@ -104,7 +105,8 @@ tool_functions = {
 
 
 def process_response(response, tool_functions, original_query):
-    """Process a non-streaming response with possible tool calls."""
+    """Process a non-streaming response with possible tool calls"""
+
     print("\n--- Response Output ---")
 
     # Check if the response has content
@@ -193,7 +195,7 @@ def process_response(response, tool_functions, original_query):
 
 
 def run_test_case(query, test_name):
-    """Run a single test case with the given query."""
+    """Run a single test case with the given query"""
     print(f"\n{'=' * 50}\nTEST CASE: {test_name}\n{'=' * 50}")
     print(f"Query: '{query}'")
 

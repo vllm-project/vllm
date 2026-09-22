@@ -4,17 +4,25 @@
 
 namespace vllm::batch_invariant {
 
-void fused_silu_mul_per_token_group_quant(
-    torch::Tensor input, torch::Tensor output_q, torch::Tensor output_s,
-    int64_t group_size, double eps, double min_8bit, double max_8bit,
-    double clamp_limit, bool round_scale, bool scale_ue8m0,
-    bool fuse_silu_and_mul, const std::optional<torch::Tensor>& masked_m);
+void top_k_per_row_prefill(const at::Tensor& logits,
+                          const at::Tensor& row_starts,
+                          const at::Tensor& row_ends, at::Tensor& indices,
+                          int64_t num_rows, int64_t stride0, int64_t stride1,
+                          int64_t top_k);
 
-void top_k_per_row_prefill(const torch::Tensor& logits,
-                           const torch::Tensor& row_starts,
-                           const torch::Tensor& row_ends,
-                           torch::Tensor& indices, int64_t num_rows,
-                           int64_t stride0, int64_t stride1, int64_t top_k);
+void fused_silu_mul_per_token_group_quant(
+    torch::Tensor input,
+    torch::Tensor output_q,
+    torch::Tensor output_s,
+    int64_t group_size,
+    double eps,
+    double min_8bit,
+    double max_8bit,
+    double clamp_limit,
+    bool round_scale,
+    bool scale_ue8m0,
+    bool fuse_silu_and_mul,
+    const std::optional<torch::Tensor>& masked_m);
 
 void combine_topk_swa_decode(torch::Tensor& combined_indices,
                              torch::Tensor& combined_lens,

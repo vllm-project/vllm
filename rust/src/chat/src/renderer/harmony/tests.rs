@@ -9,11 +9,12 @@ use thiserror_ext::AsReport as _;
 use super::HarmonyChatRenderer;
 use super::encoding::harmony_encoding;
 use crate::ChatRenderer;
-use crate::EffortValue;
 use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
+use crate::request::{
+    ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort,
+};
 
 const PINNED_DATE: &str = "2025-06-28";
 
@@ -21,7 +22,7 @@ fn fixture_request(input_name: &str) -> ChatRequest {
     fixture_chat_request(
         &fixture_path(input_name),
         FixtureRequestOptions {
-            enable_thinking: None,
+            enable_thinking: Some(false),
             no_generation_prompt_when_last_assistant: false,
         },
     )
@@ -35,8 +36,7 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn test_renderer(use_system_instructions: bool) -> HarmonyChatRenderer {
-    HarmonyChatRenderer::with_options(Default::default(), PINNED_DATE, use_system_instructions)
-        .unwrap()
+    HarmonyChatRenderer::with_options(PINNED_DATE, use_system_instructions).unwrap()
 }
 
 fn render_token_ids(request: &ChatRequest) -> Vec<u32> {
@@ -138,46 +138,12 @@ fn drops_stale_analysis_fixture() {
 #[test]
 fn rejects_invalid_reasoning_effort() {
     let mut request = ChatRequest::for_test();
-    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
 
     let error = test_renderer(false).render(&request).unwrap_err();
 
-    expect![[r#"reasoning_effort="none" is not supported by Harmony. Supported values are: low, medium, high."#]]
+    expect![[r#"chat template error: reasoning_effort="none" is not supported by Harmony. Supported values are: low, medium, high."#]]
         .assert_eq(&error.to_report_string());
-}
-
-#[test]
-fn normalized_reasoning_respects_harmony_capability_and_deployment_effort() {
-    let renderer = HarmonyChatRenderer::with_options(
-        [("reasoning_effort".to_string(), serde_json::json!("low"))].into(),
-        PINNED_DATE,
-        false,
-    )
-    .unwrap();
-    let mut request = ChatRequest::for_test();
-    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
-    request
-        .chat_options
-        .template_kwargs
-        .insert("enable_thinking".into(), serde_json::json!(true));
-    let rendered = renderer.render(&request).unwrap();
-    let prompt = harmony_encoding()
-        .unwrap()
-        .tokenizer()
-        .decode_utf8(rendered.prompt.into_token_ids().unwrap())
-        .unwrap();
-    assert!(prompt.contains("Reasoning: low"));
-    assert_eq!(
-        rendered.effective_template_kwargs["reasoning_effort"],
-        "low"
-    );
-    assert_eq!(rendered.effective_template_kwargs["enable_thinking"], true);
-
-    request
-        .chat_options
-        .template_kwargs
-        .insert("thinking".into(), serde_json::json!(false));
-    assert!(renderer.render(&request).is_err());
 }
 
 #[test]

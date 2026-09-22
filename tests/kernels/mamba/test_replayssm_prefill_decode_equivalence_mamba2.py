@@ -36,7 +36,6 @@ from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_outpu
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import compute_varlen_chunk_metadata
 
@@ -69,7 +68,7 @@ def _run_prefill_decode_equivalence(
     flow (raw dt + softplus + a per-head dt_bias), so this also checks prefill
     and decode apply the softplus/bias preprocessing consistently. ``state_dtype``
     is the recurrent-state precision; ``act_dtype`` the activation/buffer one."""
-    device = current_platform.device_type
+    device = "cuda"
     rtol, atol = _prefill_tolerances(act_dtype)
     set_random_seed(seed)
 
@@ -204,10 +203,7 @@ def _run_prefill_decode_equivalence(
     )
 
 
-@pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
-    reason="Mamba2 ReplaySSM kernels require a CUDA-alike or XPU device.",
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
 @pytest.mark.parametrize(
     "precision",
     # fp32 state is the default; bf16/fp16 are reduced-footprint configs. fp16

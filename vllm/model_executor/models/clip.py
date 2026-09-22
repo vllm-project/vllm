@@ -67,11 +67,12 @@ from .vision import (
 
 
 class CLIPImagePixelInputs(TensorSchema):
-    """Dimensions:
-    - bn: Batch size * number of images
-    - c: Number of channels (3)
-    - h: Height of each image
-    - w: Width of each image
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height of each image
+        - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -118,38 +119,6 @@ def _get_vision_feature_select_strategy(pooling_type: str):
         ) from None
 
 
-def dual_encoder_has_text_tokens(
-    has_mm_embeddings: bool,
-    is_multimodal: torch.Tensor | None,
-) -> bool:
-    """Whether a dual-encoder pooling batch still contains text tokens.
-
-    ``embed_input_ids`` used to treat "the batch has any image embeddings" as
-    "the whole batch is vision-only". Mixed image+text batches then skipped
-    the text encoder, so completion-style text embeddings collapsed (issue
-    #53091). Honor the per-token ``is_multimodal`` mask instead.
-    """
-    if not has_mm_embeddings or is_multimodal is None:
-        return not has_mm_embeddings
-    return bool((~is_multimodal).any().item())
-
-
-def merge_dual_encoder_text_and_vision(
-    text_features: torch.Tensor,
-    vision_embeds: torch.Tensor,
-    is_multimodal: torch.Tensor | None,
-) -> torch.Tensor:
-    """Restore vision embeddings on multimodal tokens after the text encoder.
-
-    The model runner builds ``is_multimodal`` on CPU; text and vision features
-    are on the compute device.
-    """
-    if is_multimodal is None or not bool(is_multimodal.any().item()):
-        return text_features
-    mm_mask = is_multimodal.to(device=vision_embeds.device, non_blocking=True)
-    return torch.where(mm_mask.unsqueeze(-1), vision_embeds, text_features)
-
-
 class CLIPProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(CLIPConfig)
@@ -173,7 +142,6 @@ class CLIPProcessingInfo(BaseProcessingInfo):
 
         pooler_config = self.ctx.model_config.pooler_config
         assert pooler_config is not None
-        assert pooler_config.seq_pooling_type is not None
 
         return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
@@ -239,16 +207,39 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
         if inputs.mm_data_items:
-            special_tokens = self.info.get_tokenizer().all_special_ids
-            if all(tok in special_tokens for tok in inputs.prompt):
-                inputs.prompt = []
+            if isinstance(inputs.prompt, str):
+                if len(inputs.prompt) > 0:
+                    raise ValueError(
+                        "CLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty text prompt."
+                    )
             else:
-                raise ValueError(
-                    "CLIP accepts text-only or image-only inputs, not both! "
-                    "You must pass an image with an empty token prompt."
-                )
+                special_tokens = self.info.get_tokenizer().all_special_ids
+                if all(tok in special_tokens for tok in inputs.prompt):
+                    inputs.prompt = []
+                else:
+                    raise ValueError(
+                        "CLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty token prompt."
+                    )
+
+            # For multi-modal data, the prompt after processing should
+            # only contain the dummy image tokens
+            inputs.tokenization_kwargs = {
+                **inputs.tokenization_kwargs,
+                "add_special_tokens": False,
+            }
 
         return super().apply(inputs, timing_ctx)
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
 
     def _get_mm_fields_config(
         self,
@@ -416,7 +407,8 @@ class CLIPAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        """Input shape: Batch x Time x Channel."""
+        """Input shape: Batch x Time x Channel"""
+
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -504,12 +496,12 @@ class CLIPEncoderLayer(nn.Module):
 
 
 class CLIPEncoder(nn.Module):
-    """Transformer encoder consisting of `config.num_hidden_layers` self
+    """
+    Transformer encoder consisting of `config.num_hidden_layers` self
     attention layers. Each layer is a [`CLIPEncoderLayer`].
 
     Args:
         config: CLIPConfig
-
     """
 
     def __init__(
@@ -676,9 +668,6 @@ class CLIPVisionTransformer(nn.Module):
             self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         else:
             self.post_layernorm = None
-            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
-                orig_to_new_prefix={"post_layernorm.": None}
-            )
 
     @property
     def dtype(self):
@@ -717,7 +706,10 @@ class CLIPVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        skip_prefixes: list[str] = []
+        if self.post_layernorm is None:
+            skip_prefixes.append("post_layernorm.")
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
 
         # Drop layers beyond num_hidden_layers_override.
         def _filter(ws):
@@ -782,8 +774,6 @@ class CLIPVisionModel(nn.Module):
 class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
-
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     @classmethod
@@ -839,9 +829,8 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         self.pooler = DispatchPooler.for_embedding(pooler_config)
 
-        # Set in embed_input_ids; consumed by forward.
-        self._has_text_tokens = True
-        self._mm_token_mask: torch.Tensor | None = None
+        # Assumes that self.forward is called after self.embed_input_ids
+        self._is_text_input = True
 
     def get_text_features(
         self,
@@ -865,7 +854,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         if feature_select_strategy is None:
-            assert self.pooler_config.seq_pooling_type is not None
             feature_select_strategy = _get_vision_feature_select_strategy(
                 self.pooler_config.seq_pooling_type
             )
@@ -939,12 +927,8 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        has_mm_embeddings = (
-            multimodal_embeddings is not None and len(multimodal_embeddings) > 0
-        )
-        self._mm_token_mask = is_multimodal
-        self._has_text_tokens = dual_encoder_has_text_tokens(
-            has_mm_embeddings, is_multimodal
+        self._is_text_input = (
+            multimodal_embeddings is None or len(multimodal_embeddings) == 0
         )
 
         # This is to satisfy the type checker for each overload
@@ -977,11 +961,9 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             raise RuntimeError("PP is not supported for this model")
 
         # Multimodal inputs
-        assert inputs_embeds is not None
-        if not self._has_text_tokens:
+        if not self._is_text_input:
             return inputs_embeds
 
-        vision_embeds = inputs_embeds
         # NOTE: inputs_embeds in model runner has size text_config.projection_dim
         # (instead of text_config.hidden_size) to accommodate image embeddings
         hidden_size = self.text_embed_dim
@@ -991,15 +973,13 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             # No need to handle this case for now
             raise NotImplementedError
 
-        text_features = self.get_text_features(input_ids, positions, inputs_embeds)
-        return merge_dual_encoder_text_and_vision(
-            text_features, vision_embeds, self._mm_token_mask
-        )
+        return self.get_text_features(input_ids, positions, inputs_embeds)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
+            skip_substrs=[".position_ids"],
             ignore_unexpected_prefixes=["logit_scale."],
         )
 
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights)

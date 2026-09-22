@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from math import sqrt
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -51,7 +51,6 @@ from .interfaces import (
     SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
-    supports_pp,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -63,14 +62,15 @@ from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Step3VLImagePixelInputs(TensorSchema):
-    """Dimensions:
-    - bn: Batch size * number of images
-    - c: Number of channels (3)
-    - h: Height
-    - w: Width
-    - bnp: Batch size * number of images * number of patches
-    - hp: Height of patch
-    - wp: Width of patch
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
+        - bnp: Batch size * number of images * number of patches
+        - hp: Height of patch
+        - wp: Width of patch
     """
 
     type: Literal["pixel_values"]
@@ -80,10 +80,11 @@ class Step3VLImagePixelInputs(TensorSchema):
 
 
 class Step3VLImageEmbeddingInputs(TensorSchema):
-    """Dimensions:
-    - bn: Batch size * number of images
-    - f: Image feature size
-    - h: Hidden size (must match the hidden size of language model backbone)
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - f: Image feature size
+        - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -104,10 +105,10 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
 
         return Step3VLImageProcessor(**kwargs)
 
-    def get_hf_processor(self, **kwargs: object) -> Step3VLProcessor:
+    def get_hf_processor(self) -> Step3VLProcessor:
         return Step3VLProcessor(
             tokenizer=self.get_tokenizer(),
-            image_processor=self.get_image_processor(**kwargs),
+            image_processor=self.get_image_processor(),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -168,11 +169,8 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
 
         def get_replacement_step1o(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
-            num_patches_data = out_item["num_patches"].data
+            num_patches = int(out_item["num_patches"].data)
             patch_newline_mask = out_item["patch_newline_mask"].data
-            assert isinstance(num_patches_data, torch.Tensor)
-            assert isinstance(patch_newline_mask, torch.Tensor)
-            num_patches = int(num_patches_data.item())
             image_repl_ids = hf_processor.get_image_repl_feature_ids(
                 1, num_patches, patch_newline_mask.tolist()
             )
@@ -204,7 +202,7 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
             ),
             num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             patch_newline_mask=MultiModalFieldConfig.flat_from_sizes(
-                "image", num_patches, keep_on_cpu=True
+                "image", num_patches
             ),
         )
 
@@ -295,7 +293,7 @@ class Step3VisionEmbeddings(nn.Module):
 
 
 class Step3VisionAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper."""
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
         self,
@@ -348,7 +346,7 @@ class Step3VisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        """Input shape: Batch x Time x Channel."""
+        """Input shape: Batch x Time x Channel"""
         bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj
@@ -516,7 +514,7 @@ class Step3VLForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.get_multimodal_config()
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -562,16 +560,14 @@ class Step3VLForConditionalGeneration(
             )
 
         with self._mark_language_model(vllm_config):
-            language_model = init_vllm_registered_model(
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
-            self.language_model = language_model
-            assert supports_pp(language_model)
 
         self.make_empty_intermediate_tensors = (
-            language_model.make_empty_intermediate_tensors
+            self.language_model.make_empty_intermediate_tensors
         )
 
     @property
@@ -630,9 +626,6 @@ class Step3VLForConditionalGeneration(
             return None
 
         if pixel_values is not None and patch_pixel_values is not None:
-            assert isinstance(pixel_values, torch.Tensor)
-            assert isinstance(patch_pixel_values, torch.Tensor)
-            assert isinstance(num_patches, torch.Tensor)
             return Step3VLImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values.to(self.dtype),
@@ -641,7 +634,6 @@ class Step3VLForConditionalGeneration(
             )
 
         if image_embeds is not None:
-            assert isinstance(image_embeds, torch.Tensor)
             return Step3VLImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds.to(self.dtype),
@@ -665,7 +657,7 @@ class Step3VLForConditionalGeneration(
 
     def _process_image_input(
         self, image_input: Step3VLImageInputs
-    ) -> list[torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             image_features = image_input["data"]
             return [
@@ -694,7 +686,6 @@ class Step3VLForConditionalGeneration(
         for i, num_patch in enumerate(num_patches_list):
             cur_feature = []
             if num_patch > 0:
-                assert patch_image_features is not None
                 patch_slice = patch_image_features[
                     cur_patch_idx : cur_patch_idx + num_patch
                 ]
@@ -774,7 +765,6 @@ class Step3VLForConditionalGeneration(
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
         num_patches = mm_kwargs.get("num_patches")
-        assert isinstance(num_patches, torch.Tensor)
 
         img_grid = (
             self.config.vision_config.image_size // self.config.vision_config.patch_size
@@ -838,7 +828,6 @@ class Step3VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
-        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,

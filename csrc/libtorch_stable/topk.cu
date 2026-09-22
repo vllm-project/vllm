@@ -4,12 +4,10 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 
-#include "ops.h"
 #include "torch_utils.h"
 
 #ifndef USE_ROCM
   #include "persistent_topk.cuh"
-  #include "sampled_topk.cuh"
 #endif
 
 namespace {
@@ -37,22 +35,7 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     max_smem_per_block = device_prop->sharedMemPerBlockOptin;
   }
 
-  // Allow static fallback storage in addition to the 128 KiB dynamic buffer.
-  if (num_rows > 64 &&
-      max_seq_len >= vllm::sampled_topk::kMinSampledLength<TopK> &&
-      max_smem_per_block >= 144 * 1024) {
-    auto kernel = vllm::sampled_topk::sampled_topk_kernel<TopK>;
-    constexpr size_t smem_size =
-        vllm::filtered_topk::FILTERED_TOPK_SMEM_DYNAMIC;
-    cudaError_t status = cudaFuncSetAttribute(
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-    STD_TORCH_CHECK(status == cudaSuccess,
-                    "sampled_topk smem failed: ", cudaGetErrorString(status));
-    kernel<<<num_rows, vllm::sampled_topk::kThreads, smem_size, stream>>>(
-        logits.const_data_ptr<float>(), lengths.const_data_ptr<int32_t>(),
-        output.mutable_data_ptr<int32_t>(), stride,
-        static_cast<int>(std::min(max_seq_len, logits.size(1))));
-  } else if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
+  if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
     cudaError_t status =
         vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
             logits.const_data_ptr<float>(), output.mutable_data_ptr<int32_t>(),
@@ -149,15 +132,17 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     if (num_groups == 0) num_groups = 1;
     uint32_t total_ctas = num_groups * ctas_per_group;
 
-    // If the cooperative launch wouldn't fit, use the generic decode kernel on
-    // low-smem devices or FilteredTopK where its 128 KiB requirement is met.
+    // If the cooperative launch wouldn't fit, fall back to FilteredTopK
+    // instead of deadlocking. Only relevant when needs_cooperative.
     if (needs_cooperative && total_ctas > hw_resident_cap) {
-      if (max_smem_per_block < 128 * 1024) {
-        const int64_t next_n = lengths.dim() == 2 ? lengths.size(1) : 1;
-        top_k_per_row_decode(logits, next_n, lengths, output, num_rows,
-                             logits.stride(0), logits.stride(1), TopK);
-        return;
-      }
+      STD_TORCH_CHECK(
+          max_smem_per_block >= 128 * 1024,
+          "persistent_topk would oversubscribe and the FilteredTopK "
+          "fallback requires >=128KB smem per block (have ",
+          max_smem_per_block, "). total_ctas=", total_ctas,
+          " > num_sms*occupancy=", hw_resident_cap, " (TopK=", TopK,
+          ", vec_size=", vec_size, ", ctas_per_group=", ctas_per_group,
+          ", smem=", smem_size, ").");
       cudaError_t status =
           vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
               logits.const_data_ptr<float>(),

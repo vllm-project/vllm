@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for Qwen3 unembed LoRA support.
+"""
+Tests for Qwen3 unembed LoRA support.
 
 This test creates synthetic LoRA weights that include lm_head (output embedding)
 to verify that Qwen3 properly supports LoRA on the unembed/lm_head layer.

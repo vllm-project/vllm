@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    require_batch_invariant_kernel,
+    require_batch_invariant_quant_kernel,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import (
     _top_k_per_row_prefill,
@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 
 def _require_unified_kernel() -> None:
     try:
-        require_batch_invariant_kernel()
+        require_batch_invariant_quant_kernel()
     except RuntimeError as error:
         pytest.skip(str(error))
 

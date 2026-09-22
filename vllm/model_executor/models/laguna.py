@@ -54,19 +54,8 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
-def get_mlp_layer_types(config) -> list[str]:
-    """Return which layers are MoE, rejecting configs predating Transformers support."""
-    mlp_layer_types = getattr(config, "mlp_layer_types", None)
-    if mlp_layer_types is None:
-        raise ValueError(
-            "Laguna requires the `LagunaConfig` from Transformers, which is "
-            "available from v5.17.0. Please update Transformers to run this model."
-        )
-    return mlp_layer_types
-
-
 class LagunaMLP(nn.Module):
-    """Dense MLP for Laguna."""
+    """Dense MLP for Laguna (used in mlp_only_layers)."""
 
     def __init__(
         self,
@@ -217,7 +206,7 @@ class LagunaMoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=True,
+            renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
@@ -304,12 +293,13 @@ class LagunaAttention(nn.Module):
         else:
             self.sliding_window = None
 
+        # QKV projection (no bias for Laguna)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=config.attention_bias,
+            bias=config.qkv_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -327,7 +317,6 @@ class LagunaAttention(nn.Module):
         # config.gating may be:
         #   - True / "per-element": one gate per (head, head_dim) channel
         #   - "per-head":           one gate per head, broadcast across head_dim
-        self.g_proj: ColumnParallelLinear | None
         if self.gating:
             # v5 LagunaConfig uses ``gating=True`` for per-head; older configs
             # used ``"per-head"``. Accept both. ``"per-element"`` (or legacy
@@ -516,9 +505,14 @@ class LagunaDecoderLayer(nn.Module):
             ),
         )
 
+        # Check if this layer uses MoE or dense MLP (matches Qwen2/Qwen3 convention)
+        mlp_only_layers = (
+            [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
+        )
         self.is_moe_layer = (
-            get_mlp_layer_types(config)[layer_idx] == "sparse"
-            and config.num_experts > 0
+            (layer_idx not in mlp_only_layers)
+            and (config.num_experts > 0)
+            and ((layer_idx + 1) % config.decoder_sparse_step == 0)
         )
 
         if self.is_moe_layer:
@@ -769,5 +763,8 @@ class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
         return loader.load_weights(weights)

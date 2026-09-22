@@ -17,15 +17,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     }
 )
 
-IMAGE_SIZE_FACTOR_GROUPS = (
-    # Single-scale
-    (1.0,),
-    # Single-scale, batched
-    (1.0, 1.0, 1.0),
-    # Multi-scale
-    (0.25, 0.5, 1.0),
-)
-
 
 def run_awq_test(
     vllm_runner: type[VllmRunner],
@@ -33,7 +24,7 @@ def run_awq_test(
     source_model: str,
     quant_model: str,
     *,
-    size_factor_groups: tuple[tuple[float, ...], ...],
+    size_factors: list[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -42,12 +33,11 @@ def run_awq_test(
 ):
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image_and_size_group = [
+    inputs_per_image = [
         (
             [prompt for _ in size_factors],
             [rescale_image_size(image, factor) for factor in size_factors],
         )
-        for size_factors in size_factor_groups
         for image, prompt in zip(images, HF_IMAGE_PROMPTS)
     ]
 
@@ -70,7 +60,7 @@ def run_awq_test(
             vllm_model.generate_greedy_logprobs(
                 prompts, max_tokens, num_logprobs=num_logprobs, images=images
             )
-            for prompts, images in inputs_per_image_and_size_group
+            for prompts, images in inputs_per_image
         ]
 
     with vllm_runner(
@@ -87,7 +77,7 @@ def run_awq_test(
             vllm_model.generate_greedy_logprobs(
                 prompts, max_tokens, num_logprobs=num_logprobs, images=images
             )
-            for prompts, images in inputs_per_image_and_size_group
+            for prompts, images in inputs_per_image
         ]
 
     for source_outputs, quant_outputs in zip(
@@ -138,6 +128,17 @@ def test_awq_load(
     ("source_model", "quant_model"),
     [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")],
 )
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+    ],
+)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -147,6 +148,7 @@ def test_awq_models(
     image_assets,
     source_model,
     quant_model,
+    size_factors,
     dtype,
     max_tokens,
     num_logprobs,
@@ -156,7 +158,7 @@ def test_awq_models(
         image_assets,
         source_model,
         quant_model,
-        size_factor_groups=IMAGE_SIZE_FACTOR_GROUPS,
+        size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,

@@ -303,7 +303,6 @@ class MiMoV2Attention(nn.Module):
                 backend_enum = requested
             else:
                 fa_backend = AttentionBackendEnum.FLASH_ATTN_DIFFKV.get_class()
-                assert hasattr(fa_backend, "is_supported_on_current_device")
                 if fa_backend.is_supported_on_current_device(
                     head_size=self.head_dim,
                     head_size_v=self.v_head_dim,
@@ -313,7 +312,6 @@ class MiMoV2Attention(nn.Module):
                 else:
                     backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
             attn_backend = backend_enum.get_class()
-            assert hasattr(attn_backend, "set_head_size_v")
             attn_backend.set_head_size_v(self.v_head_dim)
             logger.info_once("Using %s for attention.", attn_backend.get_name())
         else:
@@ -638,7 +636,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping: list[tuple[str, str, str | int]] = [
+        stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -711,7 +709,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             ):
                 continue
             stacked_matched = False
-            for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name_rewritten = name.replace(weight_name, param_name)
@@ -730,7 +728,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
 
                 param = params_dict[name_rewritten]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, stacked_shard_id)
+                weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name_rewritten)
 
                 stacked_matched = True
@@ -776,7 +774,8 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         tp_rank: int,
         tp_size: int,
     ) -> bool:
-        """The fused fp8 QKV projection weights and scale are stored separately.
+        """
+        The fused fp8 QKV projection weights and scale are stored separately.
         Special care must be taken while sharding these tensors across TP ranks.
         See _shard_fp8_qkv_proj for more details.
 
@@ -784,7 +783,6 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             True if ``tensor`` was an fp8 qkv_proj weight/scale and was consumed
             (caller should skip it); False otherwise, so the caller falls
             through to its normal loading path.
-
         """
         is_weight = (
             name.endswith("qkv_proj.weight") and tensor.dtype == torch.float8_e4m3fn

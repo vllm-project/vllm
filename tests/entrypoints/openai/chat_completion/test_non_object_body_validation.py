@@ -11,7 +11,6 @@ import pytest
 from pydantic import ValidationError
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.exceptions import VLLMValidationError
 
 
 @pytest.mark.parametrize(
@@ -29,7 +28,7 @@ def test_chat_completion_request_rejects_non_object_body(payload):
 
 
 def test_chat_completion_request_cache_salt_still_validated_on_dict():
-    with pytest.raises(VLLMValidationError, match="cache_salt"):
+    with pytest.raises(ValidationError, match="cache_salt"):
         ChatCompletionRequest.model_validate(
             {
                 "model": "qwen",

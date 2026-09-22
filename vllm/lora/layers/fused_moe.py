@@ -248,6 +248,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
+
         self._verify_ep_fs(lora_config)
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
@@ -293,7 +294,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     )
 
     def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
-        """Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA."""
+        """
+        Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA
+        """
         if self.tp_size == 1 or not self.fully_sharded:
             return w13_lora_a
 
@@ -318,7 +321,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         return w13_lora_b[:, start_idx:end_idx, :]
 
     def _slice_w2_a(self, w2_lora_a: torch.Tensor) -> torch.Tensor:
-        """Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA."""
+        """
+        Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA
+        """
         if self.tp_size == 1:
             return w2_lora_a
         # w2_lora_a shape (num_experts,rank,input_size)
@@ -329,7 +334,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         return w2_lora_a[:, :, start_idx:end_idx]
 
     def _slice_w2_b(self, w2_lora_b: torch.Tensor) -> torch.Tensor:
-        """Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA."""
+        """
+        Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA
+        """
         if self.tp_size == 1 or not self.fully_sharded:
             return w2_lora_b
         # Based on S-LoRA, we slice W2 B along the hidden_size dim.
@@ -468,6 +475,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
+
         # source_layer is MoERunner
         moe_cls = maybe_get_oot_by_class(MoERunner)
         return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 2
@@ -514,6 +522,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
+
         if model_config is None:
             raise ValueError("model_config must be provided for MoE LoRA.")
         architectures = model_config.architectures
@@ -600,22 +609,30 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
 
     @property
     def w13_input_size(self):
-        """Full size."""
+        """
+        Full size
+        """
         return self.w13_lora_a_stacked[0].shape[-1]
 
     @property
     def w13_output_size(self):
-        """Full size."""
+        """
+        Full size
+        """
         return self.w13_lora_b_stacked[0].shape[-2] * self.tp_size
 
     @property
     def w2_input_size(self):
-        """Full size."""
+        """
+        Full size
+        """
         return self.w2_lora_a_stacked[0].shape[-1] * self.tp_size
 
     @property
     def w2_output_size(self):
-        """Full size."""
+        """
+        Full size
+        """
         return self.hidden_size
 
     @classmethod

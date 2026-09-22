@@ -4,6 +4,7 @@
 import os
 from typing import TYPE_CHECKING
 
+import regex as re
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
@@ -15,7 +16,6 @@ from vllm.logger import init_logger
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
-    ClassificationHeadWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     FusedMoE3DWithLoRA,
@@ -33,10 +33,8 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
-from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -49,7 +47,8 @@ logger = init_logger(__name__)
 
 
 def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
-    """Returns num_active_loras values for cudagraph capture.
+    """
+    Returns num_active_loras values for cudagraph capture.
 
     When specialize=True: powers of 2 up to max_loras, plus max_loras + 1.
     When specialize=False: just [max_loras + 1].
@@ -143,17 +142,6 @@ def from_layer_logits_processor(
     return ret
 
 
-def from_layer_classification(
-    layer: nn.Module,
-    max_loras: int,
-    lora_config: LoRAConfig,
-    model_config: PretrainedConfig | None = None,
-) -> ClassificationHeadWithLoRA:
-    instance_layer = ClassificationHeadWithLoRA(layer)
-    instance_layer.create_lora_weights(max_loras, lora_config, model_config)
-    return instance_layer
-
-
 def replace_submodule(
     model: nn.Module, module_name: str, new_module: nn.Module
 ) -> nn.Module:
@@ -169,7 +157,7 @@ def parse_fine_tuned_lora_name(
 ) -> tuple[str, bool]:
     """Parse the name of lora weights.
 
-    Args:
+    args:
         name: the name of the fine-tuned LoRA, e.g.
             base_model.model.dense1.weight
         weights_mapper: maps the name of weight, e.g.
@@ -178,8 +166,8 @@ def parse_fine_tuned_lora_name(
         tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
             is_lora_a whether the tensor is lora_a or lora_b.
-
     """
+
     # LoRA weight qualified name usually starts with `base_model.model.`,
     # so we remove the prefix `base_model.model.` to make the following
     # mapping correctly.
@@ -204,14 +192,13 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
-    if (parts[-1] == "weight" or parts[-1] == "bias") and len(parts) >= 2:
-        if parts[-2] in ["lora_A", "lora_B"]:
-            new_name = ".".join(parts[start_index:-2])
-            return new_name, parts[-2] == "lora_A"
-        # For modules_to_save in classification.
-        elif parts[-2] in ["score", "classifier"]:
-            new_name = parts[-2]
-            return new_name, False
+    if (
+        parts[-1] == "weight"
+        and len(parts) >= 2
+        and (parts[-2] == "lora_A" or parts[-2] == "lora_B")
+    ):
+        new_name = ".".join(parts[start_index:-2])
+        return new_name, parts[-2] == "lora_A"
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[start_index:-1])
@@ -230,7 +217,10 @@ def is_base_embedding_weights(name: str) -> bool:
 
 
 def get_supported_lora_modules(model: nn.Module) -> list[str]:
-    """In vLLM, all linear layers support LoRA."""
+    """
+    In vLLM, all linear layers support LoRA.
+    """
+
     supported_lora_modules: set[str] = set()
     for name, module in model.named_modules():
         # get the embedding modules if the module's embedding_modules
@@ -240,7 +230,11 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
             for name in embedding_modules:
                 supported_lora_modules.add(name)
 
-        if isinstance(module, (LinearBase, MoERunner)):
+        # get all the linear subfixes.
+        if isinstance(module, (LinearBase,)):
+            supported_lora_modules.add(name.split(".")[-1])
+
+        if isinstance(module, (MoERunner,)):
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)
@@ -248,37 +242,29 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
 
 def is_supported_lora_module(
     module_name: str,
-    module: nn.Module,
     supported_lora_modules: list[str],
 ) -> bool:
     """Check if a module is in the model's supported LoRA modules.
 
-    The module name must match a model-supported suffix, and the runtime
-    module must belong to a module family handled by LoRA.
+    Uses regex suffix matching against the model-defined supported modules
+    list (e.g., matching "model.layers.0.self_attn.o_proj" against
+    "o_proj").
 
     Args:
         module_name: Full dot-separated module name.
-        module: Runtime module associated with ``module_name``.
         supported_lora_modules: List of module suffixes supported by the
             model.
 
     Returns:
         True if the module is supported, False otherwise.
-
     """
-    module_suffix = module_name.rsplit(".", 1)[-1]
-    if module_suffix not in supported_lora_modules:
-        return False
-
-    return isinstance(
-        module,
-        (
-            LinearBase,
-            MoERunner,
-            VocabParallelEmbedding,
-            maybe_get_oot_by_class(VocabParallelEmbedding),
-            BaseLayerWithLoRA,
-        ),
+    return any(
+        re.match(
+            r".*\.{target_module}$".format(target_module=target_module),
+            module_name,
+        )
+        or target_module == module_name
+        for target_module in supported_lora_modules
     )
 
 
@@ -302,7 +288,6 @@ def is_in_target_modules(
 
     Returns:
         True if the module passes the filter, False otherwise.
-
     """
     if target_modules is None:
         return True
@@ -327,21 +312,22 @@ def is_in_target_modules(
 
 
 def get_adapter_absolute_path(lora_path: str) -> str:
-    """Resolves the given lora_path to an absolute local path.
+    """
+    Resolves the given lora_path to an absolute local path.
 
     If the lora_path is identified as a Hugging Face model identifier,
     it will download the model and return the local snapshot path.
     Otherwise, it treats the lora_path as a local file path and
     converts it to an absolute path.
 
-    Args:
-        lora_path (str): The path to the lora model, which can be an absolute
-            path, a relative path, or a Hugging Face model identifier.
+    Parameters:
+    lora_path (str): The path to the lora model, which can be an absolute path,
+                     a relative path, or a Hugging Face model identifier.
 
     Returns:
-        str: The resolved absolute local path to the lora model.
-
+    str: The resolved absolute local path to the lora model.
     """
+
     # Check if the path is an absolute path. Return it no matter exists or not.
     if os.path.isabs(lora_path):
         return lora_path

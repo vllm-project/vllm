@@ -6,7 +6,7 @@ import weakref
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm.exceptions import VLLMValidationError
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "distilbert/distilgpt2"
 
@@ -26,17 +26,22 @@ TOKEN_IDS = [
 
 
 @pytest.fixture(scope="module")
-def llm(vllm_runner):
-    with vllm_runner(
-        MODEL_NAME,
+def llm():
+    # pytest caches the fixture so we use weakref.proxy to
+    # enable garbage collection
+    llm = LLM(
+        model=MODEL_NAME,
         max_num_batched_tokens=4096,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.10,
         enforce_eager=True,
-    ) as runner:
-        # pytest caches yielded fixtures until after teardown, so use a proxy to
-        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
-        yield weakref.proxy(runner.llm)
+    )
+
+    yield weakref.proxy(llm)
+
+    del llm
+
+    cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skip_global_cleanup
@@ -53,7 +58,7 @@ def test_multiple_sampling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(VLLMValidationError):
+    with pytest.raises(ValueError):
         outputs = llm.generate(PROMPTS, sampling_params=sampling_params[:3])
 
     # Single SamplingParams should be applied to every prompt
@@ -76,13 +81,13 @@ def test_multiple_priority(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the length of priority does not match the length of prompts
-    with pytest.raises(VLLMValidationError):
+    with pytest.raises(ValueError):
         outputs = llm.generate(
             PROMPTS, sampling_params=None, priority=[0] * (len(PROMPTS) - 1)
         )
 
     # Exception raised, if the priority list is empty
-    with pytest.raises(VLLMValidationError):
+    with pytest.raises(ValueError):
         outputs = llm.generate(PROMPTS, sampling_params=None, priority=[])
 
 
@@ -92,34 +97,34 @@ def test_single_prompt_priority(llm: LLM):
     assert len(outputs) == 1
 
 
-def test_max_model_len(vllm_runner):
+def test_max_model_len():
     max_model_len = 20
-    with vllm_runner(
-        MODEL_NAME,
+    llm = LLM(
+        model=MODEL_NAME,
         max_model_len=max_model_len,
         gpu_memory_utilization=0.10,
         enforce_eager=True,  # reduce test time
-    ) as runner:
-        sampling_params = SamplingParams(max_tokens=max_model_len + 10)
-        outputs = runner.llm.generate(PROMPTS, sampling_params)
-        for output in outputs:
-            num_total_tokens = len(output.prompt_token_ids) + len(
-                output.outputs[0].token_ids
-            )
-            # Total tokens must not exceed max_model_len.
-            # It can be less if generation finishes due to other reasons (e.g., EOS)
-            # before reaching the absolute model length limit.
-            assert num_total_tokens <= max_model_len
+    )
+    sampling_params = SamplingParams(max_tokens=max_model_len + 10)
+    outputs = llm.generate(PROMPTS, sampling_params)
+    for output in outputs:
+        num_total_tokens = len(output.prompt_token_ids) + len(
+            output.outputs[0].token_ids
+        )
+        # Total tokens must not exceed max_model_len.
+        # It can be less if generation finishes due to other reasons (e.g., EOS)
+        # before reaching the absolute model length limit.
+        assert num_total_tokens <= max_model_len
 
 
-def test_log_stats(vllm_runner):
-    with vllm_runner(
-        MODEL_NAME,
+def test_log_stats():
+    llm = LLM(
+        model=MODEL_NAME,
         disable_log_stats=False,
         gpu_memory_utilization=0.10,
         enforce_eager=True,  # reduce test time
-    ) as runner:
-        outputs = runner.llm.generate(PROMPTS, sampling_params=None)
+    )
+    outputs = llm.generate(PROMPTS, sampling_params=None)
 
-        # disable_log_stats is False, every output should have metrics
-        assert all(output.metrics is not None for output in outputs)
+    # disable_log_stats is False, every output should have metrics
+    assert all(output.metrics is not None for output in outputs)

@@ -5,6 +5,7 @@
 //! Variation of https://github.com/lightseekorg/smg/blob/main/crates/protocols/src/validated.rs
 
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Request};
 use serde::de::DeserializeOwned;
 use validator::Validate;
@@ -29,7 +30,9 @@ where
     type Rejection = ApiError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(mut data) = Json::<T>::from_request(req, state).await?;
+        let Json(mut data) = Json::<T>::from_request(req, state)
+            .await
+            .map_err(|err: JsonRejection| ApiError::json_parse_error(err.body_text()))?;
 
         data.normalize();
 

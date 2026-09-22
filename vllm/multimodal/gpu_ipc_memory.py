@@ -183,19 +183,16 @@ def reserve_mm_ipc_gpu_memory(
 
     Raises:
         ValueError: If the reservation leaves no memory for the KV cache.
-
     """
     if mm_config is None:
         return available_kv_cache_memory_bytes
 
     from vllm import envs
-    from vllm.multimodal.video_decoders import (
-        PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
-        PYNVVIDEOCODEC_VIDEO_BACKEND,
-    )
-    from vllm.multimodal.video_decoders.pynvvideocodec import (
+    from vllm.multimodal.video import (
         PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
         PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+        PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+        PYNVVIDEOCODEC_VIDEO_BACKEND,
         validate_pynvvideocodec_hw_decoders,
     )
 

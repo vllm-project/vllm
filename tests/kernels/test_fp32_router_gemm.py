@@ -3,7 +3,8 @@
 """Tests for fp32_router_gemm kernel: activation×weight→fp32.
 
 Supported (hidden_size, num_experts) pairs:
-  (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
+  (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3,
+  (6144, 256) -> GLM-5.2
 
 Correctness baseline: F.linear in float32. Every M in [1, 32] is covered so
 all tuned geometries (wide-block, experts-per-block, token-group; boundaries
@@ -15,10 +16,9 @@ import pytest
 import torch
 
 from vllm._custom_ops import fp32_router_gemm
-from vllm.platforms import current_platform
 
 # (hidden_size, num_experts)
-SHAPES = [(3072, 256), (6144, 128)]
+SHAPES = [(3072, 256), (6144, 128), (6144, 256)]
 ALL_M = list(range(1, 33))
 # Absolute tolerance for fp32 kernel vs float64 reference
 ATOL_FP32 = 2e-4
@@ -26,10 +26,8 @@ ATOL_BF16 = 2e-2  # bf16 activation has lower precision
 
 
 def _requires_sm90():
-    # ROCm reports a CUDA-like device capability (gfx950 -> (9, 5)), which would
-    # pass the SM90 check below for a kernel that is only built for CUDA.
-    if not current_platform.is_cuda():
-        pytest.skip("fp32_router_gemm is built for CUDA only")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
     major, minor = torch.cuda.get_device_capability()
     if major * 10 + minor < 90:
         pytest.skip(f"fp32_router_gemm requires SM90+, got SM{major}{minor}")

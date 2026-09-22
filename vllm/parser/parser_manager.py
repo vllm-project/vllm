@@ -16,7 +16,10 @@ logger = init_logger(__name__)
 
 
 class ParserManager:
-    """Provides a unified Parser by composing reasoning and tool parser adapters."""
+    """
+    Provides a unified Parser by composing individual reasoning and tool
+    parsers from their respective registries.
+    """
 
     @classmethod
     def get_tool_parser(
@@ -78,9 +81,11 @@ class ParserManager:
         model_name: str | None = None,
         is_harmony: bool = False,
     ) -> type[Parser] | None:
-        """Get a Parser that handles both reasoning and tool parsing.
+        """
+        Get a Parser that handles both reasoning and tool parsing.
 
-        Composes the individual parsers into a ``DelegatingParser`` subclass.
+        Composes individual reasoning and tool parsers into a single
+        DelegatingParser subclass.
 
         Args:
             tool_parser_name: The name of the tool parser.
@@ -92,7 +97,6 @@ class ParserManager:
 
         Returns:
             A Parser class, or None if neither parser is specified.
-
         """
         if not tool_parser_name and not reasoning_parser_name:
             return None
@@ -123,21 +127,6 @@ class ParserManager:
                 tool_parser_cls = t_cls
 
             return _KimiK3Parser
-
-        if {reasoning_parser_name, tool_parser_name} & {
-            "cohere_command3",
-            "cohere_command4",
-        }:
-            from vllm.parser.cohere_command import CohereCommandParser
-
-            r_cls = reasoning_parser_cls
-            t_cls = tool_parser_cls
-
-            class _CohereCommandParser(CohereCommandParser):
-                reasoning_parser_cls = r_cls
-                tool_parser_cls = t_cls
-
-            return _CohereCommandParser
 
         from vllm.parser.abstract_parser import DelegatingParser
 

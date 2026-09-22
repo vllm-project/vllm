@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 
-"""Example online usage of Score API.
+"""
+Example online usage of Score API.
 
 Run `vllm serve <model> --runner pooling` to start up the server in vLLM.
 e.g.

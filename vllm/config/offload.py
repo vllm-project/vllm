@@ -137,7 +137,8 @@ class OffloadConfig:
         return self
 
     def compute_hash(self) -> str:
-        """Provide a hash that uniquely identifies all the offload configs.
+        """
+        Provide a hash that uniquely identifies all the offload configs.
 
         All fields are included because PrefetchOffloader patches module
         forwards and inserts custom ops (wait_prefetch, start_prefetch)

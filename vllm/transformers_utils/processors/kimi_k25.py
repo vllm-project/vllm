@@ -28,7 +28,8 @@ class KimiK25Processor(ProcessorMixin):
         return_tensors: str | TensorType | None = None,
         **kwargs,
     ) -> BatchFeature:
-        """Args:
+        """
+        Args:
             text: The text to be field to the model.
             vision_chunks: List of `VisionChunk` items to be processed.
                 For image: `VisionChunkImage` with
@@ -43,7 +44,6 @@ class KimiK25Processor(ProcessorMixin):
               Returned when `vision_chunks` is not `None`.
             - **grid_thws** -- list of image 3D grid in LLM.
               Returned when `vision_chunks` is not `None`.
-
         """
         if vision_chunks is not None:
             mm_inputs = self.image_processor.preprocess(

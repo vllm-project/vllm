@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -34,20 +33,6 @@ from vllm.model_executor.models.utils import (
 logger = init_logger(__name__)
 
 
-if TYPE_CHECKING:
-
-    class _EagleMistralModelBase(nn.Module):
-        pass
-
-    class _EagleMistralForCausalLMBase(nn.Module):
-        def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-            raise NotImplementedError
-
-else:
-    _EagleMistralModelBase = MistralModel
-    _EagleMistralForCausalLMBase = MistralForCausalLM
-
-
 class EagleMistralDecoderLayer(MistralDecoderLayer):
     def __init__(
         self,
@@ -62,7 +47,7 @@ class EagleMistralDecoderLayer(MistralDecoderLayer):
 
 
 @support_torch_compile
-class EagleMistralModel(_EagleMistralModelBase):
+class EagleMistralModel(MistralModel):
     def __init__(
         self,
         *,
@@ -73,9 +58,7 @@ class EagleMistralModel(_EagleMistralModelBase):
         # Bypass MistralModel.__init__ to avoid creating duplicate attention
         # layer entries in the global context.
         nn.Module.__init__(self)
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        self.config = speculative_config.draft_model_config.hf_config
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         # Get drafter's quantization config
         self.quant_config = get_draft_quant_config(vllm_config)
@@ -129,9 +112,7 @@ class EagleMistralModel(_EagleMistralModelBase):
         return hidden_states, hidden_states
 
 
-class EagleMistralForCausalLM(
-    _EagleMistralForCausalLMBase, SupportsMultiModalEmbeddings
-):
+class EagleMistralForCausalLM(MistralForCausalLM, SupportsMultiModalEmbeddings):
     mistral_mapping = MistralForCausalLM.mistral_mapping | {
         "eagle_linear": "model.fc",
     }
@@ -140,9 +121,7 @@ class EagleMistralForCausalLM(
         # Bypass MistralForCausalLM.__init__ to use the draft model config
         # and to avoid creating an lm_head.
         nn.Module.__init__(self)
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        self.config = speculative_config.draft_model_config.hf_config
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )

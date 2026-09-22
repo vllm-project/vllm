@@ -20,7 +20,6 @@ from vllm.config.vllm import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -54,18 +53,6 @@ def _attention_group() -> KVCacheGroupSpec:
     )
 
 
-def _circular_group() -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
-        ["circular"],
-        CircularBufferSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-        ),
-    )
-
-
 def _mamba_group(mamba_cache_mode: str) -> KVCacheGroupSpec:
     # Name carries the mode so several groups can coexist in one config.
     return KVCacheGroupSpec(
@@ -88,10 +75,9 @@ def _make_runner(
     """Stub model runner exposing only what the warmup entry points read."""
     return SimpleNamespace(
         num_speculative_steps=num_spec_steps,
-        adaptive_verification=None,
-        rejection_sampler=None,
         decode_query_len=num_spec_steps + 1,
         is_pooling_model=False,
+        is_encoder_only=False,
         is_encoder_decoder=False,
         is_last_pp_rank=True,
         max_num_reqs=4,
@@ -102,9 +88,7 @@ def _make_runner(
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=kv_cache_groups, num_blocks=1024
         ),
-        vllm_config=SimpleNamespace(
-            num_lookahead_tokens=num_lookahead_tokens, is_mm_encoder_only=False
-        ),
+        vllm_config=SimpleNamespace(num_lookahead_tokens=num_lookahead_tokens),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
     )
@@ -227,7 +211,8 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
 
 
 def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
-    """Attention, circular, and Mamba groups exercise every reservation branch.
+    """Full attention plus one Mamba group per cache mode, so a single manager
+    exercises every branch `_reserved_block_count` has.
 
     "none" and "all" reach the same branch of both `_reserved_block_count` and
     `MambaManager`, which tests only for "align". They are still both listed:
@@ -240,7 +225,6 @@ def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
         kv_cache_tensors=[],
         kv_cache_groups=[
             _attention_group(),
-            _circular_group(),
             _mamba_group("none"),
             _mamba_group("all"),
             _mamba_group("align"),

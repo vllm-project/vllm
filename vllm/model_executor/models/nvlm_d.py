@@ -26,7 +26,6 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
-    cached_encode,
 )
 from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
 from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
@@ -107,8 +106,6 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
         hf_processor: NVLMProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
-        tokenizer = self.info.get_tokenizer()
-
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -141,18 +138,14 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
 
             repl = hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
-            # `repl.full` ends in the special `</Image>` token, so there is
-            # no BPE merge across the boundary with the newline
-            newline_ids = cached_encode(tokenizer, "\n", add_special_tokens=False)
-
-            return PromptUpdateDetails.select_token_id(
-                repl.full + newline_ids, hf_processor.ctx_image_token_id
+            return PromptUpdateDetails.select_text(
+                repl.full + "\n", hf_processor.ctx_image_token
             )
 
         # See note in dummy data regarding why we have the extra newline
         return PromptReplacement(
             modality="image",
-            target=cached_encode(tokenizer, "<image>\n", add_special_tokens=False),
+            target="<image>\n",
             replacement=get_replacement_nvlm,
         )
 

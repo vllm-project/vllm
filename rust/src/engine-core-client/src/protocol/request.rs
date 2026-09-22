@@ -158,10 +158,8 @@ mod tests {
     use rmpv::Value;
 
     use super::*;
-    use crate::protocol::dtype::TensorDtype;
     use crate::protocol::multimodal::{
-        MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, MmModality,
-        PlaceholderRange,
+        MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
     };
     use crate::protocol::sampling::EngineCoreSamplingParams;
     use crate::protocol::tensor::{WireArrayData, WireTensor};
@@ -214,7 +212,7 @@ mod tests {
                         "inline".to_string(),
                         MmFieldElem {
                             data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
-                                TensorDtype::U8,
+                                "uint8",
                                 vec![inline.len()],
                                 inline,
                             ))),
@@ -227,7 +225,7 @@ mod tests {
                             data: Some(MmKwargValue::List(vec![
                                 MmKwargValue::Int(7),
                                 MmKwargValue::Tensor(WireTensor::from_raw(
-                                    TensorDtype::U8,
+                                    "uint8",
                                     vec![first_aux.len()],
                                     first_aux,
                                 )),
@@ -236,13 +234,13 @@ mod tests {
                         },
                     ),
                 ])),
-                modality: MmModality::Image,
+                modality: "image".to_string(),
                 identifier: "id".to_string(),
                 mm_position: PlaceholderRange {
                     offset: 0,
                     length: second_aux.len(),
                     is_embed: Some(WireTensor::from_raw(
-                        TensorDtype::Bool,
+                        "bool",
                         vec![second_aux.len()],
                         second_aux,
                     )),

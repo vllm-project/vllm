@@ -172,8 +172,7 @@ struct hash<MatMulPrimitiveHandler::ClassMatmulCacheKey> {
   size_t operator()(
       const MatMulPrimitiveHandler::ClassMatmulCacheKey& val) const {
     return hash<dnnl_dim_t>()(val.b_n_size) ^ hash<dnnl_dim_t>()(val.b_k_size) ^
-           hash<int>()(static_cast<int>(val.b_type)) ^
-           hash<int>()(static_cast<int>(val.c_type));
+           hash<int>()(static_cast<int>(val.b_type));
   }
 };
 
@@ -203,7 +202,7 @@ bool operator==(const W8A8MatMulPrimitiveHandler::MSizeCacheKey& l,
 bool operator==(const MatMulPrimitiveHandler::ClassMatmulCacheKey& l,
                 const MatMulPrimitiveHandler::ClassMatmulCacheKey& r) {
   return l.b_n_size == r.b_n_size && l.b_k_size == r.b_k_size &&
-         l.b_type == r.b_type && l.c_type == r.c_type;
+         l.b_type == r.b_type;
 }
 
 bool operator==(const MatMulPrimitiveHandler::MSizeCacheKey& l,
@@ -483,10 +482,8 @@ void MatMulPrimitiveHandler::execute(ExecArgs& args) {
 dnnl::matmul MatMulPrimitiveHandler::get_matmul_cache(
     const MSizeCacheKey& key) {
   if (m_size_cache_.get() == nullptr) {
-    ClassMatmulCacheKey class_key = {.b_n_size = b_n_size_,
-                                     .b_k_size = b_k_size_,
-                                     .b_type = b_type_,
-                                     .c_type = c_type_};
+    ClassMatmulCacheKey class_key = {
+        .b_n_size = b_n_size_, .b_k_size = b_k_size_, .b_type = b_type_};
     m_size_cache_ =
         get_matul_class_primitive_cache(class_key, primitive_cache_size_);
   }

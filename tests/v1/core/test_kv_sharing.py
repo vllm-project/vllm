@@ -17,7 +17,8 @@ def new_kv_cache_spec():
 
 
 def test_initialize_kv_cache_for_kv_sharing_different_attn_groups():
-    """Test initializing KV cache sharing with different attention groups.
+    """
+    Test initializing KV cache sharing with different attention groups.
     Layers in the same KV cache group might be placed in different attn groups
     if they have different attention backends.
     """
@@ -49,7 +50,8 @@ def test_initialize_kv_cache_for_kv_sharing_different_attn_groups():
 
 
 def test_initialize_kv_cache_for_kv_sharing_same_attn_groups():
-    """Test case assuming that all layers in the same KV cache group have the same
+    """
+    Test case assuming that all layers in the same KV cache group have the same
     attention backends. This is true for most models.
     """
     shared_kv_cache_layers = {
@@ -77,7 +79,8 @@ def test_initialize_kv_cache_for_kv_sharing_same_attn_groups():
 
 
 def test_initialize_kv_cache_for_kv_sharing_no_attn_groups():
-    """Test KV sharing set up when no attention groups are provided.
+    """
+    Test KV sharing set up when no attention groups are provided.
     This is the case for the TPU model runner, which doesn't have
     support for attention groups yet.
     """

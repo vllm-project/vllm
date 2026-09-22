@@ -19,7 +19,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Memory-efficient attention for prefill.
+"""
+Memory-efficient attention for prefill.
 It supports page size = 1.
 """
 
@@ -228,7 +229,8 @@ def context_attention_fwd(
     sinks: torch.Tensor | None = None,
     sinks_bias_key0: bool = False,
 ):
-    """q, k, v: [b * s, head, head_dim]
+    """
+    q, k, v: [b * s, head, head_dim]
     b_start_loc: [b]
     b_seq_len: [b]
     out: [b * s, head, head_dim]

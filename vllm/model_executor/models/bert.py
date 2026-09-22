@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Set
-from dataclasses import replace
 
 import torch
 from torch import nn
@@ -383,7 +382,6 @@ class BertModel(nn.Module, SupportsQuant):
             ".self.key": (".self.qkv_proj", "k"),
             ".self.value": (".self.qkv_proj", "v"),
         },
-        orig_to_new_prefix={"pooler.": None},
     )
 
     def __init__(
@@ -418,15 +416,12 @@ class BertModel(nn.Module, SupportsQuant):
         return self.encoder(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class BertPoolingModel(BertModel):
     is_pooling_model = True
-
-    # Unlike `BertModel`, this model has a pooler to load weights into.
-    hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})
 
     def __init__(
         self,
@@ -458,7 +453,6 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     Attributes:
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
-
     """
 
     is_pooling_model = True
@@ -494,13 +488,11 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
 
-        orig_to_new_prefix: dict[str, str | None] = {"lm_head.": None}
         has_model_prefix = any(name.startswith("model.") for name, _ in weights_list)
         if not has_model_prefix:
-            orig_to_new_prefix[""] = "model."
-        mapper = WeightsMapper(orig_to_new_prefix=orig_to_new_prefix)
+            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
 
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
         return loader.load_weights(weights_list, mapper=mapper)
 
     def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
@@ -576,7 +568,8 @@ class BertMLMHead(nn.Module):
 
 
 class SPLADESparsePooler(Pooler):
-    """SPLADE sparse pooling:
+    """
+    SPLADE sparse pooling:
     logits = mlm_head(hidden_states)
             -> log1p(relu(logits))
             -> (max|sum over L)
@@ -664,7 +657,8 @@ class SPLADESparsePooler(Pooler):
 
 @default_pooling_type(seq_pooling_type="CLS")
 class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
-    """BertEmbeddingModel + SPLADE sparse embedding.
+    """
+    BertEmbeddingModel + SPLADE sparse embedding.
     - Make logits by self.mlm_head
     - pooler: SPLADESparsePooler(mlm_head...)
     """
@@ -778,7 +772,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
     Attributes:
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
-
     """
 
     is_pooling_model = True

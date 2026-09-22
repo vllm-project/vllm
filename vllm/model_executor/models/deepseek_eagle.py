@@ -39,7 +39,6 @@ class DeepseekV2Model(nn.Module):
         start_layer_id: int = 0,
     ) -> None:
         super().__init__()
-        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         quant_config = vllm_config.quant_config
         self.vocab_size = self.config.vocab_size
@@ -156,7 +155,7 @@ class DeepseekV2Model(nn.Module):
                 break
             else:
                 for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, expert_shard_id = mapping
+                    param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
@@ -167,7 +166,7 @@ class DeepseekV2Model(nn.Module):
                         param,
                         loaded_weight,
                         name,
-                        shard_id=expert_shard_id,
+                        shard_id=shard_id,
                         expert_id=expert_id,
                     )
                     break
@@ -177,10 +176,9 @@ class DeepseekV2Model(nn.Module):
                         continue
 
                     # Remapping the name of FP8 kv-scale.
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None:
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
                         continue
-                    name = remapped_name
 
                     param = params_dict[name]
                     weight_loader = getattr(
@@ -194,7 +192,6 @@ class DeepseekV2Model(nn.Module):
 class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         quant_config = vllm_config.quant_config
         target_layer_num = vllm_config.model_config.get_num_layers(
@@ -225,7 +222,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(  # type: ignore[override]
+    def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -253,5 +250,8 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             process_eagle_weight(self, name)
             return name, loaded_weight
 
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=None,
+        )
         loader.load_weights(map(transform, weights))

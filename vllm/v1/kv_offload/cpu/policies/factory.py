@@ -57,7 +57,6 @@ class CachePolicyFactory:
 
         Raises ValueError if the cache policy is neither registered nor
         resolvable via `module_path`.
-
         """
         if name in cls._registry:
             return cls._registry[name]()

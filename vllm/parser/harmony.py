@@ -27,14 +27,14 @@ from xgrammar.structural_tag import (
 )
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     FunctionCall,
-)
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
@@ -387,11 +387,12 @@ class HarmonyParser(DelegatingParser):
         return recipient[:constrain_index].rstrip() or None
 
 
-_JSON_CONSTRAINS = [" json", " <|constrain|>json"]
 # Harmomy's stop tokens are <|return|>, <|call|>, <|endoftext|>
-# They are represented as "" since xgrammar disallows stop tokens while
-# under constraints, leading to bad or infinite generations.
-_END_TAG = ["<|end|>", ""]
+# <|return|> is represented as "" since it's the default stop token, which xgrammar
+# disallows under constraints, leading to bad or infinite generation.
+# StreamableParser doesn't consider <|endoftext|> as a message end, so it's excluded
+# TODO: Remove <|call|> once #50595 lands.
+_END_TAG = ["<|end|>", "<|call|>", ""]
 _FINAL_BEGIN = "<|channel|>final{constrain}<|message|>"
 _TOOL_CALL_CHANNELS = [
     "<|channel|>commentary",
@@ -399,8 +400,10 @@ _TOOL_CALL_CHANNELS = [
     "<|channel|>final",
 ]
 _FUNCTION_CALL_BEGINS = [
-    " to=functions.{name}{channel}{constrain}<|message|>",
-    "{channel} to=functions.{name}{constrain}<|message|>",
+    "to=functions.{name} {channel} json<|message|>",
+    "to=functions.{name} {channel} <|constrain|>json<|message|>",
+    "{channel} to=functions.{name} json<|message|>",
+    "{channel} to=functions.{name} <|constrain|>json<|message|>",
 ]
 _JSON_CONTENT = JSONSchemaFormat(json_schema={"type": "object"})
 _ANY_CONTENT = AnyTextFormat()
@@ -451,10 +454,9 @@ def get_harmony_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
-    token_suffix: str = "",
 ) -> StructuralTag:
     # reasoning always enabled for Harmony
-    del reasoning, token_suffix
+    del reasoning
 
     if builtin_tools:
         # Fallback for built-in tools
@@ -476,9 +478,7 @@ def get_harmony_structural_tag(
     else:
         tags = [
             TagFormat(
-                begin=pattern.format(
-                    name=tool.function.name, channel=channel, constrain=constrain
-                ),
+                begin=pattern.format(name=tool.function.name, channel=channel),
                 content=JSONSchemaFormat(
                     json_schema=get_function_parameters(tool.function)
                 ),
@@ -486,18 +486,23 @@ def get_harmony_structural_tag(
             )
             for tool in tools
             for pattern in _FUNCTION_CALL_BEGINS
-            for constrain in _JSON_CONSTRAINS
             for channel in _TOOL_CALL_CHANNELS
         ]
 
     if tool_choice == "auto":
-        tags.extend(
+        tags.append(
             TagFormat(
-                begin=_FINAL_BEGIN.format(constrain=constrain),
+                begin=_FINAL_BEGIN.format(constrain=" <|constrain|>json"),
                 content=_ANY_CONTENT,
                 end=_END_TAG,
             )
-            for constrain in _JSON_CONSTRAINS + [""]
+        )
+        tags.append(
+            TagFormat(
+                begin=_FINAL_BEGIN.format(constrain=""),
+                content=_ANY_CONTENT,
+                end=_END_TAG,
+            )
         )
 
     return _assemble_tag(
@@ -555,22 +560,14 @@ def _adjust_output_format(
         return request
 
     if isinstance(final_content, JSONSchemaFormat):
-        content = OrFormat(
-            elements=[
-                TagFormat(
-                    begin=_FINAL_BEGIN.format(constrain=constrain),
-                    content=final_content,
-                    end=_END_TAG,
-                )
-                for constrain in _JSON_CONSTRAINS
-            ]
-        )
+        begin = _FINAL_BEGIN.format(constrain=" <|constrain|>json")
     else:
-        content = TagFormat(
-            begin=_FINAL_BEGIN.format(constrain=""), content=final_content, end=_END_TAG
-        )
+        begin = _FINAL_BEGIN.format(constrain="")
+
     structural_tag = _assemble_tag(
-        allow_analysis=True, allow_commentary=False, content=content
+        allow_analysis=True,
+        allow_commentary=False,
+        content=TagFormat(begin=begin, content=final_content, end=_END_TAG),
     )
 
     request.structured_outputs = replace(

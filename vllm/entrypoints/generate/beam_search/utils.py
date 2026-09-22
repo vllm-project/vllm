@@ -150,8 +150,7 @@ def get_beam_search_score(
     if tokens[-1] == eos_token_id:
         seq_len -= 1
 
-    # An aborted beam may contain only an EOS prompt token.
-    return cumulative_logprob / (max(seq_len, 1) ** length_penalty)
+    return cumulative_logprob / (seq_len**length_penalty)
 
 
 def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):

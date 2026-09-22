@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mock-based unit tests for ObjectStoreSecondaryTierManager.
+"""
+Mock-based unit tests for ObjectStoreSecondaryTierManager.
 
 These tests replace the NIXL backend with an in-memory mock so they run
 without S3 credentials or a live object store. They verify the manager's
@@ -73,8 +74,6 @@ def _make_offloading_config(
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
-            data_parallel_size=1,
-            data_parallel_rank_local=None,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
@@ -105,14 +104,14 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    chunk_ids: list[int] | None = None,
+    block_ids: list[int] | None = None,
 ) -> TransferJob:
-    if chunk_ids is None:
-        chunk_ids = list(range(len(keys)))
+    if block_ids is None:
+        block_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        chunk_ids=np.array(chunk_ids, dtype=np.int32),
+        block_ids=np.array(block_ids, dtype=np.int64),
         is_promotion=False,
         req_context=_CTX,
     )
@@ -540,7 +539,7 @@ class TestMockObjTierFailures:
         mmap_region = MagicMock()
         mmap_region.create_kv_memoryview.return_value = primary_kv_view
         primary_tier = CPUPrimaryTierOffloadingManager(
-            num_chunks=num_blocks, mmap_region=mmap_region
+            num_blocks=num_blocks, mmap_region=mmap_region
         )
         obj_tier, agent = _make_tier(
             num_blocks=num_blocks, primary_kv_view=primary_kv_view

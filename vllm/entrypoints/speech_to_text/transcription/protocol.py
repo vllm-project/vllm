@@ -13,8 +13,11 @@ from pydantic import (
 )
 
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.entrypoints.generate.base.protocol import DeltaMessage
-from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    OpenAIBaseModel,
+    UsageInfo,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import (
@@ -282,8 +285,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_transcription_request(cls, data):
-        if not isinstance(data, dict):
-            return data
         if isinstance(data.get("file"), str):
             raise HTTPException(
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,

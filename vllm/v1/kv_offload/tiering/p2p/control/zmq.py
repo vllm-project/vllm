@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ZMQ-based transport layer for P2P KV cache sharing.
+"""
+ZMQ-based transport layer for P2P KV cache sharing.
 
 Provides ZmqConnection (per-peer messaging) and ZmqTransport (connection
 management). Message-content agnostic.

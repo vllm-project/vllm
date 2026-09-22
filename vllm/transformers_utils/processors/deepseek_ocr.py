@@ -234,7 +234,9 @@ class DeepseekOCRProcessor(ProcessorMixin):
         images: list[Image.Image],
         crop_mode: bool = CROP_MODE,
     ):
-        """Args:
+        """
+
+        Args:
             prompt (str): the formatted prompt;
             images (List[ImageType]): the list of images;
             crop_mode (bool): if True, then crop the image;
@@ -246,10 +248,11 @@ class DeepseekOCRProcessor(ProcessorMixin):
                 - pixel_values (torch.FloatTensor): [n_patches, 3, H, W]
                 - image_id (int): the id of the image token
                 - num_image_tokens (List[int]): the number of image tokens
-
         """
-        if prompt is None or images is None:
-            raise ValueError("prompt and images must be used at the same time.")
+
+        assert prompt is not None and images is not None, (
+            "prompt and images must be used at the same time."
+        )
 
         sft_format = prompt
 
@@ -307,13 +310,8 @@ class DeepseekOCRProcessor(ProcessorMixin):
         cropping: bool = True,
     ):
         """Tokenize text with <image> tags."""
-        num_image_tags = conversation.count(self.image_token)
-        if num_image_tags != len(images):
-            raise ValueError(
-                f"Number of {self.image_token!r} tokens in prompt "
-                f"({num_image_tags}) does not match number of images "
-                f"({len(images)})."
-            )
+
+        assert conversation.count(self.image_token) == len(images)
         text_splits = conversation.split(self.image_token)
         images_list, images_crop_list, images_seq_mask, images_spatial_crop = (
             [],

@@ -65,7 +65,9 @@ async def get_prefiller_info(prefill_clients: list, ready: asyncio.Event):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager to handle startup and shutdown events."""
+    """
+    Lifespan context manager to handle startup and shutdown events.
+    """
     # Startup: Initialize client pools for prefiller and decoder services
     app.state.prefill_clients = []
     app.state.decode_clients = []
@@ -178,12 +180,10 @@ def _parse_prefill_urls(prefill_list):
     """Parse prefill URLs from --prefill arguments.
 
     Format: --prefill URL [BOOTSTRAP_PORT]
-
     Example:
         --prefill http://prefill1:8080 9000  # With bootstrap port
         --prefill http://prefill2:8080 none  # Explicitly no bootstrap port
         --prefill http://prefill3:8080       # Defaults to no bootstrap port
-
     """
     if not prefill_list:
         return []
@@ -228,7 +228,8 @@ def _parse_decode_urls(decode_list):
 
 
 def get_next_client(app, service_type: str):
-    """Get the next client in round-robin fashion.
+    """
+    Get the next client in round-robin fashion.
 
     Args:
         app: The FastAPI app instance
@@ -236,7 +237,6 @@ def get_next_client(app, service_type: str):
 
     Returns:
         The next client to use
-
     """
     if service_type == "prefill":
         return next(app.state.prefill_iterator)
@@ -250,7 +250,9 @@ def get_next_client(app, service_type: str):
 async def send_request_to_service(
     client_info: dict, dp_rank: int, endpoint: str, req_data: dict, request_id: str
 ):
-    """Send a request to a service using a client from the pool."""
+    """
+    Send a request to a service using a client from the pool.
+    """
     req_data = req_data.copy()
     req_data["kv_transfer_params"] = {
         "do_remote_decode": True,
@@ -286,7 +288,9 @@ async def stream_service_response(
     req_data: dict,
     request_id: str,
 ):
-    """Asynchronously stream response from a service using a client from the pool."""
+    """
+    Asynchronously stream response from a service using a client from the pool.
+    """
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,

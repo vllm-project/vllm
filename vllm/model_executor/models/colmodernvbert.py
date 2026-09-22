@@ -33,7 +33,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
 
 from .interfaces import (
@@ -154,25 +153,18 @@ class ColModernVBertDummyInputsBuilder(
 class ColModernVBertMultiModalProcessor(
     BaseMultiModalProcessor[ColModernVBertProcessingInfo],
 ):
-    def _apply_hf_processor_main(
+    def _call_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
-        hf_kwargs: Mapping[str, object],
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
-            mm_items, hf_kwargs
-        )
-
-        if not mm_data:
-            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
         tokenizer = self.info.get_tokenizer()
-        assert isinstance(tokenizer, HfTokenizer)
         text_encoding = tokenizer(
-            prompt_text,
+            prompt,
             return_tensors="pt",
+            **tok_kwargs,
         )
         result = BatchFeature(data=dict(text_encoding))
 
@@ -191,10 +183,16 @@ class ColModernVBertMultiModalProcessor(
             )
             result.update(image_outputs)
 
-        processed_data = result
-        return self._finalize_hf_mm_data(
-            mm_data, hf_kwargs, passthrough_data, processed_data
-        )
+        return result
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
 
     def _get_mm_fields_config(
         self,

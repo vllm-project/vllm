@@ -36,7 +36,8 @@ def glob(
     path: str = "",
     allow_pattern: list[str] | None = None,
 ) -> list[str]:
-    """List full file names from S3 path and filter by allow pattern.
+    """
+    List full file names from S3 path and filter by allow pattern.
 
     Args:
         s3: S3 client to use.
@@ -45,7 +46,6 @@ def glob(
 
     Returns:
         list[str]: List of full S3 paths allowed by the pattern
-
     """
     if s3 is None:
         s3 = boto3.client("s3")
@@ -61,7 +61,8 @@ def list_files(
     allow_pattern: list[str] | None = None,
     ignore_pattern: list[str] | None = None,
 ) -> tuple[str, str, list[str]]:
-    """List files from S3 path and filter by pattern.
+    """
+    List files from S3 path and filter by pattern.
 
     Args:
         s3: S3 client to use.
@@ -76,7 +77,6 @@ def list_files(
               and the prefix as a dir like string
             - The third element is a list of files allowed or
               disallowed by pattern
-
     """
     parts = path.removeprefix("s3://").split("/")
     prefix = "/".join(parts[1:])

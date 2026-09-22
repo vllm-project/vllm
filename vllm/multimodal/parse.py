@@ -36,7 +36,6 @@ from .inputs import (
     VideoItem,
 )
 from .media import MediaWithBytes
-from .video import DecodedFrames
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -58,7 +57,8 @@ else:
 
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
-    """Represents data items for a modality in
+    """
+    Represents data items for a modality in
     [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
     """
 
@@ -150,7 +150,6 @@ def validate_embedding_ndim(
         tensor: The tensor to validate.
         modality: The modality name for error messages (e.g., "image", "audio").
         index: Optional index for list items, included in error messages.
-
     """
     if tensor.ndim < 2 or tensor.ndim > 3:
         idx_str = f" [{index}]" if index is not None else ""
@@ -164,7 +163,8 @@ def validate_embedding_ndim(
 class EmbeddingItems(
     ModalityDataItems[torch.Tensor | list[torch.Tensor], torch.Tensor]
 ):
-    """Base class for data items that are expressed as a batched embedding tensor,
+    """
+    Base class for data items that are expressed as a batched embedding tensor,
     or a list of embedding tensors (one per item).
     """
 
@@ -250,7 +250,8 @@ class EmbeddingItems(
 class DictEmbeddingItems(
     ModalityDataItems[Mapping[str, torch.Tensor], Mapping[str, torch.Tensor]]
 ):
-    """Base class for data items that are expressed as a dictionary of tensors.
+    """
+    Base class for data items that are expressed as a dictionary of tensors.
 
     Usually, the dictionary keys correspond to the outputs of HF processor.
     """
@@ -266,18 +267,18 @@ class DictEmbeddingItems(
         ],
         optional_fields: Set[str] = frozenset(),
     ) -> None:
-        """Args:
-        data: The dictionary of tensors for this modality.
-        modality: The modality these items belong to.
-        required_fields: Fields `data` must contain.
-        fields_factory: Builds the field config from the data.
-        optional_fields: Fields `data` may omit. Which fields these are is
-            the caller's decision -- see
-            `MultiModalDataParser.embedding_field_sets`, where a deployment
-            that receives embeddings through an EC connector makes the
-            embeddings optional. They still need a field config, since they
-            are used whenever they *are* supplied.
-
+        """
+        Args:
+            data: The dictionary of tensors for this modality.
+            modality: The modality these items belong to.
+            required_fields: Fields `data` must contain.
+            fields_factory: Builds the field config from the data.
+            optional_fields: Fields `data` may omit. Which fields these are is
+                the caller's decision -- see
+                `MultiModalDataParser.embedding_field_sets`, where a deployment
+                that receives embeddings through an EC connector makes the
+                embeddings optional. They still need a field config, since they
+                are used whenever they *are* supplied.
         """
         from transformers.feature_extraction_utils import BatchFeature
 
@@ -469,12 +470,14 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
-    """A normalized [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+    """
+    A normalized [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     such that each entry corresponds to a list.
     """
 
     def select(self, modalities: Set[str]):
-        """Construct a new `MultiModalDataItems` instance containing only the
+        """
+        Construct a new `MultiModalDataItems` instance containing only the
         selected modalities.
         """
         return MultiModalDataItems(
@@ -482,7 +485,8 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
         )
 
     def get_count(self, modality: str, *, strict: bool = True) -> int:
-        """Get the number of data items belonging to a modality.
+        """
+        Get the number of data items belonging to a modality.
 
         If `strict=False`, return `0` instead of raising [`KeyError`][]
         even if the modality is not found.
@@ -508,7 +512,8 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
         modality: str,
         typ: type[_D] | tuple[type[_D], ...],
     ) -> _D:
-        """Get the data items belonging to a modality,
+        """
+        Get the data items belonging to a modality,
         requiring that they belong to a certain type.
         """
         if modality not in self:
@@ -535,15 +540,13 @@ ModalityDataParser: TypeAlias = Callable[
 
 
 class MultiModalDataParser:
-    """Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+    """
+    Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
 
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
             items to the model's expected sampling rate.
-        audio_resample_method (str): Backend used for the resampling above.
-            Defaults to torchaudio; models with specific needs may override
-            (e.g. phi4mm uses scipy).
         target_channels (int, optional): Target number of audio channels.
             If provided, normalizes audio to this many channels (e.g., 1 for mono).
             If None, audio channels are passed through unchanged.
@@ -551,10 +554,10 @@ class MultiModalDataParser:
             embedding inputs. If provided, validates that user-supplied
             embeddings have the correct hidden size to prevent crashes
             during model inference.
-        allow_missing_mm_embeddings (bool): Whether pre-computed embedding
-            tensors may be absent from the request on a disaggregated consumer.
-            Derived by `BaseProcessingInfo.allow_missing_mm_embeddings`.
-
+        embeds_from_ec_connector (bool): Whether pre-computed embeddings may be
+            absent from the request because an encode/prefill/decode encoder
+            instance publishes them through an EC connector instead. Derived by
+            `BaseProcessingInfo.embeds_from_ec_connector`.
     """
 
     embedding_fields: Mapping[str, Mapping[str, EmbeddingFieldRole]] = {}
@@ -591,7 +594,7 @@ class MultiModalDataParser:
         """
         metadata = self.placeholder_metadata_fields(modality)
         values = set(self.embedding_fields.get(modality, {})) - metadata
-        if self.allow_missing_mm_embeddings:
+        if self.embeds_from_ec_connector:
             return metadata, values
         return metadata | values, set()
 
@@ -600,16 +603,14 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["pyav", "scipy", "soxr", "torchaudio"] = (
-            "torchaudio"
-        ),
+        audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
-        allow_missing_mm_embeddings: bool = False,
+        embeds_from_ec_connector: bool = False,
     ) -> None:
         super().__init__()
 
-        self.allow_missing_mm_embeddings = allow_missing_mm_embeddings
+        self.embeds_from_ec_connector = embeds_from_ec_connector
 
         self.audio_resampler = AudioResampler(
             target_sr=target_sr,
@@ -648,7 +649,7 @@ class MultiModalDataParser:
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any] | None]:
+    ) -> tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any] | None]:
         if isinstance(video, MediaWithBytes):
             new_video, metadata = self._get_video_with_metadata(video.media)
             return MediaWithBytes(new_video, video.original_bytes), metadata
@@ -656,11 +657,10 @@ class MultiModalDataParser:
             return video
         if isinstance(video, list):
             return np.array(video), None
-        if isinstance(video, (np.ndarray, torch.Tensor)):
-            # Tensors pass through untouched: HF video processors accept them
-            # directly, and device tensors (e.g. NVDEC-decoded frames) must
-            # stay on-device to avoid a D2H round-trip.
+        if isinstance(video, np.ndarray):
             return video, None
+        if isinstance(video, torch.Tensor):
+            return video.numpy(), None
 
         assert_never(video)
 
@@ -674,7 +674,7 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return AudioEmbeddingItems(data, self.expected_hidden_size)
 
-        data_items: list[AudioItem | None]
+        data_items: list[AudioItem]
         if (
             (is_list_of(data, float) and len(data) > 0)
             or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1)
@@ -686,13 +686,8 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_audios = list[np.ndarray | None]()
+        new_audios = list[np.ndarray]()
         for data_item in data_items:
-            # Requests can omit audio samples when reusing a cached UUID.
-            if data_item is None:
-                new_audios.append(None)
-                continue
-
             audio, orig_sr = self._get_audio_with_sr(data_item)
             if orig_sr is None:
                 new_audio = audio
@@ -747,14 +742,8 @@ class MultiModalDataParser:
             return VideoEmbeddingItems(data, self.expected_hidden_size)
 
         data_items: list[VideoItem]
-        if (
-            (is_list_of(data, PILImage.Image) and len(data) > 0)
-            or (
-                is_list_of(data, (np.ndarray, torch.Tensor), check="all")
-                and len(data) > 0
-                and all(item.ndim == 3 for item in data)
-            )
-            or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4)
+        if (is_list_of(data, PILImage.Image) and len(data) > 0) or (
+            isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4
         ):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
@@ -765,19 +754,12 @@ class MultiModalDataParser:
             data_items = data  # type: ignore[assignment]
 
         new_videos = list[
-            DecodedFrames
-            | MediaWithBytes[DecodedFrames]
-            | tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any]]
-            | None
+            np.ndarray
+            | MediaWithBytes[np.ndarray]
+            | tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any]]
         ]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:
-            # Allow None video items, valid requests can contain empty URLs
-            # if they use multi-modal uuids.
-            if data_item is None:
-                new_videos.append(None)
-                metadata_lst.append(None)
-                continue
             video, metadata = self._get_video_with_metadata(data_item)
             if self.video_needs_metadata:
                 if metadata is None:

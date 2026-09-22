@@ -106,7 +106,8 @@ direct_register_custom_op(
 
 
 class QkNormRopeKvCachePattern:
-    """Match the unfused sequence:
+    """
+    Match the unfused sequence:
       q, k, v = split(qkv, ...)
       q = rms_norm(q.view(heads), q_weight).view(flat)
       k = rms_norm(k.view(heads), k_weight).view(flat)
@@ -412,7 +413,8 @@ class QkNormRopeKvCachePattern:
 
 
 class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
-    """Fuse QK-norm + RoPE + KV cache update into a single AITER HIP kernel.
+    """
+    Fuse QK-norm + RoPE + KV cache update into a single AITER HIP kernel.
 
     Supersedes both QKNormRoPEFusionPass and RopeKVCacheFusionPass for
     attention layers that support the combined operation, eliminating two

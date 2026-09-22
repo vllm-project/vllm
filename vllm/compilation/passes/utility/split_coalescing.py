@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Coalesce duplicate ``split_with_sizes`` nodes that operate on the same
+"""
+Coalesce duplicate ``split_with_sizes`` nodes that operate on the same
 input tensor with the same split sizes.
 
 On certain hardware/dtype combinations (e.g. B200 + FP8) the Inductor
@@ -9,10 +10,9 @@ that CSE fails to merge. This pass detects and replaces the duplicates
 so that downstream pattern-matching passes (e.g. QK-Norm+RoPE fusion)
 see a single split node with all users attached.
 
-See Also:
+See also:
   - vLLM  #33295  (original issue)
   - PyTorch #174472 (upstream CSE gap)
-
 """
 
 import operator

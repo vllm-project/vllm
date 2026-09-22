@@ -221,21 +221,15 @@ class MistralModel(LlamaModel):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         t_cond: torch.Tensor | None = None,
-        **extra_layer_kwargs: object,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         return super().forward(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds,
-            t_cond=t_cond,
-            **extra_layer_kwargs,
+            input_ids, positions, intermediate_tensors, inputs_embeds, t_cond=t_cond
         )
 
 
 class MistralForCausalLM(LlamaForCausalLM):
     # Mistral: We don't support LoRA on the embedding layers.
-    embedding_modules = {}
+    embedding_modules: dict[str, str] = {}
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
@@ -283,7 +277,10 @@ class MistralForCausalLM(LlamaForCausalLM):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
         return loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights

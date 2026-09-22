@@ -58,9 +58,7 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
 
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        config = speculative_config.draft_model_config.hf_config.text_config
+        config = vllm_config.speculative_config.draft_model_config.hf_config.text_config
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -86,8 +84,7 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        token_positions = positions[0] if positions.ndim == 2 else positions
-        inputs_embeds.masked_fill_((token_positions == 0).unsqueeze(-1), 0)
+        inputs_embeds[positions[0] == 0] = 0
 
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
@@ -147,7 +144,7 @@ class GlmOcrMTP(nn.Module, SupportsPP):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(  # type: ignore[override]
+    def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -198,10 +195,9 @@ class GlmOcrMTP(nn.Module, SupportsPP):
 
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale or zero point.
-                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped_name is None:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
                     continue
-                name = remapped_name
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -246,7 +242,8 @@ class GlmOcrMTP(nn.Module, SupportsPP):
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """Rewrite the weight name to match the format of the original model.
+        """
+        Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """

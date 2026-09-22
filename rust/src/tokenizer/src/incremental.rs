@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::mem::take;
+
 use crate::{Result, Tokenizer};
-
-mod attribution;
-
-use attribution::AttributedTextBuffer;
-pub use attribution::{DecodedText, TokenAnchor, TokenAttribution};
 
 /// Stateful incremental decoder that emits text chunks one token at a time.
 pub trait IncrementalDecoder: Send {
@@ -15,16 +12,13 @@ pub trait IncrementalDecoder: Send {
     fn push_token(&mut self, token_id: u32) -> Result<usize>;
 
     /// Consume any text which is currently ready.
-    fn next_chunk(&mut self) -> Option<DecodedText>;
+    fn next_chunk(&mut self) -> Option<String>;
 
     /// Flush any remaining buffered text that has not yet been emitted.
     ///
     /// Called after the final generated token to force out buffered/incomplete
     /// fragments.
-    fn flush(
-        &mut self,
-        truncate_output_to: Option<usize>,
-    ) -> Result<(Option<DecodedText>, DecodedText)>;
+    fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)>;
 
     /// Return cumulative decoded text so far.
     fn output(&self) -> &str;
@@ -42,7 +36,8 @@ pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
     prefix: String,
     prefix_index: usize,
     prefix_seeded: bool,
-    decoded: AttributedTextBuffer,
+    cumulative_output: String,
+    output_index: usize,
 }
 
 impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
@@ -60,7 +55,8 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
             prefix: String::new(),
             prefix_index: 0,
             prefix_seeded: prompt_token_ids.is_empty(),
-            decoded: AttributedTextBuffer::default(),
+            cumulative_output: String::new(),
+            output_index: 0,
         }
     }
 }
@@ -76,7 +72,9 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
     ///
     /// Prompt ids may come from the model vocabulary rather than the local
     /// tokenizer vocabulary. For this seeding path, ids that cannot be mapped
-    /// back to raw token text are dropped before retrying strict decode.
+    /// back to raw token text are dropped before retrying strict decode. This
+    /// tolerance is intentionally limited to prompt context; generated ids are
+    /// decoded later through the normal strict path.
     fn decode_prompt_context(&self, ids: &[u32]) -> Result<(String, Vec<u32>)> {
         match self.tokenizer.decode(ids, self.skip_special_tokens) {
             Ok(decoded) => Ok((decoded, ids.to_vec())),
@@ -136,66 +134,54 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
         self.ids.push(token_id);
         let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         let prefix_len = self.prefix.len();
-        let produced_text = string.len() > prefix_len && !string.ends_with('\u{FFFD}');
-
-        // Skipped undefined IDs leave the decoded text unchanged. Check only
-        // non-emitting steps to avoid id_to_token's lookup and String allocation
-        // on the normal path.
-        let zero_width = (self.skip_special_tokens && self.tokenizer.is_special_id(token_id))
-            || (!produced_text && self.tokenizer.id_to_token(token_id).is_none());
-        if zero_width {
-            self.decoded.record_zero_width_token(token_id);
-        } else {
-            self.decoded.record_pending_token(token_id);
-        }
-
-        if !produced_text {
+        if string.len() <= prefix_len || string.ends_with('\u{FFFD}') {
             return Ok(0);
         }
         // Ensure we split at a utf-8 char boundary.
         let new_chunk = &string[string.floor_char_boundary(prefix_len)..];
-        self.decoded.append_visible_text(new_chunk);
+        self.cumulative_output.push_str(new_chunk);
         self.ids.drain(..self.prefix_index);
         self.prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         self.prefix_index = self.ids.len();
         Ok(new_chunk.len())
     }
 
-    fn next_chunk(&mut self) -> Option<DecodedText> {
-        let cutoff = self.decoded.len().saturating_sub(self.min_bytes_to_buffer);
+    fn next_chunk(&mut self) -> Option<String> {
+        let cutoff = self.cumulative_output.len().saturating_sub(self.min_bytes_to_buffer);
         // Ensure we split at a utf-8 char boundary.
-        let cutoff = self.decoded.text().floor_char_boundary(cutoff);
-        self.decoded.take_ready(cutoff)
+        let cutoff = self.cumulative_output.floor_char_boundary(cutoff);
+        (cutoff > self.output_index).then(|| {
+            let chunk = self.cumulative_output[self.output_index..cutoff].to_string();
+            self.output_index = cutoff;
+            chunk
+        })
     }
 
-    fn flush(
-        &mut self,
-        truncate_output_to: Option<usize>,
-    ) -> Result<(Option<DecodedText>, DecodedText)> {
+    fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)> {
         // If the prefix was never seeded (no push_token was called), `ids`
         // holds only prompt context — decoding it would re-emit prompt text.
         if self.prefix_seeded && !self.ids.is_empty() {
             let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
             let prefix_len = self.prefix.len();
             // Ensure we split at a utf-8 char boundary.
-            let new_chunk = &string[string.floor_char_boundary(prefix_len)..];
-            if !new_chunk.is_empty() {
-                self.decoded.append_visible_text(new_chunk);
-            }
+            self.cumulative_output
+                .push_str(&string[string.floor_char_boundary(prefix_len)..]);
         }
-        self.decoded.resolve_pending_zero_width();
         self.ids.clear();
         self.prefix.clear();
         self.prefix_index = 0;
         self.prefix_seeded = true;
         if let Some(truncate_output_to) = truncate_output_to {
-            self.decoded.truncate(truncate_output_to);
+            self.cumulative_output.truncate(truncate_output_to);
         }
-        Ok(self.decoded.finish())
+        let last_chunk = (self.output_index < self.cumulative_output.len())
+            .then(|| self.cumulative_output[self.output_index..].to_string());
+        self.output_index = 0;
+        Ok((last_chunk, take(&mut self.cumulative_output)))
     }
 
     fn output(&self) -> &str {
-        self.decoded.text()
+        &self.cumulative_output
     }
 }
 
@@ -226,8 +212,8 @@ mod tests {
             unreachable!()
         }
 
-        fn id_to_token(&self, id: u32) -> Option<String> {
-            Some(id.to_string())
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            unreachable!()
         }
     }
 
@@ -259,13 +245,13 @@ mod tests {
         let mut decoder = backend.create_decode_stream(&[], false, 0);
 
         assert_eq!(decoder.push_token(b'o' as u32).unwrap(), 1);
-        assert_eq!(decoder.next_chunk().unwrap().text, "o");
+        assert_eq!(decoder.next_chunk().as_deref(), Some("o"));
         assert_eq!(decoder.push_token(b'k' as u32).unwrap(), 1);
-        assert_eq!(decoder.next_chunk().unwrap().text, "k");
+        assert_eq!(decoder.next_chunk().as_deref(), Some("k"));
         // All text already consumed via next_chunk
         let (last_chunk, full_text) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk, None);
-        assert_eq!(full_text.text, "ok");
+        assert_eq!(full_text, "ok");
     }
 
     #[test]
@@ -302,7 +288,6 @@ mod tests {
                     0 if !skip_special_tokens => text.push_str("<special>"),
                     0 => {}
                     1 => text.push('a'),
-                    2 => text.push('b'),
                     _ => {}
                 }
             }
@@ -315,10 +300,6 @@ mod tests {
 
         fn id_to_token(&self, _id: u32) -> Option<String> {
             unreachable!()
-        }
-
-        fn is_special_id(&self, token_id: u32) -> bool {
-            token_id == 0
         }
     }
 
@@ -412,17 +393,17 @@ mod tests {
         let mut decoder = backend.create_decode_stream(&[], false, 0);
 
         let input = b"Hello, world!";
-        let mut out = String::new();
+        let mut full = String::new();
         for &byte in input {
             decoder.push_token(byte as u32).unwrap();
             if let Some(chunk) = decoder.next_chunk() {
-                out.push_str(&chunk.text);
+                full.push_str(&chunk);
             }
         }
-        let (last_chunk, full) = decoder.flush(None).unwrap();
+        let (last_chunk, full_text) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk, None); // all consumed via next_chunk
-        assert_eq!(out, "Hello, world!");
-        assert_eq!(full.text, "Hello, world!");
+        assert_eq!(full, "Hello, world!");
+        assert_eq!(full_text, "Hello, world!");
     }
 
     /// Backend simulating non-monotonic decode where adding a token changes how
@@ -458,8 +439,8 @@ mod tests {
             unreachable!()
         }
 
-        fn id_to_token(&self, id: u32) -> Option<String> {
-            Some(id.to_string())
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            unreachable!()
         }
     }
 
@@ -489,15 +470,15 @@ mod tests {
         for &byte in input {
             decoder.push_token(byte as u32).unwrap();
             if let Some(chunk) = decoder.next_chunk() {
-                chunks.push_str(&chunk.text);
+                chunks.push_str(&chunk);
             }
         }
         // With hold_back_bytes=3, last 3 bytes ("lo!") are held back
         assert_eq!(chunks, "Hel");
         // Flush returns the rest
-        let (last_chunk, full) = decoder.flush(None).unwrap();
-        assert_eq!(last_chunk.unwrap().text, "lo!");
-        assert_eq!(full.text, "Hello!");
+        let (last_chunk, full_text) = decoder.flush(None).unwrap();
+        assert_eq!(last_chunk.as_deref(), Some("lo!"));
+        assert_eq!(full_text, "Hello!");
     }
 
     #[test]
@@ -512,14 +493,14 @@ mod tests {
         for byte in "你好A".bytes() {
             decoder.push_token(u32::from(byte)).unwrap();
             if let Some(chunk) = decoder.next_chunk() {
-                out.push_str(&chunk.text);
+                out.push_str(&chunk);
             }
         }
-        let (last_chunk, full) = decoder.flush(None).unwrap();
+        let (last_chunk, full_text) = decoder.flush(None).unwrap();
         if let Some(chunk) = last_chunk {
-            out.push_str(&chunk.text);
+            out.push_str(&chunk);
         }
-        assert_eq!(full.text, "你好A");
+        assert_eq!(full_text, "你好A");
         assert_eq!(out, "你好A");
     }
 
@@ -534,9 +515,9 @@ mod tests {
             .collect();
         let mut decoder = backend.create_decode_stream(&prompt, false, 0);
 
-        let (last_chunk, full) = decoder.flush(None).unwrap();
+        let (last_chunk, full_text) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk, None);
-        assert_eq!(full.text, "");
+        assert_eq!(full_text, "");
     }
 
     #[test]
@@ -545,8 +526,8 @@ mod tests {
         let prompt = vec![0xe4, 0xbd];
         let mut decoder = backend.create_decode_stream(&prompt, false, 0);
 
-        let (last_chunk, full) = decoder.flush(None).unwrap();
+        let (last_chunk, full_text) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk, None);
-        assert_eq!(full.text, "");
+        assert_eq!(full_text, "");
     }
 }

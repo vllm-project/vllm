@@ -15,7 +15,6 @@ from functools import lru_cache
 import torch
 import torch.nn as nn
 import transformers
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
 
 from vllm.model_executor.custom_op import PluggableLayer
 
@@ -23,7 +22,8 @@ from vllm.model_executor.custom_op import PluggableLayer
 # --8<-- [start:qwen2_decoder]
 @PluggableLayer.register("qwen2_decoder")
 class CustomQwen2Decoder(PluggableLayer):
-    """Qwen2 visual encoder
+    """
+    Qwen2 visual encoder
     non-causal attention + causal attention
     token_type_ids ：0=non-causal, 1=causal
     """
@@ -49,6 +49,7 @@ class CustomQwen2Decoder(PluggableLayer):
         super().__init__()
 
         # load
+        Qwen2Model = transformers.models.qwen2.modeling_qwen2.Qwen2Model
         Qwen2Config = transformers.Qwen2Config
 
         # config
@@ -69,12 +70,12 @@ class CustomQwen2Decoder(PluggableLayer):
         )
 
         #
-        self.model = self._create_custom_model(config)
+        self.model = self._create_custom_model(Qwen2Model, config)
 
         del self.model.embed_tokens
 
-    def _create_custom_model(self, config):
-        """Qwen2Model."""
+    def _create_custom_model(self, Qwen2Model, config):
+        """Qwen2Model"""
 
         class CustomQwen2ModelInner(Qwen2Model):
             def forward(
@@ -193,11 +194,11 @@ class CustomQwen2Decoder(PluggableLayer):
         attention_mask: torch.Tensor = None,
         **kwargs,
     ):
-        """Args:
-        inputs_embeds: [batch_size, seq_len, hidden_dim]
-        token_type_ids: [batch_size, seq_len], 0=non-causal, 1=causal
-        attention_mask: [batch_size, seq_len], optional
-
+        """
+        Args:
+            inputs_embeds: [batch_size, seq_len, hidden_dim]
+            token_type_ids: [batch_size, seq_len], 0=non-causal, 1=causal
+            attention_mask: [batch_size, seq_len], optional
         """
         return self.model(
             inputs_embeds=inputs_embeds,
@@ -208,7 +209,8 @@ class CustomQwen2Decoder(PluggableLayer):
 
 
 class Qwen2Decoder2Encoder(nn.Module):
-    """Decoder based on Multilingual BART
+    """
+    Decoder based on Multilingual BART
     Set the initial weights and configuration with a pretrained multilingual BART model,
     and modify the detailed configurations as a Nougat decoder
     """

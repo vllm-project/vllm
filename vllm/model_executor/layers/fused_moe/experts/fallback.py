@@ -30,7 +30,8 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         type[mk.FusedMoEExpertsModular],
         type[mk.FusedMoEExpertsModular],
     ]:
-        """Get the cls for the experts and fallback experts.
+        """
+        Get the cls for the experts and fallback experts.
 
         Subclasses should implement this method, so that
         we have a consistent way to call the _supports_*

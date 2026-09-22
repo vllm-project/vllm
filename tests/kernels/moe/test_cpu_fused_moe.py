@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 
 import pytest
 import torch
@@ -24,10 +25,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     ArmCPUUnquantizedExperts,
     CPUUnquantizedExperts,
-    PowerCPUUnquantizedExperts,
     X86CPUUnquantizedExperts,
+    select_experts,
 )
-from vllm.model_executor.layers.fused_moe.router.cpu_router import _softmax_topk
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -48,12 +48,13 @@ ACT = [
 ]
 USE_BIAS = [False, True]
 ISA = ["vec"]
-if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+if (
+    current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+    and sys.platform != "darwin"
+):
     ISA.append("neon")
 if torch.cpu._is_amx_tile_supported():
     ISA.append("amx")
-if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
-    ISA.append("vsx")
 
 DTYPE = [torch.bfloat16]
 
@@ -284,9 +285,7 @@ def test_cpu_fused_moe(
 
     packed_w13 = cpu_prepack_moe_weight(w13, isa)
     packed_w2 = cpu_prepack_moe_weight(w2, isa)
-    output = torch.empty_like(input)
-    cpu_fused_moe(
-        output,
+    output = cpu_fused_moe(
         input,
         packed_w13,
         packed_w2,
@@ -370,9 +369,7 @@ def test_cpu_fused_moe_int8(
     )
     packed_w13 = cpu_prepack_moe_weight_int8(w13, isa)
     packed_w2 = cpu_prepack_moe_weight_int8(w2, isa)
-    output = torch.empty_like(input)
-    cpu_fused_moe_int8(
-        output,
+    output = cpu_fused_moe_int8(
         input,
         packed_w13,
         packed_w2,
@@ -501,6 +498,7 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
 ):
     """CPU kernels handle unaligned intermediate sizes by zero-padding the
     weights before prepacking."""
+
     set_random_seed(0)
     batch_size = 64
     intermediate_size = UNALIGNED_INTERMEDIATE_DIM
@@ -524,10 +522,15 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         w2_bias = torch.randn((expert_num, hidden_size), dtype=dtype) / (
             0.5 * hidden_size**0.5
         )
-    # Route with the same helper the router uses internally, so the
-    # reference only differs from the kernel in how the experts are
-    # evaluated.
-    topk_weight, topk_ids = _softmax_topk(router_logits, topk_num, False)
+    # Route with the same helper apply() uses internally, so the reference
+    # only differs from the kernel in how the experts are evaluated.
+    topk_weight, topk_ids = select_experts(
+        hidden_states=input,
+        router_logits=router_logits,
+        top_k=topk_num,
+        use_grouped_topk=False,
+        renormalize=False,
+    )
 
     ref_output = ref_fused_moe(
         input, w13, w2, w13_bias, w2_bias, topk_weight, topk_ids, act
@@ -548,7 +551,6 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         "vec": CPUUnquantizedExperts,
         "amx": X86CPUUnquantizedExperts,
         "neon": ArmCPUUnquantizedExperts,
-        "vsx": PowerCPUUnquantizedExperts,
     }[isa]
     supported, reason = experts_cls.is_supported_config(
         experts_cls,
@@ -573,22 +575,15 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
     assert experts.isa == isa
     experts.process_weights_after_loading(layer)
 
-    output = torch.empty_like(input)
-    experts.apply(
-        output=output,
+    output = experts.apply(
         hidden_states=input,
         w1=layer.w13_weight,
         w2=layer.w2_weight,
-        topk_weights=topk_weight,
-        topk_ids=topk_ids,
+        router_logits=router_logits,
         activation=act,
         global_num_experts=expert_num,
         expert_map=None,
         a1q_scale=None,
-        a2_scale=None,
-        workspace13=torch.empty(0),
-        workspace2=torch.empty(0),
-        expert_tokens_meta=None,
         apply_router_weight_on_input=False,
     )
 

@@ -1,7 +1,6 @@
 group: Hardware
 steps:
   - label: "GH200 Test"
-    key: gh200-test
     soft_fail: true
     device: gh200
     no_plugin: true

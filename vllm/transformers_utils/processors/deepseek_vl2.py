@@ -186,7 +186,9 @@ class DeepseekVLV2Processor(ProcessorMixin):
         inference_mode: bool = True,
         **kwargs: Any,
     ):
-        """Args:
+        """
+
+        Args:
             prompt (str): the formatted prompt;
             images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
@@ -199,10 +201,11 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - pixel_values (torch.FloatTensor): [n_patches, 3, H, W]
                 - image_id (int): the id of the image token
                 - num_image_tokens (list[int]): the number of image tokens
-
         """
-        if prompt is None or images is None:
-            raise ValueError("prompt and images must be used at the same time.")
+
+        assert prompt is not None and images is not None, (
+            "prompt and images must be used at the same time."
+        )
 
         sft_format = prompt
         (
@@ -274,7 +277,9 @@ class DeepseekVLV2Processor(ProcessorMixin):
         inference_mode: bool = True,
         **kwargs: Any,
     ):
-        """Args:
+        """
+
+        Args:
             text (str): the formatted prompt;
             images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
@@ -286,8 +291,8 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - images (torch.FloatTensor): [n_images, 3, H, W]
                 - image_id (int): the id of the image token
                 - num_image_tokens (list[int]): the number of image tokens
-
         """
+
         prepare = self.process_one(
             prompt=text,
             images=images,
@@ -305,13 +310,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         cropping: bool = True,
     ):
         """Tokenize text with <image> tags."""
-        num_image_tags = conversation.count(self.image_token)
-        if num_image_tags != len(images):
-            raise ValueError(
-                f"Number of {self.image_token!r} tokens in prompt "
-                f"({num_image_tags}) does not match number of images "
-                f"({len(images)})."
-            )
+        assert conversation.count(self.image_token) == len(images)
         text_splits = conversation.split(self.image_token)
         images_list, images_seq_mask, images_spatial_crop = [], [], []
         num_image_tokens = []

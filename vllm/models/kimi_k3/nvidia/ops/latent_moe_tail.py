@@ -9,20 +9,19 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed import get_tp_group
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.warmup.cutedsl_warmup import (
     CuTeDSLCompileUnit,
     register_cutedsl_warmup_provider,
 )
 
-_MAX_NUM_TOKENS = 128
+_MAX_NUM_TOKENS = 16
 _SKINNY_MAX_NUM_TOKENS = 5
 _MMA_TILER_MN = (64, 32)
 _GEMM_CLUSTER_MN = (1, 8)
 _B_PRIME_STAGES = 2
-_COLLECTIVE_TOKEN_CTAS = 32
+_COLLECTIVE_TOKEN_CTAS = 8
 _LAMPORT_COPY_CTAS = 32
-_LAMPORT_COPY_THREADS = 128
+_LAMPORT_COPY_THREADS = 224
 _SUPPORTED_TP_SIZES = (8, 16)
 
 
@@ -36,7 +35,6 @@ class KimiK3LatentMoETailContract:
     latent_size: int
     max_num_tokens: int
     rms_eps: float
-    experts_per_token: int
 
 
 class KimiK3LatentMoETailOp:
@@ -55,7 +53,6 @@ class KimiK3LatentMoETailOp:
         dtype: torch.dtype,
         device: torch.device,
         rms_eps: float,
-        experts_per_token: int = 0,
     ) -> tuple[KimiK3LatentMoETailContract, dist.ProcessGroup]:
         tp = get_tp_group()
         group = tp.device_group
@@ -75,7 +72,6 @@ class KimiK3LatentMoETailOp:
                 latent_size=latent_size,
                 max_num_tokens=_MAX_NUM_TOKENS,
                 rms_eps=float(rms_eps),
-                experts_per_token=experts_per_token,
             ),
             group,
         )
@@ -89,12 +85,10 @@ class KimiK3LatentMoETailOp:
         dtype: torch.dtype,
         device: torch.device,
         rms_eps: float,
-        experts_per_token: int = 0,
     ) -> "KimiK3LatentMoETailOp":
         contract, group = cls._contract_and_group(
             hidden_size=hidden_size,
             latent_size=latent_size,
-            experts_per_token=experts_per_token,
             dtype=dtype,
             device=device,
             rms_eps=rms_eps,
@@ -146,7 +140,6 @@ class KimiK3LatentMoETailOp:
                 max_token_ctas=_COLLECTIVE_TOKEN_CTAS,
                 rms_eps=contract.rms_eps,
                 fp32_internal=False,
-                top_k=contract.experts_per_token,
             )
             self._up_projection = AdaptiveUpProjectionKernel(
                 group=group,
@@ -198,7 +191,7 @@ class KimiK3LatentMoETailOp:
 
     def __call__(
         self,
-        routed_output: torch.Tensor | UnfinalizedMoEOutput,
+        routed_output: torch.Tensor,
         shared_output: torch.Tensor,
         rms_weight: torch.Tensor,
         up_weight: torch.Tensor,
@@ -209,12 +202,7 @@ class KimiK3LatentMoETailOp:
             rms_weight,
             up_weight,
         )
-        num_tokens = (
-            routed_output.expanded_idx_to_permuted_idx.shape[0]
-            if isinstance(routed_output, UnfinalizedMoEOutput)
-            else routed_output.shape[0]
-        )
-        self._up_projection.ensure_compiled(num_tokens)
+        self._up_projection.ensure_compiled(routed_output.shape[0])
         latent, shared_shard = self._collective(
             routed_output,
             shared_output,
@@ -233,27 +221,24 @@ class KimiK3LatentMoETailOp:
         )
         return self._lamport_copy(
             mailbox,
-            m=num_tokens,
+            m=routed_output.shape[0],
         ).squeeze(0)
 
     def _validate_inputs(
         self,
-        routed_output: torch.Tensor | UnfinalizedMoEOutput,
+        routed_output: torch.Tensor,
         shared_output: torch.Tensor,
         rms_weight: torch.Tensor,
         up_weight: torch.Tensor,
     ) -> None:
         contract = self.contract
-        if isinstance(routed_output, UnfinalizedMoEOutput):
-            num_tokens = routed_output.expanded_idx_to_permuted_idx.shape[0]
-        else:
-            if routed_output.ndim != 2:
-                raise ValueError("routed_output must be a 2D tensor.")
-            num_tokens = routed_output.shape[0]
-            if routed_output.shape != (num_tokens, contract.latent_size):
-                raise ValueError(
-                    f"routed_output must have shape [M, {contract.latent_size}]."
-                )
+        if routed_output.ndim != 2:
+            raise ValueError("routed_output must be a 2D tensor.")
+        num_tokens = routed_output.shape[0]
+        if routed_output.shape != (num_tokens, contract.latent_size):
+            raise ValueError(
+                f"routed_output must have shape [M, {contract.latent_size}]."
+            )
         if shared_output.shape != (num_tokens, contract.hidden_size):
             raise ValueError(
                 f"shared_output must have shape [M, {contract.hidden_size}]."
@@ -271,7 +256,7 @@ class KimiK3LatentMoETailOp:
                 f"{contract.max_num_tokens} tokens."
             )
 
-        tensors = (shared_output, rms_weight, up_weight)
+        tensors = (routed_output, shared_output, rms_weight, up_weight)
         if any(tensor.device != contract.device for tensor in tensors):
             raise ValueError("All inputs must be on the contract device.")
         if any(tensor.dtype != contract.dtype for tensor in tensors):

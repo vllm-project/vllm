@@ -16,6 +16,7 @@ def is_ray_initialized():
 
 def is_in_ray_actor():
     """Check if we are in a Ray actor."""
+
     try:
         import ray
 

@@ -28,7 +28,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -36,11 +35,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
-    GateLinear,
-    MoERunner,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -59,13 +54,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 
 from .bailing_moe import BailingMoeForCausalLM
-from .interfaces import (
-    EagleModelMixin,
-    MixtureOfExperts,
-    SupportsEagle3,
-    SupportsLoRA,
-    SupportsPP,
-)
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -310,11 +299,11 @@ class SarvamMLAMoE(nn.Module):
         else:
             self.router_dtype = torch.bfloat16
 
-        self.gate = GateLinear(
+        self.gate = nn.Linear(
             self.hidden_size,
             self.num_experts,
-            out_dtype=self.router_dtype,
-            prefix=f"{prefix}.gate",
+            bias=False,
+            dtype=self.router_dtype,
         )
 
         if getattr(config, "moe_router_enable_expert_bias", True):
@@ -329,7 +318,6 @@ class SarvamMLAMoE(nn.Module):
 
         self.score_function = getattr(config, "score_function", "sigmoid")
         self.num_shared_experts = getattr(config, "num_shared_experts", 1)
-        self.shared_experts: SarvamMLAMLP | None
         if self.num_shared_experts > 0:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
                 shared_int = config.moe_shared_expert_intermediate_size
@@ -369,7 +357,12 @@ class SarvamMLAMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits = self.gate(
+            hidden_states.to(self.router_dtype)
+            if self.router_dtype is not None
+            else hidden_states
+        )
+        router_logits = router_logits.to(hidden_states.dtype)
         final_hidden = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -449,19 +442,7 @@ class SarvamMLABlock(nn.Module):
         return hidden_states, residual
 
 
-# PEP 563 stringifies annotations in this module, so the decorator cannot infer
-# these; they are the set DeepSeek-V2 infers for the same forward signature.
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": 0,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    }
-)
-class SarvamMLAModel(nn.Module, EagleModelMixin):
-    """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
-
+class SarvamMLAModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
@@ -527,18 +508,7 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        """Run this stage and optionally return its auxiliary hidden states.
-
-        Auxiliary captures are local to this stage, matching Qwen3 MoE.
-        Pipeline transport carries only hidden states and residual; EAGLE3
-        capture across pipeline stages is not supported by this model.
-
-        Returns:
-            Intermediate tensors on non-final stages. On the final stage,
-            normalized hidden states, paired with auxiliary states if captured.
-
-        """
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -551,22 +521,12 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, hidden_states, residual
-        )
-        for layer_idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer),
-            start=self.start_layer,
-        ):
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 hidden_states,
                 positions,
                 residual,
             )
-            self._maybe_add_hidden_state(
-                aux_hidden_states, layer_idx + 1, hidden_states, residual
-            )
-
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -575,9 +535,6 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
-
-        if len(aux_hidden_states) > 0:
-            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(
@@ -591,9 +548,6 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
 
 
 class SarvamMixtureOfExperts(MixtureOfExperts):
-    moe_layers: list[MoERunner]
-    moe_mlp_layers: list[SarvamMLAMoE]
-
     def extract_moe_parameters(self, example_moe: SarvamMLAMoE | None) -> None:
         if example_moe is None:
             raise RuntimeError("No SarvamMLAMoE layer found in model.layers.")
@@ -630,10 +584,14 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
             if hasattr(fused, "update_expert_map"):
                 fused.update_expert_map()
 
+    def set_eplb_state(self, eplb_state) -> None:
+        self.eplb_state = eplb_state
+        for moe in self.moe_layers:
+            if hasattr(moe, "set_eplb_state"):
+                moe.set_eplb_state(eplb_state)
 
-class SarvamMLAForCausalLM(
-    nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, SarvamMixtureOfExperts
-):
+
+class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfExperts):
     packed_modules_mapping = {
         "q_proj": ["q_proj"],
         "q_a_proj": ["q_a_proj"],
@@ -643,21 +601,9 @@ class SarvamMLAForCausalLM(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    @staticmethod
-    def _remap_config(config) -> None:
-        """Default the routing keys the released checkpoints omit."""
-        defaults = {
-            "n_group": 1,
-            "topk_group": 1,
-        }
-        for attr, default in defaults.items():
-            if getattr(config, attr, None) is None:
-                setattr(config, attr, default)
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        self._remap_config(config)
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
@@ -669,14 +615,15 @@ class SarvamMLAForCausalLM(
 
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
             if self.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
@@ -712,8 +659,7 @@ class SarvamMLAForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        """Return backbone outputs, including auxiliary states when captured."""
+    ) -> torch.Tensor | IntermediateTensors:
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -734,7 +680,10 @@ class SarvamMLAForCausalLM(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
+        )
         return loader.load_weights(weights)
 
 

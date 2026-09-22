@@ -115,7 +115,6 @@ def load_endpoint_plugins(
 
     Returns:
         Instantiated plugins that passed gating in discovery order.
-
     """
     from importlib.metadata import entry_points
 

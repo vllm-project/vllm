@@ -3,7 +3,6 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Model Runner V2 Core Tests (Intel)
-  key: model-runner-v2-core-tests-intel
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
@@ -35,7 +34,6 @@ steps:
       pytest -v -s v1/e2e/general/test_min_tokens.py'
 
 - label: Model Runner V2 Examples (Intel)
-  key: model-runner-v2-examples-intel
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
@@ -66,7 +64,6 @@ steps:
       python3 features/automatic_prefix_caching/prefix_caching_offline.py'
 
 - label: Model Runner V2 Distributed (2 GPUs)
-  key: model-runner-v2-distributed-2-gpus
   timeout_in_minutes: 50
   device: intel_gpu
   agent_tags:
@@ -93,7 +90,6 @@ steps:
       TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed\(num_gpus=2\)" -k "not ray and not True"'
 
 - label: Model Runner V2 Spec Decode
-  key: model-runner-v2-spec-decode
   timeout_in_minutes: 50
   device: intel_gpu
   agent_tags:

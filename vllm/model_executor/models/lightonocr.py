@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
+from typing import TypeVar
 
 import torch
 import torch.nn as nn
@@ -34,41 +35,56 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 
+_I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
-class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
-    def get_vision_encoder_info(
+
+class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
+    def _call_hf_processor(
         self,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
-    ) -> PixtralHFEncoderInfo:
-        # LightOnOCR prompt updates use vision_config.image_size directly;
-        # preserve that behavior rather than inheriting Mistral3's processor
-        # longest_edge override.
-        return PixtralHFEncoderInfo(self.get_hf_config())
-
-
-class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessingInfo]):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
-
-    def _postprocess_hf_mm_data(
-        self,
+        prompt: str,
         mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if not mm_data:
-            return processed_data
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+        # NOTE: LightOnOCR does not use break/end tokens, so we remove them here.
+        input_ids = processed_outputs.get("input_ids")
+        if input_ids is not None:
+            processor = self.info.get_hf_processor()
+            tokenizer = self.info.get_tokenizer()
+            vocab = tokenizer.get_vocab()
+
+            break_id = vocab.get(processor.image_break_token)
+            end_id = vocab.get(processor.image_end_token)
+
+            # create mask to remove break/end tokens
+            keep_mask = ~torch.isin(
+                input_ids,
+                torch.tensor([break_id, end_id]),
+            )
+
+            processed_outputs["input_ids"] = input_ids[keep_mask].unsqueeze(0)
+            if "attention_mask" in processed_outputs:
+                processed_outputs["attention_mask"] = processed_outputs[
+                    "attention_mask"
+                ][keep_mask].unsqueeze(0)
 
         # un-pad pixel_values per-image so caches remain independent.
-        pixel_values = processed_data.get("pixel_values")
+        pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            image_sizes = processed_data["image_sizes"]
+            image_sizes = processed_outputs["image_sizes"]
             assert len(pixel_values) == len(image_sizes)
-            processed_data["pixel_values"] = [
+            processed_outputs["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]
 
-        return processed_data
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -111,7 +127,7 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
 
 @MULTIMODAL_REGISTRY.register_processor(
     LightOnOCRMultiModalProcessor,
-    info=LightOnOCRProcessingInfo,
+    info=Mistral3ProcessingInfo,
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):

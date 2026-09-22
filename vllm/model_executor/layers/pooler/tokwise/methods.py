@@ -11,7 +11,6 @@ from vllm.config import get_current_vllm_config
 from vllm.config.pooler import TokenPoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
 TokenPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
@@ -70,7 +69,7 @@ class AllPool(TokenPoolingMethod):
             return hidden_states_lst
 
         pooling_states = pooling_metadata.pooling_states
-        finished_mask = pooling_cursor.get_finished_mask()
+        finished_mask = pooling_cursor.is_finished().tolist()
 
         # If chunked_prefill is enabled
         # 1. first store the chunked hidden_states in pooling_states.hidden_states_cache
@@ -132,7 +131,7 @@ class StepPool(AllPool):
 
                 if step_tag_id is not None:
                     idx_cpu = (token_id_cpu == step_tag_id).nonzero(as_tuple=True)[0]
-                    idx = async_tensor_h2d(idx_cpu, data.device)
+                    idx = idx_cpu.to(data.device, non_blocking=True)
                     data = data[idx]
 
                 pooled_data.append(data)

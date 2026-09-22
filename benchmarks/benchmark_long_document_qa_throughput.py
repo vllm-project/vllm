@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Offline benchmark to test the long document QA throughput.
+"""
+Offline benchmark to test the long document QA throughput.
 
 Example usage:
     # This workload samples 8 different prompts with a default input
@@ -48,14 +49,14 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def test_long_document_qa(llm=None, sampling_params=None, prompts=None):
-    """Test long document QA with the given prompts and sampling parameters.
+    """
+    Test long document QA with the given prompts and sampling parameters.
     Print the time spent in processing all the prompts.
 
     Args:
         llm: The language model used for generating responses.
         sampling_params: Sampling parameter used to generate the response.
         prompts: A list of prompt strings to be processed by the LLM.
-
     """
     start_time = time.time()
     llm.generate(prompts, sampling_params=sampling_params)
@@ -64,7 +65,8 @@ def test_long_document_qa(llm=None, sampling_params=None, prompts=None):
 
 
 def repeat_prompts(prompts, repeat_count, mode: str):
-    """Repeat each prompt in the list for a specified number of times.
+    """
+    Repeat each prompt in the list for a specified number of times.
     The order of prompts in the output list depends on the mode.
 
     Args:
@@ -82,7 +84,6 @@ def repeat_prompts(prompts, repeat_count, mode: str):
 
     Raises:
         ValueError: If an invalid mode is provided.
-
     """
     print("Repeat mode: ", mode)
     if mode == "random":

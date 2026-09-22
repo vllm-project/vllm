@@ -8,7 +8,8 @@ from vllm.config import CUDAGraphMode, VllmConfig
 
 
 class AbstractStaticGraphWrapper(Protocol):
-    """StaticGraphWrapper interface that allows platforms to wrap a callable
+    """
+    StaticGraphWrapper interface that allows platforms to wrap a callable
     to be captured as a static graph.
     """
 
@@ -19,7 +20,8 @@ class AbstractStaticGraphWrapper(Protocol):
         runtime_mode: CUDAGraphMode,
         **kwargs: Any,
     ) -> None:
-        """Initializes the StaticGraphWrapper class with graph capturing and
+        """
+        Initializes the StaticGraphWrapper class with graph capturing and
         execution-related configurations.
 
         Args:
@@ -29,16 +31,15 @@ class AbstractStaticGraphWrapper(Protocol):
                 graph runtime. See CUDAGraphMode in vllm/config.py.
                 Note that only the subset enum `NONE`, `PIECEWISE` and `FULL`
                 are used as concrete runtime mode for cudagraph dispatching.
-
         Keyword Args:
             kwargs: Additional keyword arguments for platform-specific
                 configurations.
-
         """
         raise NotImplementedError
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Executes the wrapped callable.
+        """
+        Executes the wrapped callable.
 
         If the current runtime mode in the ForwardContext matches the runtime
         mode of this instance, it replays the CUDAGraph or captures it using
@@ -52,6 +53,5 @@ class AbstractStaticGraphWrapper(Protocol):
 
         Returns:
             Any: Output of the executed callable.
-
         """
         raise NotImplementedError

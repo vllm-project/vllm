@@ -12,15 +12,8 @@ Define service name
 {{-  if .Values.serviceName }}
 {{-    .Values.serviceName | lower | trim }}
 {{-  else }}
-{{-    printf "%s-service" .Release.Name }}
+"{{ .Release.Name }}-service"
 {{-  end }}
-{{- end }}
-
-{{/*
-Define deployment name
-*/}}
-{{- define "chart.deployment-name" -}}
-{{- printf "%s-deployment-vllm" .Release.Name }}
 {{- end }}
 
 {{/*

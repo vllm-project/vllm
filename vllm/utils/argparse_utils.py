@@ -16,7 +16,7 @@ from argparse import (
     _ArgumentGroup,
 )
 from collections import defaultdict
-from typing import Any, NoReturn
+from typing import Any
 
 import regex as re
 import yaml
@@ -34,7 +34,6 @@ def human_readable_int(value: str) -> int:
     - '1k' -> 1,000
     - '1K' -> 1,024
     - '25.6k' -> 25,600
-
     """
     value = value.strip()
 
@@ -83,7 +82,6 @@ def human_readable_int_or_auto(value: str) -> int:
     - '1K' -> 1,024
     - '25.6k' -> 25,600
     - '-1' or 'auto' -> -1 (special value for auto-detection)
-
     """
     value = value.strip()
 
@@ -97,7 +95,8 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
-        """1. Sentences split across lines have their single newlines removed.
+        """
+        1. Sentences split across lines have their single newlines removed.
         2. Paragraphs and lists are split into separate lines.
         3. Each line is wrapped to the specified width (width of terminal).
         """
@@ -133,22 +132,6 @@ class FlexibleArgumentParser(ArgumentParser):
         # Pop kwarg "add_json_tip" to control whether to add the JSON tip
         self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
-        self._show_serve_task_hint = False
-
-    def error(self, message: str) -> NoReturn:
-        if (
-            (self.prog.endswith(" serve") or self._show_serve_task_hint)
-            and message.startswith("unrecognized arguments:")
-            and re.search(r"(^|\s)--task(=|\s|$)", message)
-        ):
-            message += (
-                "\n\nHint: --task is not a vllm serve option. "
-                "For embedding, reranking, or reward models, use "
-                "--runner pooling. To adapt a generative model for pooling, "
-                "also use --convert embed, --convert classify, or "
-                "--convert reward."
-            )
-        super().error(message)
 
     if sys.version_info < (3, 13):
         # Enable the deprecated kwarg for Python 3.12 and below
@@ -264,9 +247,6 @@ class FlexibleArgumentParser(ArgumentParser):
     ):
         if args is None:
             args = sys.argv[1:]
-        self._show_serve_task_hint = args[:1] == ["serve"] and any(
-            re.match(r"^--task(=.+|$)", arg) for arg in args[1:]
-        )
 
         if args and args[0] == "serve":
             # Check for --model in command line arguments first
@@ -467,7 +447,7 @@ class FlexibleArgumentParser(ArgumentParser):
         The arguments in config file will be inserted between
         the argument list.
 
-        Example:
+        example:
         ```yaml
             port: 12323
             tensor-parallel-size: 4
@@ -493,7 +473,6 @@ class FlexibleArgumentParser(ArgumentParser):
         Please note how the config args are inserted after the sub command.
         this way the order of priorities is maintained when these are args
         parsed by super().
-
         """
         assert args.count("--config") <= 1, "More than one config file specified!"
 

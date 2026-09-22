@@ -27,11 +27,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
-    maybe_convert_block_hash,
-    resolve_block_hashes,
-)
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     get_kv_cache_spec_kind,
@@ -78,8 +74,8 @@ def get_offloading_event_group_spec(
 @dataclass(slots=True)
 class _OffloadEventMetadata:
     """BlockStored payload snapshot for one OffloadKey, captured while the
-    Request is available and kept until the final matching removal event.
-    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent."""
+    Request is available and kept until the matching eviction event. ``medium``
+    is forwarded from the OffloadingEvent."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -92,7 +88,6 @@ class _OffloadEventMetadata:
     extra_keys: tuple[tuple[Any, ...] | None, ...] | None
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
-    active_residencies: set[tuple[Medium, str | None]]
 
 
 class OffloadingEventsTracker:
@@ -101,8 +96,8 @@ class OffloadingEventsTracker:
     The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
     :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
     available. Deferred and missing lookups add no state. Under the connector's
-    supported success-only transfer model, entries remain until the final
-    observed residency removal or :meth:`reset`.
+    supported success-only transfer model, entries follow primary allocations
+    until CPU removal translation or :meth:`reset`.
     """
 
     def __init__(self, config: OffloadingKVEventsConfig):
@@ -111,7 +106,7 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until final removal or reset.
+        # OffloadKey -> payload snapshot, kept until CPU removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
 
     def record_store(
@@ -131,8 +126,6 @@ class OffloadingEventsTracker:
         if group_config.sliding_window_size_in_chunks is not None:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
         self._pending_event_metadata[offload_key] = meta
 
     def record_lookup(
@@ -219,7 +212,7 @@ class OffloadingEventsTracker:
 
         lora_id = req.lora_request.adapter_id if req.lora_request is not None else None
         lora_name = req.lora_request.name if req.lora_request is not None else None
-        meta = _OffloadEventMetadata(
+        self._pending_event_metadata[offload_key] = _OffloadEventMetadata(
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
@@ -229,11 +222,7 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={(Medium.CPU, None)},
         )
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
-        self._pending_event_metadata[offload_key] = meta
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -245,7 +234,6 @@ class OffloadingEventsTracker:
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
-
         """
         for event in events:
             if event.removed:
@@ -267,26 +255,22 @@ class OffloadingEventsTracker:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
         per-block ``block_size``."""
-        hashes_per_chunk = group_config.hashes_per_chunk
-        assert hashes_per_chunk > 0
+        hbf = group_config.hashes_per_chunk
+        assert hbf > 0
         assert chunk_idx >= 0
-        tokens_per_hash = group_config.tokens_per_chunk // hashes_per_chunk
-        # Each chunk's final raw hash is its OffloadKey.
-        first_hash_idx = chunk_idx * hashes_per_chunk
-        last_hash_idx = first_hash_idx + hashes_per_chunk
+        # per-block token count (= the GPU/hash block size)
+        tokens_per_hash = group_config.tokens_per_chunk // hbf
+        # chunk c covers hash-blocks [c*hbf, (c+1)*hbf); its tail block's hash
+        # is the chunk's OffloadKey.
+        first_hash_idx = chunk_idx * hbf
+        last_hash_idx = first_hash_idx + hbf
         assert first_hash_idx >= 0
         assert last_hash_idx <= len(req.block_hashes)
-        raw_chunk_hashes = req.block_hashes[first_hash_idx:last_hash_idx]
-        chunk_hashes = resolve_block_hashes(
-            raw_chunk_hashes,
-            tokens_per_hash,
-            group_config.tokens_per_block,
-        )
-        for block_hash in chunk_hashes:
+        chunk_hashes: list[BlockHash] = []
+        for block_hash in req.block_hashes[first_hash_idx:last_hash_idx]:
             assert block_hash is not None
-        assert len(chunk_hashes) == (
-            group_config.tokens_per_chunk // group_config.tokens_per_block
-        )
+            chunk_hashes.append(block_hash)
+        assert len(chunk_hashes) == hbf
 
         if group_config.sliding_window_size_in_chunks is not None:
             # The recording methods filter these out before calling this helper.
@@ -314,13 +298,12 @@ class OffloadingEventsTracker:
             block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
-            block_size=group_config.tokens_per_block,
+            block_size=tokens_per_hash,
             lora_id=lora_id,
             lora_name=lora_name,
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={(Medium.CPU, None)},
         )
 
     def _placeholder_stored(
@@ -328,7 +311,6 @@ class OffloadingEventsTracker:
         key: OffloadKey,
         medium: Medium,
         locality: str | None,
-        ownership: str | None,
     ) -> BlockStored:
         return BlockStored(
             block_hashes=[
@@ -342,7 +324,6 @@ class OffloadingEventsTracker:
             lora_name=None,
             group_idx=get_offload_group_idx(key),
             locality=locality,
-            ownership=ownership,
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -362,13 +343,9 @@ class OffloadingEventsTracker:
                         "groups and promotions not observed as a primary-tier "
                         "hit before translation."
                     )
-                yield self._placeholder_stored(
-                    key, event.medium, locality, event.ownership
-                )
+                yield self._placeholder_stored(key, event.medium, locality)
                 continue
 
-            if event.removal_expected:
-                meta.active_residencies.add((event.medium, event.ownership))
             yield BlockStored(
                 block_hashes=list(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
@@ -392,7 +369,6 @@ class OffloadingEventsTracker:
                     meta.kv_cache_spec.kv_cache_spec_sliding_window
                 ),
                 locality=locality,
-                ownership=event.ownership,
             )
 
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -400,15 +376,12 @@ class OffloadingEventsTracker:
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
         for key in event.keys:
-            meta = self._pending_event_metadata.get(key)
+            meta = self._pending_event_metadata.pop(key, None)
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
                 )
-                meta.active_residencies.discard((event.medium, event.ownership))
-                if not meta.active_residencies:
-                    self._pending_event_metadata.pop(key)
             else:
                 if self.self_describing_enabled:
                     logger.warning_once(
@@ -429,5 +402,4 @@ class OffloadingEventsTracker:
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 group_idx=group_idx,
                 locality=locality,
-                ownership=event.ownership,
             )

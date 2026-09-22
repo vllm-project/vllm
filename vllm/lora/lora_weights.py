@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence as GenericSequence
-from dataclasses import dataclass
 
 import torch
 import torch.types
@@ -163,6 +162,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
         If LoRA is None, it signifies that the submodule does not have a LoRA.
         """
+
         first_lora = next(lora for lora in loras if lora is not None)
         assert first_lora is not None
         rank = first_lora.rank
@@ -201,9 +201,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         w1_lora_b = torch.stack(w1_lora_b_lst, dim=0)  # (num_experts,output_size,rank)
         w2_lora_b = torch.stack(w2_lora_b_lst, dim=0)
 
-        # All w1, w2, w3 have the same scaling factor. Use the per-adapter
-        # scaling (e.g. alpha/sqrt(r) for rsLoRA) instead of alpha/rank.
-        scaling = first_lora.scaling
+        # All w1, w2, w3 have the same scaling factor.
+        scaling = lora_alpha / rank
         last_scaling = scaling
 
         if is_non_gated_moe:
@@ -251,7 +250,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         assert w1_lora is not None and w2_lora is not None and w3_lora is not None
         rank = w1_lora.rank
         lora_alpha = w1_lora.lora_alpha
-        scaling = w1_lora.scaling
+        scaling = lora_alpha / rank
         return cls(
             module_name,
             rank,
@@ -281,17 +280,3 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @property
     def is_packed(self) -> bool:
         return True
-
-
-@dataclass
-class LoRAFullModuleWeights:
-    """LoRA weights for classification layers."""
-
-    module_name: str
-    weight: torch.Tensor
-    bias: torch.Tensor | None = None
-
-    def pin_memory(self) -> None:
-        self.weight = self.weight.pin_memory()
-        if self.bias is not None:
-            self.bias = self.bias.pin_memory()

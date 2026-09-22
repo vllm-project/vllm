@@ -17,7 +17,6 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -118,7 +117,6 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         """Capture CUDA graphs for centroids get_top_tokens at key sizes."""
         masked_emb = self.model.masked_embedding
         lm_head_weight = self.model._get_full_lm_head_weight()
-        capture_stream = current_stream()
 
         for size in [1, 2, 4, 8, 16, 32, 64]:
             static_input = torch.zeros(
@@ -132,7 +130,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
             torch.accelerator.synchronize()
 
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, stream=capture_stream):
+            with torch.cuda.graph(g):
                 static_output = masked_emb.get_top_tokens(
                     static_input,
                     lm_head_weight,

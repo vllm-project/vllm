@@ -7,10 +7,11 @@ mod control;
 mod convert;
 mod health;
 mod inference;
-mod media;
 
 /// Generated protobuf/gRPC types for the `vllm` package.
-pub use vllm_proto as pb;
+pub mod pb {
+    tonic::include_proto!("vllm");
+}
 
 pub(crate) use control::ControlGrpcService;
 pub use control::ControlServiceImpl;

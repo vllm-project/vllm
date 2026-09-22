@@ -539,7 +539,9 @@ def fused_kda_gate_chunk_cumsum(
         )
     B, T, H, D = raw_g.shape
     if raw_beta.shape != (B, T, H):
-        raise ValueError(f"Expected raw_beta shape {(B, T, H)}, got {raw_beta.shape}")
+        raise ValueError(
+            f"Expected raw_beta shape {(B, T, H)}, got {raw_beta.shape}"
+        )
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = cdiv(T, chunk_size) if cu_seqlens is None else len(chunk_indices)
@@ -596,7 +598,6 @@ def _chunk_kda_fwd_with_cumulative_g(
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
     safe_gate: bool = False,
-    out: torch.Tensor | None = None,
 ):
     # `g` must already be chunk-local cumulatively-summed AND scaled by
     # RCP_LN2 (so the downstream exp2-based kernels reproduce exp(g)).
@@ -641,7 +642,7 @@ def _chunk_kda_fwd_with_cumulative_g(
         g=g,
         A=Aqk,
         h=h,
-        o=v if out is None else out,
+        o=v,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -705,7 +706,6 @@ def chunk_kda_with_fused_gate_fwd(
     output_final_state: bool,
     lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
-    out: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
     chunk_indices = (
@@ -736,7 +736,6 @@ def chunk_kda_with_fused_gate_fwd(
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
         safe_gate=lower_bound is not None,
-        out=out,
     )
 
 
@@ -788,7 +787,6 @@ def chunk_kda_with_fused_gate(
     lower_bound: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    out: torch.Tensor | None = None,
     **kwargs,
 ):
     """Run chunk KDA from raw gate and beta projections."""
@@ -812,7 +810,6 @@ def chunk_kda_with_fused_gate(
         output_final_state=output_final_state,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
-        out=out,
     )
     return o, final_state
 
@@ -899,12 +896,13 @@ def fused_kda_gate(
     threshold: float = 20.0,
     lower_bound: float | None = None,
 ) -> torch.Tensor:
-    """Forward pass for KDA gate:
-    input g: [..., H*D]
-    param A: [H] or [1, 1, H, 1]
-    beta: softplus beta parameter
-    threshold: softplus threshold parameter
-    return  : [..., H, D]
+    """
+    Forward pass for KDA gate:
+      input g: [..., H*D]
+      param A: [H] or [1, 1, H, 1]
+      beta: softplus beta parameter
+      threshold: softplus threshold parameter
+      return  : [..., H, D]
     """
     orig_shape = g.shape[:-1]
 

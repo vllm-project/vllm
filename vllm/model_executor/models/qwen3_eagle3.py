@@ -288,7 +288,9 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
         if getattr(self.config, "draft_vocab_size", None) is None:
             base_vocab_size = getattr(self.config, "vocab_size", None)
             self.config.draft_vocab_size = base_vocab_size
-        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
+        target_layer_num = vllm_config.model_config.get_num_layers(
+            vllm_config.parallel_config
+        )
 
         # Store target layer count in draft config for
         # proper layer_types indexing in draft models
@@ -309,14 +311,10 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
-        target_vocab_size = vllm_config.model_config.get_vocab_size()
-        if self.config.draft_vocab_size != target_vocab_size:
-            self.draft_id_to_target_id = nn.Parameter(
-                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
-                requires_grad=False,
-            )
-        else:
-            self.draft_id_to_target_id = None
+        self.draft_id_to_target_id = nn.Parameter(
+            torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
+            requires_grad=False,
+        )
 
         self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
 
@@ -427,15 +425,18 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
                 "Please provide mask_hidden in the weights."
             )
 
-        orig_to_new_substr = {"mask_hidden": None}
+        skip_substrs = ["mask_hidden"]
         if not includes_draft_id_mapping:
-            orig_to_new_substr["draft_id_to_target_id"] = None
+            skip_substrs.append("draft_id_to_target_id")
         if not includes_embed_tokens:
-            orig_to_new_substr["embed_tokens"] = None
+            skip_substrs.append("embed_tokens")
         if not self.model.use_aux_hidden_state:
-            orig_to_new_substr["fc."] = None
+            skip_substrs.append("fc.")
         if not self.model.norm_before_fc:
-            orig_to_new_substr["input_norm."] = None
-        mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
-        loader = AutoWeightsLoader(self)
-        loader.load_weights(model_weights.items(), mapper=mapper)
+            skip_substrs.append("input_norm.")
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=None,
+            skip_substrs=skip_substrs,
+        )
+        loader.load_weights(model_weights.items())

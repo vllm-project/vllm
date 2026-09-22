@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::{DecodedText, DynTokenizer};
+use vllm_tokenizer::DynTokenizer;
 
-use super::{
-    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
-    Result,
-};
+use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
 /// Reasoning parser for Cohere Command models that use explicit START/END tags.
 pub struct CohereCmdReasoningParser {
@@ -18,12 +15,12 @@ impl CohereCmdReasoningParser {
     /// machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParserBuilder::new(
+            inner: DelimitedReasoningParser::new(
                 tokenizer,
                 "<|START_THINKING|>",
                 "<|END_THINKING|>",
-            )
-            .build()?,
+                false,
+            )?,
         })
     }
 }
@@ -37,10 +34,11 @@ impl ReasoningParser for CohereCmdReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids)
+        self.inner.initialize(prompt_token_ids);
+        Ok(())
     }
 
-    fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
+    fn push(&mut self, delta: &str) -> Result<ReasoningDelta> {
         Ok(self.inner.push(delta))
     }
 

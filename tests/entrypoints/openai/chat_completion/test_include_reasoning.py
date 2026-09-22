@@ -5,7 +5,7 @@
 
 Verifies that reasoning content is included by default and suppressed
 when ``include_reasoning=False``, for both streaming and non-streaming
-Chat Completions, while reasoning tokens remain represented in usage.
+Chat Completions.
 """
 
 import openai
@@ -45,8 +45,7 @@ async def test_include_reasoning_true_non_streaming(client: openai.AsyncOpenAI):
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=512,
-        temperature=0,
+        max_tokens=200,
         extra_body={"include_reasoning": True},
     )
 
@@ -64,8 +63,7 @@ async def test_include_reasoning_false_non_streaming(client: openai.AsyncOpenAI)
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=512,
-        temperature=0,
+        max_tokens=200,
         extra_body={"include_reasoning": False},
     )
 
@@ -80,29 +78,12 @@ async def test_include_reasoning_false_non_streaming(client: openai.AsyncOpenAI)
 
 
 @pytest.mark.asyncio
-async def test_reasoning_tokens_in_usage(client: openai.AsyncOpenAI):
-    """Hidden reasoning still contributes to terminal usage details."""
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES,
-        max_tokens=64,
-        extra_body={"include_reasoning": False},
-    )
-
-    assert response.usage is not None
-    details = response.usage.completion_tokens_details
-    assert details is not None
-    assert details.reasoning_tokens > 0
-
-
-@pytest.mark.asyncio
 async def test_include_reasoning_true_streaming(client: openai.AsyncOpenAI):
     """Default: reasoning deltas appear in streaming response."""
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=512,
-        temperature=0,
+        max_tokens=200,
         stream=True,
         extra_body={"include_reasoning": True},
     )
@@ -133,8 +114,7 @@ async def test_include_reasoning_false_streaming(client: openai.AsyncOpenAI):
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=512,
-        temperature=0,
+        max_tokens=200,
         stream=True,
         extra_body={"include_reasoning": False},
     )

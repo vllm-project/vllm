@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Comprehensive tests for UnsafeCloneEliminationPass.
+"""
+Comprehensive tests for UnsafeCloneEliminationPass.
 
 This test suite exercises all possible valid FX graph patterns involving clones:
 1. Clone with no users (dead code)

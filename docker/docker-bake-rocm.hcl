@@ -33,10 +33,6 @@ variable "CI_BASE_CONTENT_HASH" {
   default = ""
 }
 
-variable "CI_BASE_DOCKERFILE" {
-  default = "docker/Dockerfile.rocm"
-}
-
 # REMOTE_VLLM=0: use local source via Docker build context (ONBUILD COPY ./ vllm/)
 # REMOTE_VLLM=1: clone from GitHub at VLLM_BRANCH (standalone builds without local source)
 variable "REMOTE_VLLM" {
@@ -78,7 +74,7 @@ group "default" {
 }
 
 target "_common-rocm" {
-  dockerfile = CI_BASE_DOCKERFILE
+  dockerfile = "docker/Dockerfile.rocm"
   context    = "."
   args = {
     max_jobs                        = MAX_JOBS

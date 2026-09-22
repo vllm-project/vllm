@@ -19,10 +19,7 @@
 
 mod cohere_cmd;
 mod deepseek_r1;
-mod deepseek_v3;
 mod delimited;
-mod glm45;
-mod hy;
 mod kimi;
 mod minimax_m3;
 mod qwen3;
@@ -30,52 +27,42 @@ mod seed_oss;
 mod step3p5;
 
 use thiserror::Error;
-use vllm_tokenizer::{DecodedText, DynTokenizer};
+use vllm_tokenizer::DynTokenizer;
 
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
-pub use self::deepseek_v3::DeepSeekV3ReasoningParser;
-pub(crate) use self::delimited::{
-    DelimitedReasoningParser, DelimitedReasoningParserBuilder, last_reasoning_boundary,
-};
-pub use self::glm45::Glm45ReasoningParser;
-pub(crate) use self::hy::HyReasoningParser;
+pub(crate) use self::delimited::{DelimitedReasoningParser, last_reasoning_boundary};
 pub use self::kimi::KimiReasoningParser;
 pub use self::minimax_m3::MiniMaxM3ReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
 pub use self::seed_oss::SeedOssReasoningParser;
 pub use self::step3p5::Step3p5ReasoningParser;
 
-/// Nemotron V3 and Step3p5 frame all three reasoning boundaries with one newline.
-pub type NemotronV3ReasoningParser = Step3p5ReasoningParser;
-/// Step3 and DeepSeek R1 prefill a newline after the reasoning opener.
-pub type Step3ReasoningParser = DeepSeekR1ReasoningParser;
-
-/// DeepSeek V4 currently shares the DeepSeek V3 reasoning parser.
-pub type DeepSeekV4ReasoningParser = DeepSeekV3ReasoningParser;
-/// DeepSeek V4.1 uses bare `<think>...</think>` delimiters.
-pub type DeepSeekV41ReasoningParser = DeepSeekV3ReasoningParser;
-/// GLM-4.7 and GLM-5 use bare reasoning delimiters.
-pub type Glm47ReasoningParser = DeepSeekV3ReasoningParser;
-/// Kimi K2 currently shares the DeepSeek V3 reasoning parser.
+/// DeepSeek V3 currently shares the standard `<think>...</think>` parser.
+pub type DeepSeekV3ReasoningParser = Qwen3ReasoningParser;
+/// DeepSeek V4 currently shares the standard `<think>...</think>` parser.
+pub type DeepSeekV4ReasoningParser = Qwen3ReasoningParser;
+/// GLM45 currently shares the standard `<think>...</think>` parser.
+pub type Glm45ReasoningParser = Qwen3ReasoningParser;
+/// Kimi K2 currently shares the standard `<think>...</think>` parser.
 // TODO: kimi k2 may implicitly end reasoning by starting a tool call section
 // using <|tool_calls_section_begin|>, we should support that.
-pub type KimiK2ReasoningParser = DeepSeekV3ReasoningParser;
-/// MiniMax M2 currently shares the Qwen3 reasoning parser.
+pub type KimiK2ReasoningParser = Qwen3ReasoningParser;
+/// MiniMax M2 currently shares the standard `<think>...</think>` parser.
 pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
+/// Nemotron V3 currently shares the standard `<think>...</think>` parser.
+pub type NemotronV3ReasoningParser = Qwen3ReasoningParser;
+/// Step3 currently shares the standard `<think>...</think>` parser.
+pub type Step3ReasoningParser = Qwen3ReasoningParser;
 
 /// Result alias for reasoning parser operations.
 pub type Result<T> = std::result::Result<T, ReasoningError>;
 
 /// One parsed streaming delta split into reasoning and visible content.
-///
-/// Each portion carries the attributions of the generated tokens that produced
-/// it, so downstream consumers can count reasoning tokens exactly. Marker
-/// spans are dropped by the parsers, keeping marker tokens out of any count.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ReasoningDelta {
-    pub reasoning: Option<DecodedText>,
-    pub content: Option<DecodedText>,
+    pub reasoning: Option<String>,
+    pub content: Option<String>,
 }
 
 impl ReasoningDelta {
@@ -85,30 +72,24 @@ impl ReasoningDelta {
     }
 
     /// Append text to the reasoning portion, creating it on first use.
-    ///
-    /// A piece with empty text but non-empty attributions (zero-width tokens
-    /// only) is still kept: the tokens are attributed to the current state.
-    pub(crate) fn push_reasoning(&mut self, piece: DecodedText) {
-        if piece.is_empty() {
+    pub(crate) fn push_reasoning(&mut self, text: &str) {
+        if text.is_empty() {
             return;
         }
         match &mut self.reasoning {
-            Some(existing) => existing.append(piece),
-            None => self.reasoning = Some(piece),
+            Some(existing) => existing.push_str(text),
+            None => self.reasoning = Some(text.to_string()),
         }
     }
 
     /// Append text to the visible content portion, creating it on first use.
-    ///
-    /// A piece with empty text but non-empty attributions (zero-width tokens
-    /// only) is still kept: the tokens are attributed to the current state.
-    pub(crate) fn push_content(&mut self, piece: DecodedText) {
-        if piece.is_empty() {
+    pub(crate) fn push_content(&mut self, text: &str) {
+        if text.is_empty() {
             return;
         }
         match &mut self.content {
-            Some(existing) => existing.append(piece),
-            None => self.content = Some(piece),
+            Some(existing) => existing.push_str(text),
+            None => self.content = Some(text.to_string()),
         }
     }
 }
@@ -136,7 +117,7 @@ pub trait ReasoningParser: Send {
     }
 
     /// Feed one decoded text delta into the parser.
-    fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta>;
+    fn push(&mut self, delta: &str) -> Result<ReasoningDelta>;
 
     /// Flush any buffered partial delimiter state at end of stream.
     fn finish(&mut self) -> Result<ReasoningDelta> {
@@ -147,8 +128,6 @@ pub trait ReasoningParser: Send {
 /// Errors produced while creating or running reasoning parsers.
 #[derive(Debug, Error)]
 pub enum ReasoningError {
-    #[error(transparent)]
-    Tokenizer(#[from] vllm_tokenizer::TokenizerError),
     #[error("tokenizer is missing reasoning delimiter token `{token}`")]
     MissingToken { token: String },
     #[error(

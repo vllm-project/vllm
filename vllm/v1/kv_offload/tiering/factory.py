@@ -71,7 +71,6 @@ class SecondaryTierFactory:
         Raises:
             ValueError: If 'type' is missing, or is neither registered nor
                 resolvable via module_path.
-
         """
         tier_type = tier_config.get("type")
         if not tier_type:
@@ -123,10 +122,4 @@ SecondaryTierFactory.register_tier(
     "obj",
     "vllm.v1.kv_offload.tiering.obj.manager",
     "ObjectStoreSecondaryTierManager",
-)
-
-SecondaryTierFactory.register_tier(
-    "kvcr",
-    "vllm.v1.kv_offload.tiering.kvcr.manager",
-    "KVCRSecondaryTierManager",
 )

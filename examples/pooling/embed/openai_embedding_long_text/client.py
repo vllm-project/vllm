@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Example script demonstrating long text embedding with chunked processing in vLLM.
+"""
+Example script demonstrating long text embedding with chunked processing in vLLM.
 
 This example shows how to use vLLM's chunked processing feature to handle text
 inputs that exceed the model's maximum token length. The feature automatically

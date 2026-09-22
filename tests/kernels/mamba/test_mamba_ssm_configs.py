@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the JSON-based config loader added to selective_state_update.
+"""
+Unit tests for the JSON-based config loader added to selective_state_update.
 
 Tests cover:
   - Flat MoE-style filename generation

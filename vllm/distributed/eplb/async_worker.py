@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The async worker that transfers experts in the background."""
+"""
+The async worker that transfers experts in the background.
+"""
 
 import threading
 from typing import TYPE_CHECKING
@@ -10,7 +12,7 @@ import torch
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
-from .eplb_utils import CpuGpuEvent, device_stream
+from .eplb_utils import CpuGpuEvent
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -24,17 +26,17 @@ def start_async_worker(
     is_profile: bool = False,
 ) -> threading.Thread:
     rank = get_eplb_group().device_group.rank()
-    device_index = state.device_index
+    device_index = state.cuda_device_index
     assert state.is_async
 
     def thread_target() -> None:
         assert device_index is not None
         torch.accelerator.set_device_index(device_index)
-        stream = torch.Stream(device=torch.accelerator.current_accelerator())
+        cuda_stream = torch.cuda.Stream(device=device_index)
         try:
             transfer_run_periodically(
                 state=state,
-                stream=stream,
+                cuda_stream=cuda_stream,
                 is_profile=is_profile,
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -49,13 +51,13 @@ def run_rebalance_experts(
     model_state: "EplbModelState",
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
-    stream: torch.Stream,
+    cuda_stream: torch.cuda.Stream,
 ) -> torch.Tensor:
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
 
     # Move the global expert load window to CPU for computation.
-    with device_stream(stream):
+    with torch.cuda.stream(cuda_stream):
         global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
     # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
@@ -73,11 +75,11 @@ def run_rebalance_experts(
 
 def transfer_run_periodically(
     state: "EplbState",
-    stream: torch.Stream,
+    cuda_stream: torch.cuda.Stream,
     is_profile: bool = False,
 ) -> None:
     while True:
-        state.rearrange_event.wait(stream=stream)
+        state.rearrange_event.wait(stream=cuda_stream)
 
         eplb_group = get_eplb_group().device_group
         eplb_cpu_group = get_eplb_group().cpu_group
@@ -87,16 +89,16 @@ def transfer_run_periodically(
         for model_state in state.model_states.values():
             layer_idx = 0
             # Set the async worker's CUDA stream on the communicator
-            model_state.communicator.set_stream(stream)
+            model_state.communicator.set_stream(cuda_stream)
             num_layers = model_state.model.num_moe_layers
 
             # Snapshot the physical_to_logical_map (synchronized with
             # rearrange_event) and copy it to CPU
-            with device_stream(stream):
+            with torch.cuda.stream(cuda_stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
             new_physical_to_logical_map = run_rebalance_experts(
-                model_state, state, physical_to_logical_map_cpu, stream
+                model_state, state, physical_to_logical_map_cpu, cuda_stream
             )
 
             # Execute one EPLB layer transfer per model forward pass. Each iteration
@@ -132,13 +134,13 @@ def transfer_run_periodically(
                     communicator=model_state.communicator,
                     ep_group=eplb_group,
                     is_profile=is_profile,
-                    stream=stream,
+                    cuda_stream=cuda_stream,
                     layer_idx=layer_idx,
                 )
 
                 # Wait until all writes to expert_buffer have finished before making the
                 # AsyncEplbLayerResult visible to the main thread.
-                stream.synchronize()
+                cuda_stream.synchronize()
 
                 # This event guarantees that expert_buffer will not be overwritten by
                 # subsequent iterations of this loop until the main thread has consumed
@@ -155,6 +157,6 @@ def transfer_run_periodically(
                 # Block this thread until the main thread and main stream
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
-                consumed_event.wait(stream=stream)
+                consumed_event.wait(stream=cuda_stream)
                 assert model_state.pending_result is None
                 layer_idx += 1

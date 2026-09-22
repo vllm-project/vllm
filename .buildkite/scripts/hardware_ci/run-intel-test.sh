@@ -22,11 +22,6 @@ fi
 export PYTHONPATH=".."
 export VLLM_DISABLE_COMPILE_CACHE=1
 
-if [[ "${BUILDKITE_PARALLEL_JOB_COUNT:-1}" -gt 1 ]]; then
-  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--num-shards=${BUILDKITE_PARALLEL_JOB_COUNT} --shard-id=${BUILDKITE_PARALLEL_JOB:-0}"
-  export PYTEST_ADDOPTS
-fi
-
 ###############################################################################
 # Helper Functions
 ###############################################################################
@@ -374,7 +369,6 @@ export HF_TOKEN ZE_AFFINITY_MASK VLLM_DISABLE_COMPILE_CACHE
     -e VLLM_DISABLE_COMPILE_CACHE \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
-    -e PYTEST_ADDOPTS \
     -e CMDS \
     --name "${container_name}" \
     "${IMAGE}" \

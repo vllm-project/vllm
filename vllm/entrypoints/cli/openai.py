@@ -46,35 +46,21 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
 
 
 def _print_chat_stream(stream, stats: bool = False) -> str:
-    output: str = ""
-    in_reasoning: bool = False
-    start: float = time.perf_counter()
+    output = ""
+    start = time.perf_counter()
     ttft: float | None = None
-    completion_tokens: int = 0
+    completion_tokens = 0
     for chunk in stream:
         if chunk.usage is not None:
             completion_tokens = chunk.usage.completion_tokens
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
-        reasoning = getattr(delta, "reasoning", None) or getattr(
-            delta, "reasoning_content", None
-        )
-        if ttft is None and (reasoning or delta.content):
-            ttft = time.perf_counter() - start
-        if reasoning:
-            if not in_reasoning:
-                print("<think>", flush=True)
-                in_reasoning = True
-            print(reasoning, end="", flush=True)
         if delta.content:
-            if in_reasoning:
-                print("\n</think>", flush=True)
-                in_reasoning = False
+            if ttft is None:
+                ttft = time.perf_counter() - start
             output += delta.content
             print(delta.content, end="", flush=True)
-    if in_reasoning:
-        print("\n</think>", end="", flush=True)
     print()
     if stats:
         _print_metrics(start, ttft, completion_tokens)
@@ -185,7 +171,7 @@ class ChatCommand(CLISubcommand):
         if stats:
             create_kwargs["stream_options"] = {"include_usage": True}
 
-        if args.quick is not None:
+        if args.quick:
             conversation.append({"role": "user", "content": args.quick})
 
             stream = client.chat.completions.create(
@@ -262,12 +248,12 @@ class CompleteCommand(CLISubcommand):
             "model": model_name,
             "stream": True,
         }
-        if args.max_tokens is not None:
+        if args.max_tokens:
             kwargs["max_tokens"] = args.max_tokens
         if stats:
             kwargs["stream_options"] = {"include_usage": True}
 
-        if args.quick is not None:
+        if args.quick:
             stream = client.completions.create(prompt=args.quick, **kwargs)
             _print_completion_stream(stream, stats)
             return

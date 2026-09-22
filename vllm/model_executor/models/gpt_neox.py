@@ -48,7 +48,6 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsPP
 from .utils import (
     AutoWeightsLoader,
-    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -197,10 +196,6 @@ class GPTNeoXLayer(nn.Module):
 
 @support_torch_compile
 class GPTNeoXModel(nn.Module):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={"attention.bias": None, "attention.masked_bias": None}
-    )
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -244,7 +239,6 @@ class GPTNeoXModel(nn.Module):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
         else:
-            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(position_ids, hidden_states)
@@ -268,10 +262,10 @@ class GPTNeoXModel(nn.Module):
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(
-            self._repack_qkv(weights), mapper=self.hf_to_vllm_mapper
+        loader = AutoWeightsLoader(
+            self, skip_substrs=["attention.bias", "attention.masked_bias"]
         )
+        return loader.load_weights(self._repack_qkv(weights))
 
 
 class GPTNeoXForCausalLM(nn.Module, SupportsPP):
@@ -291,7 +285,7 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
             prefix=maybe_prefix(prefix, "embed_out"),
         )
         if self.config.tie_word_embeddings:
-            self.embed_out = self.embed_out.tie_weights(self.gpt_neox.embed_in)
+            self.embed_out.weight = self.gpt_neox.embed_in.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.gpt_neox.make_empty_intermediate_tensors

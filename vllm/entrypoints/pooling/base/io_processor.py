@@ -13,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatTemplateConfig,
 )
-from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
@@ -213,12 +212,12 @@ class PoolingIOProcessor:
             if param.task is None:
                 param.task = pooling_task
             elif pooling_task == "plugin":
-                # `plugin` task uses io_processor.parse_data to verify inputs.
+                # `plugin` task uses io_processor.parse_request to verify inputs.
                 # We actually allow plugin to overwrite pooling_task.
                 pass
             elif param.task != pooling_task:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                raise VLLMValidationError(msg)
+                raise ValueError(msg)
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -294,7 +293,7 @@ class PoolingIOProcessor:
                 and chat_template_kwargs.get("chat_template") is not None
             )
         ):
-            raise VLLMValidationError(
+            raise ValueError(
                 "Chat template is passed with request, but "
                 "--trust-request-chat-template is not set. "
                 "Refused request with untrusted chat template."
@@ -308,7 +307,7 @@ class PoolingIOProcessor:
     ) -> Sequence[PoolingParams]:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
-                raise VLLMValidationError(
+                raise ValueError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and params ({len(params)}) must be the same."
                 )
@@ -324,7 +323,7 @@ class PoolingIOProcessor:
     ) -> Sequence[LoRARequest | None]:
         if isinstance(lora_request, Sequence):
             if len(lora_request) != num_requests:
-                raise VLLMValidationError(
+                raise ValueError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and lora_request ({len(lora_request)}) must be the same."
                 )
