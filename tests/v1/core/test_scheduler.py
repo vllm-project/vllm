@@ -586,6 +586,66 @@ def test_local_prefill_interval_never_idles_the_model():
     assert "new0" in output.num_scheduled_tokens
 
 
+@pytest.mark.parametrize("interval", [2, 3])
+def test_local_prefill_interval_defers_inflight_prefill_chunk(interval: int):
+    """The single-engine interval gates prefill WORK, not just new admissions.
+
+    A request that is already partially prefilled is held for the remainder of
+    the interval too, exactly as `throttle_prefills` does for DP. That is the
+    point of the cadence -- a held step must carry no prefill at all, or decode
+    does not get the uninterrupted stretch the interval exists to give it.
+    """
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=50,
+        enable_chunked_prefill=True,
+        prefill_schedule_interval=interval,
+    )
+
+    # A short request that finishes prefill in one step -> a running decode.
+    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["dec0"])
+    scheduler.add_request(decode_req)
+    output = scheduler.schedule()
+    _decode_one(scheduler, output, ["dec0"])
+    assert decode_req in scheduler.running and not decode_req.is_prefill_chunk
+
+    # A long request (80 tokens, budget 50) -> prefilled in chunks. That first
+    # prefill closed the interval, so walk to the next step that opens it.
+    (chunk_req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["chk0"])
+    scheduler.add_request(chunk_req)
+    for _ in range(interval - 1):
+        output = scheduler.schedule()
+        assert "chk0" not in output.num_scheduled_tokens
+        _decode_one(scheduler, output, ["dec0"])
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["chk0"] > 0
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["dec0", "chk0"],
+            req_id_to_index={"dec0": 0, "chk0": 1},
+            sampled_token_ids=[[0], []],  # no token sampled for partial prefill
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert chunk_req.is_prefill_chunk  # still mid-prefill, in running
+
+    # Held steps: the in-flight chunk is deferred along with new admissions,
+    # while the decode keeps running.
+    for _ in range(interval - 1):
+        output = scheduler.schedule()
+        assert "chk0" not in output.num_scheduled_tokens
+        assert "dec0" in output.num_scheduled_tokens
+        _decode_one(scheduler, output, ["dec0"])
+
+    # Once the interval has elapsed the chunk resumes.
+    output = scheduler.schedule()
+    assert "chk0" in output.num_scheduled_tokens
+
+
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-

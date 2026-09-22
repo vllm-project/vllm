@@ -205,7 +205,15 @@ class SchedulerConfig:
     alignment requirement, so the interval is instead measured from the last
     step that carried prefill. Either way, prefill is only deferred when at
     least one running request can decode in its place, so the interval never
-    leaves the model idle."""
+    leaves the model idle.
+
+    A deferred step carries no prefill at all, not merely no new admissions: an
+    already-admitted request that is still being prefilled in chunks is held
+    for the remainder of the interval too. That is the point of the cadence --
+    letting a chunk through would give decode the interrupted step the interval
+    exists to prevent -- but it does mean a long prompt takes up to N times as
+    many steps to finish prefilling. Size the interval against the prompt
+    lengths you serve, not just the decode benefit."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
