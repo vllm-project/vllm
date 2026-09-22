@@ -253,9 +253,7 @@ def test_rocm_aiter_topk_gating_matches_softmax_reference(
         (num_tokens, num_experts), dtype=torch.bfloat16, device="cuda"
     )
     scores = torch.softmax(gating_output.float(), dim=-1)
-    ref_weights, ref_ids = torch.topk(scores, k=topk, dim=-1)
-    if renormalize:
-        ref_weights = ref_weights / ref_weights.sum(dim=-1, keepdim=True)
+    cutoff = torch.topk(scores, k=topk, dim=-1).values[:, -1:]
 
     topk_weights = torch.empty((num_tokens, topk), dtype=torch.float32, device="cuda")
     topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device="cuda")
@@ -272,10 +270,22 @@ def test_rocm_aiter_topk_gating_matches_softmax_reference(
         "",
     )
 
-    got_w, got_ids = _sort_routing(topk_weights, topk_ids)
-    ref_w, ref_ids_sorted = _sort_routing(ref_weights, ref_ids.to(torch.int32))
-    assert torch.equal(got_ids, ref_ids_sorted)
-    torch.testing.assert_close(got_w, ref_w, atol=2e-2, rtol=2e-2)
+    # BF16 logits can tie at the top-k boundary, so a different tied expert is
+    # valid. Check selection against the cutoff and weights against the scores
+    # of the experts the kernel actually selected.
+    assert ((topk_ids >= 0) & (topk_ids < num_experts)).all()
+    sorted_ids = torch.sort(topk_ids, dim=-1).values
+    assert (sorted_ids[:, 1:] != sorted_ids[:, :-1]).all()
+    selected_scores = torch.gather(scores, 1, topk_ids.long())
+    assert (selected_scores >= cutoff).all()
+    expected_weights = selected_scores
+    if renormalize:
+        expected_weights = expected_weights / expected_weights.sum(
+            dim=-1, keepdim=True
+        )
+    torch.testing.assert_close(
+        topk_weights, expected_weights, atol=2e-2, rtol=2e-2
+    )
 
 
 def test_rocm_aiter_topk_gating_torch_compile_compatibility():
