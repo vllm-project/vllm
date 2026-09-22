@@ -1,0 +1,18 @@
+# Same checkpoint as Nemotron-3-Super-120B-A12B-NVFP4.yaml, but the static
+# ModelOpt activation scales are replaced by FlashInfer's per-token scales
+# (hf_config.nvfp4_per_token_activation). Exercises the non-gated RELU^2
+# per-token TRTLLM MoE path, including the FC2 requant of all-zero rows.
+model_name: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+accuracy_threshold: 0.93
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 2
+  --enable-expert-parallel
+  --mamba-backend flashinfer
+  --moe-backend flashinfer_trtllm
+  --hf-overrides '{"nvfp4_per_token_activation": true}'
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
