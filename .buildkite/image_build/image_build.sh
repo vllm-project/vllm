@@ -79,6 +79,17 @@ setup_buildx_builder() {
     docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 }
 
+download_ci_hcl() {
+    echo "--- :arrow_down: Downloading ci.hcl"
+    curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}"
+    echo "Downloaded to ${CI_HCL_PATH}"
+
+    if [[ ! -f "${CI_HCL_PATH}" ]]; then
+        echo "Error: ci.hcl not found at ${CI_HCL_PATH}"
+        exit 1
+    fi
+}
+
 export_kernel_symbol_map() {
     # Only when the build asked for it (nightly/post-merge). The map was
     # produced inside the csrc-build stage during the main bake; this second
@@ -110,6 +121,19 @@ check_and_skip_if_image_exists() {
         if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "Image already exists: ${IMAGE_TAG}"
             echo "Skipping build"
+            if [[ "${VLLM_KERNEL_SYMBOL_MAP:-0}" == "1" ]]; then
+                # The image is reused, but the symbol map is an artifact of
+                # this build. Bake just the export target: its layers come
+                # from the registry cache, and the map step itself reruns
+                # if the cached image was built without the arg.
+                download_ci_hcl
+                setup_buildx_builder
+                resolve_parent_commit
+                export PARENT_COMMIT
+                BUILD_TMP_DIR="$(mktemp -d)"
+                export_kernel_symbol_map || true
+                rm -rf -- "${BUILD_TMP_DIR}"
+            fi
             annotate_image_tags
             exit 0
         fi
@@ -308,14 +332,7 @@ if [[ ! -f "${VLLM_BAKE_FILE_PATH}" ]]; then
     exit 1
 fi
 
-echo "--- :arrow_down: Downloading ci.hcl"
-curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}"
-echo "Downloaded to ${CI_HCL_PATH}"
-
-if [[ ! -f "${CI_HCL_PATH}" ]]; then
-    echo "Error: ci.hcl not found at ${CI_HCL_PATH}"
-    exit 1
-fi
+download_ci_hcl
 
 setup_buildx_builder
 

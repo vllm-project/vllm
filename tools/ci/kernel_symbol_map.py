@@ -23,10 +23,12 @@ Output (gzipped JSON):
 
     {
       "version": 1,
-      "commit": "...",              # from the environment when known
+      "commit": "...",              # from --commit or the environment
       "cuda": "13.0",               # nvcc release when found
       "generated_at": "2026-09-19T...",
       "build_dirs": ["build/temp.linux-x86_64-cpython-312"],
+      "incomplete": false,          # true when any object's extraction failed
+      "errors": [],                 # [{"object", "source", "error"}, ...]
       "objects": [
         {
           "source": "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu",
@@ -36,12 +38,19 @@ Output (gzipped JSON):
           "symbols": ["_Z21fusedQKNormRopeKernelI...", ...],
           "deps": ["csrc/libtorch_stable/fused_qknorm_rope_kernel.cu",
                    "csrc/cuda_compat.h", ...]
+          # "error": "..."          # present when cuobjdump failed on it
         },
         ...
       ],
       "stats": {...},
-      "reason": "..."                # only when the map is empty
+      "reason": "..."               # only when the map is empty
     }
+
+The consumer's contract: a file is known only through objects whose
+extraction succeeded. When an object carries `error`, every file it was
+compiled from or included is unknown, and a change to such a file must fall
+back to the static rule rather than drop the steps that saw no symbol. The
+empty-map `reason` is the same contract for the whole build.
 
 Paths are relative to --source-root when the file lives inside it, otherwise
 absolute (FetchContent sources under the build directory, CUDA headers).
@@ -55,12 +64,13 @@ import datetime as dt
 import gzip
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import regex as re
 
 DEVICE_SUFFIXES = (".cu.o", ".hip.o")
 SOURCE_SUFFIXES = (".cu", ".hip", ".cpp", ".cc", ".cxx", ".c")
@@ -154,6 +164,7 @@ def parse_symbols(text: str) -> list[str]:
 
 
 def device_symbols(cuobjdump: str, obj: Path) -> tuple[list[str], str | None]:
+    """(symbols, error). An error means the object is unknown, not kernel-free."""
     try:
         r = subprocess.run(
             [cuobjdump, "-symbols", str(obj)],
@@ -236,6 +247,8 @@ def main() -> int:
         "cuda": cuda_release(nvcc),
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "build_dirs": [],
+        "incomplete": False,
+        "errors": [],
         "objects": [],
         "stats": {},
     }
@@ -268,10 +281,6 @@ def main() -> int:
         n_deps = sum(len(d) for d in all_deps.values())
         log(f"{len(jobs)} objects, {n_deps} dependency records")
 
-    errors = 0
-    n_device = 0
-    n_symbols = 0
-
     def work(job):
         bd, rel, obj = job
         deps = all_deps.get(bd, {}).get(rel, [])
@@ -281,33 +290,41 @@ def main() -> int:
         rel_deps = sorted(
             {relpath(d if os.path.isabs(d) else bd / d, source_root) for d in deps}
         )
-        return {
+        entry = {
             "source": source,
             "target": target,
             "object": rel,
             "device": device,
             "symbols": syms,
             "deps": rel_deps,
-        }, err
+        }
+        if err:
+            entry["error"] = err
+        return entry
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, a.jobs)) as ex:
-        for entry, err in ex.map(work, jobs):
-            if err:
-                errors += 1
-                if errors <= 5:
-                    log(f"cuobjdump failed on {entry['object']}: {err}")
-            if entry["device"]:
-                n_device += 1
-            n_symbols += len(entry["symbols"])
-            result["objects"].append(entry)
-    result["objects"].sort(key=lambda e: (e["source"], e["target"]))
+        result["objects"] = sorted(
+            ex.map(work, jobs), key=lambda e: (e["source"], e["target"])
+        )
+
+    # An object cuobjdump could not read is unknown, not kernel-free. Say so
+    # at the top so a consumer never has to scan for it, and name the objects
+    # so it can widen the "unknown" set to every file they touch.
+    result["errors"] = [
+        {"object": e["object"], "source": e["source"], "error": e["error"]}
+        for e in result["objects"]
+        if "error" in e
+    ]
+    result["incomplete"] = bool(result["errors"])
+    for e in result["errors"][:5]:
+        log(f"cuobjdump failed on {e['object']}: {e['error']}")
 
     result["stats"] = {
         "objects": len(jobs),
-        "device_objects": n_device,
+        "device_objects": sum(1 for e in result["objects"] if e["device"]),
         "objects_with_symbols": sum(1 for e in result["objects"] if e["symbols"]),
-        "symbols": n_symbols,
-        "cuobjdump_errors": errors,
+        "symbols": sum(len(e["symbols"]) for e in result["objects"]),
+        "cuobjdump_errors": len(result["errors"]),
         "seconds": round(time.time() - t0, 1),
     }
 
@@ -315,6 +332,11 @@ def main() -> int:
     with gzip.open(a.out, "wt", encoding="utf-8") as f:
         json.dump(result, f, separators=(",", ":"))
     note = f"; reason: {result['reason']}" if "reason" in result else ""
+    if result["incomplete"]:
+        note += (
+            f"; INCOMPLETE: {len(result['errors'])} objects unreadable, files they"
+            " touch must not be treated as kernel-free"
+        )
     log(f"wrote {a.out} ({a.out.stat().st_size // 1024} KiB): {result['stats']}{note}")
 
     # One line a human can check in the build log.
