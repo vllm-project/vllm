@@ -17,12 +17,12 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use itertools::{Either, izip};
+use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
     ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
     PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
-    VisionProcessorRegistry,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -43,18 +43,20 @@ mod input;
 mod item;
 mod preprocessed;
 mod tensor;
+mod timing;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
-use vllm_tracing::timing::{mm_request_span, mm_stage_span};
+use self::timing::MM_STAGE_TARGET;
+pub use self::timing::{mm_request_span, mm_timing_layer};
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
 pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
-    image: Option<ModalitySupport>,
-    video: Option<ModalitySupport>,
+    image: Option<VisionModalitySupport>,
+    video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
     media_connector: Arc<MediaConnector>,
     /// Maximum number of input items allowed per prompt for each modality.
@@ -131,13 +133,18 @@ impl MultimodalModelContext {
         REGISTRY.lookup(&self.metadata())
     }
 
-    /// Resolve a static vision preprocessor for one loaded model.
-    ///
-    /// The vision preprocessor serves both the image and video modalities.
-    fn resolve_vision_processor(&self) -> Option<&'static dyn VisionPreProcessor> {
-        static REGISTRY: LazyLock<VisionProcessorRegistry> =
-            LazyLock::new(VisionProcessorRegistry::with_defaults);
-        REGISTRY.find(&self.model_id, self.model_type.as_deref())
+    /// Build a vision preprocessor for one loaded model and modality.
+    fn resolve_vision_processor(
+        &self,
+        model_spec: &'static dyn ModelProcessorSpec,
+        preprocessor_config: &PreProcessorConfig,
+        modality: Modality,
+    ) -> Result<Option<Arc<dyn VisionPreProcessor>>> {
+        match model_spec.vision_processor(&self.metadata(), preprocessor_config, modality) {
+            Ok(processor) => Ok(Some(Arc::from(processor))),
+            Err(ModelRegistryError::UnsupportedModality { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Resolve an audio preprocessor for one loaded model.
@@ -146,7 +153,7 @@ impl MultimodalModelContext {
         model_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: &PreProcessorConfig,
     ) -> Option<Arc<dyn AudioPreProcessor>> {
-        model_spec.audio_processor(&self.config, preprocessor_config).map(Arc::from)
+        model_spec.audio_processor(&self.metadata(), preprocessor_config).map(Arc::from)
     }
 }
 
@@ -240,17 +247,16 @@ impl ResolvedPlaceholder {
     }
 }
 
-/// Static per-modality vision preprocessor plus its loaded config, resolved
-/// placeholder tokens, and the model's shared tensor-layout spec.
+/// Model-owned vision preprocessor plus resolved placeholder tokens and
+/// the model's shared tensor-layout spec.
 #[derive(Clone)]
-struct ModalitySupport {
+struct VisionModalitySupport {
     spec: ResolvedMultimodalSpec,
     placeholder: ResolvedPlaceholder,
-    processor: &'static dyn VisionPreProcessor,
-    config: PreProcessorConfig,
+    processor: Arc<dyn VisionPreProcessor>,
 }
 
-/// Static audio preprocessor plus the resolved model contract for its output.
+/// Model-owned audio preprocessor plus the resolved model contract for its output.
 #[derive(Clone)]
 struct AudioModalitySupport {
     spec: ResolvedMultimodalSpec,
@@ -397,7 +403,7 @@ impl MultimodalModelInfo {
             &context,
             preprocessor_config.clone(),
             video_preprocessor_config,
-        );
+        )?;
         let audio = Self::resolve_audio_lane(&context, &preprocessor_config)?;
 
         if image.is_none() && video.is_none() && audio.is_none() {
@@ -428,27 +434,19 @@ impl MultimodalModelInfo {
     ///
     /// A missing model spec or vision processor disables both lanes but is
     /// not an error: unsupported model families are logged and skipped.
+    /// Processor construction errors propagate to model loading.
     fn resolve_vision_lanes(
         context: &MultimodalModelContext,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
-    ) -> (Option<ModalitySupport>, Option<ModalitySupport>) {
+    ) -> Result<(Option<VisionModalitySupport>, Option<VisionModalitySupport>)> {
         let Some(raw_spec) = context.resolve_model_spec() else {
             warn!(
                 model_id = context.model_id,
                 model_type = context.model_type,
                 "multimodal model spec is not registered; disabling image/video support for this model"
             );
-            return (None, None);
-        };
-
-        let Some(processor) = context.resolve_vision_processor() else {
-            warn!(
-                model_id = context.model_id,
-                model_type = context.model_type,
-                "vision processor is not registered; disabling image/video support for this model"
-            );
-            return (None, None);
+            return Ok((None, None));
         };
 
         // Warn and disable the modality if the placeholder resolution fails.
@@ -466,14 +464,19 @@ impl MultimodalModelInfo {
                 }
             };
 
-        let image = resolve_placeholder(Modality::Image).map(|placeholder| ModalitySupport {
-            spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Image),
-            placeholder,
-            processor,
-            config: preprocessor_config.clone(),
-        });
+        let image = if let Some(placeholder) = resolve_placeholder(Modality::Image) {
+            context
+                .resolve_vision_processor(raw_spec, &preprocessor_config, Modality::Image)?
+                .map(|processor| VisionModalitySupport {
+                    spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Image),
+                    placeholder,
+                    processor,
+                })
+        } else {
+            None
+        };
 
-        let video = resolve_placeholder(Modality::Video).and_then(|placeholder| {
+        let video = if let Some(placeholder) = resolve_placeholder(Modality::Video) {
             // Placeholder expansion attributes markers to modalities by token
             // ID, so a marker shared with the image modality is ambiguous.
             let image_marker = image.as_ref().map(|image| image.placeholder.marker_token_id);
@@ -485,16 +488,23 @@ impl MultimodalModelInfo {
                 );
                 None
             } else {
-                Some(ModalitySupport {
-                    spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Video),
-                    placeholder,
-                    processor,
-                    config: video_preprocessor_config,
-                })
+                context
+                    .resolve_vision_processor(
+                        raw_spec,
+                        &video_preprocessor_config,
+                        Modality::Video,
+                    )?
+                    .map(|processor| VisionModalitySupport {
+                        spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Video),
+                        placeholder,
+                        processor,
+                    })
             }
-        });
+        } else {
+            None
+        };
 
-        (image, video)
+        Ok((image, video))
     }
 
     /// Resolve a spec-backed audio lane when the model advertises audio support.
@@ -760,13 +770,17 @@ impl MultimodalModelInfo {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype)
-            .instrument(mm_stage_span("preprocessor_total"))
-            .await
+        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype).await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
     /// span aggregated per request by the `vllm-tracing` timing layer.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocessor_total")
+    )]
     async fn prepare_multimodal_timed(
         &self,
         media_parts: Vec<MediaContentPart>,
@@ -775,34 +789,22 @@ impl MultimodalModelInfo {
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
-        let fetched =
-            self.fetch_media(media_parts).instrument(mm_stage_span("media_fetch")).await?;
+        let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared.push(
-                self.prepare_images(fetched.images, fetched.image_uuids, model_dtype)
-                    .instrument(mm_stage_span("preprocess_image"))
-                    .await?,
-            );
+            prepared
+                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
         }
         if !fetched.videos.is_empty() {
-            prepared.push(
-                self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype)
-                    .instrument(mm_stage_span("preprocess_video"))
-                    .await?,
-            );
+            prepared
+                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
         }
         if !fetched.audios.is_empty() {
-            prepared.push(
-                self.prepare_audios(fetched.audios, fetched.audio_uuids)
-                    .instrument(mm_stage_span("preprocess_audio"))
-                    .await?,
-            );
+            prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
         }
 
-        let mut ranges = mm_stage_span("prompt_expansion")
-            .in_scope(|| expand_prompt_token_ids(prompt_token_ids, &prepared))?;
+        let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
 
         let mut features = Vec::with_capacity(media_parts_len);
         for media in prepared {
@@ -845,6 +847,12 @@ impl MultimodalModelInfo {
 
     /// Fetch all connector-backed media parts and split them per modality,
     /// preserving their request-order UUID metadata.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "media_fetch")
+    )]
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
         for part in media_parts {

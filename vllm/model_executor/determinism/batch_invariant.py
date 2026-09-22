@@ -1104,7 +1104,10 @@ def enable_batch_invariant_mode():
 
         _fp16_block_size_n = 128
 
-    # Softmax, log_softmax, mean, and bmm are already batch-invariant on XPU
+    # Native mean can change reduction order with the row count on XPU too.
+    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
+
+    # Softmax, log_softmax, and bmm are already batch-invariant on XPU
     # (oneDNN backend produces bitwise-identical results regardless of batch
     # context). Only register these overrides on CUDA where they are needed.
     if not current_platform.is_xpu():
@@ -1113,7 +1116,6 @@ def enable_batch_invariant_mode():
         )
         _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
-        _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
         # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
         # (torch._native.ops.bmm_outer_product), so we need allow_override
         # to replace it at the dispatcher level.
