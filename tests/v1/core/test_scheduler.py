@@ -537,6 +537,77 @@ def test_cache_aware_admission_prefers_cached_prefix():
     assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
 
 
+@pytest.mark.parametrize("window", [0, 4])
+def test_cache_aware_admission_protects_resident_prefix_from_eviction(window: int):
+    """The point of the reordering, not just its ordering.
+
+    With the cache too small to hold both prompts, whichever request is
+    admitted first keeps its blocks. Arrival order puts the cold request first,
+    so only the reordering can stop it evicting the prefix the warm request
+    still needs. `window=0` is the control: same setup, reordering off.
+    """
+    # 48-token prompts at block_size 16 are 3 blocks each; 5 blocks cannot hold
+    # both, so admitting one evicts the other's cached prefix.
+    scheduler, warm, cold = _setup_cache_aware(
+        num_tokens=48,
+        num_blocks=5,
+        block_size=16,
+        cache_aware_admission_window=window,
+    )
+    cached_before = scheduler.kv_cache_manager.get_num_cached_tokens(warm)
+    assert cached_before > 0
+
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+    output = scheduler.schedule()
+    scheduled = [r.req_id for r in output.scheduled_new_reqs]
+
+    if window:
+        # The warm request goes first and is admitted against its cached
+        # prefix, so it computes fewer tokens than its prompt.
+        assert scheduled[0] == "warm"
+        assert output.num_scheduled_tokens["warm"] < warm.num_prompt_tokens
+    else:
+        # Arrival order wins: the cold request takes the blocks it needs and
+        # the warm request's resident prefix is partly evicted, so the hit it
+        # would have had shrinks and those tokens must be recomputed.
+        assert scheduled[0] == "cold"
+        assert scheduler.kv_cache_manager.get_num_cached_tokens(warm) < cached_before
+
+
+def test_cache_aware_admission_keeps_blocked_and_started_requests_in_place():
+    """Reordering is confined to plain waiting peers.
+
+    A request in a blocked status, and one that is already partially computed,
+    each keep their exact index; nothing is moved across them, and the queue
+    beyond the window is untouched. This is the property that makes this a
+    reorder among peers rather than a priority change.
+    """
+    scheduler, warm, cold = _setup_cache_aware(cache_aware_admission_window=4)
+
+    blocked, started, tail = create_requests(
+        num_requests=3, num_tokens=48, req_ids=["blocked", "started", "tail"]
+    )
+    # Enqueue everything as a plain waiting request first: a request that is
+    # already blocked on arrival is routed to `skipped_waiting` instead, and
+    # the guard under test is for one whose state changed while queued.
+    for request in (cold, blocked, started, warm, tail):
+        scheduler.add_request(request)
+    blocked.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    started.num_computed_tokens = 16
+
+    before = [r.request_id for r in scheduler.waiting]
+    assert before == ["cold", "blocked", "started", "warm", "tail"]
+
+    scheduler._reorder_waiting_by_cached_prefix()
+    after = [r.request_id for r in scheduler.waiting]
+
+    # Only `cold` and `warm` are plain waiting peers inside the 4-slot window,
+    # so only they swap. `blocked` holds index 1, `started` holds index 2, and
+    # `tail` sits beyond the window untouched.
+    assert after == ["warm", "blocked", "started", "cold", "tail"]
+
+
 def test_cache_aware_admission_does_not_look_past_the_window():
     """The window bounds how far a cached request can be promoted from, so a
     request outside it keeps its place in arrival order.
@@ -564,11 +635,45 @@ def test_cache_aware_admission_skipped_below_threshold():
     assert [r.req_id for r in output.scheduled_new_reqs] == ["cold", "warm"]
 
 
+def test_cache_aware_admission_is_safe_on_a_mamba_spec():
+    """The probe must not assume full attention.
+
+    `get_num_cached_tokens` goes through the KV cache coordinator, so a group
+    whose spec is not full attention has to be handled rather than crash. A
+    Mamba group keeps recurrent state rather than a reusable token prefix, so
+    the probe finds nothing to reuse and the reordering degrades to a no-op
+    instead of shuffling the queue on meaningless scores.
+    """
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        cache_aware_admission_window=4,
+        cache_aware_admission_threshold=0.0,
+        kv_cache_spec=MambaSpec(
+            block_size=16,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
+    )
+    assert scheduler.cache_aware_window == 4
+
+    requests = create_requests(num_requests=3, num_tokens=48, req_ids=["a", "b", "c"])
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Probing is safe, reports no reusable prefix, and leaves arrival order.
+    assert all(
+        scheduler.kv_cache_manager.get_num_cached_tokens(r) == 0 for r in requests
+    )
+    scheduler._reorder_waiting_by_cached_prefix()
+    assert [r.request_id for r in scheduler.waiting] == ["a", "b", "c"]
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
         # Reordering by queue position is meaningless in a priority heap.
-        {"policy": "priority", "enable_prefix_caching": True},
+        {"scheduling_policy": "priority", "enable_prefix_caching": True},
         # Nothing to reorder by without a prefix cache.
         {"enable_prefix_caching": False},
     ],
