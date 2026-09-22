@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -19,13 +20,13 @@ logger = init_logger(__name__)
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
     Fp8MoeBackend.DEEPGEMM,
-    Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.MARLIN,
     Fp8MoeBackend.XPU,
     # AITER FlyDSL (gfx950): auto-picked by select_mxfp8_moe_backend when
     # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
     # devices / no flydsl / EP it is skipped and native is used.
     Fp8MoeBackend.AITER_MXFP8,
+    Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.TRITON_MXFP8,
     Fp8MoeBackend.EMULATION,
 )
@@ -129,7 +130,11 @@ def select_mxfp8_moe_backend(
         return backend, _select_kernel_cls(backend, config)
 
     # Auto-select: pick the first supported backend.
-    for backend in _SUPPORTED_BACKENDS:
+    backends = list(_SUPPORTED_BACKENDS)
+    if current_platform.is_cuda() and current_platform.is_device_capability(90):
+        backends.remove(Fp8MoeBackend.HUMMING)
+        backends.insert(backends.index(Fp8MoeBackend.MARLIN), Fp8MoeBackend.HUMMING)
+    for backend in backends:
         try:
             experts_cls = _select_kernel_cls(backend, config)
         except ValueError:

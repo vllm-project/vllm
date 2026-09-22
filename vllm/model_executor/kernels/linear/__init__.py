@@ -377,8 +377,9 @@ def _resolve_backend_kernels(
     layer_desc: str,
     *,
     quantization: str,
+    compute_capability: int | None = None,
 ) -> list[type]:
-    """Apply --linear-backend filtering to one layer type's kernel list.
+    """Apply device priorities and --linear-backend filtering to a kernel list.
 
     When the requested backend has no kernel for this layer type, fall back
     to the unfiltered list (with a WARNING log) instead of failing engine
@@ -387,6 +388,22 @@ def _resolve_backend_kernels(
     layer types (e.g. NVFP4 MoE projections next to FP8 attention
     projections).
     """
+    if current_platform.is_cuda():
+        humming = next(
+            (k for k in kernels if k in _LINEAR_BACKEND_KERNEL_MAP["humming"]), None
+        )
+        marlin = next(
+            (k for k in kernels if k in _LINEAR_BACKEND_KERNEL_MAP["marlin"]), None
+        )
+        if humming is not None and marlin is not None:
+            if compute_capability is None:
+                cc = current_platform.get_device_capability()
+                compute_capability = cc.to_int() if cc is not None else None
+            if compute_capability == 90:
+                kernels = kernels.copy()
+                kernels.remove(humming)
+                kernels.insert(kernels.index(marlin), humming)
+
     linear_backend = _get_linear_backend(quantization=quantization)
     if linear_backend == "auto":
         return kernels
@@ -425,8 +442,8 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         B12xTensorFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
-        HummingFP8ScaledMMLinearKernel,
         MarlinFP8ScaledMMLinearKernel,
+        HummingFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
         AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
@@ -459,8 +476,8 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
         B12xFp8BlockScaledMMKernel,
-        HummingFP8ScaledMMLinearKernel,
         MarlinFP8ScaledMMLinearKernel,
+        HummingFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -501,11 +518,11 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         CutlassW4A8LinearKernel,
         MacheteLinearKernel,
         AllSparkLinearKernel,
-        HummingLinearKernel,
         MarlinLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
         TritonW4A16LinearKernel,
+        HummingLinearKernel,
     ],
     PlatformEnum.ROCM: [
         RDNA3W4A16LinearKernel,
@@ -530,10 +547,10 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferCutedslMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
-        HummingMxfp8LinearKernel,
         MarlinMxfp8LinearKernel,
         B12xMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
+        HummingMxfp8LinearKernel,
         FlashInferTrtllmMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
@@ -556,7 +573,6 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         CutlassNvFp4LinearKernel,
         # Weight-only: a fallback on a W4A4-capable checkpoint, not a preference.
         FlashInferCuteDslNvFp4W4A16LinearKernel,
-        HummingNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
         FlashInferTrtllmNvFp4LinearKernel,
         FlashInferCudnnNvFp4LinearKernel,
@@ -564,6 +580,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         B12xNvFp4LinearKernel,
         TorchNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
+        HummingNvFp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
@@ -582,8 +599,8 @@ _POSSIBLE_MXFP6_KERNELS: dict[PlatformEnum, list[type[MxFp6LinearKernel]]] = {
 _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferMxFp4LinearKernel,
-        HummingMxFp4LinearKernel,
         MarlinMxFp4LinearKernel,
+        HummingMxFp4LinearKernel,
         B12xMxFp4LinearKernel,
         EmulationMxfp4LinearKernel,
     ],
@@ -682,6 +699,7 @@ def choose_scaled_mm_linear_kernel(
         platform_kernels,
         "scaled-mm",
         quantization=quantization,
+        compute_capability=compute_capability,
     )
 
     for kernel in platform_kernels:
@@ -845,6 +863,7 @@ def choose_mp_linear_kernel(
         platform_kernels,
         "mixed-precision",
         quantization="mixed_precision",
+        compute_capability=compute_capability,
     )
 
     failure_reasons = []
@@ -1070,7 +1089,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
-    a16_kernels: tuple[type[NvFp4LinearKernel], ...] = (
+    a16_kernels = (
         FlashInferCuteDslNvFp4W4A16LinearKernel,
         MarlinNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
@@ -1115,14 +1134,14 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
         # Weight-only: prefer FlashInfer CuTe-DSL W4A16 on SM100/103,
-        # otherwise use the registry's Humming/Marlin fallback order.
+        # Humming then Marlin on SM90, and Marlin elsewhere.
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
-        else:
-            a16_kernels = (HummingNvFp4LinearKernel, MarlinNvFp4LinearKernel)
+        elif compute_capability != 90:
+            force_kernel = MarlinNvFp4LinearKernel
 
     if force_kernel is not None:
         if use_a16 and force_kernel not in a16_kernels:

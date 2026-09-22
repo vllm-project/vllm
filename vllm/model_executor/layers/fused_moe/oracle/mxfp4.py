@@ -345,13 +345,16 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
-        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.CPU,
         Mxfp4MoeBackend.EMULATION,
     ]
+    if current_platform.is_cuda() and current_platform.is_device_capability(90):
+        _AVAILABLE_BACKENDS.insert(
+            _AVAILABLE_BACKENDS.index(Mxfp4MoeBackend.MARLIN), Mxfp4MoeBackend.HUMMING
+        )
     return _AVAILABLE_BACKENDS
 
 
@@ -376,10 +379,13 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
-        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
     ]
+    if current_platform.is_cuda() and current_platform.is_device_capability(90):
+        _AVAILABLE_BACKENDS.insert(
+            _AVAILABLE_BACKENDS.index(Mxfp4MoeBackend.MARLIN), Mxfp4MoeBackend.HUMMING
+        )
     return _AVAILABLE_BACKENDS
 
 

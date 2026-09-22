@@ -123,16 +123,20 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
 
-    return [
+    backends = [
         # Native HIP kernel, gated on gfx1100 by _supports_current_device().
         WNA16MoEBackend.RDNA3,
         WNA16MoEBackend.FLASHINFER_TRTLLM,
-        WNA16MoEBackend.HUMMING,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
         WNA16MoEBackend.TRITON,
+        WNA16MoEBackend.HUMMING,
         WNA16MoEBackend.EMULATION,
     ]
+    if current_platform.is_cuda() and current_platform.is_device_capability(90):
+        backends.remove(WNA16MoEBackend.HUMMING)
+        backends.insert(backends.index(WNA16MoEBackend.MARLIN), WNA16MoEBackend.HUMMING)
+    return backends
 
 
 def _backend_incompatibility_reason(

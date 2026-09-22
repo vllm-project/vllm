@@ -85,8 +85,8 @@ def _get_priority_backends(
         Fp8MoeBackend.DEEPGEMM,
         Fp8MoeBackend.VLLM_CUTLASS,
         Fp8MoeBackend.TRITON,
-        Fp8MoeBackend.HUMMING,
         Fp8MoeBackend.MARLIN,
+        Fp8MoeBackend.HUMMING,
         Fp8MoeBackend.BATCHED_DEEPGEMM,
         Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
         Fp8MoeBackend.BATCHED_TRITON,
@@ -94,6 +94,12 @@ def _get_priority_backends(
         Fp8MoeBackend.CPU,
         Fp8MoeBackend.HPC,
     ]
+    if current_platform.is_cuda() and current_platform.is_device_capability(90):
+        _AVAILABLE_BACKENDS.remove(Fp8MoeBackend.HUMMING)
+        _AVAILABLE_BACKENDS.insert(
+            _AVAILABLE_BACKENDS.index(Fp8MoeBackend.MARLIN),
+            Fp8MoeBackend.HUMMING,
+        )
 
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
         backends.insert(0, backends.pop(backends.index(backend)))
