@@ -20,6 +20,7 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
@@ -103,6 +104,101 @@ def _make_speculator(
     speculator.hidden_states = torch.zeros(4, 3)
     speculator.model = _DraftModel(output)
     return speculator
+
+
+@pytest.mark.parametrize(
+    ("hybrid", "attention_free", "adaptive", "pcp", "expected"),
+    [
+        (False, False, False, None, True),
+        (True, False, False, None, False),
+        (False, True, False, None, False),
+        (False, False, True, None, False),
+        (False, False, False, object(), False),
+    ],
+)
+def test_padded_prompt_tail_draft_capability(
+    hybrid,
+    attention_free,
+    adaptive,
+    pcp,
+    expected,
+):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.draft_model_config = SimpleNamespace(
+        is_hybrid=hybrid,
+        is_attention_free=attention_free,
+    )
+    speculator.enable_adaptive_verification = adaptive
+    speculator.pcp_manager = pcp
+    assert speculator.supports_padded_prompt_tail_graph is expected
+
+
+@pytest.mark.parametrize("tail_width", [None, 4])
+def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
+    monkeypatch,
+    tail_width,
+):
+    """A tail classified as prefill must retain the target's verifier DP shape."""
+    speculator = _make_speculator(monkeypatch, torch.zeros(4, 3))
+    speculator.num_speculative_steps = 3
+    speculator.max_model_len = 8192
+    speculator.max_num_reqs = 1
+    speculator.dp_size, speculator.dp_rank = 2, 0
+    speculator.last_token_indices = speculator.current_draft_step = None
+    speculator._copy_request_inputs = lambda *args, **kwargs: None
+    monkeypatch.setattr(spec_module, "prepare_prefill_inputs", lambda *args: None)
+    batch = SimpleNamespace(
+        num_tokens=4,
+        num_tokens_after_padding=4,
+        num_reqs=1,
+        num_scheduled_tokens=torch.tensor([4]),
+        seq_lens_cpu_upper_bound=torch.tensor([4099]),
+        idx_mapping=None,
+        has_prefill=True,
+        padded_prompt_tail_query_len=tail_width,
+    )
+    sync = DPSyncState(
+        num_tokens_across_dp=torch.tensor([4, 4]),
+        uniform_token_count=4,
+        eager=False,
+        num_reqs=1,
+    )
+    manager = Mock()
+    manager.dispatch.return_value = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=4,
+        num_reqs=1,
+    )
+    speculator.prefill_cudagraph_manager = manager
+
+    class Dispatched(Exception):
+        pass
+
+    def dispatch(*args, **kwargs):
+        # Execute the real DP reuse assertions before stopping the model call.
+        desc, reused = dispatch_cg_and_sync_dp(*args, **kwargs)
+        assert reused is sync
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        raise Dispatched
+
+    monkeypatch.setattr(spec_module, "dispatch_cg_and_sync_dp", dispatch)
+    expected = Dispatched if tail_width is not None else AssertionError
+    with pytest.raises(expected):
+        speculator.propose(
+            batch,
+            {},
+            {},
+            torch.zeros(4, 3),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            dp_sync=sync,
+        )
+    assert batch.has_prefill
 
 
 @pytest.mark.parametrize(("hc_mult", "expected"), [(None, 64), (4, 256)])

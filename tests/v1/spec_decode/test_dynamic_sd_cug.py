@@ -16,9 +16,113 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu.prompt_tail import get_padded_prompt_tail_query_len
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _prompt_tail_batch(k=3):
+    output = SimpleNamespace(
+        num_scheduled_tokens={"tail": k + 1, "decode": k + 1},
+        scheduled_spec_decode_tokens={"tail": [-1] * k, "decode": list(range(k))},
+    )
+    state = SimpleNamespace(
+        has_prefill=True,
+        req_ids=["tail", "decode"],
+        num_tokens=2 * (k + 1),
+        is_prefilling_np=[True, False],
+        num_computed_prefill_tokens_np=[4095, 100],
+        prefill_len_np=[4096, 100],
+    )
+    return output, state
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 5, 8])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_padded_prompt_tail_preserves_prefill_state(k, mixed):
+    output, state = _prompt_tail_batch(k)
+    if not mixed:
+        state.req_ids = ["tail"]
+        state.num_tokens = k + 1
+        del output.num_scheduled_tokens["decode"]
+        del output.scheduled_spec_decode_tokens["decode"]
+    assert (
+        get_padded_prompt_tail_query_len(
+            output,
+            state,
+            decode_query_len=k + 1,
+            num_speculative_tokens=k,
+            supported=True,
+        )
+        == k + 1
+    )
+    assert state.has_prefill
+    assert state.is_prefilling_np[0]
+    assert state.num_computed_prefill_tokens_np[0] == 4095
+    assert output.scheduled_spec_decode_tokens["tail"] == [-1] * k
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "short_prefill",
+        "uncached",
+        "partial_drafts",
+        "missing_decode_drafts",
+        "real_drafts",
+        "ragged",
+        "trimmed",
+        "unsupported",
+        "dummy",
+        "decode",
+        "no_speculation",
+        "wrong_width",
+        "second_prefill",
+    ],
+)
+def test_padded_prompt_tail_rejects_incompatible_batches(case):
+    output, state = _prompt_tail_batch()
+    supported, k, width = True, 3, 4
+    if case == "short_prefill":
+        state.num_computed_prefill_tokens_np[0] = 4092
+    elif case == "uncached":
+        state.num_computed_prefill_tokens_np[0] = 0
+        state.prefill_len_np[0] = 1
+    elif case == "partial_drafts":
+        output.scheduled_spec_decode_tokens["tail"] = [-1, -1]
+    elif case == "missing_decode_drafts":
+        del output.scheduled_spec_decode_tokens["decode"]
+    elif case == "real_drafts":
+        output.scheduled_spec_decode_tokens["tail"] = [-1, 42, -1]
+    elif case == "ragged":
+        output.num_scheduled_tokens["decode"] = 3
+    elif case == "trimmed":
+        state.num_tokens -= 1
+    elif case == "unsupported":
+        supported = False
+    elif case == "dummy":
+        state = None
+    elif case == "decode":
+        state.has_prefill = False
+    elif case == "no_speculation":
+        k = 0
+    elif case == "wrong_width":
+        width = 3
+    elif case == "second_prefill":
+        state.is_prefilling_np[1] = True
+        state.prefill_len_np[1] = 102
+        output.scheduled_spec_decode_tokens["decode"] = [-1] * k
+    assert (
+        get_padded_prompt_tail_query_len(
+            output,
+            state,
+            decode_query_len=width,
+            num_speculative_tokens=k,
+            supported=supported,
+        )
+        is None
+    )
 
 
 def _create_vllm_config_for_dsd(
