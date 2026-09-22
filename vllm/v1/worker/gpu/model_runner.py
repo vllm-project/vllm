@@ -790,6 +790,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
+        elif self.speculator is not None:
+            num_reqs = min(
+                num_reqs,
+                self.max_num_tokens // self.speculator.num_query_per_req,
+            )
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
         num_tokens_per_request = [
@@ -2243,6 +2248,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         torch.accelerator.synchronize()
         if self.aux_output_connector is not None:
             self.aux_output_connector.close()
+        set_offloader(None)
         self.cudagraph_manager = None
         self.fast_prefill = None
         self.pooling_runner = None
