@@ -278,6 +278,7 @@ def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         num_decode_tokens=2 * qlen,
+        max_query_len=qlen,
         dcp_tot_seq_lens_device=torch.tensor([10, 12], dtype=torch.int32),
     )
 
@@ -684,6 +685,7 @@ def test_min_kv_seq_len_ignores_cudagraph_padding_rows(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * mtp_qlen,
+        max_query_len=mtp_qlen,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -998,6 +1000,7 @@ def _build_non_causal(monkeypatch, *, num_heads, kv_cache_dtype, qlen, mtp_qlen)
         query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         num_decode_tokens=2 * qlen,
+        max_query_len=qlen,
         dcp_tot_seq_lens_device=None,
     )
     return metadata, get_mla_metadata_v1
