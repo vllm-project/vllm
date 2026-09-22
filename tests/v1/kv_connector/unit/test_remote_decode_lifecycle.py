@@ -123,6 +123,8 @@ def test_kv_pinned_stats():
     # Both prompts must fit in one step's token budget.
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_TOKENS = int(BLOCK_SIZE * 1.5)
+    NUM_BLOCKS_PER_REQ = 2
+    total_blocks = scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1
     requests = [
         create_request(
             request_id=i,
@@ -140,10 +142,14 @@ def test_kv_pinned_stats():
         scheduler_output = scheduler.schedule()
         outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
         stats = outputs[0].scheduler_stats
-        return stats.num_kv_pinned_reqs, stats.num_kv_pinned_tokens
+        return stats.num_kv_pinned_reqs, stats.kv_cache_pinned_usage
+
+    def expected(num_pinned_reqs):
+        pinned_blocks = num_pinned_reqs * NUM_BLOCKS_PER_REQ
+        return num_pinned_reqs, pinned_blocks / total_blocks
 
     # Prefill finishes; both requests pin their blocks for the decoder.
-    assert step(create_model_runner_output(reqs=requests)) == (2, 2 * NUM_TOKENS)
+    assert step(create_model_runner_output(reqs=requests)) == expected(2)
 
     # Each finished transfer releases that request's blocks.
     for num_left, request in zip((1, 0), requests):
@@ -151,7 +157,7 @@ def test_kv_pinned_stats():
         model_runner_output.kv_connector_output = KVConnectorOutput(
             finished_sending={request.request_id}
         )
-        assert step(model_runner_output) == (num_left, num_left * NUM_TOKENS)
+        assert step(model_runner_output) == expected(num_left)
 
     assert_scheduler_empty(scheduler)
 

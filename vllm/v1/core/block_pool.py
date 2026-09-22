@@ -881,6 +881,14 @@ class BlockPool:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
 
+    def get_usage_of_blocks(self, num_blocks: int) -> float:
+        """Get the fraction (0.0-1.0) of the KV cache that `num_blocks`
+        non-null blocks occupy, using the same denominator as `get_usage`."""
+        total_gpu_blocks = self.num_gpu_blocks - 1
+        if not total_gpu_blocks:
+            return 0
+        return num_blocks / total_gpu_blocks
+
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.
 
