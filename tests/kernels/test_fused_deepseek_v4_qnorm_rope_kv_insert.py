@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Standalone unit test for the horizontally-fused DeepseekV4-MLA kernel:
+"""Standalone unit test for the horizontally-fused DeepseekV4-MLA kernel:
 
   fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
     - Q side:  optional per-head RMSNorm + GPT-J RoPE on last 64 dims
@@ -97,7 +96,7 @@ def apply_rope_gptj_last_k(
     # `e*c - o*s` fused form. This keeps the reference close to the kernel, but
     # the fp32 reference and the fp32 GPU kernel can still round to bf16 on
     # opposite sides of a round-to-nearest tie for a tiny number of elements at
-    # high positions, so callers compare the RoPE region within 1 bf16 ULP.
+    # high positions, so callers allow for bf16 rounding in the RoPE region.
     new_even = torch.addcmul(-odd * sin, even, cos)
     new_odd = torch.addcmul(odd * cos, even, sin)
     rope_rotated = torch.stack((new_even, new_odd), dim=-1).reshape(shape)
@@ -315,7 +314,19 @@ def test_q_path_without_qnorm_matches_rope_only_reference(num_tokens: int):
         apply_q_norm=False,
     )
 
-    torch.testing.assert_close(q_out[:, :n_heads], q_ref, rtol=0, atol=0)
+    torch.testing.assert_close(
+        q_out[:, :n_heads, :NOPE_DIM], q_ref[..., :NOPE_DIM], rtol=0, atol=0
+    )
+    # HIP and PyTorch can contract different FP32 products into an FMA.
+    # Allow bf16 rounding and small cancellation errors only in the RoPE region
+    # on ROCm; the unrotated dimensions and padded heads must remain exact.
+    rope_rtol, rope_atol = (1e-2, 1e-6) if current_platform.is_rocm() else (0, 0)
+    torch.testing.assert_close(
+        q_out[:, :n_heads, NOPE_DIM:],
+        q_ref[..., NOPE_DIM:],
+        rtol=rope_rtol,
+        atol=rope_atol,
+    )
     assert q_out[:, n_heads:].count_nonzero().item() == 0
 
 

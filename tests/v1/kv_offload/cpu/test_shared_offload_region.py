@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
+from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
@@ -786,6 +787,87 @@ def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
         call(0x200000),
         call(0x100000),
     ]
+
+
+@pytest.fixture
+def host_register(monkeypatch):
+    """Pretend to run on CUDA with host registrations capped at seven pages.
+
+    Registration goes to a mock CudaRTLibrary and the region's cleanup to a
+    separate mock torch runtime. Both stay installed through the cleanup that
+    ``_region`` runs on exit.
+    """
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = 0
+    cudart.cudaHostUnregister.return_value = 0
+    cudart.cudaGetLastError.return_value = 2
+    torch_cudart = MagicMock()
+    torch_cudart.cudaHostUnregister.return_value = MagicMock(value=0)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(gpu_worker, "MAX_HOST_REGISTER_CHUNK_BYTES", 7 * PAGE_SIZE)
+    monkeypatch.setattr(gpu_worker, "CudaRTLibrary", lambda: cudart)
+    monkeypatch.setattr(region_module.torch.cuda, "cudart", lambda: torch_cudart)
+    return cudart, torch_cudart
+
+
+def test_pin_mmap_region_registers_row_aligned_chunks(iid, host_register):
+    """Chunks end on row boundaries: 3-page rows under a 7-page cap register
+    as 6 + 6 + 3 pages, where a raw byte cap would give 7 + 7 + 1."""
+    cudart, torch_cudart = host_register
+    with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
+        gpu_worker.pin_mmap_region(region)
+        base = region._base.data_ptr()
+        assert cudart.mock_calls == [
+            call.cudaHostRegister(base, 6 * PAGE_SIZE),
+            call.cudaHostRegister(base + 6 * PAGE_SIZE, 6 * PAGE_SIZE),
+            call.cudaHostRegister(base + 12 * PAGE_SIZE, 3 * PAGE_SIZE),
+        ]
+        assert region.is_pinned
+
+    assert torch_cudart.cudaHostUnregister.call_args_list == [
+        call(base + 12 * PAGE_SIZE),
+        call(base + 6 * PAGE_SIZE),
+        call(base),
+    ]
+
+
+@pytest.mark.parametrize("fail_at", [0, 1, 2])
+def test_pin_mmap_region_failure_leaves_region_pageable(iid, host_register, fail_at):
+    """A failed chunk drains its pending error and unregisters the chunks
+    before it on the same handle, so the region is pinned whole or not at all."""
+    cudart, torch_cudart = host_register
+    cudart.cudaHostRegister.side_effect = [0] * fail_at + [2]
+    with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
+        gpu_worker.pin_mmap_region(region)
+        base = region._base.data_ptr()
+        assert not region.is_pinned
+        assert region.pinned_addresses == []
+
+    registered = [base + i * 6 * PAGE_SIZE for i in range(fail_at)]
+    failed_size = min(6, 15 - 6 * fail_at) * PAGE_SIZE
+    assert cudart.mock_calls == [
+        *(call.cudaHostRegister(address, 6 * PAGE_SIZE) for address in registered),
+        call.cudaHostRegister(base + fail_at * 6 * PAGE_SIZE, failed_size),
+        call.cudaGetLastError(),
+        *(call.cudaHostUnregister(address) for address in reversed(registered)),
+    ]
+    torch_cudart.cudaHostUnregister.assert_not_called()
+
+
+def test_pin_mmap_region_without_cuda_runtime_stays_pageable(
+    iid, host_register, monkeypatch
+):
+    """A CUDA runtime that cannot be loaded leaves the region pageable instead
+    of failing worker startup."""
+
+    def missing_runtime():
+        raise AssertionError("libcudart is not loaded in the current process")
+
+    monkeypatch.setattr(gpu_worker, "CudaRTLibrary", missing_runtime)
+    with _region(iid) as region:
+        gpu_worker.pin_mmap_region(region)
+        assert not region.is_pinned
+        assert region.pinned_addresses == []
 
 
 def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
