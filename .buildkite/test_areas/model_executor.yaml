@@ -27,7 +27,6 @@ steps:
     # init) fails fast with a traceback instead of running until the global
     # build timeout. The `thread` method also handles hangs inside C/CUDA
     # calls that the signal method cannot interrupt.
-    # Each branch runs whole coverage units without partition filters.
     - |
       case "$$BUILDKITE_PARALLEL_JOB" in
         0)
