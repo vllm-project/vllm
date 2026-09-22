@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -211,10 +212,22 @@ pub struct TextRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// Optional reasoning-parser kwargs forwarded to engine-side structured
-    /// output logic.
+    /// Optional orchestrator-originated KV hints.
     #[serde(default)]
-    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    pub kv_hints: Option<KvHintsEnvelope>,
+    /// Reasoning-parser kwargs forwarded to engine-side structured output
+    /// logic. The engine consults them only when it owns grammar activation;
+    /// see [`Self::reasoning_ended`].
+    #[serde(default)]
+    pub reasoning_parser_kwargs: ReasoningParserKwargs,
+    /// Optional engine reasoning-gate override selected by a higher-level frontend.
+    ///
+    /// `Some(true)` means the structured output grammar covers reasoning from
+    /// the first generated token, so the engine masks and advances immediately
+    /// instead of waiting for its reasoning parser. Unset for final-output-only
+    /// grammars and for requests without a grammar.
+    #[serde(default)]
+    pub reasoning_ended: Option<bool>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -242,7 +255,9 @@ impl TextRequest {
             add_special_tokens: false,
             data_parallel_rank: None,
             session_id: None,
-            reasoning_parser_kwargs: None,
+            kv_hints: None,
+            reasoning_parser_kwargs: Default::default(),
+            reasoning_ended: None,
             lora_request: None,
             arrival_time: None,
         }

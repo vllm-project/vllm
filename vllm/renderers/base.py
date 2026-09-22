@@ -32,7 +32,11 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.cache import (
+    BaseMultiModalProcessorCache,
+    processor_cache_from_config,
+    processor_only_cache_from_config,
+)
 from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
 from vllm.multimodal.parse import (
     MultiModalDataItems,
@@ -149,7 +153,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._mm_cache_stats: MultiModalCacheStats | None = None
 
-        if mm_registry.supports_multimodal_inputs(config.model_config):
+        if config.model_config.supports_multimodal_inputs:
             # Install the process-global GPU memory pool used to gate
             # frontend GPU-side multimodal decoding (no-op when the budget
             # is 0). Lives in the API-server process only.
@@ -166,10 +170,8 @@ class BaseRenderer(ABC, Generic[_T]):
                     tokenizer=self.tokenizer,
                 )
 
-            self._mm_processor_cache = mm_registry.processor_cache_from_config(config)
-            self._mm_processor_only_cache = (
-                mm_registry.processor_only_cache_from_config(config)
-            )
+            self._mm_processor_cache = processor_cache_from_config(config)
+            self._mm_processor_only_cache = processor_only_cache_from_config(config)
 
             # This is used to generate internal request ID for MM processing
             # It has no relation to the request ID for engine core

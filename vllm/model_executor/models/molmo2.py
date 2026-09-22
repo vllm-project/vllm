@@ -11,7 +11,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import ImageOps
 from PIL.Image import Image
 from transformers import (
     BaseImageProcessor,
@@ -54,6 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import normalize_image
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -1299,7 +1299,7 @@ def exif_transpose(
             exif_transpose(img) if isinstance(img, Image) else img for img in images
         ]
     elif images is not None and isinstance(images, Image):
-        images = ImageOps.exif_transpose(images)
+        images = normalize_image(images)
     return images
 
 

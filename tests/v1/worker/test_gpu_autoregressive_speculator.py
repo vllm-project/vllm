@@ -148,8 +148,16 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
 
 
 def test_mm_support_configured_after_model_load(monkeypatch):
-    target_model_config = object()
-    draft_model_config = object()
+    checked_configs = []
+
+    class _ModelConfig:
+        @property
+        def supports_multimodal_inputs(self):
+            checked_configs.append(self)
+            return True
+
+    target_model_config = _ModelConfig()
+    draft_model_config = _ModelConfig()
     vllm_config = SimpleNamespace(model_config=target_model_config)
     draft_model = _MultimodalDraftModel()
 
@@ -164,19 +172,8 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.supports_mm_inputs = False
         speculator.use_acceptance_estimator = False
 
-    checked_configs = []
-
-    def supports_multimodal_inputs(model_config):
-        checked_configs.append(model_config)
-        return True
-
     monkeypatch.setattr(DraftModelSpeculator, "__init__", init_base)
     _mock_base_model_load(monkeypatch)
-    monkeypatch.setattr(
-        base_spec_module.MULTIMODAL_REGISTRY,
-        "supports_multimodal_inputs",
-        supports_multimodal_inputs,
-    )
 
     speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
 
@@ -198,7 +195,9 @@ def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
-    speculator.vllm_config = SimpleNamespace(model_config=object())
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(supports_multimodal_inputs=True)
+    )
     speculator.max_num_tokens = 4
     speculator.hidden_size = 3
     speculator.dtype = torch.float32
@@ -206,11 +205,6 @@ def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
     draft_model = _MultimodalDraftModel()
     speculator.test_draft_model = draft_model
     _mock_base_model_load(monkeypatch)
-    monkeypatch.setattr(
-        base_spec_module.MULTIMODAL_REGISTRY,
-        "supports_multimodal_inputs",
-        lambda model_config: True,
-    )
 
     speculator.load_model(torch.nn.Module())
 
@@ -223,16 +217,13 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
-    speculator.vllm_config = SimpleNamespace(model_config=object())
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(supports_multimodal_inputs=True)
+    )
     draft_model = _TextOnlyDraftModel()
     speculator.test_draft_model = draft_model
     warning_messages = []
     _mock_base_model_load(monkeypatch)
-    monkeypatch.setattr(
-        base_spec_module.MULTIMODAL_REGISTRY,
-        "supports_multimodal_inputs",
-        lambda model_config: True,
-    )
     monkeypatch.setattr(
         base_spec_module.logger,
         "warning_once",
@@ -257,7 +248,9 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
     speculator.cached_draft_input_embeds = None
-    speculator.vllm_config = SimpleNamespace(model_config=object())
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(supports_multimodal_inputs=True)
+    )
     speculator.max_num_tokens = 4
     speculator.max_num_reqs = 2
     speculator.num_speculative_steps = 3
@@ -270,11 +263,6 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
         MultiModuleMTPSpeculator,
         "load_draft_model",
         lambda self, target_model, target_attn_layer_names: draft_model,
-    )
-    monkeypatch.setattr(
-        base_spec_module.MULTIMODAL_REGISTRY,
-        "supports_multimodal_inputs",
-        lambda model_config: True,
     )
 
     speculator.load_model(torch.nn.Module())

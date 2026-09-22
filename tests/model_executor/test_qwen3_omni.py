@@ -369,11 +369,12 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
             draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
             attention_backend=None,
             kv_cache_dtype=None,
+            draft_load_config=None,
         ),
         parallel_config=ParallelConfig(),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
-        load_config=SimpleNamespace(),
+        load_config=SimpleNamespace(load_format="auto"),
         model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
     )
 

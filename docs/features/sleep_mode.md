@@ -74,6 +74,21 @@ llm.wake_up(tags=["weights"])
 llm.wake_up(tags=["kv_cache"])
 ```
 
+#### Retaining frozen weights during RLHF updates
+
+Set `sleep_preserve_parameter_names` (CLI: `--sleep-preserve-parameter-names`)
+to runtime parameter-name glob
+patterns for weights that stay frozen during training. Each pattern must match
+`model.named_parameters()`; checkpoint names and `requires_grad` are not used.
+
+Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
+wake-up restores them in place and releases the backups. CPU parameters need no
+copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
+
+The trainer must omit these parameters from updates, and reload/post-processing
+must preserve their values and storage (including avoiding replacement with meta
+tensors). This option does not filter updates and applies only to the target model.
+
 #### Release only KV cache memory
 
 `LLM.release_kv_cache_memory()` discards KV cache physical memory while keeping model weights resident. It requires a completed pause and all executor memory to be resident: full sleep, partial wake-up, and repeated release without restoring memory are rejected. Requests retained with `mode="keep"` are recomputed after wake-up.

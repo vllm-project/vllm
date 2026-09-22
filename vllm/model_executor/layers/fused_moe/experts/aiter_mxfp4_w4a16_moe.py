@@ -321,7 +321,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
         return (
-            not moe_parallel_config.use_all2all_kernels
+            not moe_parallel_config.use_ep
             and not moe_parallel_config.enable_eplb
             and moe_parallel_config.dp_size <= 1
         )

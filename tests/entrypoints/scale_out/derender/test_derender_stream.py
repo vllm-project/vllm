@@ -5,24 +5,24 @@
 
 Tests are split into two layers:
 
-1. Unit tests (no server): covers ``_detokenize_delta`` correctness
-   (chunked == one-shot) and ``derender_completion_stream`` /
-   ``derender_chat_stream`` logic via a real tokenizer on a tiny model.
+1. Unit tests (no server): covers `_detokenize_delta` correctness
+   (chunked == one-shot) and `derender_completion_stream` /
+   `derender_chat_stream` logic via a real tokenizer on a tiny model.
    The parser path is covered both with a deterministic stub parser and
-   with the real ``HarmonyParser`` (skipped without ``openai_harmony``).
+   with the real `HarmonyParser` (skipped without `openai_harmony`).
 
 2. Integration tests (require a running render server): covers the full
    HTTP round-trip through the streaming endpoint.  Marked with
-   ``@pytest.mark.asyncio`` and gated by the ``server`` / ``client``
-   fixtures from the sibling ``test_derender.py``.
+   `@pytest.mark.asyncio` and gated by the `server` / `client`
+   fixtures from the sibling `test_derender.py`.
 """
 
 import json
-from collections.abc import Callable
 
 import pytest
 import pytest_asyncio
 
+from tests.entrypoints.scale_out.derender.utils import stream_chat_derender
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -356,7 +356,7 @@ class TestDetokenizeDelta:
         """prev_tokens must not grow with the number of chunks (bounded transport).
 
         Guards that the carried decode window is a small constant
-        tail, so cumulative ``stream_state`` transport is O(n) and not O(n^2).
+        tail, so cumulative `stream_state` transport is O(n) and not O(n^2).
         """
         token_ids = tokenizer.encode(
             "a reasonably long ascii stream of tokens used to exercise the "
@@ -1616,86 +1616,6 @@ async def _render_parser_chat(client, messages: list[dict]) -> dict:
     return resp.json()
 
 
-async def _stream_chat_derender(
-    client,
-    output_ids: list[int],
-    chunk_sizes: list[int],
-    chat_request: dict,
-    prompt_tokens: int,
-    prompt_token_ids: list[int],
-    on_chunk: Callable[[list[dict]], None] | None = None,
-) -> dict:
-    """Feed `output_ids` through the streaming chat derender endpoint in
-    the given `chunk_sizes`, threading `stream_state` across calls and
-    return the assembled message.
-
-    If `on_chunk` is given, it is called after every chunk with a
-    snapshot (deep copy) of the `tool_calls` accumulator so far, letting
-    callers assert properties of the intermediate deltas (e.g. monotonic
-    argument growth) rather than only the final assembled result.
-    """
-    state = None
-    content = ""
-    reasoning = ""
-    tool_calls: list[dict] = []
-    finish_reason = None
-
-    pos = 0
-    for i, size in enumerate(chunk_sizes):
-        tids = output_ids[pos : pos + size]
-        pos += size
-        is_last = i == len(chunk_sizes) - 1
-        resp = await client.post(
-            "/v1/chat/completions/derender",
-            json={
-                "stream": True,
-                "model": PARSER_MODEL,
-                "generate_chunk": {
-                    "request_id": "stream-test",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "token_ids": tids,
-                            "finish_reason": "stop" if is_last else None,
-                        }
-                    ],
-                },
-                "stream_state": state,
-                "prompt_tokens": prompt_tokens,
-                "prompt_token_ids": prompt_token_ids,
-                "chat_request": chat_request,
-            },
-        )
-        assert resp.status_code == 200, resp.text
-        data = resp.json()
-        state = data["stream_state"]
-        delta = data["chunk"]["choices"][0]["delta"]
-        content += delta.get("content") or ""
-        reasoning += delta.get("reasoning") or ""
-        for tc in delta.get("tool_calls") or []:
-            idx = tc["index"]
-            while len(tool_calls) <= idx:
-                tool_calls.append({"id": None, "name": None, "arguments": ""})
-            if tc.get("id"):
-                tool_calls[idx]["id"] = tc["id"]
-            fn = tc.get("function") or {}
-            if fn.get("name"):
-                tool_calls[idx]["name"] = fn["name"]
-            if fn.get("arguments"):
-                tool_calls[idx]["arguments"] += fn["arguments"]
-        if is_last:
-            finish_reason = data["chunk"]["choices"][0]["finish_reason"]
-        if on_chunk is not None:
-            on_chunk([dict(tc) for tc in tool_calls])
-
-    return {
-        "content": content or None,
-        "reasoning": reasoning or None,
-        "tool_calls": tool_calls,
-        "finish_reason": finish_reason,
-    }
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "chunking",
@@ -1755,7 +1675,7 @@ async def test_stream_parsed_matches_batch_reasoning(
         "triples": [3] * (n // 3) + [n % 3],
     }[chunking]
     chunk_sizes = [c for c in chunk_sizes if c > 0]
-    streamed = await _stream_chat_derender(
+    streamed = await stream_chat_derender(
         parser_client,
         output_ids,
         chunk_sizes,
@@ -1823,7 +1743,7 @@ async def test_stream_parsed_matches_batch_tool_call(parser_client, parser_token
             if tool_calls and tool_calls[0]["arguments"]:
                 _snapshots.append(tool_calls[0]["arguments"])
 
-        streamed = await _stream_chat_derender(
+        streamed = await stream_chat_derender(
             parser_client,
             output_ids,
             chunk_sizes,
@@ -1868,7 +1788,7 @@ async def test_stream_parsed_cjk_across_chunk_boundaries(
         "messages": messages,
         "include_reasoning": True,
     }
-    streamed = await _stream_chat_derender(
+    streamed = await stream_chat_derender(
         parser_client,
         output_ids,
         [1] * len(output_ids),
@@ -1896,7 +1816,7 @@ async def test_stream_parsed_include_reasoning_false(parser_client, parser_token
         "messages": messages,
         "include_reasoning": False,
     }
-    streamed = await _stream_chat_derender(
+    streamed = await stream_chat_derender(
         parser_client,
         output_ids,
         [1] * len(output_ids),

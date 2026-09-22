@@ -3,9 +3,7 @@
 
 use std::sync::Arc;
 
-use vllm_parser::tool::{
-    Result, StructuralTagBuilder, Tool, ToolParser, ToolParserError, ToolParserOutput,
-};
+use vllm_parser::tool::{Result, Tool, ToolParser, ToolParserError, ToolParserOutput};
 use vllm_parser::unified::{
     UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
 };
@@ -87,10 +85,6 @@ impl<T: UnifiedParser> ToolParser for UnifiedToolParserAdapter<T> {
 
     fn preserve_special_tokens(&self) -> bool {
         self.inner.preserve_special_tokens()
-    }
-
-    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        self.inner.structural_tag_builder()
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {

@@ -4,7 +4,7 @@
 
 These tests exercise:
   - Zero-limit modalities are filtered from mm_counts passed to
-    get_dummy_processor_inputs (e.g. --limit-mm-per-prompt image=0 ...)
+    get_dummy_inputs (e.g. --limit-mm-per-prompt image=0 ...)
   - The warmup runs through the processor-only cache and clears it afterwards,
     so its dummy inputs never land in the sender cache used by the serving path
   - MM warmup is skipped entirely when mm_processor is None
@@ -92,7 +92,7 @@ class TestMmWarmupZeroLimitFiltering:
 
         BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.get_dummy_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert "video" not in kwargs["mm_counts"]
@@ -104,7 +104,7 @@ class TestMmWarmupZeroLimitFiltering:
 
         BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.get_dummy_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert kwargs["mm_counts"] == {}
@@ -115,7 +115,7 @@ class TestMmWarmupZeroLimitFiltering:
 
         BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.get_dummy_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert kwargs["mm_counts"] == {"image": 1, "video": 1}
@@ -134,7 +134,7 @@ class TestMmWarmupRunsNormally:
 
         BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.get_dummy_inputs
         assert get_inputs.call_args.kwargs["seq_len"] == expected_seq_len
 
     def test_processor_apply_called(self):
@@ -207,9 +207,7 @@ class TestWarmupFaultIsolation:
     def test_mm_failure_is_swallowed_and_cache_cleared(self):
         renderer = _make_renderer_mock({"image": 1})
         # the warmup blows up before apply()
-        renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs.side_effect = (
-            RuntimeError("mm boom")
-        )
+        renderer.mm_processor.get_dummy_inputs.side_effect = RuntimeError("mm boom")
 
         BaseRenderer.warmup(renderer, ChatParams())  # must not raise
 
