@@ -276,9 +276,9 @@ def test_gpu_sampler_warns_when_watermarking_is_enabled_for_greedy(monkeypatch):
         "vllm.v1.watermarking.gpu_sampler.logger.warning_once", messages.append
     )
 
-    sampler.add_request(0, 1, SamplingParams(temperature=0))
-    sampler.add_request(0, 1, SamplingParams(temperature=1))
-    sampler.add_request(0, 1, SamplingParams(temperature=0, watermarking=False))
+    sampler.add_request(0, SamplingParams(temperature=0))
+    sampler.add_request(0, SamplingParams(temperature=1))
+    sampler.add_request(0, SamplingParams(temperature=0, watermarking=False))
 
     assert messages == [
         (
