@@ -270,8 +270,9 @@ def _parallel(**kw):
 
 
 def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
-    """Local GPU i is TP rank r*local+i without DP, and DP rank start+i//tp,
-    TP rank i%tp with DP, matching the engine's placement on both nodes."""
+    """Each node serves a contiguous global-rank block (DP-major), so without
+    DP local GPU i is TP rank r*local+i, and single-node DP launchers offset
+    by --data-parallel-start-rank."""
     from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
 
     tp_second_node = _parallel(tensor_parallel_size=8, nnodes=2, node_rank=1)
@@ -290,6 +291,28 @@ def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
     )
     assert plan_local_ranks(dp_tp) == [(0, 2, 0), (1, 2, 1), (2, 3, 0), (3, 3, 1)]
 
+    # DP + nnodes: node-local TP replicas
+    dp_tp_node0 = _parallel(tensor_parallel_size=8, data_parallel_size=2, nnodes=2)
+    assert plan_local_ranks(dp_tp_node0) == [(i, 0, i) for i in range(8)]
+    dp_tp_node1 = _parallel(
+        tensor_parallel_size=8, data_parallel_size=2, nnodes=2, node_rank=1
+    )
+    assert plan_local_ranks(dp_tp_node1) == [(i, 1, i) for i in range(8)]
+
+    # DP + nnodes: TP group spans nodes (TP8 x DP2 on 4 nodes)
+    tp_span_node1 = _parallel(
+        tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=1
+    )
+    assert plan_local_ranks(tp_span_node1) == [(i, 0, 4 + i) for i in range(4)]
+    tp_span_node2 = _parallel(
+        tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=2
+    )
+    assert plan_local_ranks(tp_span_node2) == [(i, 1, i) for i in range(4)]
+
+    # DP + nnodes: several DP replicas per node (TP4 x DP4 on 2 nodes)
+    dp_multi_node0 = _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
+    assert plan_local_ranks(dp_multi_node0) == [(i, i // 4, i % 4) for i in range(8)]
+
 
 def test_daemon_rejects_unmappable_parallelism():
     from vllm.model_executor.model_loader.weight_cache.daemon import (
@@ -301,11 +324,17 @@ def test_daemon_rejects_unmappable_parallelism():
             data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=12
         )
     )
+    # DP combines with --nnodes when the world size divides evenly.
+    _reject_unsupported_parallelism(
+        _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
+    )
     with pytest.raises(ValueError, match="pipeline"):
         _reject_unsupported_parallelism(_parallel(pipeline_parallel_size=2))
-    with pytest.raises(ValueError, match="--nnodes"):
+    with pytest.raises(ValueError, match="evenly divide"):
+        _reject_unsupported_parallelism(_parallel(tensor_parallel_size=3, nnodes=2))
+    with pytest.raises(ValueError, match="evenly divide"):
         _reject_unsupported_parallelism(
-            _parallel(data_parallel_size=4, data_parallel_size_local=2, nnodes=2)
+            _parallel(tensor_parallel_size=2, data_parallel_size=3, nnodes=4)
         )
     with pytest.raises(ValueError, match="exceeds"):
         _reject_unsupported_parallelism(
