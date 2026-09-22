@@ -488,7 +488,13 @@ def _setup_cache_aware(num_tokens: int = 48, **kwargs):
     """A scheduler where `warm`'s prompt is already cached and `cold`'s is not.
 
     Returns `(scheduler, warm, cold)`, with neither request added yet.
+
+    The threshold is pinned rather than inherited. These fixtures sit at ~0 KV
+    cache usage, so under the shipped default of 0.5 the reorder would never
+    run and every test below would pass without exercising it. Tests that are
+    about the threshold itself pass their own value.
     """
+    kwargs.setdefault("cache_aware_admission_threshold", 0)
     scheduler = create_scheduler(enable_prefix_caching=True, **kwargs)
     seed, warm = create_requests(
         num_requests=2,
