@@ -21,9 +21,9 @@ const PARAMETER_END: &str = "</parameter>";
 
 /// Model-specific configuration for the shared Qwen Coder grammar.
 ///
-/// Only the tool-call wrapper tokens vary across models that reuse this
-/// grammar; the inner `<function=...>` / `<parameter=...>` tags are always
-/// byte-identical. Seed-OSS, for example, wraps the same body in
+/// Models may vary the tool-call wrapper and parameter newline framing;
+/// the inner `<function=...>` / `<parameter=...>` tags are byte-identical.
+/// Seed-OSS, for example, wraps the same body in
 /// `<seed:tool_call>` / `</seed:tool_call>`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct QwenCoderConfig {
@@ -35,6 +35,8 @@ pub(crate) struct QwenCoderConfig {
     pub(crate) next_tool_call_start: &'static str,
     /// Marker that closes a tool-call block.
     pub(crate) tool_call_end: &'static str,
+    /// Consume one template-inserted newline at each parameter value boundary.
+    pub(crate) trim_parameter_newlines: bool,
 }
 
 const QWEN_CODER_CONFIG: QwenCoderConfig = QwenCoderConfig {
@@ -43,6 +45,7 @@ const QWEN_CODER_CONFIG: QwenCoderConfig = QwenCoderConfig {
     first_tool_call_start: "\n\n<tool_call>",
     next_tool_call_start: "\n<tool_call>",
     tool_call_end: TOOL_CALL_END,
+    trim_parameter_newlines: true,
 };
 
 type QwenCoderInput<'i> = Partial<&'i str>;
@@ -200,7 +203,7 @@ fn parse_next_qwen_coder_event(
     match mode {
         QwenCoderMode::Text => parse_text_event(input, config, after_tool_call),
         QwenCoderMode::ToolCall { end_marker_scan } => {
-            tool_call_event(input, end_marker_scan, config.tool_call_end)
+            tool_call_event(input, end_marker_scan, config)
         }
     }
 }
@@ -231,26 +234,26 @@ fn parse_text_event(
 fn tool_call_event(
     input: &mut QwenCoderInput<'_>,
     end_marker_scan: &mut MarkerScanState,
-    tool_call_end: &'static str,
+    config: QwenCoderConfig,
 ) -> ModalResult<QwenCoderEvent> {
     let (body,) = seq!(
         _: ws0,
-        take_until_marker(tool_call_end, end_marker_scan),
-        _: literal(tool_call_end),
+        take_until_marker(config.tool_call_end, end_marker_scan),
+        _: literal(config.tool_call_end),
     )
     .parse_next(input)?;
 
-    parse_tool_call_body(body)
+    parse_tool_call_body(body, config.trim_parameter_newlines)
 }
 
 /// Parse a Qwen Coder function block.
-fn function_event(input: &mut &str) -> ModalResult<QwenCoderEvent> {
+fn function_event(input: &mut &str, trim_parameter_newlines: bool) -> ModalResult<QwenCoderEvent> {
     let (name, raw_params) = seq!(
         _: literal(FUNCTION_START),
         take_until(1.., ">"),
         _: ">",
         _: ws0,
-        repeat(0.., terminated(parameter, ws0)),
+        repeat(0.., terminated(|input: &mut &str| parameter(input, trim_parameter_newlines), ws0)),
         _: literal(FUNCTION_END),
     )
     .parse_next(input)?;
@@ -262,23 +265,33 @@ fn function_event(input: &mut &str) -> ModalResult<QwenCoderEvent> {
 }
 
 /// Parse a Qwen Coder parameter block.
-fn parameter(input: &mut &str) -> ModalResult<(String, String)> {
+fn parameter(input: &mut &str, trim_newlines: bool) -> ModalResult<(String, String)> {
     let (name, value) = seq!(
         _: literal(PARAMETER_START),
         take_until(1.., ">"),
         _: ">",
-        take_until(0.., PARAMETER_END).map(trim_one_wrapping_newline),
+        take_until(0.., PARAMETER_END),
         _: literal(PARAMETER_END),
     )
     .parse_next(input)?;
 
+    let value = if trim_newlines {
+        trim_one_wrapping_newline(value)
+    } else {
+        value
+    };
     Ok((name.to_string(), value.to_string()))
 }
 
 /// Parse a Qwen Coder tool-call body.
-fn parse_tool_call_body(body: &str) -> ModalResult<QwenCoderEvent> {
+fn parse_tool_call_body(body: &str, trim_parameter_newlines: bool) -> ModalResult<QwenCoderEvent> {
     let mut input = body;
-    delimited(ws0, function_event, (ws0, eof)).parse_next(&mut input)
+    delimited(
+        ws0,
+        |input: &mut &str| function_event(input, trim_parameter_newlines),
+        (ws0, eof),
+    )
+    .parse_next(&mut input)
 }
 
 /// Trim a single leading and trailing newline from a parameter value.

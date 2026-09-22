@@ -52,7 +52,9 @@ pub(super) fn apply_structural_tag_constraint(
         builder,
         &tools,
         tool_choice,
-        StructuralTagOptions::default().with_reasoning(false),
+        StructuralTagOptions::default()
+            .with_reasoning(false)
+            .with_parallel_tool_calls(request.parallel_tool_calls()),
     )
     .and_then(|tag| tag.to_json_string())
     .map_err(|error| Error::StructuralTag {
@@ -150,6 +152,33 @@ mod tests {
             .structured_outputs
             .as_ref()
             .expect("structured outputs should be set")
+    }
+
+    #[test]
+    fn tool_grammar_honors_parallel_call_policy() {
+        for parallel in [false, true] {
+            let tools = vec![chat_tool("lookup", Some(true))];
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(
+                    &[],
+                    tools,
+                    Some(ChatToolChoice::Auto),
+                    parallel,
+                )
+                .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            let parser = qwen3_coder_parser(request.tools());
+            apply_structural_tag_constraint(
+                &mut request,
+                parser.structural_tag_builder(),
+                ToolStrictLevel::Auto,
+            )
+            .unwrap();
+            let tag = structural_tag_value(&request);
+            assert_eq!(tag["format"]["type"], "triggered_tags");
+            assert_eq!(tag["format"]["stop_after_first"], !parallel);
+        }
     }
 
     #[test]
