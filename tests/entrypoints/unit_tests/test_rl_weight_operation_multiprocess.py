@@ -37,9 +37,9 @@ from vllm.entrypoints.serve.dev.rlhf.metrics import weight_operation_metrics
 
 operation, ready_path, hold_seconds = sys.argv[1], sys.argv[2], float(sys.argv[3])
 metrics = weight_operation_metrics()
+# Staying inside the block holds the in-flight gauge at 1 (the recorder's own
+# increment) so the parent can scrape a non-zero value.
 with metrics.record(operation):
-    # Hold a non-zero in-flight value so the parent can scrape it.
-    metrics.in_flight.labels(operation=operation).inc()
     open(ready_path, "w").close()
     time.sleep(hold_seconds)
 """
