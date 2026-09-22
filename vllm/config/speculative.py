@@ -393,6 +393,12 @@ def uses_pard2(hf_config) -> bool:
     )
 
 
+def pard2_is_target_dependent(hf_config) -> bool:
+    """Whether PARD-2 fuses target hidden states. False when the target's hidden
+    dim does not match what ``target_proj`` was trained on."""
+    return bool(getattr(hf_config, "pard2_target_dependent", True))
+
+
 @config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
@@ -1474,19 +1480,7 @@ class SpeculativeConfig:
                     self.parallel_drafting = True
 
                 if self.method == "pard2":
-                    # Use target-dependent fusion only when the target's hidden
-                    # dim matches what target_proj expects; otherwise fall back to
-                    # a plain parallel draft (target-independent, no fusion).
-                    if self._pard2_target_dim_matches():
-                        self._prepare_pard2_draft_config()
-                    else:
-                        logger.info(
-                            "PARD-2: target hidden dim does not match the draft's "
-                            "pard2_target_dim; running target-independent "
-                            "(plain parallel draft, no target-hidden fusion)."
-                        )
-                        self.method = "draft_model"
-                        self.parallel_drafting = True
+                    self._prepare_pard2_draft_config()
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -1779,6 +1773,9 @@ class SpeculativeConfig:
         Reuse EAGLE-3 aux-hidden-state capture to gather ``pard2_target_layers``
         from the target, then route to the family model class (Llama/Qwen3) chosen
         by ``model_type``. The fusion itself happens in the model's forward.
+
+        Target-independent mode keeps the same draft and the same parallel layout
+        but skips the fusion, so it captures no aux hidden states.
         """
         self.parallel_drafting = True
         hf_config = self.draft_model_config.hf_config
@@ -1786,17 +1783,30 @@ class SpeculativeConfig:
         target_layers = getattr(hf_config, "pard2_target_layers", None)
         if not target_layers:
             raise ValueError("PARD-2 draft config must specify `pard2_target_layers`.")
-        # pard2_target_layers are end-relative (negative) indices into the target's
-        # output_hidden_states (len num_layers+1; index 0 = embeddings). Resolve to
-        # positive via modulo so vLLM captures the same layers.
-        num_target_layers = self.target_model_config.hf_text_config.num_hidden_layers
-        resolved = [int(layer) % (num_target_layers + 1) for layer in target_layers]
-        hf_config.eagle_aux_hidden_state_layer_ids = resolved
-        hf_config.num_aux_hidden_states = len(resolved)
-        # combine_hidden_states projects concat(target layers) -> draft hidden.
-        hf_config.target_hidden_size = (
-            self.target_model_config.hf_text_config.hidden_size
-        )
+        hf_config.pard2_target_dependent = self._pard2_target_dim_matches()
+        if hf_config.pard2_target_dependent:
+            # pard2_target_layers are end-relative (negative) indices into the
+            # target's output_hidden_states (len num_layers+1; index 0 =
+            # embeddings). Resolve to positive via modulo so vLLM captures the
+            # same layers.
+            num_target_layers = (
+                self.target_model_config.hf_text_config.num_hidden_layers
+            )
+            resolved = [int(layer) % (num_target_layers + 1) for layer in target_layers]
+            hf_config.eagle_aux_hidden_state_layer_ids = resolved
+            hf_config.num_aux_hidden_states = len(resolved)
+            # combine_hidden_states projects concat(target layers) -> draft hidden.
+            hf_config.target_hidden_size = (
+                self.target_model_config.hf_text_config.hidden_size
+            )
+        else:
+            logger.info(
+                "PARD-2: target hidden dim does not match the draft's "
+                "pard2_target_dim; running target-independent "
+                "(plain parallel draft, no target-hidden fusion)."
+            )
+            hf_config.eagle_aux_hidden_state_layer_ids = []
+            hf_config.num_aux_hidden_states = 0
         model_type = getattr(hf_config, "model_type", "llama")
         pard2_arch_by_model_type = {
             "llama": "Pard2LlamaForCausalLM",

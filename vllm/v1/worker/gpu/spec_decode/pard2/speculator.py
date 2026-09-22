@@ -30,6 +30,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.speculative import pard2_is_target_dependent
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -55,7 +56,12 @@ class Pard2Speculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        # Fed to the draft as feat[t-1]; the draft projects it internally.
+        self.target_dependent = pard2_is_target_dependent(
+            self.draft_model_config.hf_config
+        )
+
+        # Fed to the draft as feat[t-1]; the draft projects it internally. Left
+        # as zeros in target-independent mode, where the model ignores it.
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
@@ -337,7 +343,11 @@ class Pard2Speculator(DraftModelSpeculator):
             max_seq_len + self.num_query_per_req, self.max_model_len
         )
 
-        if aux_hidden_states:
+        if not self.target_dependent:
+            # No fusion: the draft reads embeddings only, so the hidden-state
+            # buffer it is handed is ignored by the model.
+            target_hidden_states = None
+        elif aux_hidden_states:
             target_hidden_states = self.model.combine_hidden_states(
                 torch.cat(aux_hidden_states, dim=-1)
             )
@@ -354,8 +364,10 @@ class Pard2Speculator(DraftModelSpeculator):
         # --- Pass 1: absorb the confirmed tokens into the draft's KV cache. ---
         # Same shape as the target's batch, so its metadata and slot mappings
         # apply unchanged.
-        last_accepted_rows = self._last_accepted_rows(
-            input_batch, num_rejected, num_reqs
+        last_accepted_rows = (
+            self._last_accepted_rows(input_batch, num_rejected, num_reqs)
+            if self.target_dependent
+            else None
         )
 
         if not (dummy_run and skip_attn_for_dummy_run):
@@ -365,13 +377,14 @@ class Pard2Speculator(DraftModelSpeculator):
             self.input_buffers.positions[:num_target_tokens].copy_(
                 self.target_input_buffers.positions[:num_target_tokens]
             )
-            self._fill_context_hidden_states(
-                input_batch,
-                target_hidden_states,
-                last_accepted_rows,
-                num_reqs,
-                num_target_tokens,
-            )
+            if self.target_dependent:
+                self._fill_context_hidden_states(
+                    input_batch,
+                    target_hidden_states,
+                    last_accepted_rows,
+                    num_reqs,
+                    num_target_tokens,
+                )
             self._prepare_eplb_forward(num_target_tokens)
             self._run_model(
                 input_batch.num_tokens_after_padding,
@@ -423,9 +436,12 @@ class Pard2Speculator(DraftModelSpeculator):
 
         # Repeat-last-feat: no new real features exist past the context, so all K
         # rows reuse the last accepted one.
-        self.hidden_states[:num_query_tokens].view(
-            num_reqs, self.num_query_per_req, -1
-        ).copy_(target_hidden_states.index_select(0, last_accepted_rows).unsqueeze(1))
+        if self.target_dependent:
+            self.hidden_states[:num_query_tokens].view(
+                num_reqs, self.num_query_per_req, -1
+            ).copy_(
+                target_hidden_states.index_select(0, last_accepted_rows).unsqueeze(1)
+            )
 
         if dummy_run and skip_attn_for_dummy_run:
             self._prepare_eplb_forward(num_query_tokens)

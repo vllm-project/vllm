@@ -32,6 +32,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.speculative import pard2_is_target_dependent
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
@@ -276,13 +277,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
-            if self.speculative_config.method in (
-                "eagle3",
-                "dflash",
-                "dspark",
-                "extract_hidden_states",
-                "pard2",
-            ):
+            method = self.speculative_config.method
+            # Target-independent PARD-2 drafts from embeddings alone.
+            if method == "pard2":
+                needs_aux = pard2_is_target_dependent(
+                    self.speculative_config.draft_model_config.hf_config
+                )
+            else:
+                needs_aux = method in (
+                    "eagle3",
+                    "dflash",
+                    "dspark",
+                    "extract_hidden_states",
+                )
+            if needs_aux:
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
 
