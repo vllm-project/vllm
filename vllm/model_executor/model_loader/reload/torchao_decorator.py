@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import wraps
-from types import FunctionType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 
 import torch
 
@@ -20,13 +19,22 @@ if TYPE_CHECKING:
 
 __all__ = ["set_torchao_reload_attrs", "support_quantized_model_reload_from_hp_weights"]
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
 
 def set_torchao_reload_attrs(model: torch.nn.Module, model_config: ModelConfig):
     model._do_torchao_reload = True
     model._model_config = model_config
 
 
-def support_quantized_model_reload_from_hp_weights(original_load_weights: FunctionType):
+def support_quantized_model_reload_from_hp_weights(
+    original_load_weights: Callable[
+        Concatenate["AutoWeightsLoader", Iterable[tuple[str, torch.Tensor]], _P], _R
+    ],
+) -> Callable[
+    Concatenate["AutoWeightsLoader", Iterable[tuple[str, torch.Tensor]], _P], _R
+]:
     """Decorator for `load_weights` method for AutoWeightsLoader.load_weights to support
     reloading high precision (bfloat16/float16/float32) weight for an already quantized
     model, this involves restoring the weights to a high precision weights and
@@ -40,9 +48,9 @@ def support_quantized_model_reload_from_hp_weights(original_load_weights: Functi
     def patched_model_load_weights(
         self: "AutoWeightsLoader",
         weights: Iterable[tuple[str, torch.Tensor]],
-        *args,
-        **kwargs,
-    ):
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> _R:
         model = self.module
 
         if not getattr(model, "_do_torchao_reload", False):

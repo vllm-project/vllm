@@ -285,7 +285,9 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
                 return [replacement_id] * int(out_mm_data["audio_num_tokens"][item_idx])
             start = chunks_start_idx[item_idx]
             end = chunks_start_idx[item_idx + 1]
-            audio_token_len = out_mm_data["audio_token_len"][start:end].sum()
+            audio_token_lens = out_mm_data["audio_token_len"]
+            assert isinstance(audio_token_lens, torch.Tensor)
+            audio_token_len = audio_token_lens[start:end].sum()
             return [replacement_id] * int(audio_token_len)  # type: ignore
 
         return [
@@ -566,7 +568,8 @@ class UltravoxWhisperEncoder(WhisperEncoder):
     ) -> torch.Tensor:
         return (input_lengths - 1) // 2 + 1
 
-    def forward(
+    # Ultravox requires chunk lengths in addition to Whisper's input features.
+    def forward(  # type: ignore[override]
         self,
         input_features: torch.Tensor,
         audio_lens: torch.Tensor,
@@ -960,12 +963,12 @@ def pad_and_concat_to_dim3(
 
         return features
 
-    features = [pad_and_concat_to_dim3(f) for f in features]
+    tensors = [pad_and_concat_to_dim3(f) for f in features]
 
-    max_len = max(f.shape[-1] for f in features)
+    max_len = max(f.shape[-1] for f in tensors)
     # Ensure all features have dim=3
-    features = [f.view(-1, *f.shape[-2:]) for f in features]
+    tensors = [f.view(-1, *f.shape[-2:]) for f in tensors]
     # Pad and concatenate:
     # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
-    features = [F.pad(f, (0, max_len - f.shape[-1])) for f in features]
-    return torch.cat(features)
+    tensors = [F.pad(f, (0, max_len - f.shape[-1])) for f in tensors]
+    return torch.cat(tensors)
