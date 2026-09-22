@@ -1,5 +1,6 @@
 #include "../../../../quantization/w8a8/fp8/common.cuh"
 #include "../../../../cuda_compat.h"
+#include "../../../../cuda_utils.h"
 #include "../../../dispatch_utils.h"
 #include "../../../cub_helpers.h"
 #include "../../vectorization_utils.cuh"
@@ -20,9 +21,43 @@ constexpr int kFp8QuantBlockSize = 256;
 template <typename T>
 using fp8_quant_vec_t = vec_n_t<T, kFp8QuantVecSize>;
 
+// Vectors per thread on the single-read per-token path. 16-bit rows longer
+// than one vector per thread (hidden > 4096) stay on the two-pass kernel: its
+// second read hits L2 and it already runs at HBM bandwidth there, while
+// holding more vectors measured 2-7% slower on H100. fp32 rows gain up to 4.
+template <typename T>
+constexpr int kFp8QuantMaxVecsPerThread = sizeof(T) == 4 ? 4 : 1;
+
+// Picks the fewest vectors per thread whose thread count, rounded up to whole
+// warps, fits in one block, so every thread holds the same number of vectors.
+// Returns false when the row is too long for the single-read path.
+inline bool select_single_read_launch(int num_vecs, int max_vecs, int warp_size,
+                                      int block_size, int& threads,
+                                      int& vecs_per_thread) {
+  for (int v = 1; v <= max_vecs; v *= 2) {
+    const int t =
+        cuda_utils::ceil_div(cuda_utils::ceil_div(num_vecs, v), warp_size) *
+        warp_size;
+    if (t <= block_size) {
+      threads = t;
+      vecs_per_thread = v;
+      return true;
+    }
+  }
+  return false;
+}
+
 template <typename T>
 bool ptr_vec_aligned(const T* ptr) {
   return reinterpret_cast<uintptr_t>(ptr) % alignof(fp8_quant_vec_t<T>) == 0;
+}
+
+// True when every row of a [tokens, hidden] view starts on a
+// fp8_quant_vec_t<T> boundary, so rows can be read or written as whole vectors.
+template <typename T>
+bool rows_vec_aligned(const T* ptr, int64_t row_stride) {
+  return ptr_vec_aligned(ptr) &&
+         (row_stride * sizeof(T)) % alignof(fp8_quant_vec_t<T>) == 0;
 }
 
 __device__ __forceinline__ float warp_reduce_max(float v) {
@@ -200,6 +235,88 @@ __global__ void scaled_fp8_quant_kernel_strided_dynamic(
       });
 }
 
+// One block per token, one read of the row. Each thread keeps its
+// kVecsPerThread vectors in registers across the abs-max reduction, so the row
+// is read from global memory once instead of twice. Thread t owns vectors
+// t, t + blockDim.x, ..., so a warp always touches consecutive vectors and
+// every load and store is coalesced.
+template <typename scalar_t, typename fp8_type, int kVecsPerThread>
+__global__ void __launch_bounds__(kFp8QuantBlockSize)
+    dynamic_per_token_scaled_fp8_quant_kernel_single_read(
+        fp8_type* __restrict__ out, float* __restrict__ scale,
+        const scalar_t* __restrict__ input, const float* __restrict__ scale_ub,
+        int num_vecs, int64_t in_row_stride, int64_t out_row_stride) {
+  using in_vec_t = fp8_quant_vec_t<scalar_t>;
+  using out_vec_t = fp8_quant_vec_t<fp8_type>;
+
+  const int64_t token_idx = blockIdx.x;
+  const int tid = threadIdx.x;
+  const auto* token_in =
+      reinterpret_cast<const in_vec_t*>(input + token_idx * in_row_stride);
+  auto* token_out =
+      reinterpret_cast<out_vec_t*>(out + token_idx * out_row_stride);
+
+  in_vec_t vecs[kVecsPerThread];
+#pragma unroll
+  for (int k = 0; k < kVecsPerThread; ++k) {
+    const int v = tid + k * blockDim.x;
+    if (v < num_vecs) {
+      vecs[k] = token_in[v];
+    }
+  }
+
+  float thread_max = 0.0f;
+#pragma unroll
+  for (int k = 0; k < kVecsPerThread; ++k) {
+    const int v = tid + k * blockDim.x;
+    if (v < num_vecs) {
+#pragma unroll
+      for (int i = 0; i < kFp8QuantVecSize; ++i) {
+        thread_max =
+            fmaxf(thread_max, fabsf(static_cast<float>(vecs[k].val[i])));
+      }
+    }
+  }
+
+  __shared__ float warp_max[kFp8QuantBlockSize / 32];
+  const float block_max = block_reduce_max(thread_max, warp_max);
+
+  // Every thread derives the same scale, so no broadcast is needed.
+  float token_scale = scale_ub ? fminf(block_max, *scale_ub) : block_max;
+  token_scale = fmaxf(token_scale / quant_type_max_v<fp8_type>,
+                      min_scaling_factor<fp8_type>::val());
+  if (tid == 0) {
+    scale[token_idx] = token_scale;
+  }
+
+#pragma unroll
+  for (int k = 0; k < kVecsPerThread; ++k) {
+    const int v = tid + k * blockDim.x;
+    if (v < num_vecs) {
+      out_vec_t q;
+#pragma unroll
+      for (int i = 0; i < kFp8QuantVecSize; ++i) {
+        q.val[i] = scaled_fp8_conversion<false, fp8_type>(
+            static_cast<float>(vecs[k].val[i]), token_scale);
+      }
+      token_out[v] = q;
+    }
+  }
+}
+
+template <typename scalar_t, typename fp8_type, int kVecsPerThread>
+void launch_dynamic_per_token_single_read(
+    fp8_type* out, float* scale, const scalar_t* input, const float* scale_ub,
+    int num_tokens, int num_vecs, int threads, int64_t in_row_stride,
+    int64_t out_row_stride, cudaStream_t stream) {
+  dynamic_per_token_scaled_fp8_quant_kernel_single_read<scalar_t, fp8_type,
+                                                        kVecsPerThread>
+      <<<num_tokens, threads, 0, stream>>>(
+          out, scale, input, scale_ub, num_vecs, in_row_stride, out_row_stride);
+}
+
+// Generic two-pass path for rows that are unaligned, not a multiple of 16
+// elements, or too long to hold in registers.
 template <typename scalar_t, typename fp8_type>
 __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
     fp8_type* __restrict__ out, float* __restrict__ scale,
@@ -476,12 +593,14 @@ void dynamic_per_token_scaled_fp8_quant(
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
-  const int block_size = 256;
+  const int block_size = vllm::kFp8QuantBlockSize;
   dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, block_size));
 
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
+
+  const int num_vecs = hidden_size / vllm::kFp8QuantVecSize;
+  const int warp_size = WARP_SIZE;
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -492,15 +611,48 @@ void dynamic_per_token_scaled_fp8_quant(
         VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(),
             "dynamic_per_token_scaled_fp8_quant_kernel_fp8_type", [&] {
-              vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided<scalar_t,
-                                                                      fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      out.mutable_data_ptr<fp8_t>(),
-                      scales.mutable_data_ptr<float>(),
-                      input.const_data_ptr<scalar_t>(),
-                      scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
-                                           : nullptr,
-                      hidden_size, in_row_stride, out_row_stride);
+              const scalar_t* in_ptr = input.const_data_ptr<scalar_t>();
+              fp8_t* out_ptr = out.mutable_data_ptr<fp8_t>();
+              float* scales_ptr = scales.mutable_data_ptr<float>();
+              const float* scale_ub_ptr =
+                  scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
+                                       : nullptr;
+
+              int single_read_threads = 0;
+              int vecs_per_thread = 0;
+              const bool single_read =
+                  hidden_size % vllm::kFp8QuantVecSize == 0 && num_vecs > 0 &&
+                  vllm::rows_vec_aligned(in_ptr, in_row_stride) &&
+                  vllm::rows_vec_aligned(out_ptr, out_row_stride) &&
+                  vllm::select_single_read_launch(
+                      num_vecs, vllm::kFp8QuantMaxVecsPerThread<scalar_t>,
+                      warp_size, block_size, single_read_threads,
+                      vecs_per_thread);
+              if (!single_read) {
+                vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided<
+                    scalar_t, fp8_t>
+                    <<<grid, dim3(std::min(hidden_size, block_size)), 0,
+                       stream>>>(out_ptr, scales_ptr, in_ptr, scale_ub_ptr,
+                                 hidden_size, in_row_stride, out_row_stride);
+                return;
+              }
+
+              if (vecs_per_thread == 1) {
+                vllm::launch_dynamic_per_token_single_read<scalar_t, fp8_t, 1>(
+                    out_ptr, scales_ptr, in_ptr, scale_ub_ptr, num_tokens,
+                    num_vecs, single_read_threads, in_row_stride,
+                    out_row_stride, stream);
+              } else if (vecs_per_thread == 2) {
+                vllm::launch_dynamic_per_token_single_read<scalar_t, fp8_t, 2>(
+                    out_ptr, scales_ptr, in_ptr, scale_ub_ptr, num_tokens,
+                    num_vecs, single_read_threads, in_row_stride,
+                    out_row_stride, stream);
+              } else {
+                vllm::launch_dynamic_per_token_single_read<scalar_t, fp8_t, 4>(
+                    out_ptr, scales_ptr, in_ptr, scale_ub_ptr, num_tokens,
+                    num_vecs, single_read_threads, in_row_stride,
+                    out_row_stride, stream);
+              }
             });
       });
 }
