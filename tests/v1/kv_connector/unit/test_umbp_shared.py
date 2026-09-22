@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     KVLayoutDescriptor,
     KVLayoutPlanner,
     KVRange,
+    KVRegion,
     KVShardSlice,
     LoadSpec,
     LookupState,
@@ -264,6 +265,60 @@ def test_layout_planner_partial_range_spans_physical_subblocks():
     assert [item.object_offset for item in plan.ranges] == [0, 128, 384, 512]
     assert plan.ranges[0].base_address == caches["layer1"].data_ptr() + 2432
     assert plan.ranges[1].base_address == caches["layer1"].data_ptr() + 2560
+
+
+def test_layout_planner_builds_compact_group_objects():
+    planner = KVLayoutPlanner(
+        (
+            KVRegion("attention.0", 0, 256, 256, 0, 16),
+            KVRegion("mamba.0", 1, 512, 512, 256, 32),
+            KVRegion("attention.1", 0, 256, 256, 768, 16),
+        )
+    )
+    addresses = {"attention.0": 1000, "mamba.0": 2000, "attention.1": 3000}
+
+    attention = planner.plan_for_block("attention", 2, addresses, group_id=0)
+    mamba = planner.plan_for_block("mamba", 2, addresses, group_id=1)
+
+    assert [item.layer_name for item in attention.ranges] == [
+        "attention.0",
+        "attention.1",
+    ]
+    assert [item.object_offset for item in attention.ranges] == [0, 256]
+    assert max(item.object_offset + item.length for item in attention.ranges) == 512
+    assert [item.layer_name for item in mamba.ranges] == ["mamba.0"]
+    assert [item.object_offset for item in mamba.ranges] == [0]
+    assert max(item.object_offset + item.length for item in mamba.ranges) == 512
+
+
+def test_layout_planner_rejects_unknown_group():
+    planner = KVLayoutPlanner((KVRegion("attention", 0, 256, 256, 0, 16),))
+
+    with pytest.raises(ValueError, match="does not contain cache group 1"):
+        planner.plan_for_block("missing", 0, {"attention": 1000}, group_id=1)
+
+
+def test_worker_materializes_only_the_requested_group():
+    planner = KVLayoutPlanner(
+        (
+            KVRegion("attention", 0, 32, 32, 0, 16),
+            KVRegion("mamba", 1, 32, 32, 32, 16),
+        )
+    )
+    planner.register_kv_caches(
+        {
+            "attention": torch.empty((8, 16), dtype=torch.float16),
+            "mamba": torch.empty((8, 16), dtype=torch.float16),
+        }
+    )
+    worker = UMBPStoreConnectorWorker(_WorkerHandle(), planner)
+
+    [materialized] = worker._materialize_plans(
+        [BlockTransferPlan("mamba-key", 2, group_id=1)]
+    )
+
+    assert [item.layer_name for item in materialized.ranges] == ["mamba"]
+    assert [item.object_offset for item in materialized.ranges] == [0]
 
 
 def test_transfer_job_isolates_failed_keys():
