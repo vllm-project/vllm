@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -42,9 +46,6 @@ if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
         KDARecoverSSMCommitContext,
     )
-
-
-FLASHKDA_CHUNK_SIZE = 16
 
 
 @cache
@@ -261,18 +262,16 @@ class KDARecoverSSMCommitMetadata:
 
 
 @dataclass
-class KDACheckpointMetadata:
-    checkpoint_offsets: torch.Tensor
-    state_indices: torch.Tensor
-
-
-@dataclass
 class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
+    spec_token_start: int | None = None
+    non_spec_token_start: int | None = None
+    flashinfer_prefill_query_start_loc: torch.Tensor | None = None
+    flashinfer_prefill_seq_order: torch.Tensor | None = None
     recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
-    checkpoint: KDACheckpointMetadata | None = None
+    checkpoint: MambaPrefillCheckpointMetadata | None = None
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -316,6 +315,14 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
+        additional_config = vllm_config.additional_config
+        self.use_flashinfer_prefill = (
+            isinstance(additional_config, dict)
+            and additional_config.get("kda_prefill_backend") == "flashinfer"
+        )
         self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
@@ -389,8 +396,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks_cpu = None
             num_spec_decodes = 0
+            active_non_spec_mask_cpu = None
         else:
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+            active_non_spec_mask_cpu = None
             if self.use_recoverssm:
                 assert m.is_prefilling is not None
                 assert m.is_prefilling.device.type == "cpu"
@@ -407,15 +416,43 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             ):
                 spec_sequence_masks_cpu = None
                 num_spec_decodes = 0
+                active_non_spec_mask_cpu = None
             else:
                 num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+                if num_spec_decodes == 0:
+                    spec_sequence_masks_cpu = None
 
         spec_request_indices = None
+        spec_token_start = None
+        non_spec_token_start = None
         if num_spec_decodes == 0:
-            # The runner orders ordinary decodes before prefills.
-            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(m, decode_threshold=1)
+            # V2 already excludes prefills from full decode graphs via has_prefill.
+            # Classify first chunks as prefills to mask recycled state;
+            # resumed one-token chunks can still use the decode kernels.
+            assert m.seq_lens_cpu_upper_bound is not None
+            query_lens_cpu = query_start_loc_cpu.diff()
+            no_prior_state = (query_lens_cpu > 0) & (
+                m.seq_lens_cpu_upper_bound <= query_lens_cpu
             )
+            # Capture batches also have seq_len == query_len, but are not prefills.
+            if m.is_prefilling is not None:
+                no_prior_state &= m.is_prefilling
+            else:
+                no_prior_state = torch.zeros_like(no_prior_state)
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(
+                    m.replace(is_prefilling=no_prior_state),
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=False,
+                )
+            )
+            # Exclude trailing padding from both prefill counts.
+            if num_prefills:
+                num_prefills -= int((query_lens_cpu[num_decodes:] == 0).sum())
+                num_prefill_tokens = (
+                    int(query_start_loc_cpu[num_decodes + num_prefills])
+                    - num_decode_tokens
+                )
             num_spec_decode_tokens = 0
             spec_token_indx = None
             non_spec_token_indx = None
@@ -507,6 +544,13 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
 
+                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                # check if spec / non spec tokens are continuous
+                if (active_spec_mask[1:] != active_spec_mask[:-1]).sum().item() == 1:
+                    spec_first = active_spec_mask[0].item()
+                    spec_token_start = 0 if spec_first else num_non_spec_tokens
+                    non_spec_token_start = num_spec_decode_tokens if spec_first else 0
+
                 # Native spec uses one state slot per step. RecoverSSM keeps
                 # only the current checkpoint slot.
                 spec_state_indices_tensor = block_table_tensor[
@@ -579,62 +623,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         else:
             has_initial_state = None
 
-        checkpoint = None
-        if (
-            num_prefills > 0
-            and self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
-            and self.vllm_config.cache_config.mamba_cache_mode == "align"
-        ):
-            # prepare checkpoint metadata
-            assert m.seq_lens_cpu_upper_bound is not None
-            request_rows = list(range(m.num_reqs))
-            if spec_sequence_masks_cpu is not None:
-                # get non spec request rows
-                request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
-            all_query_lens = query_start_loc_cpu.diff().tolist()
-            query_lens = [all_query_lens[row] for row in request_rows]
-            seq_lens = m.seq_lens_cpu_upper_bound.tolist()
-            block_size = self.kv_cache_spec.block_size
-            checkpoint_splits = []
-            checkpoint_cols = []
-            for row, query_len in zip(request_rows, query_lens):
-                seq_len = seq_lens[row]
-                offset = seq_len // block_size * block_size - (seq_len - query_len)
-                # offset should be less than query_len
-                valid = (
-                    seq_len % block_size != 0
-                    and 0 < offset < query_len
-                    and offset % FLASHKDA_CHUNK_SIZE == 0
-                )
-                offset = offset if valid else 0
-                first_len = offset or query_len
-                checkpoint_splits.append((first_len, query_len - first_len))
-                checkpoint_cols.append(seq_len // block_size - 1 if valid else -1)
-            if any(tail for _, tail in checkpoint_splits):
-                checkpoint_offsets_tensor = async_tensor_h2d(
-                    [first if tail else 0 for first, tail in checkpoint_splits],
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                request_rows_tensor = async_tensor_h2d(
-                    request_rows, dtype=torch.int64, device=query_start_loc.device
-                )
-                checkpoint_cols_tensor = async_tensor_h2d(
-                    checkpoint_cols, dtype=torch.int64, device=query_start_loc.device
-                )
-                checkpoint_state_indices = m.block_table_tensor[
-                    request_rows_tensor, checkpoint_cols_tensor
-                ]
-                checkpoint_state_indices = torch.where(
-                    checkpoint_cols_tensor >= 0,
-                    checkpoint_state_indices,
-                    NULL_BLOCK_ID,
-                )
-                checkpoint = KDACheckpointMetadata(
-                    checkpoint_offsets_tensor,
-                    checkpoint_state_indices,
-                )
-
         # Prepare per-request tensors for cudagraph replay. num_actual_tokens
         # may be token-padded, while state/query/acceptance metadata is indexed
         # by request.
@@ -699,6 +687,27 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 align=align,
             )
 
+        flashinfer_prefill_query_start_loc = None
+        flashinfer_prefill_seq_order = None
+        if self.use_flashinfer_prefill and num_prefills > 0:
+            assert non_spec_query_start_loc is not None
+            flashinfer_prefill_query_start_loc = non_spec_query_start_loc.to(
+                torch.int64
+            )
+            num_non_spec_requests = non_spec_query_start_loc.shape[0] - 1
+            num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
+            if num_non_spec_tokens > num_non_spec_requests:
+                flashinfer_prefill_seq_order = torch.argsort(
+                    flashinfer_prefill_query_start_loc.diff(), descending=True
+                ).to(torch.int32)
+
+        checkpoint = None
+        if num_prefills > 0:
+            request_rows = list(range(m.num_reqs))
+            if active_non_spec_mask_cpu is not None:
+                request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
+            checkpoint = self.checkpoint_builder.build(m, request_rows)
+
         return KimiK3KDAMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -716,6 +725,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            spec_token_start=spec_token_start,
+            non_spec_token_start=non_spec_token_start,
+            flashinfer_prefill_query_start_loc=flashinfer_prefill_query_start_loc,
+            flashinfer_prefill_seq_order=flashinfer_prefill_seq_order,
             recoverssm_commit=recoverssm_commit,
             recoverssm_context=(
                 self._get_recoverssm_context()

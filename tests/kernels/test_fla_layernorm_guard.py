@@ -7,10 +7,13 @@ import torch.nn.functional as F
 
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+    LayerNormFwdKernel,
+    calc_rows_per_block,
     layer_norm_fwd,
     layernorm_fn,
     rms_norm_ref,
 )
+from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = "xpu" if current_platform.is_xpu() else "cuda"
@@ -101,6 +104,59 @@ GROUP_SIZES = [None, 64, 128]  # None means full hidden size
 NORM_BEFORE_GATE = [True, False]
 IS_RMS_NORM = [True, False]
 SEEDS = [0, 42]
+
+
+@pytest.mark.parametrize("rows_per_token", [1, 2, 4, 8, 16])
+def test_layer_norm_fwd_warmup_keys_cover_qwen_gdn(
+    rows_per_token: int,
+) -> None:
+    device = torch.device(DEVICE)
+    group_size = 128
+    max_num_tokens = 512
+    kernel = LayerNormFwdKernel()
+    warmup_keys = set(
+        kernel.get_warmup_keys(
+            max_num_tokens=max_num_tokens,
+            rows_per_token=rows_per_token,
+            group_size=group_size,
+            x_dtype=torch.bfloat16,
+            weight_dtype=torch.bfloat16,
+            device=device,
+            norm_before_gate=True,
+            is_rms_norm=True,
+            activation="silu",
+        )
+    )
+
+    for num_tokens in range(1, max_num_tokens + 1):
+        num_rows = num_tokens * rows_per_token
+        runtime_key = kernel.dispatch(
+            x_dtype=torch.bfloat16,
+            y_dtype=torch.bfloat16,
+            weight_dtype=torch.bfloat16,
+            bias_dtype=None,
+            z_dtype=torch.bfloat16,
+            mean_dtype=None,
+            rstd_dtype=torch.float32,
+            x_aligned=True,
+            y_aligned=True,
+            weight_aligned=True,
+            bias_aligned=True,
+            z_aligned=True,
+            mean_aligned=True,
+            rstd_aligned=True,
+            stride_x_row=group_size,
+            stride_y_row=group_size,
+            stride_z_row=group_size,
+            M=num_rows,
+            N=group_size,
+            BLOCK_N=triton.next_power_of_2(group_size),
+            ROWS_PER_BLOCK=calc_rows_per_block(num_rows, device),
+            norm_before_gate=True,
+            is_rms_norm=True,
+            activation="silu",
+        )
+        assert runtime_key in warmup_keys
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -443,6 +499,50 @@ def test_rmsnorm_gated_forward_native_dtype(
         upcast=True,
     )
     torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
+def test_rmsnorm_gated_3d_matches_flattened_2d(
+    default_vllm_config,
+    dtype: torch.dtype,
+) -> None:
+    """Qwen GDN now norms (N, H, D) in place of a flatten to (N*H, D).
+
+    Last-dim RMS + gate must match the flattened layout on both the native
+    and CUDA/HIP kernels, including a 3D z view that is not contiguous.
+    """
+    from vllm.model_executor.layers.layernorm import RMSNormGated
+
+    set_random_seed(42)
+    device = torch.device(DEVICE)
+    num_tokens, num_heads, head_dim = 5, 4, 64
+    layer = RMSNormGated(
+        head_dim,
+        eps=1e-5,
+        group_size=None,
+        norm_before_gate=True,
+        device=device,
+        dtype=dtype,
+    )
+
+    packed = torch.randn(num_tokens, num_heads, 2, head_dim, dtype=dtype, device=device)
+    x3 = packed[:, :, 0, :]
+    z3 = packed[:, :, 1, :]
+    assert not x3.is_contiguous()
+    assert not z3.is_contiguous()
+    x2 = x3.reshape(-1, head_dim).contiguous()
+    z2 = z3.reshape(-1, head_dim).contiguous()
+
+    native_3d = layer.forward_native(x3, z3)
+    native_2d = layer.forward_native(x2, z2).reshape(num_tokens, num_heads, head_dim)
+    torch.testing.assert_close(native_3d, native_2d, atol=0, rtol=0)
+
+    cuda_3d = layer.forward_cuda(x3, z3)
+    cuda_2d = layer.forward_cuda(x2, z2).reshape(num_tokens, num_heads, head_dim)
+    torch.testing.assert_close(cuda_3d, cuda_2d, atol=1e-3, rtol=1e-2)
+    torch.testing.assert_close(cuda_3d, native_3d, atol=1e-2, rtol=1e-2)
+    assert cuda_3d.shape == (num_tokens, num_heads, head_dim)
 
 
 if __name__ == "__main__":

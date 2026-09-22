@@ -15,8 +15,8 @@ from openai_harmony import (
 from transformers import AutoTokenizer, GenerationConfig
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
 )

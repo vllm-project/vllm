@@ -69,7 +69,7 @@ class QianfanOCRForConditionalGeneration(InternVLChatModel):
     """
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
     ) -> None:
         super()._patch_quant_config(config, quant_config)
         # ignore vit layers to preserve model performance
