@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Round-trip tests for compressor → FP8 quant + KV cache insert → gather + dequant.
+"""Round-trip tests for compressor → FP8 quant + KV cache insert → gather + dequant.
 
 These tests cover:
   A) DeepseekV4 Attention: head_dim=512 (448 FP8 nope + 64 bf16 rope), quant_block=64
@@ -331,6 +330,19 @@ def test_v41_fused_save_compress_and_insert(
         torch.testing.assert_close(cache_backing, expected_cache, rtol=0, atol=0)
 
 
+def _rotate_rope_tail(
+    latent_row: torch.Tensor, cos_sin_row: torch.Tensor
+) -> torch.Tensor:
+    """GPT-J RoPE of one latent row's last 64 dims, in fp32."""
+    row = latent_row.float()
+    c, s = cos_sin_row.chunk(2)
+    rotated = row.clone()
+    even, odd = row[448::2], row[449::2]
+    rotated[448::2] = even * c - odd * s
+    rotated[449::2] = odd * c + even * s
+    return rotated
+
+
 def _mxfp8_record_reference(
     latent_row: torch.Tensor, cos_sin_row: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -339,12 +351,7 @@ def _mxfp8_record_reference(
     Mirrors FlashMLA's ``KVCacheLayout.V41_FP8Sparse`` quantizer: rotate the
     RoPE tail first, then scale every 32-dim tile, RoPE tiles included.
     """
-    row = latent_row.float()
-    c, s = cos_sin_row.chunk(2)
-    rotated = row.clone()
-    even, odd = row[448::2], row[449::2]
-    rotated[448::2] = even * c - odd * s
-    rotated[449::2] = odd * c + even * s
+    rotated = _rotate_rope_tail(latent_row, cos_sin_row)
     quantized, scales = _ue8m0_reference(rotated, 32, 448.0)
     return quantized.view(torch.uint8), (scales.log2() + 127).to(torch.uint8)
 
@@ -459,6 +466,166 @@ def test_v41_mxfp8_cache_round_trip():
     tolerance = 16.0 * (tile_amax / 448.0).log2().ceil().exp2()
     error = (out[0].float() - k.float()).abs()
     assert (error <= tolerance.repeat_interleave(32, dim=-1)).all()
+
+
+# e2m1 magnitudes indexed by the low 3 bits of a code; bit 3 is the sign.
+_E2M1_MAGNITUDES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _decode_nvfp4_row(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Unpack e2m1 rows and apply their e4m3 tile scales."""
+    mags = torch.tensor(_E2M1_MAGNITUDES, device=packed.device)
+    codes = torch.empty(
+        (*packed.shape[:-1], 512), dtype=torch.uint8, device=packed.device
+    )
+    codes[..., 0::2] = packed & 0xF  # even element in the low nibble
+    codes[..., 1::2] = packed >> 4
+    vals = mags[(codes & 7).long()] * torch.where(codes >= 8, -1.0, 1.0)
+    return (
+        vals.reshape(*packed.shape[:-1], 32, 16)
+        * scales.view(torch.float8_e4m3fn).float().reshape(*packed.shape[:-1], 32, 1)
+    ).flatten(-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
+    """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales.
+
+    Scales are byte-exact against the reference (``amax / 6`` clamped to the
+    e4m3 range); values are checked as round-to-nearest on the e2m1 grid, whose
+    coarsest step is 2 between 4 and 6, so half a step is ``1.0 * scale``.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(13)
+    device = "cuda"
+    cache_block = 64
+    cache_stride = math.ceil(cache_block * 288 / 512) * 512
+    num_tokens = 12
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(64, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+    cache_backing = torch.full((2, cache_stride), 165, dtype=torch.uint8, device=device)
+    cache = cache_backing.as_strided((2, cache_block, 288), (cache_stride, 288, 1))
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slots[3] = -1  # covers the negative-slot skip
+
+    rope_quant_insert(latent, positions, cos_sin, cache, slots, compress_ratio)
+
+    untouched = torch.full_like(cache_backing, 165)
+    for t in range(num_tokens):
+        slot = slots[t].item()
+        pos = positions[t].item()
+        if slot < 0 or (pos + 1) % compress_ratio:
+            continue
+        page, row = divmod(slot, cache_block)
+        cs = cos_sin[pos // compress_ratio * compress_ratio]
+        rotated = _rotate_rope_tail(latent[t], cs)
+        amax = rotated.view(32, 16).abs().amax(-1)
+        scale = (amax / 6.0).clamp(2.0**-9, 448.0).to(torch.float8_e4m3fn)
+
+        got_scales = cache_backing[page, cache_block * 256 + row * 32 :][:32]
+        torch.testing.assert_close(got_scales, scale.view(torch.uint8), rtol=0, atol=0)
+        decoded = _decode_nvfp4_row(
+            cache_backing[page, row * 256 : (row + 1) * 256], got_scales
+        )
+        step = scale.float().repeat_interleave(16)
+        assert ((decoded - rotated).abs() <= step).all()
+        untouched[page, row * 256 : (row + 1) * 256] = cache_backing[
+            page, row * 256 : (row + 1) * 256
+        ]
+        untouched[page, cache_block * 256 + row * 32 :][:32] = got_scales
+    # Rows the kernel must not have touched, page padding included.
+    torch.testing.assert_close(cache_backing, untouched, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("num_reqs", [1, 8, 32])
+@pytest.mark.parametrize("num_tokens", [70, 128, 129, 2051])
+@pytest.mark.parametrize("partial", [False, True])
+def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
+    """The NVFP4 gather dequantizes exactly what the insert kernel wrote."""
+    from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(17)
+    device = "cuda"
+    block_size = 64
+    num_blocks = math.ceil(num_tokens / block_size)
+    page_bytes = math.ceil(block_size * 288 / 512) * 512
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(num_tokens, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    backing = torch.zeros(num_blocks, page_bytes, dtype=torch.uint8, device=device)
+    cache = backing.as_strided((num_blocks, block_size, 288), (page_bytes, 288, 1))
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    rope_quant_insert(latent, positions, cos_sin, cache, slots, 1)
+
+    offset = 7 if partial else 0
+    seq_lens = num_tokens - torch.arange(num_reqs, dtype=torch.int32, device=device)
+    gather_lens = seq_lens - 3 if partial else None
+    storage = torch.full(
+        (num_reqs, num_tokens + offset + 16, 512),
+        -123.0,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    out = storage[:, : num_tokens + offset]
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).repeat(
+        num_reqs, 1
+    )
+
+    def gather():
+        dequantize_and_gather_k_cache(
+            out,
+            cache,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            block_table=block_table,
+            block_size=block_size,
+            offset=offset,
+        )
+
+    expected = _decode_nvfp4_row(
+        backing[:, : block_size * 256].reshape(-1, 256),
+        backing[:, block_size * 256 : block_size * 288].reshape(-1, 32),
+    )
+
+    def check(shorter_by):
+        assert (storage[:, num_tokens + offset :] == -123).all()
+        for req in range(num_reqs):
+            start = 3 if partial else 0
+            length = num_tokens - req - start - shorter_by
+            assert (out[req, :offset] == -123).all()
+            assert (out[req, offset + length :] == -123).all()
+            torch.testing.assert_close(
+                out[req, offset : offset + length].float(),
+                expected[start : start + length],
+                rtol=0,
+                atol=0,
+            )
+
+    gather()
+    check(0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        gather()
+    storage.fill_(-123)
+    seq_lens.sub_(1)
+    if gather_lens is not None:
+        gather_lens.sub_(1)
+    graph.replay()
+    check(1)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
@@ -970,7 +1137,6 @@ def test_get_c128_boundary(starts, query_start_loc, expected):
 def test_deepseek_v4_attention_quant_cache_roundtrip(num_tokens: int, block_size: int):
     """compressed_kv → quantize_and_insert_k_cache → dequantize_and_gather_k_cache
     → compare against original."""
-
     HEAD_DIM = 512
     NOPE_DIM = 448
     HEAD_BYTES = 584  # 448 fp8 + 128 bf16 + 8 uint8 scale
@@ -1181,9 +1347,8 @@ def test_dequantize_and_gather_k_cache(
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 17])
 @pytest.mark.parametrize("block_size", [16, 64])
 def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
-    """k → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
+    """K → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
     → manual dequant → compare against original."""
-
     HEAD_DIM = 128
     QUANT_BLOCK_SIZE = 128
     # cache_stride = head_dim + (head_dim * 4 / quant_block_size) = 128 + 4 = 132
@@ -1247,7 +1412,6 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
 
 def test_indexer_gather_accepts_upper_bound_output():
     """Gather only exact cu_seq_lens even when dst is over-allocated."""
-
     head_dim = 128
     quant_block_size = 128
     cache_stride = head_dim + head_dim * 4 // quant_block_size
@@ -1347,7 +1511,6 @@ def test_indexer_gather_accepts_upper_bound_output():
 
 def test_deepseek_v4_quant_magnitude_range():
     """Test that quantization handles a range of magnitudes correctly."""
-
     HEAD_DIM = 512
     NOPE_DIM = 448
     HEAD_BYTES = 584

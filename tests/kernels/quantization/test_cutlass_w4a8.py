@@ -300,8 +300,7 @@ def test_w4a8_cuda_graph():
 )
 @pytest.mark.parametrize("shape", MNK_SHAPES)
 def test_convert_packed_uint4b8_to_signed_int4_inplace(shape):
-    """
-    The W4A16 checkpoints encode the weights as int4b8 packed to int32.
+    """The W4A16 checkpoints encode the weights as int4b8 packed to int32.
     The CUTLASS kernels expect signed int4 packed to int32.
     This tests checks that the runtime int4b8 -> signed int4 conversion
     matches the offline conversion step exactly.

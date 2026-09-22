@@ -45,6 +45,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
 )
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -225,8 +226,7 @@ def _unpack(
 
 
 class MoERunner(MoERunnerInterface):
-    """
-    Standard MoE runner implementation for executing Mixture of Experts layers.
+    """Standard MoE runner implementation for executing Mixture of Experts layers.
 
     This is the primary concrete implementation of MoE execution logic, providing
     comprehensive support for standard MoE operations. It handles:
@@ -274,7 +274,7 @@ class MoERunner(MoERunnerInterface):
 
         # When both gates are present and FSE is enabled, fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
-        # F.linear produces combined logits. The topk kernel can then
+        # GEMM produces combined logits. The topk kernel can then
         # apply routing softmax and shared expert activation (sigmoid)
         # in a single launch.
         self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
@@ -704,7 +704,6 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
-
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
         # outside the runner (e.g. to overlap it on a separate stream), it
@@ -900,7 +899,9 @@ class MoERunner(MoERunnerInterface):
         if self.gate is not None:
             if self._fse_fuse_gate:
                 self._maybe_fuse_gate_weights()
-                router_logits = F.linear(hidden_states, self._combined_gate_weight)
+                router_logits = dispatch_unquantized_gemm()(
+                    self, hidden_states, self._combined_gate_weight, None
+                )
             else:
                 router_logits, _ = self.gate(hidden_states)
 
@@ -1019,8 +1020,7 @@ class MoERunner(MoERunnerInterface):
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> None:
-        """
-        Register the EPLB state in this layer.
+        """Register the EPLB state in this layer.
 
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
