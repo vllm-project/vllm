@@ -507,7 +507,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("per_token_activation", [False, True])
-@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float16])
 def test_nvfp4_one_sided_sizes_dispatched_activations(
     monkeypatch, per_token_activation: bool, input_dtype: torch.dtype
 ) -> None:
@@ -557,6 +557,22 @@ def test_nvfp4_one_sided_sizes_dispatched_activations(
             experts_cls=TrtLlmNvFp4ExpertsModular,
             backend=nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
             per_token_activation=per_token_activation,
+        )
+
+
+@pytest.mark.parametrize(
+    "input_dtype",
+    [torch.float32, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8],
+)
+def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtype):
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        flashinfer_one_sided_dispatch_layout,
+    )
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+
+    with pytest.raises(ValueError, match="unpacked inputs must be float16 or bfloat16"):
+        flashinfer_one_sided_dispatch_layout(
+            6144, FusedMoEQuantConfig.make("nvfp4"), input_dtype=input_dtype
         )
 
 
