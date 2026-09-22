@@ -29,6 +29,11 @@ curl -s localhost:8011/v1/chat/completions -H 'content-type: application/json' -
   ]}'
 ```
 
+The attention backend is picked as for Gemma 4: FlashAttention 4 on every
+layer when available, otherwise Triton. FlashInfer cannot serve this model (a
+batch mixes causal prefill with bidirectional denoising), and
+`--attention-backend FLASHINFER` is rejected.
+
 Per-request canvas widths smaller than the served canvas require async
 scheduling. The diffusion async scheduler is selected automatically; no
 `--scheduler-cls` argument is needed. Synchronous execution supports full-width
