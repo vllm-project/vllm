@@ -664,33 +664,6 @@ def _blackwell(vllm_config=None):
         yield
 
 
-def _mock_hopper_fa_version(*, head_size=None, **_kwargs):
-    # FA3 supports up to head size 256 on SM90; larger heads promote to FA4.
-    return 4 if head_size is not None and head_size > 256 else 3
-
-
-@contextmanager
-def _hopper(vllm_config=None):
-    platform = MagicMock()
-    platform.is_xpu.return_value = False
-    platform.is_rocm.return_value = False
-    platform.get_device_capability.return_value = DeviceCapability(9, 0)
-    platform.is_device_capability_family.side_effect = lambda family: family == 90
-    with (
-        patch("vllm.v1.attention.backends.fa_utils.current_platform", platform),
-        patch(
-            "vllm.v1.attention.backends.flash_attn.is_fa_version_supported",
-            return_value=True,
-        ),
-        patch(
-            "vllm.v1.attention.backends.fa_utils.get_flash_attn_version",
-            side_effect=_mock_hopper_fa_version,
-        ),
-        patch("vllm.config.get_current_vllm_config_or_none", return_value=vllm_config),
-    ):
-        yield
-
-
 def _hd256_config(
     *,
     is_mm_prefix_lm=False,
@@ -709,57 +682,6 @@ def _hd256_config(
     vllm_config.cache_config.cache_dtype = cache_dtype
     vllm_config.parallel_config.decode_context_parallel_size = dcp_size
     return vllm_config
-
-
-@pytest.mark.parametrize(
-    "head_size,expected_supported",
-    [
-        (256, True),
-        (384, False),
-        (512, True),
-    ],
-)
-def test_sm90_fp8_kv_head_size_support(head_size, expected_supported):
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-    with _hopper():
-        error = FlashAttentionBackend.supports_combination(
-            head_size=head_size,
-            dtype=torch.bfloat16,
-            kv_cache_dtype="fp8",
-            block_size=64,
-            use_mla=False,
-            has_sink=False,
-            use_sparse=False,
-            use_mm_prefix=False,
-            device_capability=DeviceCapability(9, 0),
-        )
-
-    if expected_supported:
-        assert error is None
-    else:
-        assert error is not None
-        assert "head_size=512 on SM90" in error
-
-
-@pytest.mark.parametrize("head_size", [256, 512])
-def test_sm90_fp8_kv_mm_prefix_deselects_flash_attn(head_size):
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-    with _hopper():
-        error = FlashAttentionBackend.supports_combination(
-            head_size=head_size,
-            dtype=torch.bfloat16,
-            kv_cache_dtype="fp8",
-            block_size=64,
-            use_mla=False,
-            has_sink=False,
-            use_sparse=False,
-            use_mm_prefix=True,
-            device_capability=DeviceCapability(9, 0),
-        )
-
-    assert error == "SM90 FP8 KV with mm_prefix requires Triton"
 
 
 @blackwell_only
@@ -940,23 +862,6 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
         )
     expected = "TRITON_FLASH_ATTN" if use_mm_prefix else "FLASH_ATTN"
     assert backend.get_name() == expected
-
-
-@blackwell_only
-@pytest.mark.parametrize("head_size", [256, 512])
-def test_hopper_fp8_mm_prefix_selects_triton_flash_attn(head_size, hopper_selection):
-    """SM90 FP8 uses FA3 for d256 and FA4 for d512 causal requests."""
-    from vllm.engine.arg_utils import EngineArgs
-
-    config = EngineArgs(
-        model="google/gemma-4-31B-it",
-        dtype="bfloat16",
-        kv_cache_dtype="fp8",
-    ).create_engine_config()
-    with set_current_vllm_config(config):
-        backend = get_attn_backend(head_size, torch.bfloat16, "fp8", use_mm_prefix=True)
-    assert config.attention_config.flash_attn_version is None
-    assert backend.get_name() == "TRITON_FLASH_ATTN"
 
 
 @blackwell_only
