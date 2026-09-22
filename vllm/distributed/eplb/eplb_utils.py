@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for EPLB (Expert Parallel Load Balancing)."""
 
+import contextlib
 import os
 import threading
 
@@ -13,9 +14,24 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+@contextlib.contextmanager
+def device_stream(stream: torch.Stream | None):
+    """Platform-agnostic context manager that activates *stream* as the
+    current accelerator stream for the duration of the ``with`` block.
+    A no-op when *stream* is ``None``."""
+    if stream is None:
+        yield
+        return
+    prev = torch.accelerator.current_stream()
+    torch.accelerator.set_stream(stream)
+    try:
+        yield
+    finally:
+        torch.accelerator.set_stream(prev)
+
+
 class CpuGpuEvent:
-    """
-    Combines a CUDA event with a CPU threading event to enforce record->wait
+    """Combines a CUDA event with a CPU threading event to enforce record->wait
     ordering across two threads.
 
     This class is designed for exactly two threads: one producer that calls
@@ -31,12 +47,11 @@ class CpuGpuEvent:
     """
 
     def __init__(self):
-        self._event = torch.cuda.Event()
+        self._event = torch.Event()
         self._recorded = threading.Event()
 
-    def wait(self, stream: torch.cuda.Stream | None = None):
-        """
-        Blocks the calling thread until record finishes. Used to guarantee that the
+    def wait(self, stream: torch.Stream | None = None):
+        """Blocks the calling thread until record finishes. Used to guarantee that the
         record kernel is called before wait.
 
         Should only be called by the Async Eplb thread.
@@ -45,9 +60,8 @@ class CpuGpuEvent:
         self._event.wait(stream)
         self._recorded.clear()
 
-    def record(self, stream: torch.cuda.Stream | None = None):
-        """
-        Unblocks the waiting thread after calling event.record().
+    def record(self, stream: torch.Stream | None = None):
+        """Unblocks the waiting thread after calling event.record().
 
         Should only be called by the main thread.
         """
@@ -56,7 +70,7 @@ class CpuGpuEvent:
                 "CpuGpuEvent.record() called before the previous event was "
                 "consumed by wait()"
             )
-        self._event = torch.cuda.Event()
+        self._event = torch.Event()
         self._event.record(stream)
         self._recorded.set()
 
@@ -65,12 +79,12 @@ def override_envs_for_eplb(
     parallel_config: ParallelConfig,
     moe_backend: str | None = None,
 ) -> None:
-    """
-    Override environment variables for EPLB when specific conditions are met.
+    """Override environment variables for EPLB when specific conditions are met.
 
     Args:
         parallel_config: The parallel configuration object.
         moe_backend: The configured MoE backend (e.g. ``deep_gemm_mega_moe``).
+
     """
     is_data_parallel = parallel_config.data_parallel_size > 1
     is_eplb_enabled = parallel_config.enable_eplb
