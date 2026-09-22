@@ -418,6 +418,13 @@ class FlexibleArgumentParser(ArgumentParser):
                 continue
 
             if processed_arg.startswith("-") and "." in processed_arg:
+                try:
+                    float(processed_arg)
+                except ValueError:
+                    pass
+                else:
+                    continue
+
                 if "=" in processed_arg:
                     processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
