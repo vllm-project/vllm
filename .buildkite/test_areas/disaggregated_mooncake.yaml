@@ -22,11 +22,11 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
+      dind: false
       device: mi355_4
       num_devices: 4
-      dind: false
-      working_dir: /vllm-workspace/tests
       timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/tests"
       depends_on:
         - image-build-amd
       source_file_dependencies:
