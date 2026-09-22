@@ -64,6 +64,7 @@ class GDNAttentionMetadata:
     non_spec_token_indx: torch.Tensor | None = None
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
+    uniform_spec_sequence_length: int | None = None  # None for ragged batches
 
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
@@ -226,6 +227,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.vllm_config.cache_config.mamba_cache_mode,
         )
 
+        uniform_spec_sequence_length = None
         spec_sequence_masks_cpu: torch.Tensor | None = None
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
@@ -289,6 +291,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             assert spec_sequence_masks_cpu is not None
             non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+            spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
+            if spec_query_lens_cpu.numel() > 0:
+                first_spec_sequence_length = int(spec_query_lens_cpu[0])
+                if first_spec_sequence_length > 0 and bool(
+                    torch.all(spec_query_lens_cpu == first_spec_sequence_length)
+                ):
+                    uniform_spec_sequence_length = first_spec_sequence_length
 
             # Use CPU tensors to avoid CPU-GPU sync
             non_spec_query_lens_cpu = query_lens_cpu[non_spec_sequence_masks_cpu]
@@ -540,6 +549,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            uniform_spec_sequence_length=uniform_spec_sequence_length,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
