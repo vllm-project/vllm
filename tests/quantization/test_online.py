@@ -517,15 +517,6 @@ def test_nvfp4_per_token_backend_contract() -> None:
         for experts_cls in nvfp4_oracle.backend_to_kernel_cls(backend):
             expected = backend == nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM
             assert experts_cls._supports_quant_scheme(*scheme) == expected, experts_cls
-            if expected:
-                supported, reason = experts_cls.is_supported_config(
-                    experts_cls,
-                    SimpleNamespace(is_act_and_mul=False),
-                    *scheme,
-                    experts_cls.activation_format(),
-                )
-                assert not supported
-                assert reason is not None and "non-gated" in reason
     assert not BatchedMarlinExperts._supports_quant_scheme(*scheme)
 
 

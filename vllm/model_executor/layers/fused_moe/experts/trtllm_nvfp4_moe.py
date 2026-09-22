@@ -231,24 +231,6 @@ class TrtLlmNvFp4ExpertsBase:
         )
 
     @staticmethod
-    def is_supported_config(
-        cls: type[mk.FusedMoEExperts],
-        moe_config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[bool, str | None]:
-        if activation_key == kNvfp4DynamicToken and not moe_config.is_act_and_mul:
-            return False, "kernel does not support non-gated per-token NVFP4"
-        return mk.FusedMoEExperts.is_supported_config(
-            cls,
-            moe_config,
-            weight_key,
-            activation_key,
-            activation_format,
-        )
-
-    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         """Supports SITU only when the installed FlashInfer exposes it."""
         if activation == MoEActivation.SITU:
