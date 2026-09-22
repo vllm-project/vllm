@@ -512,6 +512,7 @@ def _check_dummy_hash_model_forward(
     model = SimpleNamespace(
         use_mega_moe=False,
         use_sequence_parallel=False,
+        fuse_mhc_all_reduce=False,
         engram_hash=state,
         engram_swa_prefix="swa",
         engram_dp_shared_memory=dp_shared_memory,
@@ -682,6 +683,13 @@ def test_engram_dp_shared_memory_runtime_requirements(
             cpu_offload=cpu_offload,
             dp_shared_memory=True,
         )
+
+
+def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch):
+    """A /dev/shm smaller than the tables must fall back instead of failing startup."""
+    monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: 2)
+    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM)
+    assert not engram_ops.can_share_engram_tables(layout)
 
 
 @pytest.mark.parametrize(
