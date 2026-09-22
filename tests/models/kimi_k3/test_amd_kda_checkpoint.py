@@ -15,11 +15,17 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDAMetadataBuilder
-from vllm.models.kimi_k3.amd.ops.kda_checkpoint import store_conv_checkpoints
+from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
+    KimiK3ROCmKDAPrefillCheckpointExporter,
+)
 from vllm.models.kimi_k3.amd.ops.kda_chunk import KDA_CHECKPOINT_ALIGNMENT
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -107,7 +113,7 @@ def test_checkpoint_offset_is_relative_to_query_start() -> None:
 
     assert md.checkpoint is not None
     torch.testing.assert_close(md.checkpoint.checkpoint_offsets, _i32([128, 0]))
-    torch.testing.assert_close(md.checkpoint.state_indices, _i32([5, -1]))
+    torch.testing.assert_close(md.checkpoint.state_indices, _i32([5, NULL_BLOCK_ID]))
 
 
 def test_checkpoint_metadata_avoids_live_state_row() -> None:
@@ -142,7 +148,7 @@ def test_checkpoint_metadata_skips_null_reservation() -> None:
     md = _builder().build(0, common)
 
     assert md.checkpoint is not None
-    torch.testing.assert_close(md.checkpoint.state_indices, _i32([-1]))
+    torch.testing.assert_close(md.checkpoint.state_indices, _i32([NULL_BLOCK_ID]))
 
 
 def test_checkpoint_metadata_absent_without_reserved_block() -> None:
@@ -189,7 +195,7 @@ def test_spec_checkpoint_metadata_gathers_non_spec_rows_by_index() -> None:
     # Request r owns blocks r*width.., so slot cdiv(200, 64) - 2 = 2 for
     # request 1 and cdiv(128, 64) - 2 = 0 for request 4.
     torch.testing.assert_close(
-        md.checkpoint.state_indices, _i32([width + 2, -1, 4 * width])
+        md.checkpoint.state_indices, _i32([width + 2, NULL_BLOCK_ID, 4 * width])
     )
 
 
@@ -208,6 +214,15 @@ def test_checkpoint_metadata_absent_outside_align_mode() -> None:
 DIM = 384
 WIDTH = 4
 STATE_LEN = WIDTH - 1
+
+
+def store_conv_checkpoints(x, conv_state, cu, offsets, rows, state_len) -> None:
+    KimiK3ROCmKDAPrefillCheckpointExporter(state_len=state_len).export(
+        MambaPrefillCheckpointMetadata(offsets, rows),
+        raw_qkv=x,
+        conv_state=conv_state,
+        cu_seqlens=cu,
+    )
 
 
 def _conv_fixture(
@@ -250,9 +265,27 @@ def test_conv_checkpoint_skips_opted_out_sequences() -> None:
     x, cu, conv_state = _conv_fixture([200, 200])
     before = conv_state.clone()
 
-    store_conv_checkpoints(x, conv_state, cu, _i32([0, 192]), _i32([5, -1]), STATE_LEN)
+    store_conv_checkpoints(
+        x, conv_state, cu, _i32([0, 192]), _i32([5, NULL_BLOCK_ID]), STATE_LEN
+    )
 
     assert torch.equal(conv_state.isnan(), before.isnan())
+
+
+def test_exporter_stores_conv_window_through_shared_interface() -> None:
+    x, cu, conv_state = _conv_fixture([200, 200])
+    exporter = KimiK3ROCmKDAPrefillCheckpointExporter(state_len=STATE_LEN)
+    assert isinstance(exporter, MambaPrefillCheckpointExporter)
+    checkpoint = MambaPrefillCheckpointMetadata(
+        _i32([192, 0]), _i32([5, NULL_BLOCK_ID])
+    )
+
+    exporter.export(checkpoint, raw_qkv=x, conv_state=conv_state, cu_seqlens=cu)
+
+    torch.testing.assert_close(conv_state[5], x[192 - STATE_LEN : 192].transpose(0, 1))
+    untouched = torch.ones(16, dtype=torch.bool, device="cuda")
+    untouched[5] = False
+    assert bool(conv_state[untouched].isnan().all())
 
 
 @pytest.mark.parametrize("num_spec", [0, 2, 8])

@@ -11,22 +11,22 @@ from dataclasses import dataclass, fields
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import (
-    MambaSpec,
-    get_mamba_prefill_checkpoint_position,
-    is_mamba_prefill_checkpoint_valid,
-)
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -96,17 +96,23 @@ def prepare_chunk_metadata_device(
 
 
 @dataclass
-class KDACheckpointMetadata:
-    checkpoint_offsets: torch.Tensor
-    state_indices: torch.Tensor
-
-
-@dataclass
 class KimiK3ROCmKDAMetadata(GDNAttentionMetadata):
-    checkpoint: KDACheckpointMetadata | None = None
+    checkpoint: MambaPrefillCheckpointMetadata | None = None
 
 
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    def __init__(
+        self,
+        kv_cache_spec: MambaSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -141,10 +147,9 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         m: CommonAttentionMetadata,
         attn_metadata: GDNAttentionMetadata,
         num_decode_draft_tokens_cpu: torch.Tensor | None,
-    ) -> KDACheckpointMetadata | None:
+    ) -> MambaPrefillCheckpointMetadata | None:
         if attn_metadata.num_prefills == 0:
             return None
-        assert m.seq_lens_cpu_upper_bound is not None
         # request_rows must line up with prefill_query_start_loc, either the
         # prefill tail of a decode-first batch, or every non-spec row
         # including padding
@@ -157,59 +162,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             request_rows = (
                 (num_decode_draft_tokens_cpu < 0).nonzero().flatten().tolist()
             )
-        all_query_lens = m.query_start_loc_cpu.diff().tolist()
-        query_lens = [all_query_lens[row] for row in request_rows]
-        seq_lens = m.seq_lens_cpu_upper_bound.tolist()
-        block_size = self.kv_cache_spec.block_size
-        hash_block_size = self.vllm_config.cache_config.prefix_match_unit or block_size
-        speculative_config = self.vllm_config.speculative_config
-        drop_eagle_block = (
-            speculative_config is not None and speculative_config.use_eagle_block_drop()
-        )
-        checkpoint_offsets = []
-        checkpoint_cols = []
-        for row, query_len in zip(request_rows, query_lens):
-            seq_len = seq_lens[row]
-            query_start = seq_len - query_len
-            checkpoint_position = get_mamba_prefill_checkpoint_position(
-                seq_len,
-                hash_block_size,
-                drop_eagle_block=drop_eagle_block,
-            )
-            offset = checkpoint_position - query_start
-            valid = is_mamba_prefill_checkpoint_valid(
-                query_start=query_start,
-                query_end=seq_len,
-                checkpoint_position=checkpoint_position,
-                hash_block_size=hash_block_size,
-                mamba_block_size=block_size,
-                checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
-            )
-            checkpoint_offsets.append(offset if valid else 0)
-            checkpoint_cols.append(cdiv(seq_len, block_size) - 2 if valid else -1)
-        if not any(checkpoint_offsets):
-            return None
-
-        device = m.query_start_loc.device
-        checkpoint_offsets_tensor = async_tensor_h2d(
-            checkpoint_offsets, device, torch.int32
-        )
-        request_rows_tensor = async_tensor_h2d(request_rows, device, torch.int64)
-        checkpoint_cols_tensor = async_tensor_h2d(checkpoint_cols, device, torch.int64)
-        checkpoint_state_indices = m.block_table_tensor[
-            request_rows_tensor, checkpoint_cols_tensor
-        ].to(torch.int32)
-        # ROCm's `fused_kda_chunk` disables the export for sequences whose
-        # rows are negative
-        checkpoint_state_indices = torch.where(
-            (checkpoint_cols_tensor >= 0) & (checkpoint_state_indices != NULL_BLOCK_ID),
-            checkpoint_state_indices,
-            -1,
-        )
-        return KDACheckpointMetadata(
-            checkpoint_offsets_tensor,
-            checkpoint_state_indices,
-        )
+        return self.checkpoint_builder.build(m, request_rows)
 
     def _build_chunk_metadata(
         self,

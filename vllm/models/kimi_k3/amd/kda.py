@@ -40,7 +40,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
-from vllm.models.kimi_k3.amd.ops.kda_checkpoint import store_conv_checkpoints
+from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
+    KimiK3ROCmKDAPrefillCheckpointExporter,
+)
 from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     KDA_CHECKPOINT_ALIGNMENT,
     is_fused_kda_chunk_supported,
@@ -253,6 +255,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             additional_config.get("kda_prefill_checkpoint", True)
             if isinstance(additional_config, dict)
             else True
+        )
+        self._checkpoint_exporter = KimiK3ROCmKDAPrefillCheckpointExporter(
+            state_len=self.conv_size - 1
         )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
@@ -586,13 +591,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     checkpoint_state = recurrent_state
                     checkpoint_offsets = checkpoint.checkpoint_offsets
                     checkpoint_state_indices = checkpoint.state_indices
-                    store_conv_checkpoints(
-                        mixed_qkv_ns[nd_tok:],
-                        conv_state,
-                        prefill_query_start_loc,
-                        checkpoint_offsets,
-                        checkpoint_state_indices,
-                        self.conv_size - 1,
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=mixed_qkv_ns[nd_tok:],
+                        conv_state=conv_state,
+                        cu_seqlens=prefill_query_start_loc,
                     )
 
                 (
