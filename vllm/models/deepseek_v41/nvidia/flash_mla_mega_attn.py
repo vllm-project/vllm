@@ -225,7 +225,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             z,
             recipe=self._einsum_recipe,
         )
-        return self.wo_b(z.flatten(1))
+        return self._wo_b_proj(z.flatten(1))
 
     # ---- weights -----------------------------------------------------------
 
