@@ -28,9 +28,9 @@ ghp-import==2.1.0
     #   properdocs
 gitdb==4.0.12
     # via gitpython
-gitpython==3.1.50
+gitpython==3.1.62
     # via mkdocs-git-revision-date-localized-plugin
-griffelib==2.0.2
+griffelib==2.3.0
     # via mkdocstrings-python
 htmlmin2==0.1.13
     # via mkdocs-minify-plugin
@@ -87,7 +87,7 @@ mkdocs-gen-files==0.6.1
     # via -r requirements/docs.in
 mkdocs-get-deps==0.2.2
     # via mkdocs
-mkdocs-git-revision-date-localized-plugin==1.5.1
+mkdocs-git-revision-date-localized-plugin==1.6.0
     # via -r requirements/docs.in
 mkdocs-glightbox==0.5.2
     # via -r requirements/docs.in
@@ -112,6 +112,7 @@ natsort==8.4.0
 packaging==26.2
     # via
     #   mkdocs
+    #   mkdocs-git-revision-date-localized-plugin
     #   properdocs
 paginate==0.5.7
     # via mkdocs-material
@@ -157,7 +158,7 @@ regex==2026.4.4
     # via -r requirements/docs.in
 requests==2.33.1
     # via mkdocs-material
-ruff==0.15.12
+ruff==0.16.8
     # via -r requirements/docs.in
 selectolax==0.4.8
     # via mkdocs-glightbox
@@ -167,6 +168,7 @@ smmap==5.0.3
     # via gitdb
 typing-extensions==4.15.0
     # via
+    #   mkdocstrings-python
     #   pydantic
     #   pydantic-core
     #   typing-inspection
