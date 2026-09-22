@@ -39,7 +39,7 @@ from ..inputs import (
 )
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
 from .context import BaseProcessingInfo, TimingContext
-from .dummy_inputs import BaseDummyInputsBuilder
+from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
 from .inputs import ProcessorInputs
 
 if TYPE_CHECKING:
@@ -1055,6 +1055,41 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         self.data_parser = self.info.get_data_parser()
 
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        """Build the input which, after processing, results in
+        the maximum possible number of placeholder tokens.
+
+        Args:
+            seq_len: Sequence length
+            mm_counts: Count of items per modality
+            mm_options: Configurable options per modality (optional)
+
+        """
+        builder = self.dummy_inputs
+        dummy_text = builder.get_dummy_text(mm_counts)
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+
+        tokenizer = self.info.ctx.tokenizer
+        dummy_prompt: list[int]
+        if tokenizer is None:
+            # Tokenizer-less models (e.g. `skip_tokenizer_init=True`) only
+            # accept embeddings and have an empty dummy text, so there are no
+            # prompt tokens.
+            dummy_prompt = []
+        else:
+            dummy_prompt = cached_encode(tokenizer, dummy_text, truncation=False)
+
+        return ProcessorInputs(
+            prompt=dummy_prompt,
+            mm_data_items=dummy_mm_items,
+        )
+
     def get_dummy_mm_inputs(
         self,
         mm_counts: Mapping[str, int],
@@ -1070,7 +1105,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         mm_config = model_config.get_multimodal_config()
 
-        processor_inputs = self.dummy_inputs.get_dummy_processor_inputs(
+        processor_inputs = self.get_dummy_inputs(
             seq_len=seq_len,
             mm_counts=mm_counts,
             mm_options=mm_config.limit_per_prompt,
