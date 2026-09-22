@@ -850,6 +850,97 @@ __global__ void restore_N32_K16_dequantize_rhs_w8a16_perc_kernel(
   }
 }
 
+// subchannel version: scales and zeros have shape [K / GroupSize, N_32align]
+template <typename FT, typename QT>
+__global__ void restore_N32_K16_dequantize_rhs_w8a16_subchannel_kernel(
+    const QT* qdata, const FT* scales, const FT* zeros, FT* fdata,
+    const int N_32align, const int N, const int K, const int GroupSize) {
+  __shared__ FT smem[64 * 32];
+  auto warp_id = threadIdx.x / 32;
+  auto lane_id = threadIdx.x % 32;
+
+  const auto src_row_idx = blockIdx.x * 8 + lane_id / 4;
+  const int src_col_idx =
+      blockIdx.y * 64 * 4 + warp_id * 16 * 4 + (lane_id % 4) * 16;
+  const int src_offset = src_row_idx * K * 4 + src_col_idx;
+  auto params_nidx = blockIdx.x * 32 + (lane_id / 4) * 4;
+
+  // ------------------------------------------------------------------
+  // SUB-CHANNEL LOGIC:
+  // Calculate the base K index this thread is processing.
+  // Because K_local spans at most 9 elements, if GroupSize >= 16,
+  // all elements processed by this thread belong to the same k_group_idx.
+  // ------------------------------------------------------------------
+  const int k_local_base = warp_id * 16 + (lane_id % 4) * 2;
+  const int k_global_base = blockIdx.y * 64 + k_local_base;
+  const int k_group_idx = k_global_base / GroupSize;
+
+  // Offset into the [K / GroupSize, N_32align] scale/zero matrix
+  const int scale_offset = k_group_idx * N_32align + params_nidx;
+  // ------------------------------------------------------------------
+
+  QT qval_reg[16];
+  if (src_col_idx < (K * 4)) {
+    *(reinterpret_cast<uint4*>(qval_reg)) =
+        *(reinterpret_cast<const uint4*>(qdata + src_offset));
+  }
+
+  FT scale_reg[4];
+  // USE scale_offset INSTEAD OF params_nidx
+  *(reinterpret_cast<uint2*>(scale_reg)) =
+      *(reinterpret_cast<const uint2*>(scales + scale_offset));
+
+  FT zero_reg[4];
+  if (zeros != nullptr) {
+    // USE scale_offset INSTEAD OF params_nidx
+    *(reinterpret_cast<uint2*>(zero_reg)) =
+        *(reinterpret_cast<const uint2*>(zeros + scale_offset));
+  }
+
+  FT fval_reg[16];
+
+  const int sts_base_offset =
+      (warp_id * 16 + (lane_id % 4) * 2) * 32 + lane_id / 4;
+
+  #pragma unroll
+  for (int ni = 0; ni < 4; ++ni) {
+    cvt_8bx4_to_16bx4_bias128(
+        *reinterpret_cast<uint32_t*>(&qval_reg[ni * 4]),
+        reinterpret_cast<typename HalfType<FT>::T2*>(&(fval_reg[ni * 4])));
+  #pragma unroll
+    for (int ki = 0; ki < 4; ++ki) {
+      if (zeros != nullptr) {
+        fval_reg[ni * 4 + ki] = __hsub(fval_reg[ni * 4 + ki], zero_reg[ni]);
+      }
+      fval_reg[ni * 4 + ki] = __hmul(fval_reg[ni * 4 + ki], scale_reg[ni]);
+      int sts_offset = sts_base_offset + ((ki / 2) * 8 + (ki % 2)) * 32 +
+                       ((ni + lane_id % 4) % 4) * 8;
+      smem[sts_offset] = fval_reg[ni * 4 + ki];
+    }
+  }
+  __syncthreads();
+
+  const int lds_base_offset =
+      (threadIdx.x / 4) * 32 + ((threadIdx.x % 4 + threadIdx.x / 8) % 4) * 8;
+  #pragma unroll
+  for (int i = 0; i < 2; ++i) {
+    *reinterpret_cast<uint4*>(fval_reg + i * 8) =
+        *reinterpret_cast<uint4*>(smem + lds_base_offset + i * 32 * 32);
+  }
+
+  const auto dst_row_base_kidx = blockIdx.y * 64 + threadIdx.x / 4;
+  const auto dst_col_nidx = blockIdx.x * 32 + (threadIdx.x % 4) * 8;
+  #pragma unroll
+  for (int i = 0; i < 2; ++i) {
+    int dst_row_kidx = dst_row_base_kidx + i * 32;
+    int dst_offset = dst_row_kidx * N + dst_col_nidx;
+    if (dst_row_kidx < K && dst_col_nidx < N) {
+      *reinterpret_cast<uint4*>(fdata + dst_offset) =
+          *reinterpret_cast<uint4*>(fval_reg + i * 8);
+    }
+  }
+}
+
 template <typename FT, typename QT>
 void restore_N32_K16_dequantize_rhs_w8a16(const QT* qdata, const FT* scales,
                                           const FT* zeros, FT* fdata,
@@ -858,16 +949,24 @@ void restore_N32_K16_dequantize_rhs_w8a16(const QT* qdata, const FT* scales,
                                           cudaStream_t stream) {
   STD_TORCH_CHECK(N % 8 == 0 && K % 16 == 0 && N_32align % 32 == 0,
                   "Unsupported shape");
+
+  const int BLOCK = 128;
+  dim3 grid(N_32align / 32, ((K / 16) + 3) / 4);
   if (GroupSize == -1) {
-    const int BLOCK = 128;
-    dim3 grid(N_32align / 32, ((K / 16) + 3) / 4);
     restore_N32_K16_dequantize_rhs_w8a16_perc_kernel<FT, QT>
         <<<grid, BLOCK, 0, stream>>>(qdata, scales, zeros, fdata, N_32align, N,
                                      K);
-  }
-  // TODO: Support SubChannel
-  else {
-    STD_TORCH_CHECK(false, "Now only support PerChannel");
+  } else {
+    // Sub-Channel (New)
+    // Safety check: The mathematical proof relies on GroupSize div by 16
+    // to prevent thread-level group boundary crossings.
+    STD_TORCH_CHECK(
+        (GroupSize % 16) == 0,
+        "GroupSize must be divisible by 16 for thread-level group consistency");
+
+    restore_N32_K16_dequantize_rhs_w8a16_subchannel_kernel<FT, QT>
+        <<<grid, BLOCK, 0, stream>>>(qdata, scales, zeros, fdata, N_32align, N,
+                                     K, GroupSize);
   }
 }
 
@@ -911,7 +1010,7 @@ void allspark_qgemm_w8a16_perc_ampere(
     void* workspace, const BlockTileSplitkParams& fused_gemm_params,
     const int group_size, int CUBLAS_M_THRESHOLD, const int sm_version,
     cudaStream_t stream, cublasHandle_t handle) {
-  if (M > CUBLAS_M_THRESHOLD) {
+  if (M > CUBLAS_M_THRESHOLD || group_size != -1) {
     w8a16_gemm_dq_cublas<FType, QType>(A, B, B_scale, B_zero, C, workspace, M,
                                        N_32align, N, K, group_size, stream,
                                        handle);
@@ -959,7 +1058,9 @@ torch::stable::Tensor allspark_w8a16_gemm(
                   "Shape mismatch: b_qweight.size(1) = ", b_qweight.size(1),
                   ", k = ", k);
 
-  STD_TORCH_CHECK(group_size == -1, "Currently only supports group_size = -1");
+  STD_TORCH_CHECK(group_size == -1 || group_size >= 16,
+                  "Currently only supports group_size = -1 "
+                  "or group size is >= 16(subchannel)");
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       a.get_device_index());
@@ -981,7 +1082,8 @@ torch::stable::Tensor allspark_w8a16_gemm(
   allspark::BlockTileSplitkParams fused_gemm_params;
 
   size_t ws_size = 0;
-  if (m > CUBLAS_M_THRESHOLD) {
+  // UPDATE: Force full workspace allocation if sub-channel is used
+  if (m > CUBLAS_M_THRESHOLD || group_size != -1) {
     ws_size = k * n * 2;  // sizeof(f16)==2
   } else {
     ws_size = allspark::allspark_qgemm_w8a16_perc_n32k16_ampere_workspace_size(

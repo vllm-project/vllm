@@ -1934,21 +1934,32 @@ def allspark_repack_weight(
             rearranged weight, scale, and optionally zero_point.
 
     """
+
     K = qweight.shape[0]
     N = qweight.shape[1]
+
+    # Extract num_groups dynamically.
+    # For channel-wise (group_size == -1), this is naturally 1.
+    # For group-wise, it will be K // group_size.
+    num_groups = scale.shape[0]
     N_32align = (N + 32 - 1) // 32 * 32
 
     qweight_reorder = torch.empty(
         (N_32align, K), device=qweight.device, dtype=qweight.dtype
     )
-    scale_reorder = torch.empty((1, N_32align), device=scale.device, dtype=scale.dtype)
+
+    # Allocate multiple rows for scales and zero points
+    scale_reorder = torch.empty(
+        (num_groups, N_32align), device=scale.device, dtype=scale.dtype
+    )
     zero_point_reorder = None
+
     if has_zp:
         assert zero_point is not None, (
             "zero_point must be provided for asymmetric quantization."
         )
         zero_point_reorder = torch.empty(
-            (1, N_32align), device=zero_point.device, dtype=zero_point.dtype
+            (num_groups, N_32align), device=zero_point.device, dtype=zero_point.dtype
         )
 
     torch.ops._C.rearrange_kn_weight_as_n32k16_order(
@@ -1962,6 +1973,7 @@ def allspark_repack_weight(
         K,
         N,
         N_32align,
+        num_groups,  # New parameter to enable subchannel quantization support
     )
 
     return qweight_reorder, scale_reorder, zero_point_reorder

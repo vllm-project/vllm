@@ -17,7 +17,8 @@ __global__ void __launch_bounds__(128)
     rearrange_kn_weight_as_n32k16_order_ldg16_kernel(
         const uint8_t* B, const FType* B_scale, const FType* B_zero,
         uint8_t* B_result, FType* B_scale_result, FType* B_zero_result,
-        const int K, const int N, const int N_32align) {
+        const int K, const int N, const int N_32align,
+        const int64_t num_groups) {
   const auto lane_id = threadIdx.x % 32;
   const auto warp_id = threadIdx.x / 32;
 
@@ -68,17 +69,32 @@ __global__ void __launch_bounds__(128)
       }
     }
   } else {
-    // Load B_scale and B_zero
-    FType b_scale_reg, b_zero_reg;
-    auto src_offset = blockIdx.y * 128 + threadIdx.x;
-    ldg16_cg_0(b_scale_reg, B_scale + src_offset, src_offset < N);
-    if (B_zero != nullptr)
-      ldg16_cg_0(b_zero_reg, B_zero + src_offset, src_offset < N);
-    int dst_offset =
-        blockIdx.y * 128 + warp_id * 32 + (lane_id % 8) * 4 + lane_id / 8;
-    if (dst_offset < N_32align) {
-      B_scale_result[dst_offset] = b_scale_reg;
-      if (B_zero != nullptr) B_zero_result[dst_offset] = b_zero_reg;
+    // --- [UPDATED SCALES AND ZEROS REORDERING] ---
+    // Iterate over all groups. For channel-wise this loops once.
+    // For group-wise, it loops num_groups times.
+    for (int g = 0; g < num_groups; ++g) {
+      // Load B_scale and B_zero
+      FType b_scale_reg, b_zero_reg;
+
+      // Calculate local column offset (independent of group)
+      int local_col_offset = blockIdx.y * 128 + threadIdx.x;
+
+      auto src_offset = g * N + local_col_offset;
+      ldg16_cg_0(b_scale_reg, B_scale + src_offset, local_col_offset < N);
+      if (B_zero != nullptr)
+        ldg16_cg_0(b_zero_reg, B_zero + src_offset, local_col_offset < N);
+
+      // Calculate the intra-row shuffled destination
+      int local_dst_offset =
+          blockIdx.y * 128 + warp_id * 32 + (lane_id % 8) * 4 + lane_id / 8;
+
+      if (local_dst_offset < N_32align) {
+        // Apply 32-aligned group row shift
+        int dst_offset = (g * N_32align) + local_dst_offset;
+
+        B_scale_result[dst_offset] = b_scale_reg;
+        if (B_zero != nullptr) B_zero_result[dst_offset] = b_zero_reg;
+      }
     }
   }
 }
@@ -88,18 +104,21 @@ void rearrange_kn_weight_as_n32k16_order_ldg16(
     const uint8_t* B, const FType* B_scale, const FType* B_zero,
     uint8_t* B_result, FType* B_scale_result, FType* B_zero_result,
     const int64_t K, const int64_t N, const int64_t N_32align,
-    cudaStream_t stream) {
+    const int64_t num_groups, cudaStream_t stream) {
   if (N % 16 != 0 || K % 16 != 0) {
     std::cerr << "Now only support N and K is multiples of 16" << std::endl;
   }
   const int BLOCK = 128;
+
+  // The + 1 creates exactly one extra block in the X dimension to process
+  // scales and zeros.
   int grid_x = (K + 64 - 1) / 64 + 1;
   int grid_y = (N + 128 - 1) / 128;
   dim3 grid(grid_x, grid_y);
 
   rearrange_kn_weight_as_n32k16_order_ldg16_kernel<FType>
       <<<grid, BLOCK, 0, stream>>>(B, B_scale, B_zero, B_result, B_scale_result,
-                                   B_zero_result, K, N, N_32align);
+                                   B_zero_result, K, N, N_32align, num_groups);
 }
 }  // namespace allspark
 
@@ -110,7 +129,8 @@ void rearrange_kn_weight_as_n32k16_order(
     torch::stable::Tensor& b_qweight_reorder,
     torch::stable::Tensor& b_scales_reorder,
     std::optional<torch::stable::Tensor> const& b_zeros_reorder,
-    const int64_t K, const int64_t N, const int64_t N_32align) {
+    const int64_t K, const int64_t N, const int64_t N_32align,
+    const int64_t num_groups) {
   // Verify device and strides
   STD_TORCH_CHECK(b_qweight.device().is_cuda(), "b_qweight is not on GPU");
   STD_TORCH_CHECK(b_qweight.is_contiguous(), "b_qweight is not contiguous");
@@ -158,7 +178,8 @@ void rearrange_kn_weight_as_n32k16_order(
         matB, reinterpret_cast<const __half*>(b_scale),
         reinterpret_cast<const __half*>(b_zero), matB_reorder,
         reinterpret_cast<__half*>(b_scale_reorder),
-        reinterpret_cast<__half*>(b_zero_reorder), K, N, N_32align, stream);
+        reinterpret_cast<__half*>(b_zero_reorder), K, N, N_32align, num_groups,
+        stream);
   } else if (b_scales.scalar_type() ==
              torch::headeronly::ScalarType::BFloat16) {
     allspark::rearrange_kn_weight_as_n32k16_order_ldg16<__nv_bfloat16>(
@@ -166,7 +187,7 @@ void rearrange_kn_weight_as_n32k16_order(
         reinterpret_cast<const __nv_bfloat16*>(b_zero), matB_reorder,
         reinterpret_cast<__nv_bfloat16*>(b_scale_reorder),
         reinterpret_cast<__nv_bfloat16*>(b_zero_reorder), K, N, N_32align,
-        stream);
+        num_groups, stream);
   }
 }
 
