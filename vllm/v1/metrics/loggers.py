@@ -5,7 +5,6 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from functools import partial
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -25,10 +24,7 @@ from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import histogram_buckets
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
-from vllm.v1.metrics.prometheus import (
-    PrometheusStatLoggerRegistry,
-    unregister_prometheus_stat_logger_metrics,
-)
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     CachingMetrics,
     IterationStats,
@@ -463,7 +459,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _kv_connector_cls = KVConnectorProm
     _ec_connector_cls = ECConnectorProm
     _perf_metrics_cls = PerfMetricsProm
-    _use_prometheus_registry = True
 
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
@@ -473,12 +468,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         self.engine_indexes = engine_indexes
 
-        if self._use_prometheus_registry:
-            unregister_prometheus_stat_logger_metrics()
-            registry = PrometheusStatLoggerRegistry()
-            self._gauge_cls = partial(self._gauge_cls, registry=registry)
-            self._counter_cls = partial(self._counter_cls, registry=registry)
-            self._histogram_cls = partial(self._histogram_cls, registry=registry)
+        unregister_vllm_metrics()
         self.vllm_config = vllm_config
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
@@ -501,33 +491,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames,
             per_engine_labelvalues,
             is_diffusion=vllm_config.model_config.is_diffusion,
-            counter_cls=self._counter_cls,
         )
         self.kv_connector_prom = self._kv_connector_cls(
-            vllm_config,
-            labelnames,
-            per_engine_labelvalues,
-            metric_types={
-                Gauge: self._gauge_cls,
-                Counter: self._counter_cls,
-                Histogram: self._histogram_cls,
-            },
+            vllm_config, labelnames, per_engine_labelvalues
         )
         self.ec_connector_prom = self._ec_connector_cls(
-            vllm_config,
-            labelnames,
-            per_engine_labelvalues,
-            metric_types={
-                Gauge: self._gauge_cls,
-                Counter: self._counter_cls,
-                Histogram: self._histogram_cls,
-            },
+            vllm_config, labelnames, per_engine_labelvalues
         )
         self.perf_metrics_prom = self._perf_metrics_cls(
-            vllm_config,
-            labelnames,
-            per_engine_labelvalues,
-            counter_cls=self._counter_cls,
+            vllm_config, labelnames, per_engine_labelvalues
         )
 
         #
