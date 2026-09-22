@@ -11,6 +11,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
+use vllm_metrics::METRICS;
 
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
@@ -398,10 +399,12 @@ impl pb::control_server::Control for ControlServiceImpl {
         self.require_weight_transfer()?;
         let init_info = json_object(&request.into_inner().init_info_json, "init_info_json")?;
         let _guard = self.rl_lock.lock().await;
+        let recorder = METRICS.api_server.record_weight_operation("init");
         self.client()
             .init_weight_transfer_engine(init_info)
             .await
             .map_err(|error| utility_status("init_weight_transfer_engine", error))?;
+        recorder.success();
         Ok(Response::new(pb::InitWeightTransferEngineResponse {}))
     }
 
@@ -411,10 +414,12 @@ impl pb::control_server::Control for ControlServiceImpl {
     ) -> Result<Response<pb::StartWeightUpdateResponse>, Status> {
         self.require_weight_transfer()?;
         let _guard = self.rl_lock.lock().await;
+        let recorder = METRICS.api_server.record_weight_operation("start");
         self.client()
             .start_weight_update()
             .await
             .map_err(|error| utility_status("start_weight_update", error))?;
+        recorder.success();
         Ok(Response::new(pb::StartWeightUpdateResponse {}))
     }
 
@@ -429,10 +434,12 @@ impl pb::control_server::Control for ControlServiceImpl {
             ));
         }
         let _guard = self.rl_lock.lock().await;
+        let recorder = METRICS.api_server.record_weight_operation("start_draft");
         self.client()
             .start_draft_weight_update()
             .await
             .map_err(|error| utility_status("start_draft_weight_update", error))?;
+        recorder.success();
         Ok(Response::new(pb::StartDraftWeightUpdateResponse {}))
     }
 
@@ -443,10 +450,12 @@ impl pb::control_server::Control for ControlServiceImpl {
         self.require_weight_transfer()?;
         let update_info = json_object(&request.into_inner().update_info_json, "update_info_json")?;
         let _guard = self.rl_lock.lock().await;
+        let recorder = METRICS.api_server.record_weight_operation("update");
         self.client()
             .update_weights(update_info)
             .await
             .map_err(|error| utility_status("update_weights", error))?;
+        recorder.success();
         Ok(Response::new(pb::UpdateWeightsResponse {}))
     }
 
@@ -457,6 +466,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         self.require_weight_transfer()?;
         let version = request.into_inner().weight_version.map(weight_version).transpose()?;
         let _guard = self.rl_lock.lock().await;
+        let recorder = METRICS.api_server.record_weight_operation("finish");
         self.client()
             .finish_weight_update()
             .await
@@ -467,6 +477,7 @@ impl pb::control_server::Control for ControlServiceImpl {
                 .await
                 .map_err(|error| utility_status("update_weight_version", error))?;
         }
+        recorder.success();
         Ok(Response::new(pb::FinishWeightUpdateResponse {}))
     }
 
