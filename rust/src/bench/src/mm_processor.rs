@@ -16,13 +16,14 @@ use tokio::sync::Semaphore;
 
 use vllm_chat::{
     ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRequest, LoadModelBackendsOptions,
-    MultiModalTimingStats, load_model_backends,
+    load_model_backends,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::Llm;
 use vllm_managed_engine::cli::ManagedEngineArgs;
 use vllm_managed_engine::{ManagedEngineConfig, ManagedEngineHandle};
 use vllm_text::TextLlm;
+use vllm_tracing::timing::RequestTimingStats;
 
 use crate::config::RangeRatio;
 use crate::datasets::SampleRequest;
@@ -133,7 +134,7 @@ pub struct MmProcessorArgs {
 }
 
 /// Entry point for `vllm-bench mm-processor`.
-pub async fn run_mm_processor(args: MmProcessorArgs, timing: MultiModalTimingStats) -> Result<()> {
+pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats) -> Result<()> {
     if args.engine.data_parallel_size_local == Some(0) {
         anyhow::bail!(
             "`--data-parallel-size-local 0` is not supported; the benchmark requires \
@@ -179,7 +180,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: MultiModalTimingSta
 async fn run_mm_processor_with_engine(
     args: MmProcessorArgs,
     handshake_port: u16,
-    timing: &MultiModalTimingStats,
+    timing: &RequestTimingStats,
 ) -> Result<()> {
     let range_ratio =
         RangeRatio::parse(&args.random_range_ratio).context("invalid --random-range-ratio")?;
