@@ -41,7 +41,10 @@ from vllm.entrypoints.generate.base.protocol import (
     RequestResponseMetadata,
     TokenPhaseCounts,
 )
-from vllm.entrypoints.generate.base.serving import OutputTokenMetricsTracker
+from vllm.entrypoints.generate.base.serving import (
+    OutputTokenMetricsTracker,
+    build_per_request_timing_metrics,
+)
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
@@ -1310,6 +1313,10 @@ def test_output_token_metrics_tracker_averages_across_multi_token_batches():
     assert reasoning.generation_time_ms == pytest.approx(500.0)
     assert reasoning.mean_itl_ms == pytest.approx(250.0)
     assert reasoning.tokens_per_second == pytest.approx(4.0)
+    aggregate = build_per_request_timing_metrics(
+        _stats_at(2.5), num_generation_tokens=3
+    )
+    assert reasoning.mean_itl_ms == aggregate.mean_itl_ms
 
 
 def test_output_token_metrics_tracker_accepts_boundary_count_corrections():
