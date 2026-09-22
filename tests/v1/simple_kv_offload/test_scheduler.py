@@ -43,7 +43,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -140,13 +139,12 @@ def _make_scratch_kv_cache_config(
     register_all_kvcache_specs(vllm_config=None)
     fa_config = _make_kv_cache_config(num_blocks, num_groups=1)
     scratch_layers = ["layer_scratch"]
-    scratch_spec = KpoolTailSpec(
+    scratch_spec = CircularBufferSpec(
         block_size=scratch_block_size,
         num_kv_heads=2,
         head_size=HEAD_SIZE,
         head_size_v=0,
         dtype=DTYPE,
-        sliding_window=scratch_block_size,
     )
     assert not scratch_spec.prefix_cacheable
     scratch_bytes = scratch_spec.page_size_bytes * num_blocks

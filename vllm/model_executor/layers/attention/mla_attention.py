@@ -1370,7 +1370,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         spec = MLAAttentionSpec(
             **common_kwargs,
             is_index_group_leader=self.indexer is not None,
-            kernel_page_rows=self.attn_backend.get_kernel_page_rows(),
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
         if (page_rows := self.attn_backend.get_kernel_page_rows()) is not None:

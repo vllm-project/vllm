@@ -43,6 +43,7 @@ from vllm.v1.request import Request
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
 
+
 class SingleTypeKVCacheManager(ABC):
     """An abstract base class for a manager that handle the kv cache management
     logic of one specific type of attention layer.
