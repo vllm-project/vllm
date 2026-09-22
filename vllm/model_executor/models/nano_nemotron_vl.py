@@ -1653,11 +1653,11 @@ class NemotronH_Nano_VL_V2(
         if modality == "image" and "imgs_sizes" in mm_kwargs:
             sizes_data = mm_kwargs["imgs_sizes"].data
             if (
-                isinstance(sizes_data, tuple)
+                isinstance(sizes_data, (tuple, list))
                 and len(sizes_data) == 2
                 and all(isinstance(dim, int) for dim in sizes_data)
             ):
-                image_sizes = [sizes_data]
+                image_sizes = [tuple(sizes_data)]
             else:
                 image_sizes = list(sizes_data)
 
