@@ -30,5 +30,4 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      ZE_AFFINITY_MASK=0,1 pytest -v -s v1/shutdown'
+      'cd tests && pytest -v -s v1/shutdown'
