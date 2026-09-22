@@ -52,12 +52,14 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
+    DeepseekV4MoE,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
@@ -373,6 +375,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        collect_moe_layers(
+            self,
+            self.model.layers,
+            self.config,
+            decoder_layer_type=DeepseekV4DecoderLayer,
+            moe_type=DeepseekV4MoE,
+        )
 
     # --- Hooks used by the speculator -------------------------------------
 

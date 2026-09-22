@@ -1883,16 +1883,6 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
 
 class DeepseekV4MixtureOfExperts(MixtureOfExperts):
     moe_mlp_layers: list["DeepseekV4MoE"]
-    model: nn.Module
-
-    def set_moe_parameters(self) -> None:
-        collect_moe_layers(
-            self,
-            self.model.layers,
-            self.config,
-            decoder_layer_type=DeepseekV4DecoderLayer,
-            moe_type=DeepseekV4MoE,
-        )
 
     def extract_moe_parameters(self, example_moe: "DeepseekV4MoE | None") -> None:
         if example_moe is None:
@@ -1977,6 +1967,15 @@ class DeepseekV4ForCausalLM(
         )
 
         self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        collect_moe_layers(
+            self,
+            self.model.layers,
+            self.config,
+            decoder_layer_type=DeepseekV4DecoderLayer,
+            moe_type=DeepseekV4MoE,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
