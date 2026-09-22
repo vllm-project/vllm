@@ -23,12 +23,13 @@ from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQLinearMethod,
     AutoGPTQMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.gptq_utils import override_config
 from vllm.platforms import current_platform
 
 PROMPT = "On the surface of Mars, we found"
 
 MODELS = [
-    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
+    "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
 ]
 
 
@@ -70,6 +71,54 @@ def test_auto_gptq_config_get_name():
     assert AutoGPTQConfig.get_name() == "auto_gptq"
 
 
+@pytest.mark.parametrize(
+    "dynamic",
+    [
+        {},
+        {r"+:model\.layers\.0\..*": {"desc_act": True}},
+        {
+            r"+:model\.layers\.0\..*": {
+                "desc_act": True,
+                "group_size": 32,
+            }
+        },
+    ],
+)
+def test_auto_gptq_rejects_group_activation_order(dynamic):
+    desc_act = not dynamic
+    with pytest.raises(ValueError, match="group activation ordering"):
+        AutoGPTQConfig(4, 128, desc_act, True, False, dynamic, {})
+
+
+def test_auto_gptq_normalizes_channelwise_activation_order():
+    config = AutoGPTQConfig(4, -1, True, True, False, {}, {})
+    assert not config.desc_act
+
+    config = AutoGPTQConfig(
+        4,
+        128,
+        False,
+        True,
+        False,
+        {r"+:model\.layers\.0\..*": {"desc_act": True, "group_size": -1}},
+        {},
+    )
+    override_config(config, "model.layers.0.self_attn.q_proj")
+    assert config.group_size == -1
+    assert not config.desc_act
+
+    with pytest.raises(ValueError, match="group activation ordering"):
+        AutoGPTQConfig(
+            4,
+            -1,
+            True,
+            True,
+            False,
+            {r"+:model\.layers\.0\..*": {"group_size": 128}},
+            {},
+        )
+
+
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
@@ -84,7 +133,6 @@ def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
         hidden_size=8,
         intermediate_size_per_partition=4,
         params_dtype=torch.float16,
-        intermediate_size_full=4,
         weight_loader=lambda *args, **kwargs: None,
     )
 

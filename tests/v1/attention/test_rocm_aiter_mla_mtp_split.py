@@ -130,6 +130,7 @@ def _builder(
         _mla_q_dtype=torch.bfloat16,
         _mla_kv_dtype=torch.bfloat16,
         decode_attn_out_dtype=torch.bfloat16,
+        _decode_causal=True,
     )
     # Bound to the stub rather than faked: the verify flatten's per-row view is
     # part of what _build_decode is being tested for.
@@ -153,6 +154,25 @@ def test_backend_declares_uniform_batch_support():
         AiterMLAMetadataBuilder._cudagraph_support
         == rocm_aiter_mla.AttentionCGSupport.UNIFORM_BATCH
     )
+
+
+@pytest.mark.parametrize("causal", [True, False])
+def test_build_hands_common_causal_flag_to_aiter_builder(monkeypatch, causal):
+    seen = []
+
+    def fake_common_build(self, *args):
+        seen.append(self._decode_causal)
+        return SimpleNamespace(decode=None, prefill=None)
+
+    monkeypatch.setattr(
+        rocm_aiter_mla.MLACommonMetadataBuilder, "build", fake_common_build
+    )
+    builder = object.__new__(AiterMLAMetadataBuilder)
+    builder._fp8_prefill_enabled = False
+
+    builder.build(0, SimpleNamespace(causal=causal))
+
+    assert seen == [causal]
 
 
 def test_dcp_verify_row_view_is_causal_per_row():
@@ -494,7 +514,6 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
     Sweeping num_heads asserts metadata is sized for the padded decode shape,
     covering Kimi-K3 TP4's 24 -> 32 head path and native fp8 nhead=32 folding.
     """
-
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
     info_calls = []
 
@@ -674,7 +693,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
     monkeypatch,
 ):
     """Full-CG zero-qo rows follow rocm_aiter_mla.py:608-657,717-759."""
-
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
         sys.modules,
@@ -736,7 +754,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
 
 def test_decode_expands_kernel_block_page_indices(monkeypatch):
     """kernel_block_size>1 expands b -> b*K+offset at rocm_aiter_mla.py:696-704."""
-
     expand_kernel = _ExpandPageIndicesKernel()
     monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand_kernel)
     # qlen==1 now takes the persistent-metadata path, which imports
@@ -949,3 +966,81 @@ def test_persistent_metadata_gate_without_gluon_build(
 
     assert metadata.has_persistent_metadata is expect_persistent
     assert get_mla_metadata_v1.called is expect_persistent
+
+
+def _build_non_causal(monkeypatch, *, num_heads, kv_cache_dtype, qlen, mtp_qlen):
+    """Drive _build_decode with causal=False and hand back the aiter mock."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    builder = _builder(
+        mtp_decode_qlen=mtp_qlen,
+        kv_cache_dtype=kv_cache_dtype,
+        num_heads=num_heads,
+    )
+    builder._decode_causal = False
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
+        seq_lens_device=torch.tensor([7, 5], dtype=torch.int32),
+        max_seq_len=7,
+        query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        num_decode_tokens=2 * qlen,
+        dcp_tot_seq_lens_device=None,
+    )
+    return metadata, get_mla_metadata_v1
+
+
+def test_non_causal_build_hands_the_mask_to_aiter(monkeypatch):
+    """The schedule carries the mask, so is_causal must follow the block."""
+    metadata, get_mla_metadata_v1 = _build_non_causal(
+        monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=8, mtp_qlen=8
+    )
+    assert metadata.has_persistent_metadata
+    # 6th positional arg of get_mla_metadata_v1 is is_causal.
+    assert get_mla_metadata_v1.call_args.args[5] is False
+
+
+@pytest.mark.parametrize("num_heads", [12, 16, 48])
+def test_a_two_token_fp8_block_is_refused_without_a_fold(monkeypatch, num_heads):
+    """16-head (and padded-to-16) qlen-2 fp8 has no non-causal kernel.
+
+    48/80/112 (and 33 padded to 48) fold to H16 while keeping Q2, so they
+    must be refused the same way as native 16-head qlen 2.
+    """
+    with pytest.raises(ValueError, match="2-token"):
+        _build_non_causal(
+            monkeypatch,
+            num_heads=num_heads,
+            kv_cache_dtype="fp8",
+            qlen=2,
+            mtp_qlen=8,
+        )
+
+
+def test_a_two_token_fp8_block_is_allowed_when_folded(monkeypatch):
+    """32 heads at qlen 2 folds onto the 16-head / 4-token kernel."""
+    metadata, get_mla_metadata_v1 = _build_non_causal(
+        monkeypatch,
+        num_heads=32,
+        kv_cache_dtype="fp8",
+        qlen=2,
+        mtp_qlen=8,
+    )
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.called
+
+
+def test_a_two_token_bf16_block_is_allowed(monkeypatch):
+    """The bf16 fold has no such hole, so the guard must not fire there."""
+    metadata, _ = _build_non_causal(
+        monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
+    )
+    assert metadata.has_persistent_metadata
