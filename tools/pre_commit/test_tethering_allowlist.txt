@@ -59,27 +59,6 @@ tests/models/test_dspark_mla.py  # no models_*.yaml job collects this path
 tests/models/test_language_model_cache_is_weak.py  # no models_*.yaml job collects this path
 tests/models/transformers/test_layer_registry.py  # no models_*.yaml job collects this path
 
-# tests/ root-level - misc.yaml runs a hand-picked set of these by name
-# (test_regression.py, test_envs.py, test_outputs.py, test_pooling_params.py);
-# the rest are unreferenced.
-tests/test_access_log_filter.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_attention_backend_registry.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_audio_media_size_precheck.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_cmake_utils.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_connections.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_embedded_commit.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_force_first_config.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_fxgraphcache_pickle_patch.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_logprobs.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_quantization_revision_pin.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_ray_env_utils.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_request_input_bounds.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_scalartype.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_tensorizer_revision_pin.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_triton_utils.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_version.py  # root test_*.py not in misc.yaml's by-name list
-tests/test_zen_cpu_platform_detection.py  # root test_*.py not in misc.yaml's by-name list
-
 # tests/v1/ - the v1 subtree is otherwise covered by many `pytest v1/...` jobs.
 tests/v1/e2e/test_replayssm_decode.py  # ReplaySSM decode test (#52506) wired into no job
 tests/v1/ec_connector/integration/test_epd_correctness.py  # run_epd_correctness_test.sh exists but no Buildkite job invokes it
