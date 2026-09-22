@@ -762,11 +762,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # are whisper block pooling and never reach MLA).
             assert isinstance(self.kv_cache_spec.tokens_per_state, int)
             self.compress_ratio = self.kv_cache_spec.tokens_per_state
-        if self.dcp_world_size > 1 and self.compress_ratio > 1:
-            raise NotImplementedError(
-                "DCP is not supported with sparse indexer KV compression "
-                f"(compress_ratio={self.compress_ratio})."
-            )
+        # DCP composes with KV compression (DeepseekV4): build() converts
+        # seq_lens to compressed-slot units before DCP localization, matching
+        # the slot-unit sharding of the indexer cache's write layout.
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
@@ -1243,16 +1241,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 not use_native and max_decode_len > 1
             )
 
-            # DCP: localize the now-expanded per-token global bounds to this
-            # rank's owned KV. Done here (after expansion) so each token's global
-            # causal length is localized individually; see the comment above.
-            if dcp_local_seq_lens is not None:
-                seq_lens = self._dcp_localize_decode_seq_lens(
-                    seq_lens, num_decodes, seq_lens_is_buffer_view
-                )
-
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
-            # compressed tokens. Convert uncompressed seq_lens to compressed.
+            # compressed states: convert seq_lens to compressed-slot units
+            # BEFORE DCP localization. The indexer cache is sharded in slot
+            # units (owner(s) = (s // interleave) % world), so localized
+            # counts must partition slot space; localizing raw-token lengths
+            # first and dividing after counts a different partition and
+            # under/overcounts each rank's shard.
             if self.compress_ratio > 1:
                 if seq_lens_is_buffer_view:
                     seq_lens //= self.compress_ratio
@@ -1263,6 +1258,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                     self.expanded_seq_lens_buffer[num_decodes:num_decode_tokens] = 0
                     seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
+                    seq_lens_is_buffer_view = True
+
+            # DCP: localize the slot-unit, expansion-applied per-token bounds
+            # to this rank's owned KV; see the comment above on why expansion
+            # must happen in global space first.
+            if dcp_local_seq_lens is not None:
+                seq_lens = self._dcp_localize_decode_seq_lens(
+                    seq_lens, num_decodes, seq_lens_is_buffer_view
+                )
 
             # Non-MTP: deep_gemm paged MQA logits requires 2D context_lens
             # (csrc/apis/attention.hpp). Unsqueeze to (B, 1) so downstream
