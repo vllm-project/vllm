@@ -514,14 +514,7 @@ def _first_large_weight(worker) -> str:
 
 
 def _weight_probe(worker, name: str) -> dict:
-    """(all_zero, float64 checksum) of one weight tensor.
-
-    Anti-vacuity guard: it proves the level-2 sleep really discarded the weights
-    pool and that the reload really put the same bytes back, so the scale
-    assertions cannot pass on an engine that was never disturbed.  A returned
-    count from load_weights() is NOT such a proof -- it counts parameter names
-    that were processed, not values that were written.
-    """
+    """Check one initialized weight tensor before sleep and after reload."""
     tensor = dict(worker.model_runner.model.named_parameters())[name]
     flat = tensor.detach().double().flatten()
     return {
@@ -532,27 +525,42 @@ def _weight_probe(worker, name: str) -> dict:
     }
 
 
+def _weight_allocations(worker) -> tuple[dict[int, tuple[int, bool, bool]], int]:
+    """Inspect weights allocation state without reading sleeping tensors."""
+    allocator = cumem.CuMemAllocator.get_instance()
+    torch.accelerator.synchronize()
+    allocations = {
+        ptr: (data.handle[1], data.is_asleep, data.cpu_backup_tensor is not None)
+        for ptr, data in allocator.pointer_to_data.items()
+        if data.tag == "weights"
+    }
+    return allocations, torch.accelerator.get_memory_info()[0]
+
+
 # 2.46 GiB (weights + non-torch) + 0.69 GiB (peak activation) is the measured
 # floor for this 1.1B checkpoint before a single KV block is allocated, so the
 # 0.6 reservation below still leaves ~7.7 GiB for KV on an 18 GiB device: this
 # fits the smallest CI GPU slice, so the test needs no minimum-memory mark.
 @requires_fp8
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_deep_sleep_fp8_kvcache_compressed_tensors_kv_scale(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Level-2 sleep must not zero the compressed-tensors KV calibration scales.
+    """Level-2 sleep must preserve compressed-tensors KV calibration scales.
 
     CompressedTensorsKVCacheMethod.process_weights_after_loading() rebinds
     layer._q_scale/_k_scale/_v_scale onto the nn.Parameter placeholders, which
     moves those three names out of module._buffers. The only level-2 fallback in
     Worker.sleep()/Worker.wake_up() snapshots named_buffers(), so the rebound
-    scales were discarded together with the "weights" pool and read back 0.0
-    from the freshly mapped pages, while _prob_scale (never rebound, still a
-    buffer) kept its value. Descaling by 0.0 then yielded NaN logprobs and a
-    wrong first token on the very next request.
+    scales were discarded together with the "weights" pool and became
+    undefined on wake, while _prob_scale (never rebound, still a buffer) kept
+    its value. Observed zero scales yielded NaN logprobs and a wrong first
+    token, but discarded allocations are not guaranteed to read back zero.
     """
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    # These probes are trusted callables in this local test, not a server API.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     envs.disable_envs_cache()
 
     model = KV_SCALE_MODEL
@@ -647,23 +655,36 @@ def test_deep_sleep_fp8_kvcache_compressed_tensors_kv_scale(
     assert_scales_intact("after sleep(level=1)")
     assert_same_output("after sleep(level=1)")
     assert llm.collective_rpc(_weight_probe, args=(probe_name,))[0] == weight_before, (
-        "sleep(level=1) must restore the weights byte-exactly"
+        "sleep(level=1) must preserve the initialized weight probe"
     )
 
     # The regression itself: deep sleep, reload weights only (the shape of an RL
     # weight-sync), then bring the KV cache back.
-    llm.sleep(level=2)
-    llm.wake_up(tags=["weights"])
-    discarded = llm.collective_rpc(_weight_probe, args=(probe_name,))[0]
-    assert discarded["all_zero"], (
-        "level-2 sleep did not discard the weights pool, so this test is not "
-        f"exercising the reported path ({probe_name} checksum={discarded['checksum']})"
+    allocations_before, free_before = llm.collective_rpc(_weight_allocations)[0]
+    assert allocations_before, "no weights allocations found"
+    assert all(
+        not asleep and not backed_up
+        for _, asleep, backed_up in allocations_before.values()
     )
+    weight_bytes = sum(size for size, _, _ in allocations_before.values())
+    assert weight_bytes > 0
+    llm.sleep(level=2)
+    allocations_after, free_after = llm.collective_rpc(_weight_allocations)[0]
+    assert {ptr: tuple(state) for ptr, state in allocations_after.items()} == {
+        ptr: (size, True, False) for ptr, (size, _, _) in allocations_before.items()
+    }, "level-2 sleep must unmap every weights allocation without a CPU backup"
+    # Run on an otherwise idle GPU: device-wide free memory must corroborate
+    # the allocator bookkeeping. Never read discarded, uninitialized weights.
+    assert free_after - free_before >= weight_bytes, (
+        f"level-2 sleep freed {free_after - free_before} bytes; "
+        f"expected at least {weight_bytes} weights bytes"
+    )
+    llm.wake_up(tags=["weights"])
     loaded = llm.collective_rpc(_reload_weights_only, args=(model_dir,))[0]
     assert loaded > 0, "the weight reload loaded nothing; the test would be vacuous"
     weight_after = llm.collective_rpc(_weight_probe, args=(probe_name,))[0]
     assert weight_after["checksum"] == weight_before["checksum"], (
-        f"the weights-only reload did not restore {probe_name} bit-exactly: "
+        f"the weights-only reload changed the checksum of {probe_name}: "
         f"{weight_before['checksum']} -> {weight_after['checksum']}; the output "
         "comparison below would then be measuring the reload, not the scales"
     )
