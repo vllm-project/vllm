@@ -69,7 +69,11 @@ def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
 
     assert scorer.call_args.kwargs["cta_info"] is cta_info
     assert scorer.call_args.kwargs["total_ctas"] == 512
-    assert scorer.call_args.kwargs["out"] is decode.fp4_logits
+    assert scorer.call_args.kwargs["out"].shape == decode.fp4_logits.shape
+    assert (
+        scorer.call_args.kwargs["out"].untyped_storage().data_ptr()
+        == decode.fp4_logits.untyped_storage().data_ptr()
+    )
 
 
 def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch):
