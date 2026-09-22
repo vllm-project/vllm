@@ -195,9 +195,7 @@ def fused_recurrent_kda_fwd_kernel(
         initial_token = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
     else:
         initial_token = 0
-    initial_token_in_row = (initial_token >= 0) & (
-        initial_token < stride_indices_seq
-    )
+    initial_token_in_row = (initial_token >= 0) & (initial_token < stride_indices_seq)
     state_index = tl.load(
         state_indices + i_n * stride_indices_seq + initial_token,
         mask=initial_token_in_row,
