@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import pytest
 import torch
+from transformers import AutoTokenizer
 
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
@@ -113,6 +114,41 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
         base_prompt = padding_text + base_prompt
 
     return base_prompt
+
+
+_FILLER_PHRASES = [
+    "the quick brown fox jumps over a lazy dog",
+    "distant thunder rolls across quiet valleys",
+    "researchers measure deterministic attention kernels",
+    "logprobs are compared between batches of different sizes",
+]
+
+_FILLER_TOKENIZER = None
+
+
+def _prompt_with_tokens(target_tokens: int) -> str:
+    """Build a prompt of exactly ``target_tokens`` tokens.
+
+    An attention backend can only be shown to be batch-invariant over a KV
+    length spanning several kernel blocks. `_random_prompt` tops out at a few
+    hundred tokens, which fits in one block, so every backend looks invariant
+    there regardless of how it reduces across blocks.
+
+    Args:
+        target_tokens: Prompt length, in tokens of ``TEST_MODEL``'s tokenizer.
+
+    Returns:
+        A prompt tokenizing to exactly ``target_tokens`` tokens.
+
+    """
+    global _FILLER_TOKENIZER
+    if _FILLER_TOKENIZER is None:
+        _FILLER_TOKENIZER = AutoTokenizer.from_pretrained(TEST_MODEL)
+    text = " ".join(
+        random.choice(_FILLER_PHRASES) for _ in range(max(4, target_tokens // 4))
+    )
+    ids = _FILLER_TOKENIZER(text, add_special_tokens=False).input_ids[:target_tokens]
+    return _FILLER_TOKENIZER.decode(ids)
 
 
 def _extract_step_logprobs(request_output):
