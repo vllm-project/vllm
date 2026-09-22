@@ -81,6 +81,65 @@ def _torch_topk_softplus_sqrt(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+@pytest.mark.parametrize("has_hash_routing", [False, True])
+@pytest.mark.parametrize(
+    "backend,expected_experts",
+    [
+        ("aiter_triton_mxfp4_bf16", "AiterW4A16ExpertsMonolithic"),
+        ("aiter", "AiterExperts"),
+        ("triton_unfused", "UnfusedOAITritonExperts"),
+    ],
+)
+def test_hash_routing_backend_selection(
+    dist_init,
+    default_vllm_config,
+    monkeypatch,
+    has_hash_routing,
+    backend,
+    expected_experts,
+):
+    """Hash tables must reach backend selection; modular AITER remains eligible."""
+    from dataclasses import replace
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+    from vllm.platforms import rocm
+
+    # Exercise both native MX and monolithic AITER selection on any ROCm device.
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
+    monkeypatch.setattr(rocm, "on_gfx1250", lambda: False)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: True)
+    default_vllm_config.kernel_config.moe_backend = "triton"
+    layer = FusedMoEFactory(
+        num_experts=8,
+        top_k=2,
+        hidden_size=256,
+        intermediate_size=256,
+        params_dtype=torch.bfloat16,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=torch.zeros(8),
+        hash_indices_table=(
+            torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+            if has_hash_routing
+            else None
+        ),
+        prefix="hash_routing_selection",
+    )
+    config = replace(layer.routed_experts.moe_config, moe_backend=backend)
+
+    if has_hash_routing and backend == "aiter_triton_mxfp4_bf16":
+        with pytest.raises(ValueError, match="hash routing"):
+            select_deepseek_v4_mxfp4_moe_backend(config)
+    else:
+        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+        assert experts_cls.__name__ == expected_experts
+
+
 def test_torch_topk_softplus_sqrt_breaks_ties_by_expert_id():
     gating_output = torch.tensor([[2.0, 1.0, 1.0, 0.0]])
 
