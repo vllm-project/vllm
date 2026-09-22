@@ -559,17 +559,17 @@ def main() -> None:
     else:
         master_addr = parallel_config.data_parallel_master_ip
         if parallel_config.nnodes > 1:
-            if master_addr in ("127.0.0.1", "localhost"):
-                raise ValueError(
-                    "Data parallelism across nodes requires a reachable "
-                    "--data-parallel-address for the daemon rendezvous"
-                )
             nnodes = parallel_config.nnodes
             node_rank = parallel_config.node_rank
         else:
             nnodes = dp_size // parallel_config.data_parallel_size_local
             node_rank = parallel_config.data_parallel_rank // (
                 parallel_config.data_parallel_size_local
+            )
+        if nnodes > 1 and master_addr in ("127.0.0.1", "localhost"):
+            raise ValueError(
+                "Data parallelism across nodes requires a reachable "
+                "--data-parallel-address for the daemon rendezvous"
             )
 
     # The daemon forms its own world group and holds it open while serving, so
