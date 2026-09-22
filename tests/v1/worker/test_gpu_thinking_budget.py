@@ -562,15 +562,14 @@ def test_v2_loop_break_survives_a_plain_sampling_request():
     tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
     req_states = _make_req_states(tokens, prompt_len=1)
     sampler = Sampler(
+        vllm_config=SimpleNamespace(reasoning_config=MockLoopBreakReasoningConfig()),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
-        reasoning_config=MockLoopBreakReasoningConfig(),
     )
     sampler.add_request(
         req_idx=3,
-        prompt_len=1,
         sampling_params=SamplingParams(temperature=0.0),
     )
     sampler.apply_staged_writes()
@@ -586,6 +585,7 @@ def test_v2_loop_break_survives_a_plain_sampling_request():
         torch.tensor([len(tokens) - 1], dtype=torch.int32, device=DEVICE),
         torch.tensor([tokens[-1]], dtype=torch.int32, device=DEVICE),
         torch.tensor([0], dtype=torch.int32, device=DEVICE),
+        np.full(1, len(tokens) - 1, dtype=np.int64),
     )
 
     assert out[0, END].item() == pytest.approx(1.0e9)
