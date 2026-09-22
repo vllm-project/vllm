@@ -19,10 +19,7 @@ class EngineDeadError(VLLMServerError):
     ENGINE_DEAD_MESSAGE = (
         "EngineCore encountered an issue. See stack trace (above) for the root cause."
     )
-    CLIENT_MESSAGE = (
-        "The inference engine is no longer running. See the server logs for the "
-        "root cause."
-    )
+    CLIENT_MESSAGE = "The server had an error while processing your request."
 
     def __init__(self, *args, suppress_context: bool = False, **kwargs):
         super().__init__(self.ENGINE_DEAD_MESSAGE, *args, **kwargs)
