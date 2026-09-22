@@ -88,7 +88,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import Engram, gather_engram_hashes
+from .engram import Engram, can_share_engram_tables, gather_engram_hashes
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     mhc_pre_delayed_overlap,
@@ -385,8 +385,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
             or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            or not torch.cuda.is_current_stream_capturing()
         ):
-            # A side stream cannot remain unjoined across breakable graph segments.
+            # Use overlap only in FULL graphs; eager warmup initializes Mega mHC.
             mhc_stream = None
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, stream=mhc_stream)
@@ -588,6 +589,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
 
         self.engram_layout = EngramLayout.from_config(config)
+        engram_config = vllm_config.engram_config
+        if (
+            self.engram_layout is not None
+            and engram_config is not None
+            and engram_config.dp_shared_memory
+        ):
+            engram_config.dp_shared_memory = can_share_engram_tables(self.engram_layout)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
