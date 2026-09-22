@@ -2593,6 +2593,10 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     part_m_ptr,
     part_l_ptr,
     part_acc_ptr,
+    attn_sink_ptr,
+    out_ptr,
+    out_stride0,
+    out_stride1,
     q_stride0: tl.constexpr,
     q_stride1: tl.constexpr,
     main_cache_stride0: tl.constexpr,
@@ -2604,6 +2608,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     scale: tl.constexpr,
     num_heads: tl.constexpr,
     HAS_EXTRA: tl.constexpr,
+    HAS_ATTN_SINK: tl.constexpr,
     NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     IS_FNUZ_MAIN: tl.constexpr,
@@ -2611,6 +2616,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     TRUST_EXTRA_CACHE_NAN_FREE: tl.constexpr,
     ADAPTIVE_SPLITS: tl.constexpr,
     ONE_WAVE_SPLITS: tl.constexpr,
+    WRITE_DIRECT: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_K: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
@@ -2853,8 +2859,50 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                     TRUST_EXTRA_CACHE_NAN_FREE,
                 )
 
-    pm_base = (query_idx * NUM_SPLITS + split_id) * num_heads + head_offsets
     m_store = tl.where(l_i > 0.0, m_i * 0.6931471805599453, neg_large)
+
+    if WRITE_DIRECT:
+        # This workgroup owns the whole row, so there is nothing to merge: do
+        # the softmax normalization here and write `out` directly. That skips a
+        # round trip through the fp32 partial buffers and the reduce launch.
+        if HAS_ATTN_SINK:
+            sink = tl.load(
+                attn_sink_ptr + head_offsets, mask=head_mask, other=neg_large
+            ).to(tl.float32)
+            m_final = tl.maximum(m_store, sink)
+            weight = tl.exp(m_store - m_final)
+            l_final = weight * l_i + tl.exp(sink - m_final)
+        else:
+            weight = tl.full((BLOCK_H,), 1.0, tl.float32)
+            l_final = l_i
+        inv = tl.where(l_final > 0.0, weight / tl.maximum(l_final, 1.0e-30), 0.0)
+        out_dtype = out_ptr.dtype.element_ty
+        out_base = (
+            out_ptr + query_idx * out_stride0 + head_offsets[:, None] * out_stride1
+        )
+        tl.store(
+            out_base + nope_offsets_0a[None, :],
+            (acc_nope_0a * inv[:, None]).to(out_dtype),
+            mask=head_mask[:, None],
+        )
+        tl.store(
+            out_base + nope_offsets_0b[None, :],
+            (acc_nope_0b * inv[:, None]).to(out_dtype),
+            mask=head_mask[:, None],
+        )
+        tl.store(
+            out_base + nope_offsets_1[None, :],
+            (acc_nope_1 * inv[:, None]).to(out_dtype),
+            mask=head_mask[:, None],
+        )
+        tl.store(
+            out_base + tail_offsets_128[None, :],
+            (acc_tail * inv[:, None]).to(out_dtype),
+            mask=head_mask[:, None],
+        )
+        return
+
+    pm_base = (query_idx * NUM_SPLITS + split_id) * num_heads + head_offsets
     tl.store(part_m_ptr + pm_base, m_store, mask=head_mask)
     tl.store(part_l_ptr + pm_base, l_i, mask=head_mask)
     acc_base = part_acc_ptr + (
@@ -3254,6 +3302,51 @@ def _decode_num_splits(
     return best_splits
 
 
+def _decode_refine_splits(
+    base: int,
+    cu: int,
+    splits: int,
+    avg_main_len: float,
+    avg_extra_len: float,
+    block_k: int,
+    max_splits: int = 32,
+) -> int:
+    """Trade split count against iteration count inside one wave count.
+
+    Wave count sets how many times the device has to drain and per-workgroup
+    BLOCK_K iterations set how long each drain takes, so among split counts
+    that occupy the same number of waves the one walking the fewest iterations
+    is strictly cheaper: the extra splits ride along in waves that are already
+    paid for. Among those, the smallest split count leaves the least reduce
+    work.
+
+    Batch 96 at 2 head blocks is the case this exists for: 3 splits and 4
+    splits both fill 3 waves, but 3 splits walks 8 iterations per workgroup
+    against 5 for 4 splits.
+    """
+    if avg_main_len <= 0 and avg_extra_len <= 0:
+        return splits
+
+    def waves(s: int) -> int:
+        return (base * s + cu - 1) // cu
+
+    def partial_iters(s: int) -> int:
+        return _decode_partial_iters(avg_main_len, avg_extra_len, s, block_k)
+
+    target_waves = waves(splits)
+    best, best_iters = splits, partial_iters(splits)
+    for cand in range(splits + 1, max_splits + 1):
+        if waves(cand) != target_waves:
+            break  # wave count only grows from here
+        cand_iters = partial_iters(cand)
+        if cand_iters < best_iters:
+            best, best_iters = cand, cand_iters
+    for cand in range(1, best):
+        if waves(cand) == target_waves and partial_iters(cand) == best_iters:
+            return cand
+    return best
+
+
 def _decode_gfx950_num_splits(
     num_queries: int,
     heads_blocks: int,
@@ -3276,25 +3369,17 @@ def _decode_gfx950_num_splits(
         and num_splits > 4
         and _decode_partial_iters(avg_main_len, avg_extra_len, 4, block_k) <= 3
     ):
-        return 4
-    if 16 <= base < 64:
+        num_splits = 4
+    elif 16 <= base < 64:
         one_wave_splits = max(1, cu // base)
         one_wave_iters = _decode_partial_iters(
             avg_main_len, avg_extra_len, one_wave_splits, block_k
         )
         target_waves = 1 if one_wave_iters <= 9 else 2
         num_splits = min(num_splits, max(1, target_waves * cu // base))
-    if base >= 16 and num_splits > 1:
-        target_waves = (base * num_splits + cu - 1) // cu
-        target_iters = _decode_partial_iters(
-            avg_main_len, avg_extra_len, num_splits, block_k
-        )
-        for splits in range(1, num_splits):
-            waves = (base * splits + cu - 1) // cu
-            iters = _decode_partial_iters(avg_main_len, avg_extra_len, splits, block_k)
-            if waves == target_waves and iters == target_iters:
-                return splits
-    return num_splits
+    return _decode_refine_splits(
+        base, cu, num_splits, avg_main_len, avg_extra_len, block_k
+    )
 
 
 def _rocm_sparse_attn_decode_ragged_triton(
@@ -3461,15 +3546,21 @@ def _rocm_sparse_attn_decode_ragged_triton(
         else num_splits
     )
 
-    part_m = torch.empty(
-        (num_queries, num_splits, num_heads), dtype=torch.float32, device=q.device
-    )
-    part_l = torch.empty_like(part_m)
-    part_acc = torch.empty(
-        (num_queries, num_splits, num_heads, comb_dim),
-        dtype=torch.float32,
-        device=q.device,
-    )
+    # With a single split the partial kernel owns each row outright and folds
+    # the reduce into its epilogue, so the fp32 staging buffers are never read.
+    fuse_reduce = _ON_GFX950 and num_splits == 1
+    if fuse_reduce:
+        part_m = part_l = part_acc = out
+    else:
+        part_m = torch.empty(
+            (num_queries, num_splits, num_heads), dtype=torch.float32, device=q.device
+        )
+        part_l = torch.empty_like(part_m)
+        part_acc = torch.empty(
+            (num_queries, num_splits, num_heads, comb_dim),
+            dtype=torch.float32,
+            device=q.device,
+        )
 
     if _ON_GFX950:
         _sparse_attn_decode_gfx950_partial_kernel[
@@ -3485,6 +3576,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
             part_m,
             part_l,
             part_acc,
+            attn_sink,
+            out,
+            out.stride(0),
+            out.stride(1),
             q.stride(0),
             q.stride(1),
             main_cache.stride(0),
@@ -3496,6 +3591,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             scale,
             num_heads,
             HAS_EXTRA=has_extra,
+            HAS_ATTN_SINK=has_attn_sink,
             NOPE_DIM=nope_head_dim,
             ROPE_DIM=rope_head_dim,
             IS_FNUZ_MAIN=is_fnuz,
@@ -3503,6 +3599,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             TRUST_EXTRA_CACHE_NAN_FREE=extra_cache_nan_free,
             ADAPTIVE_SPLITS=adaptive_splits,
             ONE_WAVE_SPLITS=one_wave_splits,
+            WRITE_DIRECT=fuse_reduce,
             BLOCK_H=block_h,
             BLOCK_K=block_k,
             NUM_SPLITS=num_splits,
@@ -3553,6 +3650,9 @@ def _rocm_sparse_attn_decode_ragged_triton(
             NUM_STAGES=1,
             num_warps=4,
         )
+
+    if fuse_reduce:
+        return out
 
     _sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
         part_m,
