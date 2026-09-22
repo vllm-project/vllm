@@ -165,12 +165,10 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
         fa_raw = torch.empty(num_blocks * fa_spec.page_size_bytes, dtype=torch.int8)
         gdn_block_stride = gdn_spec.page_size_bytes + 64
-        gdn_raw = torch.empty(num_blocks * gdn_block_stride, dtype=torch.int8)
         (fa_cache,) = dense_kv_cache_views(
             fa_raw, fa_spec, num_blocks, 1, KVCacheLayout.LBHNC
         )
-        gdn_cache = torch.as_strided(
-            gdn_raw,
+        gdn_cache = torch.empty_strided(
             size=(num_blocks, 1, 1, gdn_spec.page_size_bytes),
             stride=(
                 gdn_block_stride,
@@ -178,6 +176,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
                 gdn_spec.page_size_bytes,
                 1,
             ),
+            dtype=torch.int8,
         )
 
         worker.register_kv_caches(
