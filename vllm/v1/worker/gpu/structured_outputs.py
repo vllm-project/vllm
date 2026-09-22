@@ -6,6 +6,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.v1.worker.gpu.async_utils import stream
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -51,7 +52,7 @@ class StructuredOutputsWorker:
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
         self.device = device
-        self.copy_stream = torch.cuda.Stream()
+        self.copy_stream = torch.Stream(device=device)
         self.mask_stride = mask_stride
         self.num_bonus_tokens = num_bonus_tokens
 
@@ -66,7 +67,8 @@ class StructuredOutputsWorker:
             return
 
         # Asynchronously copy the bitmask to GPU.
-        with torch.cuda.stream(self.copy_stream):
+        current_stream = torch.accelerator.current_stream(self.device)
+        with stream(self.copy_stream, current_stream):
             bitmask = async_tensor_h2d(
                 grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
             )
@@ -85,7 +87,7 @@ class StructuredOutputsWorker:
         )
 
         # Asynchronously copy the mapping to GPU.
-        with torch.cuda.stream(self.copy_stream):
+        with stream(self.copy_stream, current_stream):
             logits_indices = torch.tensor(
                 mapping, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
             )
@@ -94,7 +96,6 @@ class StructuredOutputsWorker:
             )
 
         # Ensure all async copies are complete before launching the kernel.
-        current_stream = torch.cuda.current_stream()
         current_stream.wait_stream(self.copy_stream)
 
         num_masks = bitmask.shape[0]

@@ -12,6 +12,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.worker.gpu.async_utils import stream
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -19,7 +20,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 class PendingRecv:
     """Per-step slot data for a deferred postprocess on the main stream."""
 
-    event: torch.cuda.Event
+    event: torch.Event
 
     sampled_tokens: torch.Tensor  # [num_reqs, max_sample_len]
     num_sampled: torch.Tensor  # [num_reqs]
@@ -64,8 +65,8 @@ class PPHandler:
         self.max_sample_len = num_speculative_steps + 1
         self.num_speculative_steps = num_speculative_steps
         self.device = device
-        self.main_stream = torch.cuda.current_stream(device)
-        self.broadcast_stream = torch.cuda.Stream(device)
+        self.main_stream = torch.accelerator.current_stream(device)
+        self.broadcast_stream = torch.Stream(device=device)
 
         # On non-last ranks, a FIFO with one entry per in-flight step: the entry
         # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded
@@ -166,7 +167,7 @@ class PPHandler:
         assert self.is_last_rank
         if compute_need_sampled_mask(input_batch) is None:
             return
-        with torch.cuda.stream(self.broadcast_stream):
+        with stream(self.broadcast_stream, self.main_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
             send = draft_tokens[input_batch.idx_mapping].contiguous()
             # Must record the idx_mapping tensor since it was allocated
@@ -190,7 +191,7 @@ class PPHandler:
         gen_at_receive_np = self.req_idx_gen_np[input_batch.idx_mapping_np]
 
         num_reqs = input_batch.num_reqs
-        with torch.cuda.stream(self.broadcast_stream):
+        with stream(self.broadcast_stream, self.main_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
             sampled_tokens = torch.empty(
                 num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
@@ -251,7 +252,7 @@ class PPHandler:
         if current_platform.is_xpu():
             self.main_stream.synchronize()
 
-        with torch.cuda.stream(self.broadcast_stream):
+        with stream(self.broadcast_stream, self.main_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
             send_tokens = torch.nn.functional.pad(
                 sampled_token_ids,

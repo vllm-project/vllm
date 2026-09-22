@@ -140,7 +140,7 @@ class AdaptiveVerificationManager:
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
-        self._copy_stream = torch.cuda.Stream(device)
+        self._copy_stream = torch.Stream(device=device)
 
         self.num_bonus_tokens = num_bonus_tokens
         # Rejection sampling verifies logits in one contiguous chunk; the
@@ -175,7 +175,9 @@ class AdaptiveVerificationManager:
             )
             for _ in range(2)
         ]
-        self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
+        self._copy_events = [
+            torch.Event(device=device, blocking=True) for _ in range(2)
+        ]
         self._pending_resets: list[int] = []
         self._stale_idx = 0
         for slot in self._stale_confidences:
@@ -276,7 +278,7 @@ class AdaptiveVerificationManager:
         write_slot = self._stale_confidences[write_idx]
         write_slot.gpu.copy_(self._confidence_probs)
 
-        current_stream = torch.cuda.current_stream(self.req_states.device)
+        current_stream = torch.accelerator.current_stream(self.req_states.device)
         self._copy_stream.wait_stream(current_stream)
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
