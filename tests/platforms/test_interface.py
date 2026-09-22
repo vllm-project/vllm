@@ -119,6 +119,32 @@ def test_layerwise_hybrid_honors_connector_required_layer_outer_layout(monkeypat
     align_hybrid.assert_called_once_with(config, _BlockOuterBackend)
 
 
+@pytest.mark.parametrize("layerwise", [None, False, True])
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_offloading_layout_preserves_layerwise_hybrid_packing(
+    monkeypatch, layerwise, hisparse
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = _hybrid_config(layerwise=layerwise, connector=True)
+    if layerwise is None:
+        config.quant_config = None
+    config.attention_config = SimpleNamespace(
+        hisparse_config=object() if hisparse else None,
+    )
+    required = OffloadingConnector.get_required_kvcache_layout(config)
+    assert required == ("BLHNC" if hisparse else None if layerwise else "LBHNC")
+    with patch.object(
+        Platform, "_get_kv_connector_cache_layout", return_value=required
+    ):
+        assert Platform._use_packed_hybrid_kv_cache(config, _BlockOuterBackend) == bool(
+            layerwise
+        )
+
+
 @pytest.mark.parametrize(
     ("backends", "block_size"),
     [([_BlockOuterBackend], 48), ([_BlockOuterBackend, _Block128Backend], 64)],

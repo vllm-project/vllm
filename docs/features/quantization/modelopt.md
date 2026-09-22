@@ -40,6 +40,14 @@ kernel page (P64 for FlashInfer NVFP4). This does not require additional
 kernels. An explicitly selected layer-outer layout, or a backend without
 block-outer support, uses the legacy aligned-page fallback.
 
+The built-in `OffloadingConnector` CPU tier preserves this packed layout when
+using a layer-wise recipe. It transfers each complete backing row, including
+quantization scales and state-cache bytes, without converting KV formats.
+Offloading does not reduce padding inside a backing row. This support assumes
+the same model, layer-wise recipe, and parallel topology on store and reload;
+it does not establish compatibility with other connectors or cross-topology
+canonical offloading.
+
 This integration supports full FP8 K/V and full NVFP4 K/V layers. A format
 that mixes K and V within one layer, such as FP8 K with NVFP4 V, requires a
 separate attention-kernel implementation and is intentionally outside this
