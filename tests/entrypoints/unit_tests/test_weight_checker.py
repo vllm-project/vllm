@@ -12,9 +12,8 @@ from fastapi import HTTPException
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.entrypoints.serve.dev.rlhf.weight_checker import handle_weight_checker
 from vllm.utils.weight_checksum import (
-    are_weight_checksums_consistent,
     combine_weight_checksums,
-    compare_weight_checksums,
+    compare_weight_checksum_reports,
     split_checksum_key,
 )
 from vllm.v1.worker import gpu_worker
@@ -27,8 +26,9 @@ class _RankZeroGroup:
     rank_in_group = 0
 
 
-# A rank-qualified checksum entry, as the handler receives it from a worker.
+# Rank-qualified checksum entries, as the handler receives them from a worker.
 _DP0_W_A = {"dp0:pp0:pcp0:tp0:ep0:w": "a"}
+_DP1_W_A = {"dp1:pp0:pcp0:tp0:ep0:w": "a"}
 
 
 @pytest.fixture
@@ -50,14 +50,16 @@ def single_rank_groups(monkeypatch):
     ],
 )
 def test_compare_detects_changed_missing_and_extra_tensors(current, mismatches):
+    """The two-report form still behaves as a baseline diff."""
     baseline = {"rank0:w": "a", "rank1:w": "b"}
-    assert compare_weight_checksums(baseline, current) == (not mismatches, mismatches)
+    match, reported, _ = compare_weight_checksum_reports([baseline, current])
+    assert (match, reported) == (not mismatches, mismatches)
 
 
 def test_compare_does_not_mutate_its_inputs():
     baseline = {"rank0:w": "a"}
     current = {"rank0:w": "b"}
-    compare_weight_checksums(baseline, current)
+    compare_weight_checksum_reports([baseline, current])
     assert baseline == {"rank0:w": "a"}
     assert current == {"rank0:w": "b"}
 
@@ -142,10 +144,11 @@ def test_split_checksum_key_keeps_the_name_whole(key, prefix, name):
         ([{}, {}], []),
     ],
 )
-def test_consistency_separates_disagreement_from_missing_ranks(reports, mismatches):
-    consistent, reported, _ = are_weight_checksums_consistent(reports)
+def test_compare_separates_disagreement_from_missing_ranks(reports, mismatches):
+    """A key only some reports carry is not "equal", it is uncovered."""
+    match, reported, _ = compare_weight_checksum_reports(reports)
     assert reported == mismatches
-    assert consistent is not mismatches
+    assert match is not mismatches
 
 
 @pytest.mark.parametrize(
@@ -153,7 +156,7 @@ def test_consistency_separates_disagreement_from_missing_ranks(reports, mismatch
     [
         ([_DP0_W_A, _DP0_W_A], ["dp0:pp0:pcp0:tp0:ep0:"]),
         (
-            [_DP0_W_A, {"dp1:pp0:pcp0:tp0:ep0:w": "a"}],
+            [_DP0_W_A, _DP1_W_A],
             ["dp0:pp0:pcp0:tp0:ep0:", "dp1:pp0:pcp0:tp0:ep0:"],
         ),
         (
@@ -163,59 +166,92 @@ def test_consistency_separates_disagreement_from_missing_ranks(reports, mismatch
         ([], []),
     ],
 )
-def test_consistency_reports_the_rank_prefixes_it_covered(reports, ranks):
-    _, _, covered = are_weight_checksums_consistent(reports)
+def test_compare_reports_the_rank_prefixes_it_covered(reports, ranks):
+    """Coverage is what tells a caller the reports reached the right ranks."""
+    _, _, covered = compare_weight_checksum_reports(reports)
     assert covered == ranks
 
 
-def test_consistency_does_not_mutate_its_inputs():
+def test_compare_does_not_mutate_its_reports():
     reports = [{"dp0:pp0:pcp0:tp0:ep0:w": "a"}, {"dp0:pp0:pcp0:tp0:ep0:w": "b"}]
-    are_weight_checksums_consistent(reports)
+    compare_weight_checksum_reports(reports)
     assert reports == [
         {"dp0:pp0:pcp0:tp0:ep0:w": "a"},
         {"dp0:pp0:pcp0:tp0:ep0:w": "b"},
     ]
 
 
-class _AwakeClient:
+class _FakeClient:
     """Stand in for an engine client that is reachable and not paused."""
+
+    def __init__(self, checksums: dict[str, str] | None = None):
+        self._checksums = _DP0_W_A if checksums is None else checksums
 
     async def is_paused(self) -> bool:
         return False
 
+    async def compute_weight_checksums_all(self) -> list[dict[str, str]]:
+        return [self._checksums]
 
-def _run(body: dict) -> dict:
-    return asyncio.run(handle_weight_checker(body, _AwakeClient()))
+
+def _run(body: dict, client: _FakeClient | None = None) -> dict:
+    return asyncio.run(handle_weight_checker(body, client or _FakeClient()))
 
 
-def test_handler_consistency_reports_agreeing_replicas():
-    checksums = {"dp0:pp0:pcp0:tp0:ep0:w": "a"}
-    response = _run({"action": "consistency", "checksums": [checksums, checksums]})
+def test_handler_compare_matches_the_live_engine_against_the_baseline():
+    response = _run({"action": "compare", "baseline": _DP0_W_A})
     assert response == {
-        "consistent": True,
+        "match": True,
         "mismatches": [],
-        "reports": 2,
         "ranks": ["dp0:pp0:pcp0:tp0:ep0:"],
     }
     # The response has to survive the JSON round trip the endpoint performs.
     assert json.loads(json.dumps(response)) == response
 
 
-def test_handler_consistency_flags_a_diverged_replica():
+def test_handler_compare_accepts_the_callers_other_reports():
+    """With extra reports, compare holds every report to every other one."""
     response = _run(
+        {"action": "compare", "baseline": _DP0_W_A, "checksums": [_DP0_W_A]}
+    )
+    assert response["match"] is True
+
+    diverged = _run(
         {
-            "action": "consistency",
-            "checksums": [{"dp0:pp0:pcp0:tp0:ep0:w": "a"}] * 2
-            + [{"dp0:pp0:pcp0:tp0:ep0:w": "b"}],
+            "action": "compare",
+            "baseline": _DP0_W_A,
+            "checksums": [{"dp0:pp0:pcp0:tp0:ep0:w": "b"}],
         }
     )
-    assert response["consistent"] is False
-    assert response["mismatches"] == ["dp0:pp0:pcp0:tp0:ep0:w"]
-    assert response["reports"] == 3
+    assert diverged["match"] is False
+    assert diverged["mismatches"] == ["dp0:pp0:pcp0:tp0:ep0:w"]
 
 
-@pytest.mark.parametrize("checksums", [None, {}, "report", [1], ["x"]])
-def test_handler_consistency_requires_reports(checksums):
+def test_handler_compare_flags_a_rank_the_baseline_does_not_cover():
+    """An engine holding a rank the baseline lacks is a mismatch, not a pass."""
+    response = _run({"action": "compare", "baseline": _DP1_W_A})
+    assert response["match"] is False
+    assert response["mismatches"] == [
+        "dp0:pp0:pcp0:tp0:ep0:w",
+        "dp1:pp0:pcp0:tp0:ep0:w",
+    ]
+
+
+@pytest.mark.parametrize("checksums", [{}, "report", [1], ["x"]])
+def test_handler_compare_rejects_a_malformed_report_list(checksums):
+    """A malformed list is rejected rather than silently ignored."""
     with pytest.raises(HTTPException) as excinfo:
-        _run({"action": "consistency", "checksums": checksums})
+        _run({"action": "compare", "baseline": _DP0_W_A, "checksums": checksums})
+    assert excinfo.value.status_code == 400
+
+
+def test_handler_compare_requires_a_baseline():
+    with pytest.raises(HTTPException) as excinfo:
+        _run({"action": "compare"})
+    assert excinfo.value.status_code == 400
+
+
+def test_handler_no_longer_has_a_separate_consistency_action():
+    with pytest.raises(HTTPException) as excinfo:
+        _run({"action": "consistency", "checksums": [_DP0_W_A]})
     assert excinfo.value.status_code == 400

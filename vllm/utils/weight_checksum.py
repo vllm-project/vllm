@@ -49,41 +49,25 @@ def combine_weight_checksums(per_worker: list[dict[str, str]]) -> dict[str, str]
     return combined
 
 
-def compare_weight_checksums(
-    baseline: dict[str, str],
-    current: dict[str, str],
-) -> tuple[bool, list[str]]:
-    """Return whether every tensor matches, and the keys that differ.
-
-    Keys present in only one of the two maps count as mismatches. The caller
-    owns the baseline: with several API processes, any of them may serve any
-    request, so no baseline can live server-side.
-    """
-    mismatches = sorted(
-        key
-        for key in baseline.keys() | current.keys()
-        if baseline.get(key) != current.get(key)
-    )
-    return not mismatches, mismatches
-
-
-def are_weight_checksums_consistent(
+def compare_weight_checksum_reports(
     reports: list[dict[str, str]],
 ) -> tuple[bool, list[str], list[str]]:
-    """Return whether several reports agree on every checksum they contain.
+    """Return whether every report agrees on every checksum it contains.
 
     Each report is one full ``checksum`` response, so an entry is a digest of
-    one shard of one rank. Only the same rank-qualified key is compared: the
-    same tensor name on a different rank holds a different shard, and its
-    digest is expected to differ.
+    one shard of one rank. The usual call is ``[baseline, current]``; passing
+    more reports compares replicas against each other instead of against a
+    single baseline, and passing one report only checks that it is readable.
+
+    Only the same rank-qualified key is compared: the same tensor name on
+    another rank holds a different shard, and its digest is expected to differ.
 
     A key that only some reports carry separates "the replicas disagree" from
     "these reports do not cover the same ranks", which is why the covered
-    prefixes are returned alongside the verdict: a single report is consistent
-    with itself, and only the caller knows which ranks it expected to reach.
+    prefixes are returned alongside the verdict.
 
     Args:
-        reports: One checksum mapping per sampled API server or process.
+        reports: One checksum mapping per report to compare.
 
     Returns:
         Whether every entry is identical in each report, the keys that are not,

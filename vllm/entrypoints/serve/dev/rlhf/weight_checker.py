@@ -12,12 +12,11 @@ from fastapi import HTTPException
 
 from vllm.engine.protocol import EngineClient
 from vllm.utils.weight_checksum import (
-    are_weight_checksums_consistent,
     combine_weight_checksums,
-    compare_weight_checksums,
+    compare_weight_checksum_reports,
 )
 
-_ACTIONS = ("checksum", "reset", "compare", "consistency")
+_ACTIONS = ("checksum", "reset", "compare")
 
 
 def _require_action(body: dict) -> str:
@@ -40,17 +39,22 @@ def _require_baseline(body: dict) -> dict[str, str]:
     return baseline
 
 
-def _require_reports(body: dict) -> list[dict[str, str]]:
+def _optional_extra_reports(body: dict) -> list[dict[str, str]]:
+    """Return the caller's other checksum reports, if it sent any.
+
+    These are what turns ``compare`` from "does this engine match its baseline"
+    into "do all of these agree", so a malformed value is rejected rather than
+    ignored.
+    """
     reports = body.get("checksums")
+    if reports is None:
+        return []
     if not isinstance(reports, list) or not all(
         isinstance(report, dict) for report in reports
     ):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
-            detail=(
-                "action='consistency' requires a 'checksums' list of "
-                "checksum response objects"
-            ),
+            detail="'checksums' must be a list of checksum response objects",
         )
     return reports
 
@@ -75,44 +79,41 @@ async def handle_weight_checker(body: dict, client: EngineClient) -> dict:
         {"action": "reset"}    -> overwrite GPU weights with random values
         {"action": "compare", "baseline": {name: hex_str}}
                                -> diff current weights against the baseline
-        {"action": "consistency", "checksums": [{name: hex_str}, ...]}
-                               -> diff several checksum reports against
-                                  each other
+        {"action": "compare", "baseline": {name: hex_str},
+                             "checksums": [{name: hex_str}, ...]}
+                               -> also diff the caller's other checksum
+                                  reports against the baseline
 
     Responses:
 
-    * **checksum**:    ``{"checksums": {name: hex_str}}``
-    * **reset**:       ``{"status": "reset"}``
-    * **compare**:     ``{"match": bool, "mismatches": [str]}``
-    * **consistency**: ``{"consistent": bool, "mismatches": [str],
-      "reports": int, "ranks": [str]}``
+    * **checksum**: ``{"checksums": {name: hex_str}}``
+    * **reset**:    ``{"status": "reset"}``
+    * **compare**:  ``{"match": bool, "mismatches": [str], "ranks": [str]}``
+
+    ``ranks`` lists the rank prefixes the comparison covered, so a caller that
+    passed several reports can tell whether they reached the ranks it expected
+    rather than only that the ones they did reach agree.
 
     A paused engine returns HTTP 409, and so does a duplicate key from the
     workers. A sleeping engine is the caller's responsibility to wake first.
     The RL workflow is in docs/features/weight_checker.md.
 
     Raises:
-        HTTPException: For an unknown action, a missing baseline or checksum
-            list, a paused engine, or duplicate keys from the workers.
+        HTTPException: For an unknown action, a missing baseline or a
+            malformed checksum list, a paused engine, or duplicate keys from
+            the workers.
     """
     action = _require_action(body)
     await _require_awake_engine(client)
-
-    if action == "consistency":
-        reports = _require_reports(body)
-        consistent, mismatches, ranks = are_weight_checksums_consistent(reports)
-        return {
-            "consistent": consistent,
-            "mismatches": mismatches,
-            "reports": len(reports),
-            "ranks": ranks,
-        }
 
     if action == "reset":
         await client.reset_weights()
         return {"status": "reset"}
 
     baseline = _require_baseline(body) if action == "compare" else None
+    # Validated before the RPC: a malformed request should not cost a hashing
+    # pass over every weight.
+    extra_reports = _optional_extra_reports(body) if action == "compare" else []
     per_engine = await client.compute_weight_checksums_all()
     try:
         checksums = combine_weight_checksums(per_engine)
@@ -125,5 +126,9 @@ async def handle_weight_checker(body: dict, client: EngineClient) -> dict:
     if baseline is None:
         return {"checksums": checksums}
 
-    match, mismatches = compare_weight_checksums(baseline, checksums)
-    return {"match": match, "mismatches": mismatches}
+    # More than one report compares replicas against each other, which needs no
+    # baseline of its own: every report is held to every other one.
+    match, mismatches, ranks = compare_weight_checksum_reports(
+        [baseline, checksums, *extra_reports]
+    )
+    return {"match": match, "mismatches": mismatches, "ranks": ranks}

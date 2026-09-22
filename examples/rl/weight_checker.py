@@ -24,9 +24,9 @@ weights, and the prefix cache would keep those blocks. See
 docs/features/weight_checker.md for the full rationale.
 
 Pass ``--extra-url`` one or more times to also check that the replicas agree
-with each other, which is a different question from whether they match a
-baseline: it compares their checksums against each other and reports the ranks
-whose digests differ.
+with each other. Their checksums ride along with the baseline on the final
+``compare``, which then holds every report to every other one instead of only
+to the baseline.
 
 For a standalone demonstration, the existing ``collective_rpc`` development
 endpoint reloads the inference weights from the configured checkpoint. In a
@@ -50,12 +50,17 @@ def post(base_url: str, path: str, **kwargs: Any) -> dict[str, Any]:
 
 
 def check_weights(
-    base_url: str, action: str, baseline: dict[str, str] | None = None
+    base_url: str,
+    action: str,
+    baseline: dict[str, str] | None = None,
+    extra_checksums: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Run one Weight Checker action, passing a baseline when comparing."""
+    """Run one Weight Checker action, with a baseline and extra reports."""
     payload: dict[str, Any] = {"action": action}
     if baseline is not None:
         payload["baseline"] = baseline
+    if extra_checksums:
+        payload["checksums"] = extra_checksums
     return post(base_url, "/weight_checker", json=payload)
 
 
@@ -68,8 +73,12 @@ def reload_inference_weights(base_url: str) -> None:
     )
 
 
-def verify_weight_update(base_url: str) -> None:
-    """Run a complete reset, reload, and byte-for-byte verification cycle."""
+def verify_weight_update(base_url: str) -> dict[str, str]:
+    """Run a complete reset, reload, and byte-for-byte verification cycle.
+
+    Returns:
+        The baseline checksums, which a later replica check can reuse.
+    """
     print("[1/6] Computing the original checksums and saving the baseline...")
     original = check_weights(base_url, "checksum")["checksums"]
     print(f"      hashed {len(original)} tensors")
@@ -107,6 +116,7 @@ def verify_weight_update(base_url: str) -> None:
     post(base_url, "/resume")
 
     print("Weight verification passed: all inference weights match.")
+    return original
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,29 +136,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def check_replicas(base_url: str, extra_urls: list[str]) -> None:
-    """Ask one server whether the replicas reached so far agree.
+def check_replicas(
+    base_url: str, bundle: dict[str, str], extra_urls: list[str]
+) -> None:
+    """Ask one server whether all the replicas agree with each other.
 
-    Each URL is queried for its own checksums, and the answers are sent back to
-    the first server, which is the one that owns the comparison. A single
-    report agrees with itself, so the returned ``ranks`` is what tells you the
-    check covered the ranks you expected.
+    Each extra URL is queried for its own checksums, and the answers ride along
+    with the baseline on a single ``compare``, which then holds every report to
+    every other one. A report agrees with itself, so the returned ``ranks`` is
+    what tells you the comparison covered the ranks you expected.
     """
-    reports = [check_weights(base_url, "checksum")["checksums"]]
-    reports += [
-        check_weights(url, "checksum")["checksums"] for url in extra_urls
-    ]
+    extra = [check_weights(url, "checksum")["checksums"] for url in extra_urls]
+    result = check_weights(base_url, "compare", bundle, extra)
+    print(f"compared {len(extra) + 2} reports covering {len(result['ranks'])} ranks")
 
-    result = post(
-        base_url,
-        "/weight_checker",
-        json={"action": "consistency", "checksums": reports},
-    )
-    print(
-        f"compared {result['reports']} reports covering {len(result['ranks'])} "
-        f"rank prefixes"
-    )
-    if not result["consistent"]:
+    if not result["match"]:
         preview = "\n".join(f"  - {name}" for name in result["mismatches"][:10])
         raise RuntimeError(
             f"Replicas disagree on {len(result['mismatches'])} tensors:\n{preview}"
@@ -159,6 +161,7 @@ def check_replicas(base_url: str, extra_urls: list[str]) -> None:
 if __name__ == "__main__":
     args = parse_args()
     base_url = args.base_url.rstrip("/")
-    verify_weight_update(base_url)
-    if args.extra_url:
-        check_replicas(base_url, [url.rstrip("/") for url in args.extra_url])
+    extra_urls = [url.rstrip("/") for url in args.extra_url]
+    bundle = verify_weight_update(base_url)
+    if extra_urls:
+        check_replicas(base_url, bundle, extra_urls)

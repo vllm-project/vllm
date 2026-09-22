@@ -10,11 +10,11 @@ Key capabilities:
 - **Per-tensor checksums**: Hashes parameters and persistent weight buffers.
 - **Distributed coverage**: Identifies every checksum by its data-, pipeline-,
   prefill-context-, tensor-, and expert-parallel ranks.
-- **Stateless comparison**: Detects changed, added, or missing tensors; the
-  caller supplies the baseline, so the check survives load balancing across API
-  server processes.
-- **Replica consistency**: Diffs several checksums against each other to find
-  ranks that disagree, or that were never reached.
+- **Stateless comparison**: `compare` diffs current weights against a caller
+  supplied `baseline`, and against any further reports the caller sends, so it
+  covers both "did the weights land" and "do the replicas agree".
+- **Coverage reporting**: Every comparison returns the rank prefixes it
+  covered, so a partial deployment cannot pass unnoticed.
 - **Weight reset**: Randomizes covered tensors before a weight transfer.
 
 ## Usage
@@ -84,7 +84,8 @@ A successful restoration returns:
 ```json
 {
   "match": true,
-  "mismatches": []
+  "mismatches": [],
+  "ranks": ["dp0:pp0:pcp0:tp0:ep0:"]
 }
 ```
 
@@ -92,25 +93,23 @@ Changed, added, or missing tensors produce `match: false`, with their fully
 qualified rank and tensor names in `mismatches`. `compare` without a `baseline`
 object returns HTTP 400.
 
+`ranks` lists the rank prefixes the comparison covered. It matters because the
+engine only reports the ranks it manages: a `match: true` over fewer ranks than
+you expected means part of the deployment was never checked.
+
 ### Check that replicas agree
 
 `compare` answers "does this engine still hold the weights the caller expects".
-Checking that several API servers or replicas agree with *each other* takes the
-other direction: send every report back and let the endpoint diff them.
+To check that several API servers or replicas agree with *each other*, collect
+their `checksum` responses and send them back alongside the baseline as
+`checksums`. Every report is then held to every other one:
 
 ```bash
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
-  -d '{"action":"consistency","checksums":[{"dp0:...":"abc..."},{"dp0:...":"abc..."}]}'
-```
-
-```json
-{
-  "consistent": true,
-  "mismatches": [],
-  "reports": 2,
-  "ranks": ["dp0:pp0:pcp0:tp0:ep0:"]
-}
+  -d '{"action":"compare",
+       "baseline":{"dp0:...":"abc..."},
+       "checksums":[{"dp0:...":"abc..."},{"dp0:...":"abc..."}]}'
 ```
 
 Only the same rank-qualified key is compared. The same tensor name on a
@@ -119,9 +118,14 @@ different rank holds a different shard of a TP or EP split, so its digest is
 Entries that not every report carries are listed in `mismatches` too, so a
 rank that no report reached cannot pass as consistent.
 
+Replica comparison is only meaningful between reports from one deployment with
+matching parallel configuration. Two independently started servers both begin
+at `dp0`, so their keys collide rather than compare; merge such reports by
+keeping their rank ranges disjoint.
+
 `ranks` is the part the verdict cannot carry on its own: a single report is
-consistent with itself, so `consistent: true` only means something once you can
-see that the reports actually covered the ranks you expected.
+consistent with itself, so `match: true` only means something once you can see
+that the reports actually covered the ranks you expected.
 
 ### RLHF weight-update workflow
 
@@ -205,13 +209,12 @@ manages.
 | --- | --- | --- |
 | `checksum` | Return per-tensor SHA-256 digests | No |
 | `reset` | Replace covered tensors with random values | Yes |
-| `compare` | Diff current weights against the supplied `baseline` | No |
-| `consistency` | Diff several `checksums` reports against each other | No |
+| `compare` | Diff current weights against `baseline`, plus any extra `checksums` | No |
 
 Invalid or missing actions return HTTP 400, and so does `compare` without a
-`baseline` object or `consistency` without a `checksums` list. A paused engine
-returns HTTP 409 for every action, checked before the per-action arguments:
-call `/resume` first, which is what a weight-update cycle does anyway.
+`baseline` object. A paused engine returns HTTP 409 for every action, checked
+before the per-action arguments: call `/resume` first, which is what a
+weight-update cycle does anyway.
 
 ## Limitations
 
