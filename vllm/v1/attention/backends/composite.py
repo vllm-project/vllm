@@ -295,11 +295,6 @@ def create_composite_attention_backend(
             )
             self.routing = routing_policy(layer_names, vllm_config)
 
-        def set_block_stride_bytes(self, block_stride_bytes: int) -> None:
-            super().set_block_stride_bytes(block_stride_bytes)
-            for builder in self._builders:
-                builder.set_block_stride_bytes(block_stride_bytes)
-
         @classmethod
         def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
             return min(

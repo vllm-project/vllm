@@ -41,6 +41,7 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
+    group_block_stride_bytes,
 )
 
 
@@ -445,6 +446,7 @@ def test_allocate_compressed_mla_cache(
     )
 
     assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
+    assert group_block_stride_bytes(config, 0) == spec.page_size_bytes
 
 
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
@@ -585,12 +587,12 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
 
 
 def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
-    """Host tensors get their own backing; view-less specs keep the raw one."""
-    spec = FullAttentionSpec(
-        block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32
+    """Host views use kernel blocks; view-less specs keep the raw backing."""
+    spec = MLAAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=4, dtype=torch.float32
     )
     page = spec.page_size_bytes
-    resident_spec = HiSparseResidentSpec(block_size=2, page_size=page)
+    resident_spec = HiSparseResidentSpec(block_size=4, page_size=page)
     device_size = 4 * page
     config = KVCacheConfig(
         num_blocks=4,
@@ -638,12 +640,12 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
     assert len(config.kv_cache_tensors) == 3
 
     assert [buf.numel() for buf in host_buffers] == [3 * page]
-    assert caches["source"].shape[0] == 3
+    assert caches["source"].shape[0] == 6
     assert (
         caches["source"].untyped_storage().data_ptr()
         == host_buffers[0].untyped_storage().data_ptr()
     )
-    assert caches["indexer"].shape[0] == 4
+    assert caches["indexer"].shape[0] == 8
     backing = caches["resident"]
     assert backing.dtype == torch.int8 and backing.numel() >= device_size
     assert (

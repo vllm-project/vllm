@@ -34,7 +34,10 @@ from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mla.indexer import kpool_page_geometry
+from vllm.v1.attention.backends.mla.indexer import (
+    Glm5NextIndexerBackend,
+    kpool_page_geometry,
+)
 from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
@@ -137,8 +140,6 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         return spec
 
     def get_attn_backend(self):
-        from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-
         return Glm5NextIndexerBackend
 
 

@@ -1618,7 +1618,15 @@ class NixlBaseConnectorWorker:
                     ]
                 else:
                     segment_bytes = num_blocks * block_stride
-                    assert cache.nbytes % segment_bytes == 0
+                    if cache.nbytes % segment_bytes != 0:
+                        raise AssertionError(
+                            "KV cache view cannot be partitioned into NIXL regions: "
+                            f"layer={layer_name}, cache_nbytes={cache.nbytes}, "
+                            f"num_blocks={num_blocks}, block_stride={block_stride}, "
+                            f"physical_page_size={physical_page_size}, "
+                            f"cache_shape={tuple(cache.shape)}, "
+                            f"cache_stride={tuple(cache.stride())}"
+                        )
                     num_segments = cache.nbytes // segment_bytes
                     region_block_len = (
                         block_stride if num_segments > 1 else physical_page_size

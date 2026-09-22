@@ -1591,8 +1591,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                 )
 
+            page_states = self.kv_cache_spec.num_states
             if self.compress_ratio > 1:
-                _, pages_per_block, _ = self._page_geometry()
+                page_states, pages_per_block, _ = self._page_geometry()
                 if pages_per_block > 1:
                     _, paged = self._indexer_page_table(block_table)
                     rows, cols = paged.shape
@@ -1641,7 +1642,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
-                    self._page_geometry()[0],
+                    page_states,
                     self.num_sms,
                     indices=decode_indices,
                 )
