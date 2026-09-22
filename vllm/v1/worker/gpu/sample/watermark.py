@@ -328,11 +328,7 @@ def repeated_context_mask(
 
     if contexts.stride(-1) != 1:
         contexts = contexts.contiguous()
-    # The kernel reads these flat, one element per row. `history_offsets` is
-    # not in the list because the kernel reads it as
-    # `history_offsets_ptr + row * history_offsets_stride`, so a stride-0
-    # broadcast row needs no copy. `local_positions` is read flat and is packed
-    # even when the caller passes the same tensor for both.
+    # Only history_offsets passes its row stride to the kernel.
     req_indices = req_indices.contiguous()
     if local_positions is not None:
         local_positions = local_positions.contiguous()
