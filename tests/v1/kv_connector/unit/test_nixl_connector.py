@@ -2155,6 +2155,51 @@ def test_mixed_memory_read_failure_does_not_notify_producer(recv_worker):
     worker.nixl_wrapper.send_notif.assert_not_called()
 
 
+def test_telemetry_exception_does_not_fail_completed_transfer(recv_worker):
+    """A DONE transfer must survive a NIXL build whose telemetry raises.
+
+    ``get_xfer_telemetry`` is called inside the ``DONE`` branch, so without a
+    guard the enclosing ``except Exception`` reclassifies a transfer that NIXL
+    already completed as a failure.
+    """
+    worker = recv_worker
+    transfers = {"request": [101]}
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    worker.nixl_wrapper.get_xfer_telemetry.side_effect = RuntimeError(
+        "nixlNoTelemetryError"
+    )
+
+    done_req_ids, failed_req_ids = worker._pop_done_transfers(transfers)
+
+    assert done_req_ids == {"request"}
+    assert failed_req_ids == set()
+    assert not transfers
+    worker.nixl_wrapper.release_xfer_handle.assert_called_once_with(101)
+    worker._log_failure.assert_not_called()
+    assert worker.xfer_stats.data["num_failed_transfers"] == []
+    # The sample is skipped, not recorded with placeholder values.
+    assert worker.xfer_stats.data["transfer_duration"] == []
+
+
+def test_telemetry_still_recorded_when_available(recv_worker):
+    """The guard must not change behaviour when telemetry does work."""
+    worker = recv_worker
+    transfers = {"request": [101]}
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    worker.nixl_wrapper.get_xfer_telemetry.return_value = get_default_xfer_telemetry(
+        xferDurationS=2, postDurationS=3, totalBytes=4, descCount=5
+    )
+
+    done_req_ids, failed_req_ids = worker._pop_done_transfers(transfers)
+
+    assert done_req_ids == {"request"}
+    assert failed_req_ids == set()
+    assert worker.xfer_stats.data["transfer_duration"] == [2]
+    assert worker.xfer_stats.data["post_duration"] == [3]
+    assert worker.xfer_stats.data["bytes_transferred"] == [4]
+    assert worker.xfer_stats.data["num_descriptors"] == [5]
+
+
 def element_byte_addrs(view: torch.Tensor) -> list[int]:
     """Absolute byte addresses of every element of a (possibly strided) view."""
     offsets = torch.zeros(view.shape, dtype=torch.int64)
