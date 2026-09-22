@@ -236,6 +236,140 @@ def test_mamba_checkpoint_admission_matches_allocation(
     assert admission_estimate == allocation_estimate == allocated
 
 
+def test_mamba_find_longest_cache_hit_drops_only_most_recent_checkpoint():
+    """MambaManager.find_longest_cache_hit must respect drop_eagle_block.
+
+    Regression test for the corruption bug where the most recent Mamba
+    state checkpoint -- which may hold recurrent state written past
+    verified MTP/EAGLE draft positions -- stayed reachable through the
+    prefix cache and got reused by later requests sharing that prefix.
+
+    Also guards against the fix that shrank the search ceiling by one
+    unit up front instead of skipping the first real match: in "align"
+    mode, checkpoints only exist at sparse block boundaries, so that
+    approach reliably landed in a gap and produced 0% cache-hit-rate
+    even when an older, safe checkpoint was available.
+    """
+    block_size = 4
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
+    )
+    manager = MambaManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    block_hashes = [BlockHash(str(i).encode()) for i in range(2)]
+    for block_hash, block in zip(block_hashes, block_pool.blocks[1:3]):
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hash, 0), block
+        )
+
+    # Without the drop, both committed checkpoints are visible.
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=8,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=block_size,
+    )
+    assert hit_length == 8
+    assert computed_blocks[0] == [block_pool.null_block, block_pool.blocks[2]]
+
+    # With the drop, only the older (index 0) checkpoint is a safe hit --
+    # the most recent one is excluded, not just its reported length trimmed.
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=8,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=True,
+        alignment_tokens=block_size,
+    )
+    assert hit_length == 4
+    assert computed_blocks[0] == [block_pool.blocks[1]]
+
+    # A single checkpoint is entirely the risky one: dropping it must fall
+    # back to no hit at all, never to a corrupted match.
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes[:1],
+        max_length=4,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=True,
+        alignment_tokens=block_size,
+    )
+    assert hit_length == 0
+
+
+def test_mamba_find_longest_cache_hit_drops_only_most_recent_checkpoint_fine_grained():
+    """Same as above, but through the fine-grained hash-lookup branch
+    (alignment_tokens < block_size), which vantis-style hybrid configs use.
+    """
+    hash_block_size = 2
+    block_size = 4
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=hash_block_size
+    )
+    manager = MambaManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    # Two full-block-aligned checkpoints, each covering one `block_size`
+    # (4-token) mamba block, hashed at the finer 2-token granularity.
+    block_hashes = [BlockHash(str(i).encode()) for i in range(4)]
+    for block_hash, block in zip(
+        (block_hashes[1], block_hashes[3]), block_pool.blocks[1:3]
+    ):
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hash, 0), block
+        )
+
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=8,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=hash_block_size,
+    )
+    assert hit_length == 8
+
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=8,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=True,
+        alignment_tokens=hash_block_size,
+    )
+    assert hit_length == 4
+    assert computed_blocks[0] == [block_pool.blocks[1]]
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,
