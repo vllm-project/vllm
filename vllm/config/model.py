@@ -340,6 +340,9 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_preserve_parameter_names: list[str] = field(default_factory=list)
+    """Parameter-name globs to preserve across level-2 sleep.
+    The sender must omit these parameters; loaders must preserve their storage."""
     sleep_mode_backend: str = "cumem"
     """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
