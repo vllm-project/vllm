@@ -648,6 +648,7 @@ def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
     indices = torch.empty((3, top_k), dtype=torch.int32, device="cuda")
 
     if not rocm_aiter_ops.is_indexer_top_k_supported(
+        indexer="dsa",
         is_prefill=True,
         compress_ratio=4,
         num_rows=logits.shape[0],
@@ -697,6 +698,7 @@ def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
     if not rocm_aiter_ops.is_indexer_top_k_supported(
+        indexer="dsa",
         is_prefill=False,
         compress_ratio=4,
         num_rows=num_rows,
@@ -741,8 +743,11 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
     is_supported = rocm_aiter_ops.is_indexer_top_k_supported
 
     eligible_cases = [
-        dict(is_prefill=True, compress_ratio=4, num_rows=1, on_gfx950=True),
         dict(
+            indexer="dsa", is_prefill=True, compress_ratio=4, num_rows=1, on_gfx950=True
+        ),
+        dict(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=4,
             num_rows=1,
@@ -750,6 +755,7 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             on_gfx950=True,
         ),
         dict(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=4,
             num_rows=257,
@@ -758,6 +764,7 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             on_gfx950=True,
         ),
         dict(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=2,
             num_rows=385,
@@ -767,6 +774,7 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             on_gfx950=True,
         ),
         dict(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=2,
             num_rows=384,
@@ -788,8 +796,11 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
         fail_if_imported,
     )
     ineligible_cases = [
-        dict(is_prefill=True, compress_ratio=1, num_rows=1, on_gfx950=True),
         dict(
+            indexer="dsa", is_prefill=True, compress_ratio=1, num_rows=1, on_gfx950=True
+        ),
+        dict(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=2,
             num_rows=384,
@@ -799,6 +810,7 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             on_gfx950=True,
         ),
         dict(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=4,
             num_rows=1,
@@ -806,6 +818,7 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             on_gfx950=True,
         ),
         dict(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=4,
             num_rows=256,
@@ -813,6 +826,7 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             on_gfx950=True,
         ),
         dict(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=4,
             num_rows=320,
@@ -826,6 +840,7 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
     monkeypatch.setattr(_aiter_ops, "_get_aiter_topk_ops", lambda: None)
     assert (
         is_supported(
+            indexer="dsa",
             is_prefill=True,
             compress_ratio=4,
             num_rows=1,
@@ -833,6 +848,34 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
         )
         is False
     )
+
+
+def test_kpool_topk_skips_the_dsv4_native_window(monkeypatch) -> None:
+    """The in-tree decode kernel's advantage window was measured on DSV4's
+    compressed-KV logits, so it must not hold back the kpool indexer."""
+    from vllm import _aiter_ops
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(
+        _aiter_ops,
+        "_get_aiter_topk_ops",
+        lambda: (lambda *a, **kw: None, lambda *a, **kw: None),
+    )
+    shape = dict(
+        is_prefill=False,
+        compress_ratio=4,
+        num_rows=128,
+        max_valid_seq_len=50_000,
+        num_columns=524_288,
+        topk_tokens=512,
+        on_gfx950=True,
+    )
+    is_supported = rocm_aiter_ops.is_indexer_top_k_supported
+    assert is_supported(indexer="dsa", **shape) is False
+    assert is_supported(indexer="kpool", **shape) is True
+
+    shape["max_valid_seq_len"] = 65_537
+    assert is_supported(indexer="kpool", **shape) is False
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

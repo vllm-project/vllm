@@ -1272,6 +1272,7 @@ def rocm_aiter_sparse_attn_indexer(
             num_rows = logits.shape[0]
 
             if rocm_aiter_ops.is_indexer_top_k_supported(
+                indexer="dsa",
                 is_prefill=True,
                 compress_ratio=compress_ratio,
                 num_rows=num_rows,
@@ -1371,6 +1372,7 @@ def rocm_aiter_sparse_attn_indexer(
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
         if rocm_aiter_ops.is_indexer_top_k_supported(
+            indexer="dsa",
             is_prefill=False,
             compress_ratio=compress_ratio,
             num_rows=num_rows,

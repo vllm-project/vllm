@@ -4,7 +4,7 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import torch.distributed as dist
@@ -2510,6 +2510,7 @@ class rocm_aiter_ops:
     @staticmethod
     def is_indexer_top_k_supported(
         *,
+        indexer: Literal["dsa", "kpool"],
         is_prefill: bool,
         compress_ratio: int,
         num_rows: int,
@@ -2519,7 +2520,10 @@ class rocm_aiter_ops:
         on_gfx950: bool | None = None,
     ) -> bool:
         """Whether AITER's sparse indexer top-k beats the in-tree kernel for
-        this shape."""
+        this shape. The in-tree decode kernel's advantage window was measured
+        on DSV4's compressed-KV logits, so it applies to ``indexer="dsa"``
+        only.
+        """
         if on_gfx950 is None:
             on_gfx950 = _on_gfx950()
         if compress_ratio <= 1 or not on_gfx950:
@@ -2528,7 +2532,8 @@ class rocm_aiter_ops:
         if not is_prefill:
             assert max_valid_seq_len is not None
             if (
-                topk_tokens == 512
+                indexer == "dsa"
+                and topk_tokens == 512
                 and 0 < num_rows <= 384
                 and num_columns is not None
                 and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
