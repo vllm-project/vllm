@@ -80,14 +80,31 @@ setup_buildx_builder() {
 }
 
 download_ci_hcl() {
+    # Returns non-zero instead of exiting: the optional export path must be
+    # able to give up without failing a build whose image already exists.
     echo "--- :arrow_down: Downloading ci.hcl"
-    curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}"
+    curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}" || return $?
     echo "Downloaded to ${CI_HCL_PATH}"
 
     if [[ ! -f "${CI_HCL_PATH}" ]]; then
         echo "Error: ci.hcl not found at ${CI_HCL_PATH}"
-        exit 1
+        return 1
     fi
+}
+
+export_kernel_symbol_map_from_cache() {
+    # The existing-image path: everything here is best effort. Called as
+    # `... || echo`, so errexit is suspended inside and any failure just
+    # returns; the build keeps the image it already has.
+    local rc=0
+    download_ci_hcl \
+        && setup_buildx_builder \
+        && resolve_parent_commit \
+        && export PARENT_COMMIT \
+        && BUILD_TMP_DIR="$(mktemp -d)" \
+        && export_kernel_symbol_map || rc=$?
+    rm -rf -- "${BUILD_TMP_DIR:-}"
+    return "${rc}"
 }
 
 export_kernel_symbol_map() {
@@ -125,14 +142,10 @@ check_and_skip_if_image_exists() {
                 # The image is reused, but the symbol map is an artifact of
                 # this build. Bake just the export target: its layers come
                 # from the registry cache, and the map step itself reruns
-                # if the cached image was built without the arg.
-                download_ci_hcl
-                setup_buildx_builder
-                resolve_parent_commit
-                export PARENT_COMMIT
-                BUILD_TMP_DIR="$(mktemp -d)"
-                export_kernel_symbol_map || true
-                rm -rf -- "${BUILD_TMP_DIR}"
+                # if the cached image was built without the arg. Never
+                # fails the build: the image is already there.
+                export_kernel_symbol_map_from_cache \
+                    || echo "kernel symbol map: export from the cached image failed; continuing" >&2
             fi
             annotate_image_tags
             exit 0
@@ -332,7 +345,7 @@ if [[ ! -f "${VLLM_BAKE_FILE_PATH}" ]]; then
     exit 1
 fi
 
-download_ci_hcl
+download_ci_hcl || exit 1
 
 setup_buildx_builder
 

@@ -27,7 +27,8 @@ Output (gzipped JSON):
       "cuda": "13.0",               # nvcc release when found
       "generated_at": "2026-09-19T...",
       "build_dirs": ["build/temp.linux-x86_64-cpython-312"],
-      "incomplete": false,          # true when any object's extraction failed
+      "incomplete": false,          # true when any object's extraction failed;
+                                    # objects is then [] and reason is set
       "errors": [],                 # [{"object", "source", "error"}, ...]
       "objects": [
         {
@@ -46,11 +47,13 @@ Output (gzipped JSON):
       "reason": "..."               # only when the map is empty
     }
 
-The consumer's contract: a file is known only through objects whose
-extraction succeeded. When an object carries `error`, every file it was
-compiled from or included is unknown, and a change to such a file must fall
-back to the static rule rather than drop the steps that saw no symbol. The
-empty-map `reason` is the same contract for the whole build.
+The consumer's contract is deliberately simple: an empty `objects` list with
+a `reason` means "no evidence for any file", fall back to the static rule.
+A partial map would need every consumer to know which files the unreadable
+objects touched, and one that forgot would drop tests that a kernel change
+can reach. So the producer never publishes a partial map: if any object is
+still unreadable after a retry, `objects` is emptied, `incomplete` is set
+and `errors` names the objects so the failure can be diagnosed.
 
 Paths are relative to --source-root when the file lives inside it, otherwise
 absolute (FetchContent sources under the build directory, CUDA headers).
@@ -165,6 +168,13 @@ def parse_symbols(text: str) -> list[str]:
 
 def device_symbols(cuobjdump: str, obj: Path) -> tuple[list[str], str | None]:
     """(symbols, error). An error means the object is unknown, not kernel-free."""
+    syms, err = _cuobjdump_symbols(cuobjdump, obj)
+    if err:  # transient failures happen on large fatbins; one retry is cheap
+        syms, err = _cuobjdump_symbols(cuobjdump, obj)
+    return syms, err
+
+
+def _cuobjdump_symbols(cuobjdump: str, obj: Path) -> tuple[list[str], str | None]:
     try:
         r = subprocess.run(
             [cuobjdump, "-symbols", str(obj)],
@@ -318,6 +328,13 @@ def main() -> int:
     result["incomplete"] = bool(result["errors"])
     for e in result["errors"][:5]:
         log(f"cuobjdump failed on {e['object']}: {e['error']}")
+    if result["incomplete"]:
+        # Publish nothing rather than something partial: see the docstring.
+        result["objects"] = []
+        result["reason"] = (
+            f"{len(result['errors'])} objects unreadable by cuobjdump, e.g. "
+            f"{result['errors'][0]['object']}: {result['errors'][0]['error']}"
+        )
 
     result["stats"] = {
         "objects": len(jobs),
@@ -332,11 +349,6 @@ def main() -> int:
     with gzip.open(a.out, "wt", encoding="utf-8") as f:
         json.dump(result, f, separators=(",", ":"))
     note = f"; reason: {result['reason']}" if "reason" in result else ""
-    if result["incomplete"]:
-        note += (
-            f"; INCOMPLETE: {len(result['errors'])} objects unreadable, files they"
-            " touch must not be treated as kernel-free"
-        )
     log(f"wrote {a.out} ({a.out.stat().st_size // 1024} KiB): {result['stats']}{note}")
 
     # One line a human can check in the build log.
