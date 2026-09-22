@@ -337,6 +337,25 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
+        # Under EP, drop the top-k slots routed to remote experts at alignment
+        # time instead of launching `off_experts == -1` GEMM blocks that only
+        # write zeros; the pad-aware `moe_sum` below skips the same slots.
+        # Their rows in the workspace caches are then never written, so every
+        # consumer of those caches must be row-local: a dynamic per-tensor
+        # scale for the second GEMM's activation would take its amax over the
+        # untouched rows, and LoRA aligns the full `topk_ids` itself.
+        a2_scale_is_global = (
+            self.quant_dtype is not None
+            and a2_scale is None
+            and self.block_shape is None
+            and (not self.per_act_token_quant or self.quantization_emulation)
+        )
+        skip_invalid = (
+            expert_map is not None
+            and self._lora_context is None
+            and not a2_scale_is_global
+        )
+
         # Include fused shared-expert rows while preserving EP remapping.
         num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
@@ -350,6 +369,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 block_shape=self.block_shape,
+                ignore_invalid_experts=skip_invalid,
             )
         )
 
@@ -584,8 +604,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     top_k_num=top_k_num,
                 )
 
-        # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        if expert_map is not None:
+            # Skip the slots whose expert is not on this rank: the rows the
+            # alignment dropped, or the zeros the `-1` blocks wrote.
+            ops.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
+        else:
+            # separate function is required for MoE + LoRA
+            self.moe_sum(intermediate_cache3, output)
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
