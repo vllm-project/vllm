@@ -6,10 +6,6 @@ import torch.utils.benchmark as benchmark
 from benchmark_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.allspark_utils import (
-    ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD,
-    ALLSPARK_SUPPORTED_QUANT_TYPES,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL,
     GPTQ_MARLIN_MIN_THREAD_N,
@@ -31,7 +27,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack,
     gptq_quantize_weights,
-    quantize_weights,
 )
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -62,9 +57,6 @@ def bench_run(
         return
 
     repack_supported = group_size in MARLIN_SUPPORTED_GROUP_SIZES
-    allspark_supported = (
-        quant_type in ALLSPARK_SUPPORTED_QUANT_TYPES and group_size == -1
-    )
 
     def gen_marlin_params():
         # Marlin quant
@@ -104,35 +96,6 @@ def bench_run(
             q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
         return q_w_gptq
 
-    def gen_allspark_params():
-        qw_reorder = s_reorder = zp_reorder = sm_count = sm_version = (
-            CUBLAS_M_THRESHOLD
-        ) = None
-        nonlocal allspark_supported
-        if allspark_supported:
-            properties = torch.cuda.get_device_properties(b.device.index)
-            sm_count = properties.multi_processor_count
-            sm_version = properties.major * 10 + properties.minor
-
-            supported_arch = sm_version >= 80 and sm_version < 90
-            allspark_supported = allspark_supported and supported_arch
-            if supported_arch:
-                w_ref, qw, s, zp = quantize_weights(b, quant_type, group_size, has_zp)
-                qw = qw.to(torch.uint8)
-
-                qw_reorder, s_reorder, zp_reorder = ops.allspark_repack_weight(
-                    qw, s, zp, has_zp
-                )
-                CUBLAS_M_THRESHOLD = ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD
-        return (
-            qw_reorder,
-            s_reorder,
-            zp_reorder,
-            sm_count,
-            sm_version,
-            CUBLAS_M_THRESHOLD,
-        )
-
     (
         marlin_w_ref,
         marlin_q_w,
@@ -141,9 +104,6 @@ def bench_run(
         marlin_zp,
     ) = gen_marlin_params()
     q_w_gptq = gen_repack_params()
-    qw_reorder, s_reorder, zp_reorder, sm_count, sm_version, CUBLAS_M_THRESHOLD = (
-        gen_allspark_params()
-    )
 
     # Prepare
     marlin_workspace = MarlinWorkspace(
@@ -167,17 +127,9 @@ def bench_run(
         "marlin_workspace": marlin_workspace,
         # GPTQ params
         "q_w_gptq": q_w_gptq,
-        # AllSpark W8A16 params
-        "qw_reorder": qw_reorder,
-        "s_reorder": s_reorder,
-        "zp_reorder": zp_reorder,
-        "sm_count": sm_count,
-        "sm_version": sm_version,
-        "CUBLAS_M_THRESHOLD": CUBLAS_M_THRESHOLD,
         # Kernels
         "marlin_gemm": ops.marlin_gemm,
         "gptq_marlin_repack": ops.gptq_marlin_repack,
-        "allspark_w8a16_gemm": ops.allspark_w8a16_gemm,
     }
 
     min_run_time = 1
@@ -224,17 +176,6 @@ def bench_run(
                 label=label,
                 sub_label=sub_label,
                 description="gptq_marlin_repack",
-            ).blocked_autorange(min_run_time=min_run_time)
-        )
-
-    if allspark_supported:
-        results.append(
-            benchmark.Timer(
-                stmt="output = allspark_w8a16_gemm(a, qw_reorder, s_reorder, zp_reorder, size_n, group_size, sm_count, sm_version, CUBLAS_M_THRESHOLD, False, True)",  # noqa: E501
-                globals=globals,
-                label=label,
-                sub_label=sub_label,
-                description="allspark_w8a16_gemm_fp32",
             ).blocked_autorange(min_run_time=min_run_time)
         )
 
