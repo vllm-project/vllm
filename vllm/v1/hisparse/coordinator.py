@@ -402,6 +402,18 @@ class HiSparseCoordinator:
     # Host publication and spills
     # ------------------------------------------------------------------
 
+    def advance_scheduled(self, requests: Iterable[tuple[str, int]]) -> None:
+        """Run the per-step residency work for each scheduled request.
+
+        ``requests`` pairs a request id with the number of tokens that are
+        finalized once the step completes.
+        """
+        if not self.resident_managers:
+            return
+        for request_id, num_tokens in requests:
+            self.plan_prefix_materialization(request_id, num_tokens)
+            self.update_residency(request_id)
+
     def plan_prefix_materialization(
         self, request_id: str, num_computed_tokens: int
     ) -> None:
