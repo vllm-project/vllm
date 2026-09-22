@@ -1150,7 +1150,12 @@ def override_envs_for_invariance():
     os.environ["NCCL_MIN_NCHANNELS"] = "1"
     os.environ["NCCL_MAX_NCHANNELS"] = "1"
     os.environ["NCCL_PROTO"] = "Simple"
-    os.environ["NCCL_ALGO"] = "allreduce:tree"
+    # NCCL >= 2.31 zero-fills the algorithm table of every collective when
+    # NCCL_ALGO is set and re-enables only the named ones; together with the
+    # NCCL_PROTO above, collectives not named here end up with no algorithm
+    # and fail with ncclInvalidUsage. Re-enable Ring and Tree for all
+    # collectives, then pin AllReduce to Tree for determinism.
+    os.environ["NCCL_ALGO"] = "ring,tree;allreduce:tree"
     os.environ["NCCL_NTHREADS"] = "1"
     os.environ["NCCL_SOCKET_NTHREADS"] = "1"
 
