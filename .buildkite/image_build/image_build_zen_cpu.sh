@@ -41,6 +41,11 @@ import os
 import sys
 
 source = Path("docker/Dockerfile.cpu").read_text()
+source = source.replace(
+    "FROM vllm-src AS vllm-build\n",
+    "FROM vllm-src AS vllm-build\nARG ZEN_CPU_VERSION_OVERRIDE\nENV VLLM_VERSION_OVERRIDE=${ZEN_CPU_VERSION_OVERRIDE}\n",
+    1,
+)
 old = """# build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
 # child stage below finds it on disk instead of re-downloading it.
 ENV PATH=\"/root/.cargo/bin:${PATH}\"
@@ -110,13 +115,17 @@ resolve_rust_build_version
 prepare_zen_cpu_dockerfile
 
 # Step 1: build the CPU base image that Dockerfile.zen layers on.
+ZEN_CPU_VERSION_OVERRIDE="0.0.0+zen.${BUILDKITE_COMMIT:0:12}"
+export ZEN_CPU_VERSION_OVERRIDE
 echo "--- :docker: Building CPU base image"
 echo "Using Rust build version: ${ZEN_CPU_RUST_BUILD_VERSION}"
+echo "Using Python vLLM version: ${ZEN_CPU_VERSION_OVERRIDE}"
 docker build --file "$ZEN_CPU_DOCKERFILE" \
   --platform linux/amd64 \
   --build-arg max_jobs=16 \
   --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
   --build-arg ZEN_CPU_RUST_BUILD_VERSION="$ZEN_CPU_RUST_BUILD_VERSION" \
+  --build-arg ZEN_CPU_VERSION_OVERRIDE="$ZEN_CPU_VERSION_OVERRIDE" \
   --build-arg VLLM_CPU_X86=true \
   --tag "$BASE_IMAGE" \
   --target vllm-openai \
