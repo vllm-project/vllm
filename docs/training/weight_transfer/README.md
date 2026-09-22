@@ -35,6 +35,7 @@ engine drives on your behalf:
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
 | [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
+| [ModelExpress](modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
 
 ## Quickstart
 
