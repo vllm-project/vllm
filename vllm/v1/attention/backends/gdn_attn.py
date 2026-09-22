@@ -14,7 +14,6 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    PersistentWorkspaceProfilingSupport,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -87,12 +86,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     reorder_batch_threshold: int = 1
 
     @classmethod
-    def get_persistent_workspace_memory_profiling_support(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: MambaSpec,
-    ) -> PersistentWorkspaceProfilingSupport:
-        return PersistentWorkspaceProfilingSupport.NEUTRAL
+    def persistent_workspace_profiling_support(
+        cls, vllm_config: VllmConfig, kv_cache_spec: MambaSpec
+    ) -> bool | None:
+        return False
 
     def __init__(
         self,

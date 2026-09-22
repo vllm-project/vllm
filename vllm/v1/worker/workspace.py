@@ -3,12 +3,12 @@
 
 import inspect
 import os
-from collections.abc import Callable, Hashable, Iterator, Sequence
+from collections.abc import Callable, Hashable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from itertools import accumulate
 from math import prod
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TypeVar, cast
 
 import torch
 
@@ -16,9 +16,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
-
-if TYPE_CHECKING:
-    from vllm.config.parallel import ParallelConfig
 
 logger = init_logger(__name__)
 T = TypeVar("T")
@@ -50,27 +47,6 @@ def use_workspace_lane(lane: int) -> Iterator[None]:
         yield
     finally:
         _workspace_lane.reset(token)
-
-
-class PersistentWorkspaceLease:
-    """Keep profiling-only owners of persistent workspace allocations alive."""
-
-    def __init__(self, owners: Sequence[object] | None = None) -> None:
-        self._owners = list(owners) if owners is not None else []
-
-    def release(self) -> None:
-        self._owners.clear()
-
-    def __enter__(self) -> "PersistentWorkspaceLease":
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.release()
-
-
-def get_num_workspace_ubatches(parallel_config: "ParallelConfig") -> int:
-    """Return the number of workspace arenas required by a worker."""
-    return max(1, parallel_config.num_ubatches)
 
 
 class WorkspaceManager:
@@ -202,16 +178,12 @@ class WorkspaceManager:
         return workspace
 
     def get_simultaneous(
-        self,
-        *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype],
-        ubatch_id: int | None = None,
+        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
     ) -> list[torch.Tensor]:
         """Get multiple workspace tensors simultaneously from a single allocation.
 
         Args:
             *shapes_and_dtypes: One or more (shape, dtype) tuples.
-            ubatch_id: Which ubatch workspace to draw from; the current one
-                when omitted.
 
         Returns:
             List of tensor views into the workspace buffer, one per shape/dtype pair.
@@ -224,7 +196,7 @@ class WorkspaceManager:
         # Calculate cumulative offsets using itertools.accumulate
         offsets = list(accumulate([0] + aligned_bytes[:-1]))
 
-        current_workspace = self._ensure_workspace_size(total_bytes, ubatch_id)
+        current_workspace = self._ensure_workspace_size(total_bytes)
 
         return [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
@@ -233,9 +205,13 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
-    def _resolve_ubatch_id(self, ubatch_id: int | None = None) -> int:
-        if ubatch_id is None:
-            ubatch_id = _workspace_ubatch_id.get()
+    def _resolve_workspace_id(self) -> int:
+        """The slot for the active ubatch and lane.
+
+        ``use_workspace_ubatch_id`` overrides the DBO ubatch so a resource
+        created while reserving for one ubatch is cached under that ubatch.
+        """
+        ubatch_id = _workspace_ubatch_id.get()
         if ubatch_id is None:
             ubatch_id = dbo_current_ubatch_id()
         if not 0 <= ubatch_id < self._num_ubatches:
@@ -243,25 +219,24 @@ class WorkspaceManager:
                 f"Workspace ubatch id {ubatch_id} is outside the configured "
                 f"range [0, {self._num_ubatches})."
             )
-        return ubatch_id
-
-    def _resolve_lane(self) -> int:
         lane = _workspace_lane.get()
         if lane >= self._num_lanes:
             raise RuntimeError(
                 f"Workspace lane {lane} is not configured; manager has "
                 f"{self._num_lanes} lane(s)."
             )
-        return lane
+        return ubatch_id * self._num_lanes + lane
 
-    def _resolve_workspace_id(self, ubatch_id: int | None = None) -> int:
-        return (
-            self._resolve_ubatch_id(ubatch_id) * self._num_lanes + self._resolve_lane()
-        )
-
-    def get_workspace(self, ubatch_id: int | None = None) -> torch.Tensor | None:
-        """Return the backing allocation for an ubatch/lane without resizing it."""
-        return self._current_workspaces[self._resolve_workspace_id(ubatch_id)]
+    def assert_within(self, limits: tuple[int, ...], phase: str) -> None:
+        """Fail when any ubatch arena grew past what ``limits`` recorded."""
+        current = self.workspace_sizes_bytes()
+        if len(current) != len(limits) or any(
+            c > lim for c, lim in zip(current, limits)
+        ):
+            raise AssertionError(
+                f"Attention workspace arena exceeded its profiled size {phase}: "
+                f"profiled={limits}, current={current}."
+            )
 
     def workspace_sizes_bytes(self) -> tuple[int, ...]:
         """Return the allocated size of every ubatch workspace."""
@@ -270,21 +245,17 @@ class WorkspaceManager:
             for workspace in self._current_workspaces
         )
 
-    def _ensure_workspace_size(
-        self, required_bytes: int, ubatch_id: int | None = None
-    ) -> torch.Tensor:
+    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
         Args:
             required_bytes: The number of bytes required.
-            ubatch_id: Which ubatch workspace to size; the current one when
-                omitted.
 
         Returns:
             The current workspace tensor.
 
         """
-        workspace_id = self._resolve_workspace_id(ubatch_id)
+        workspace_id = self._resolve_workspace_id()
         current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
 

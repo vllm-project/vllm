@@ -95,11 +95,13 @@ from vllm.v1.worker.startup_plan import (
 )
 from vllm.v1.worker.utils import (
     is_residual_scattered_for_sp,
+    prepare_profiling_workspace,
     requires_persistent_attention_workspace_profiling,
+    reserve_persistent_attention_workspace,
 )
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import (
-    get_num_workspace_ubatches,
+    current_workspace_manager,
     init_workspace_manager,
     is_workspace_manager_initialized,
     lock_workspace,
@@ -471,7 +473,7 @@ class Worker(WorkerBase):
 
         # Initialize workspace manager. DSpark target and draft CUDA graphs
         # retain workspace views concurrently, so they need separate lanes.
-        num_ubatches = get_num_workspace_ubatches(self.vllm_config.parallel_config)
+        num_ubatches = max(1, self.vllm_config.parallel_config.num_ubatches)
         init_workspace_manager(
             self.device,
             num_ubatches,
@@ -589,7 +591,7 @@ class Worker(WorkerBase):
                 weights_memory=int(self.model_runner.model_memory_usage),
             ) as profile_result:
                 if profile_persistent_workspace:
-                    workspace_lease = self.model_runner.prepare_profiling_workspace()
+                    workspace_lease = prepare_profiling_workspace(self.model_runner)
                 self.model_runner.profile_run()
             # The lease has to outlive the block above. Only the shared arenas
             # are held by the global manager; the dedicated workspace a builder
@@ -603,7 +605,7 @@ class Worker(WorkerBase):
             # live and are already in profile_result.total_consumed.
             released_workspace_lease = workspace_lease is not None
             if workspace_lease is not None:
-                workspace_lease.release()
+                workspace_lease.clear()
                 workspace_lease = None
         # Reclaiming what the lease held is only meaningful once profiling
         # succeeded, and keeping it out of the finally above means a failure
@@ -623,11 +625,28 @@ class Worker(WorkerBase):
             current_platform.is_cuda_alike()
             and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
-            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory(
-                persistent_workspace_profiled=profile_persistent_workspace
+            # The arenas the persistent workspace sized must survive CUDA
+            # graph profiling untouched; growth here escapes KV cache sizing.
+            check_arena = profile_persistent_workspace and (
+                is_workspace_manager_initialized()
             )
-        if profile_persistent_workspace:
-            self.model_runner.record_persistent_attention_workspace_profile()
+            arena_before = (
+                current_workspace_manager().workspace_sizes_bytes()
+                if check_arena
+                else ()
+            )
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            if check_arena:
+                current_workspace_manager().assert_within(
+                    arena_before, "during CUDA graph profiling"
+                )
+        if profile_persistent_workspace and is_workspace_manager_initialized():
+            # Recorded here, right after CUDA graph profiling, so the ceiling
+            # covers every arena the profiling window accounted for.
+            runner: Any = self.model_runner
+            runner._profiled_persistent_workspace_sizes = (
+                current_workspace_manager().workspace_sizes_bytes()
+            )
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
@@ -799,7 +818,7 @@ class Worker(WorkerBase):
             ),
         )
         if requires_persistent_attention_workspace_profiling(self.vllm_config):
-            self.model_runner.reserve_persistent_attention_workspace()
+            reserve_persistent_attention_workspace(self.model_runner)
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -858,7 +877,7 @@ class Worker(WorkerBase):
             requires_persistent_attention_workspace_profiling(self.vllm_config)
         )
         if profile_persistent_workspace:
-            self.model_runner.reserve_persistent_attention_workspace()
+            reserve_persistent_attention_workspace(self.model_runner)
 
         if self.use_v2_model_runner:
             # A workspace resize after capture frees what the graphs point at.
@@ -972,18 +991,12 @@ class Worker(WorkerBase):
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
-        # Every warmup that can size a workspace has run by now. A completed
-        # capture locks it itself, but capture_model() returns early when both
-        # capture modes are disabled and is skipped entirely under
-        # enforce_eager, so those paths would otherwise start serving with the
-        # workspace still growable past the capacity KV sizing was told to
-        # expect. Locking here keeps the sampler warmup above free to grow it.
-        #
-        # Only for a model that opted into the profiling lifecycle. A builder
-        # that answered UNSUPPORTED never had its workspace reserved, so
-        # locking the arena for it would turn a later lazy allocation into a
-        # hard failure instead of leaving it on the legacy path.
+        # After all warmups, reject growth beyond the profiled ceiling and lock
+        # opted-in models. Unsupported backends keep the legacy growable arena.
         if profile_persistent_workspace and is_workspace_manager_initialized():
+            manager = current_workspace_manager()
+            sizes = self.model_runner._profiled_persistent_workspace_sizes
+            manager.assert_within(sizes, "before workspace lock")
             lock_workspace()
 
         # Reset the seed to ensure that the random state is not affected by

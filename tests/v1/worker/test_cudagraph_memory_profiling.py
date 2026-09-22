@@ -5,14 +5,15 @@ import contextlib
 import gc
 import weakref
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
 
-from vllm.v1.attention.backend import PersistentWorkspaceProfilingSupport
+import vllm.v1.worker.utils as worker_utils
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.worker.workspace import (
-    PersistentWorkspaceLease,
     current_workspace_manager,
     init_workspace_manager,
     lock_workspace,
@@ -85,10 +86,12 @@ def _make_flashinfer_builder(flashinfer_backend):
     FlashInferMetadataBuilder = flashinfer_backend.FlashInferMetadataBuilder
     builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
     builder._workspace_buffer = None
-    builder._workspace_state = flashinfer_backend._FlashInferWorkspaceState()
     builder.device = torch.device("cpu")
     builder.use_dcp = False
     builder.use_trtllm_decode_attention = False
+    builder.max_num_batched_tokens = 1
+    builder.num_qo_heads = 1
+    builder.head_dim = 1
     return builder
 
 
@@ -155,35 +158,6 @@ def test_attention_group_routes_builder_initialization_to_ubatch_slots():
         assert len({builder.workspace.data_ptr() for builder in created_builders}) == 3
 
 
-def test_flashinfer_rebinds_all_builders_after_shared_arena_growth():
-    pytest.importorskip("flashinfer")
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-
-    with _managed_workspace():
-        first = _make_flashinfer_builder(flashinfer_backend)
-        first_wrapper = _FakeFlashInferWrapper(first._get_workspace_buffer(1024))
-        first._register_workspace_wrapper(first_wrapper)
-        first_int_pointer = first_wrapper._int_workspace_buffer.data_ptr()
-        first_pointer_before_growth = first._workspace_buffer.data_ptr()
-
-        second = _make_flashinfer_builder(flashinfer_backend)
-        second_wrapper = _FakeFlashInferWrapper(second._get_workspace_buffer(2048))
-        second._register_workspace_wrapper(second_wrapper)
-        second_int_pointer = second_wrapper._int_workspace_buffer.data_ptr()
-        final_pointer = current_workspace_manager().get_workspace().data_ptr()
-        assert first_pointer_before_growth != final_pointer
-
-        first.rebind_workspace_after_reservation()
-        second.rebind_workspace_after_reservation()
-
-        assert first._workspace_buffer.data_ptr() == final_pointer
-        assert second._workspace_buffer.data_ptr() == final_pointer
-        assert first_wrapper._float_workspace_buffer.data_ptr() == final_pointer
-        assert second_wrapper._float_workspace_buffer.data_ptr() == final_pointer
-        assert first_wrapper._int_workspace_buffer.data_ptr() == first_int_pointer
-        assert second_wrapper._int_workspace_buffer.data_ptr() == second_int_pointer
-
-
 def test_flashinfer_default_workspace_covers_prefill_head_footprint(monkeypatch):
     pytest.importorskip("flashinfer")
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
@@ -240,11 +214,10 @@ def _reservation_builder(
     builder_cls = builder_cls or flashinfer_backend.FlashInferMetadataBuilder
     builder = builder_cls.__new__(builder_cls)
     builder._workspace_buffer = None
-    builder._workspace_state = flashinfer_backend._FlashInferWorkspaceState()
     builder.device = torch.device("cpu")
     builder.use_dcp = False
     builder.use_xqa = False
-    builder.use_trtllm_prefill_attention = use_trtllm_prefill_attention
+    builder._reservation_trtllm_prefill = use_trtllm_prefill_attention
     builder.use_trtllm_decode_attention = use_trtllm_decode_attention
     builder.enable_cuda_graph = cudagraph_capture_sizes is not None
     builder.compilation_config = SimpleNamespace(
@@ -280,47 +253,10 @@ def _install_prefill_factories(builder, monkeypatch):
         if builder._prefill_wrapper is None:
             causal_wrapper._float_workspace_buffer = builder._get_workspace_buffer()
             builder._prefill_wrapper = causal_wrapper
-            builder._register_workspace_wrapper(causal_wrapper)
         return builder._prefill_wrapper
 
     monkeypatch.setattr(builder, "_get_prefill_wrapper", get_prefill_wrapper)
     return causal_wrapper
-
-
-def test_persistent_reserve_grows_arena_before_runtime_wrappers(monkeypatch):
-    """The runtime wrappers below the hoist never grow the arena themselves."""
-    pytest.importorskip("flashinfer")
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-
-    default_float_bytes = 4096
-    builder = _reservation_builder(
-        flashinfer_backend,
-        default_float_bytes=default_float_bytes,
-        is_mm_prefix_lm=True,
-    )
-    arena_bytes_when_built = []
-
-    causal_wrapper = _install_prefill_factories(builder, monkeypatch)
-    inner = builder._get_prefill_wrapper
-
-    def recording_get_prefill_wrapper(causal=True):
-        if builder._prefill_wrapper is None:
-            arena_bytes_when_built.append(
-                _nbytes(current_workspace_manager().get_workspace())
-            )
-        return inner(causal=causal)
-
-    monkeypatch.setattr(builder, "_get_prefill_wrapper", recording_get_prefill_wrapper)
-    # Decode is routed to direct trtllm-gen, whose workspace lives outside the
-    # arena this test is about; keep the reservation off the real allocator.
-    monkeypatch.setattr(
-        flashinfer_backend, "_get_trtllm_workspace_buffer", lambda: None
-    )
-
-    with _managed_workspace():
-        builder.reserve_workspace_for_memory_profiling()
-        assert arena_bytes_when_built == [default_float_bytes]
-        assert causal_wrapper._float_workspace_buffer is not None
 
 
 @pytest.mark.parametrize(
@@ -344,13 +280,9 @@ def test_flashinfer_persistent_workspace_profile_gate(
         ),
     )
 
-    assert FlashInferMetadataBuilder.get_persistent_workspace_memory_profiling_support(
+    assert FlashInferMetadataBuilder.persistent_workspace_profiling_support(
         config, _attention_spec(128)
-    ) is (
-        PersistentWorkspaceProfilingSupport.REQUIRED
-        if expected
-        else PersistentWorkspaceProfilingSupport.UNSUPPORTED
-    )
+    ) is (True if expected else None)
 
 
 def test_flashinfer_mm_prefix_keeps_the_conservative_arena(monkeypatch):
@@ -370,7 +302,7 @@ def test_flashinfer_mm_prefix_keeps_the_conservative_arena(monkeypatch):
         default_float_bytes=default_float_bytes,
         is_mm_prefix_lm=True,
     )
-    builder.use_trtllm_prefill_attention = True
+    builder._reservation_trtllm_prefill = True
     assert builder._get_workspace_routes().native_prefill
 
     config = SimpleNamespace(
@@ -378,10 +310,10 @@ def test_flashinfer_mm_prefix_keeps_the_conservative_arena(monkeypatch):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
     assert (
-        flashinfer_backend.FlashInferMetadataBuilder.get_persistent_workspace_memory_profiling_support(
+        flashinfer_backend.FlashInferMetadataBuilder.persistent_workspace_profiling_support(
             config, _attention_spec(128)
         )
-        is PersistentWorkspaceProfilingSupport.REQUIRED
+        is True
     )
 
     _install_prefill_factories(builder, monkeypatch)
@@ -390,8 +322,9 @@ def test_flashinfer_mm_prefix_keeps_the_conservative_arena(monkeypatch):
     )
 
     with _managed_workspace():
-        builder.reserve_workspace_for_memory_profiling()
-        arena = current_workspace_manager().get_workspace()
+        builder.prepare_workspace_for_profiling(False)
+        builder.prepare_workspace_for_profiling(True)
+        arena = builder._workspace_buffer
         size_before, pointer_before = _nbytes(arena), arena.data_ptr()
         assert size_before == default_float_bytes
 
@@ -431,10 +364,10 @@ def test_flashinfer_persistent_workspace_profile_rejects_non_causal(
     )
 
     assert (
-        FlashInferMetadataBuilder.get_persistent_workspace_memory_profiling_support(
+        FlashInferMetadataBuilder.persistent_workspace_profiling_support(
             config, kv_cache_spec
         )
-        is PersistentWorkspaceProfilingSupport.UNSUPPORTED
+        is None
     )
 
 
@@ -560,7 +493,7 @@ def test_flashinfer_workspace_routes_match_reachable_dispatches(
     from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 
     builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
-    builder.use_trtllm_prefill_attention = trtllm_prefill
+    builder._reservation_trtllm_prefill = trtllm_prefill
     builder.use_trtllm_decode_attention = trtllm_decode
     builder.use_xqa = use_xqa
     builder.kv_cache_spec = SimpleNamespace(non_causal=non_causal)
@@ -661,80 +594,15 @@ def test_flashinfer_workspace_buffer_uses_workspace_manager():
 
     with _managed_workspace():
         first_builder = _make_flashinfer_builder(flashinfer_backend)
-        first_state = first_builder.get_workspace_buffer_state()
-        first = first_builder._get_workspace_buffer(1)
+        first = first_builder._get_workspace_buffer()
 
         second_builder = _make_flashinfer_builder(flashinfer_backend)
-        second_builder.set_workspace_buffer_state(first_state)
-        second = second_builder._get_workspace_buffer(1)
+        second = second_builder._get_workspace_buffer()
 
         assert first.device.type == "cpu"
         assert first.dtype == torch.uint8
-        assert first.numel() == 1
+        assert first.numel() == first_builder._default_workspace_buffer_size()
         assert first.data_ptr() == second.data_ptr()
-
-
-def test_flashinfer_workspace_buffer_growth_resets_registered_wrappers():
-    pytest.importorskip("flashinfer")
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-
-    builder = _make_flashinfer_builder(flashinfer_backend)
-
-    with _managed_workspace():
-        wrapper = _FakeFlashInferWrapper(builder._get_workspace_buffer(1))
-        builder._register_workspace_wrapper(wrapper)
-        reset_calls = wrapper.reset_calls
-
-        # Growing the shared arena hands every registered wrapper the new
-        # buffer, so none of them is left pointing at the freed one.
-        builder._get_workspace_buffer(1024)
-        assert builder._workspace_buffer.numel() == 1024
-        assert wrapper._float_workspace_buffer.data_ptr() == (
-            builder._workspace_buffer.data_ptr()
-        )
-        assert wrapper._float_workspace_buffer.numel() == 1024
-        assert wrapper.reset_calls > reset_calls
-
-        # Rebinding to the buffer a wrapper already holds changes nothing.
-        reset_calls = wrapper.reset_calls
-        builder._workspace_state.set_buffer(builder._workspace_buffer)
-        assert wrapper.reset_calls == reset_calls
-
-        wrapper_ref = weakref.ref(wrapper)
-        del wrapper
-        gc.collect()
-
-        builder._workspace_state.set_buffer(torch.empty(2048, dtype=torch.uint8))
-        assert wrapper_ref() is None
-        assert builder._workspace_state.wrappers == []
-
-
-def test_flashinfer_dcp_prefill_wrapper_rebinds_its_inner_wrappers():
-    """The DCP prefill wrapper is a container with no workspace of its own.
-
-    Registering the container would rebind nothing, so a later arena growth
-    would leave its two inner wrappers on the workspace they captured at
-    construction time.
-    """
-    pytest.importorskip("flashinfer")
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-
-    builder = _make_flashinfer_builder(flashinfer_backend)
-
-    dcp_wrapper = flashinfer_backend.BatchDCPPrefillWrapper.__new__(
-        flashinfer_backend.BatchDCPPrefillWrapper
-    )
-    original = torch.empty(128, dtype=torch.uint8)
-    dcp_wrapper._context = _FakeFlashInferWrapper(original)
-    dcp_wrapper._new_tokens = _FakeFlashInferWrapper(original)
-
-    builder._register_workspace_wrapper(dcp_wrapper)
-    grown = torch.empty(2048, dtype=torch.uint8)
-    builder._workspace_state.set_buffer(grown)
-
-    for inner in (dcp_wrapper._context, dcp_wrapper._new_tokens):
-        assert inner._float_workspace_buffer.data_ptr() == grown.data_ptr()
-        assert inner.reset_calls >= 1
 
 
 @pytest.mark.parametrize("use_trtllm_prefill_attention", [False, True])
@@ -760,9 +628,8 @@ def test_flashinfer_memory_profile_materializes_active_route_wrappers(
             if self._prefill_wrapper is None:
                 self.calls.append(("prefill", None))
                 self._prefill_wrapper = _FakeFlashInferWrapper(
-                    self._get_workspace_buffer(1), int_workspace_bytes=64
+                    self._get_workspace_buffer(), int_workspace_bytes=64
                 )
-                self._register_workspace_wrapper(self._prefill_wrapper)
             return self._prefill_wrapper
 
         def _get_decode_wrapper(self, batch_size, use_cudagraph=False):
@@ -773,10 +640,9 @@ def test_flashinfer_memory_profile_materializes_active_route_wrappers(
                 wrapper = self._decode_wrapper
             if wrapper is None:
                 wrapper = _FakeFlashInferWrapper(
-                    self._get_workspace_buffer(1),
+                    self._get_workspace_buffer(),
                     int_workspace_bytes=128 if use_cudagraph else 96,
                 )
-                self._register_workspace_wrapper(wrapper)
                 if use_cudagraph:
                     self._decode_wrappers_cudagraph[batch_size] = wrapper
                 else:
@@ -811,8 +677,8 @@ def test_flashinfer_memory_profile_materializes_active_route_wrappers(
     )
 
     with _managed_workspace():
-        reserved = builder.reserve_workspace_for_memory_profiling()
-        builder.rebind_workspace_after_reservation()
+        builder.prepare_workspace_for_profiling(False)
+        builder.prepare_workspace_for_profiling(True)
 
         wrappers: list[_FakeFlashInferWrapper] = []
         if not use_trtllm_prefill_attention:
@@ -826,21 +692,17 @@ def test_flashinfer_memory_profile_materializes_active_route_wrappers(
                     *builder._decode_wrappers_cudagraph.values(),
                 ]
             )
-        final_workspace = current_workspace_manager().get_workspace()
+        arena_bytes = current_workspace_manager().workspace_sizes_bytes()
         use_native_prefill = not use_trtllm_prefill_attention
         use_native_decode = not use_trtllm_decode_attention
         if use_native_prefill or use_native_decode:
-            assert final_workspace is not None
+            assert arena_bytes[0] > 0
         else:
-            assert final_workspace is None
+            assert arena_bytes[0] == 0
 
         expected_calls: list[tuple[str, int | None]] = []
-        expected_reserved = 0
-        if use_native_prefill or use_native_decode:
-            expected_reserved += 4096
         if use_native_prefill:
             expected_calls.append(("prefill", None))
-            expected_reserved += 64
         if not use_trtllm_decode_attention:
             expected_calls.extend(
                 [
@@ -849,32 +711,30 @@ def test_flashinfer_memory_profile_materializes_active_route_wrappers(
                     ("decode_cg", 4),
                 ]
             )
-            expected_reserved += 96 + 128 + 128
-        if use_trtllm_prefill_attention or use_trtllm_decode_attention:
-            expected_reserved += trtllm_workspace.numel()
-        assert reserved == expected_reserved
         assert builder.calls == expected_calls
         assert len(trtllm_workspace_calls) == int(
             use_trtllm_prefill_attention or use_trtllm_decode_attention
         )
-        if final_workspace is not None:
+        if wrappers:
+            # Every wrapper was handed the one final arena, and none of them
+            # can have been rebound afterwards.
             assert all(
-                wrapper._float_workspace_buffer.data_ptr() == final_workspace.data_ptr()
+                wrapper._float_workspace_buffer.data_ptr()
+                == builder._workspace_buffer.data_ptr()
                 for wrapper in wrappers
             )
         assert len(
             {wrapper._int_workspace_buffer.data_ptr() for wrapper in wrappers}
         ) == len(wrappers)
-        assert len(builder._workspace_state._live_wrappers()) == len(wrappers)
 
         wrapper_refs = [weakref.ref(wrapper) for wrapper in wrappers]
-        lease = PersistentWorkspaceLease([builder])
+        lease = [builder]
         del wrappers
         del builder
         gc.collect()
         assert all(wrapper_ref() is not None for wrapper_ref in wrapper_refs)
 
-        lease.release()
+        lease.clear()
         gc.collect()
         assert all(wrapper_ref() is None for wrapper_ref in wrapper_refs)
 
@@ -897,7 +757,7 @@ def _profiling_runner(monkeypatch, version):
     runner.device = torch.device("cpu")
     if version == "v1":
         runner._attn_group_iterator = lambda: iter(runner.attn_groups[0])
-    monkeypatch.setattr(module, "set_current_vllm_config", _null_context)
+    monkeypatch.setattr(worker_utils, "set_current_vllm_config", _null_context)
     for name, stub in (
         ("memory_allocated", lambda device: 0),
         ("memory_reserved", lambda device: 0),
@@ -916,13 +776,15 @@ def _patch_profiling_hooks(monkeypatch, module, version, runner, init_fn, cleanu
         runner._init_minimal_kv_cache_for_profiling = init_fn
         runner._cleanup_profiling_kv_cache = cleanup_fn
     else:
+        from vllm.v1.worker.gpu import cudagraph_utils
+
         monkeypatch.setattr(
-            module,
+            cudagraph_utils,
             "_init_minimal_kv_cache_for_profiling",
             lambda _runner: init_fn(),
         )
         monkeypatch.setattr(
-            module, "_teardown_profiling_state", lambda _runner: cleanup_fn()
+            cudagraph_utils, "_teardown_profiling_state", lambda _runner: cleanup_fn()
         )
 
 
@@ -937,16 +799,14 @@ def test_persistent_workspace_lease_keeps_builder_allocations(monkeypatch, versi
         def __init__(self):
             references["builder"] = weakref.ref(self)
 
-        def reserve_workspace_for_memory_profiling(self):
+        def prepare_workspace_for_profiling(self, materialize):
+            if not materialize:
+                current_workspace_manager().get_simultaneous(((2048,), torch.uint8))
+                events.append("reserve")
+                return
             self.int_workspace = torch.empty(1536, dtype=torch.uint8)
             references["int_workspace"] = weakref.ref(self.int_workspace)
-            current_workspace_manager().get_simultaneous(((2048,), torch.uint8))
-            events.append("reserve")
-            return 3584
-
-        def rebind_workspace_after_reservation(self):
-            self.float_workspace = current_workspace_manager().get_workspace()
-            events.append("rebind")
+            events.append("materialize")
 
     def init_minimal_kv_cache():
         events.append("init")
@@ -979,12 +839,12 @@ def test_persistent_workspace_lease_keeps_builder_allocations(monkeypatch, versi
     )
 
     with _managed_workspace():
-        lease = runner.prepare_profiling_workspace()
-        assert events == ["init", "reserve", "rebind", "cleanup", "reset_peak"]
+        lease = worker_utils.prepare_profiling_workspace(runner)
+        assert events == ["init", "reserve", "materialize", "cleanup", "reset_peak"]
         assert references["builder"]() is not None
         assert references["int_workspace"]() is not None
 
-        lease.release()
+        lease.clear()
         gc.collect()
 
         assert references["builder"]() is None
@@ -997,7 +857,7 @@ def test_persistent_workspace_preparation_preserves_primary_error(monkeypatch, v
     module, runner = _profiling_runner(monkeypatch, version)
 
     class Builder:
-        def reserve_workspace_for_memory_profiling(self):
+        def prepare_workspace_for_profiling(self, materialize):
             raise ValueError("primary workspace error")
 
     cleanup_calls = []
@@ -1024,100 +884,62 @@ def test_persistent_workspace_preparation_preserves_primary_error(monkeypatch, v
         _managed_workspace(),
         pytest.raises(ValueError, match="primary workspace error"),
     ):
-        runner.prepare_profiling_workspace()
+        worker_utils.prepare_profiling_workspace(runner)
 
     assert cleanup_calls == ["cleanup"]
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
-def test_final_persistent_workspace_reserve_sets_and_enforces_baseline(version):
+def test_final_persistent_workspace_reserve_sets_and_enforces_baseline(
+    monkeypatch, version
+):
     _, GPUModelRunner = _load_gpu_model_runner(version)
     runner = GPUModelRunner.__new__(GPUModelRunner)
     requested_sizes = iter([2048, 1024, 4096])
 
-    def reserve_attention_workspace(*, memory_profiling):
-        assert memory_profiling
+    def fake_reserve(_runner):
         current_workspace_manager().get_simultaneous(
             ((next(requested_sizes),), torch.uint8)
         )
-        return 123
 
-    runner._reserve_attention_workspace = reserve_attention_workspace
+    monkeypatch.setattr(worker_utils, "reserve_attention_workspace", fake_reserve)
 
     with _managed_workspace():
         current_workspace_manager().get_simultaneous(((1024,), torch.uint8))
-        assert runner.reserve_persistent_attention_workspace() == 123
+        worker_utils.reserve_persistent_attention_workspace(runner)
         assert runner._profiled_persistent_workspace_sizes == (2048,)
-        assert runner.reserve_persistent_attention_workspace() == 123
+        worker_utils.reserve_persistent_attention_workspace(runner)
         with pytest.raises(
             AssertionError,
             match="exceeded its profiled size during",
         ):
-            runner.reserve_persistent_attention_workspace()
+            worker_utils.reserve_persistent_attention_workspace(runner)
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
-def test_final_persistent_workspace_reserve_rejects_preexisting_growth(version):
+def test_final_persistent_workspace_reserve_rejects_preexisting_growth(
+    monkeypatch, version
+):
     _, GPUModelRunner = _load_gpu_model_runner(version)
     runner = GPUModelRunner.__new__(GPUModelRunner)
     reserve_calls = []
-    runner._reserve_attention_workspace = lambda **kwargs: reserve_calls.append(kwargs)
+    monkeypatch.setattr(
+        worker_utils, "reserve_attention_workspace", lambda r: reserve_calls.append(r)
+    )
 
     with _managed_workspace():
         current_workspace_manager().get_simultaneous(((1024,), torch.uint8))
-        runner.record_persistent_attention_workspace_profile()
+        runner._profiled_persistent_workspace_sizes = (
+            current_workspace_manager().workspace_sizes_bytes()
+        )
         current_workspace_manager().get_simultaneous(((2048,), torch.uint8))
 
         with pytest.raises(
             AssertionError,
             match="exceeded its profiled size before",
         ):
-            runner.reserve_persistent_attention_workspace()
+            worker_utils.reserve_persistent_attention_workspace(runner)
         assert reserve_calls == []
-
-
-def test_cudagraph_profile_rejects_builder_init_workspace_growth(monkeypatch):
-    module, GPUModelRunner = _load_gpu_model_runner("v1")
-
-    runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.vllm_config = object()
-    cleanup_calls = []
-    runner._init_minimal_kv_cache_for_profiling = lambda: (
-        current_workspace_manager().get_simultaneous(((2048,), torch.uint8))
-    )
-    runner._cleanup_profiling_kv_cache = lambda: cleanup_calls.append("cleanup")
-    monkeypatch.setattr(module, "set_current_vllm_config", _null_context)
-
-    with _managed_workspace():
-        current_workspace_manager().get_simultaneous(((1024,), torch.uint8))
-        with pytest.raises(
-            AssertionError,
-            match="grew while rebuilding CUDA graph profiling metadata",
-        ):
-            runner.profile_cudagraph_memory(persistent_workspace_profiled=True)
-
-    assert cleanup_calls == ["cleanup"]
-
-
-def test_v2_cudagraph_profile_rejects_workspace_growth(monkeypatch):
-    from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-
-    runner = GPUModelRunner.__new__(GPUModelRunner)
-
-    def grow_arena(_runner):
-        current_workspace_manager().get_simultaneous(((2048,), torch.uint8))
-        return 4096
-
-    monkeypatch.setattr(gpu_model_runner_v2, "_profile_cudagraph_memory", grow_arena)
-
-    with _managed_workspace():
-        current_workspace_manager().get_simultaneous(((1024,), torch.uint8))
-        with pytest.raises(
-            AssertionError,
-            match="grew during CUDA graph profiling",
-        ):
-            runner.profile_cudagraph_memory(persistent_workspace_profiled=True)
 
 
 def test_v2_teardown_profiling_state_releases_builder_refs(monkeypatch):
@@ -1171,13 +993,10 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
     class Builder:
         reserved = False
 
-        def reserve_workspace_for_cudagraph_capture(self):
-            events.append("builder_reserve")
-            self.reserved = True
-            return 128
-
-        def rebind_workspace_after_reservation(self):
-            pass
+        def prepare_workspace_for_profiling(self, materialize):
+            if materialize:
+                events.append("builder_reserve")
+                self.reserved = True
 
     class FakeCudaGraphManager:
         def needs_capture(self):
@@ -1274,3 +1093,200 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
 # A composite routes one batch to two child builders, either of which can be
 # chosen at runtime. The profiling lifecycle therefore has to reach both, and
 # the pair can only promise what both children can honour.
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_minimal_kv_cache_config_restores_block_override(monkeypatch, raises):
+    """The profiling override must not leak into the real KV cache sizing."""
+    cache_config = SimpleNamespace(num_gpu_blocks_override=7)
+    runner = SimpleNamespace(
+        vllm_config=object(),
+        cache_config=cache_config,
+        max_num_reqs=4,
+        compilation_config=SimpleNamespace(max_cudagraph_capture_size=8),
+    )
+    seen = []
+
+    def from_groups(vllm_config, groups, available_memory):
+        seen.append(cache_config.num_gpu_blocks_override)
+        if raises:
+            raise RuntimeError("boom")
+        return "minimal"
+
+    monkeypatch.setattr(
+        "vllm.v1.core.kv_cache_utils.get_kv_cache_groups", lambda cfg, spec: []
+    )
+    monkeypatch.setattr(
+        "vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups", from_groups
+    )
+
+    if raises:
+        with pytest.raises(RuntimeError, match="boom"):
+            worker_utils.build_minimal_kv_cache_config(runner, object())
+    else:
+        assert worker_utils.build_minimal_kv_cache_config(runner, object()) == "minimal"
+
+    assert seen == [4]
+    assert cache_config.num_gpu_blocks_override == 7
+
+
+def test_v1_minimal_kv_cache_init_keeps_spec_registry_check(monkeypatch):
+    """V1 validates the KV cache spec registry before building the config."""
+    _, GPUModelRunner = _load_gpu_model_runner("v1")
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    spec = object()
+    checked = []
+    runner.get_kv_cache_spec = lambda: spec
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=None)
+    runner.initialize_kv_cache = lambda config, is_profiling: None
+
+    module, _ = _load_gpu_model_runner("v1")
+    monkeypatch.setattr(
+        module.KVCacheSpecRegistry,
+        "check_kv_cache_spec_registry",
+        staticmethod(lambda s: checked.append(s)),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_minimal_kv_cache_config",
+        lambda r, s: SimpleNamespace(num_blocks=1),
+    )
+
+    runner._init_minimal_kv_cache_for_profiling()
+    assert checked == [spec]
+
+
+def test_v1_capture_model_reserves_workspace_and_locks(monkeypatch):
+    """V1 capture_model() runs the shared reservation, then locks the arena."""
+    module, GPUModelRunner = _load_gpu_model_runner("v1")
+    events: list[str] = []
+
+    class Builder:
+        def prepare_workspace_for_profiling(self, materialize):
+            events.append(f"prepare:{materialize}")
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE)
+    runner.vllm_config = SimpleNamespace(
+        profiler_config=SimpleNamespace(capture_torch_profiler=False)
+    )
+    runner.attn_groups = [[SimpleNamespace(metadata_builders=[Builder()])]]
+    runner.encoder_cudagraph_manager = None
+    runner._maybe_init_encoder_cudagraph_manager = lambda: None
+    runner._freeze_gc = _null_context
+    runner.cudagraph_dispatcher = SimpleNamespace(get_capture_descs=lambda: [])
+
+    free_memory = iter([10_000, 9_000])
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_world_group",
+        lambda: SimpleNamespace(local_rank=1),
+    )
+    monkeypatch.setattr(module, "graph_capture", lambda device: _null_context())
+    monkeypatch.setattr(module, "set_cudagraph_capturing_enabled", lambda _: None)
+    monkeypatch.setattr(module, "lock_workspace", lambda: events.append("lock"))
+    monkeypatch.setattr(module.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(module.torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        module.torch.accelerator, "get_memory_info", lambda: (next(free_memory), 0)
+    )
+
+    assert runner.capture_model() == 1_000
+    assert events == ["prepare:False", "prepare:True", "lock"]
+
+
+def test_v1_profile_cudagraph_memory_bootstraps_minimal_kv(monkeypatch):
+    """V1 graph profiling installs its own minimal KV cache before capturing."""
+    module, GPUModelRunner = _load_gpu_model_runner("v1")
+    events: list[str] = []
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = object()
+    runner._init_minimal_kv_cache_for_profiling = lambda: events.append("init")
+    runner._cleanup_profiling_kv_cache = lambda: events.append("cleanup")
+    runner.cudagraph_dispatcher = SimpleNamespace(
+        get_capture_descs=lambda: [], cudagraph_keys={}, keys_initialized=True
+    )
+    runner._create_encoder_cudagraph_manager = lambda: None
+    runner.lora_config = None
+    runner.maybe_remove_all_loras = lambda _: None
+
+    monkeypatch.setattr(
+        worker_utils, "set_current_vllm_config", lambda _: _null_context()
+    )
+    monkeypatch.setattr(
+        module, "set_current_vllm_config", lambda _: _null_context(), raising=False
+    )
+
+    assert runner.profile_cudagraph_memory() == 0
+    assert events == ["init", "cleanup"]
+
+
+def test_arena_pass_never_leaves_a_builder_on_a_stale_arena(monkeypatch):
+    """A small builder must not cache the arena a larger one later replaces."""
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    created: list[tuple[Any, int]] = []
+
+    def fake_prefill_wrapper(self, causal=True):
+        buffer = self._get_workspace_buffer()
+        wrapper = SimpleNamespace(
+            _float_workspace_buffer=buffer,
+            _requested=self._default_workspace_buffer_size(),
+        )
+        created.append((wrapper, self._default_workspace_buffer_size()))
+        return wrapper
+
+    monkeypatch.setattr(
+        flashinfer_backend.FlashInferMetadataBuilder,
+        "_get_prefill_wrapper",
+        fake_prefill_wrapper,
+    )
+    # Drop the 394 MiB floor so the per-builder estimate decides the size.
+    monkeypatch.setattr(
+        flashinfer_backend.envs, "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", 1
+    )
+    monkeypatch.setattr(flashinfer_backend.envs, "VLLM_BATCH_INVARIANT", False)
+
+    def make(tokens):
+        builder = _make_flashinfer_builder(flashinfer_backend)
+        builder.max_num_batched_tokens = tokens
+        builder.num_qo_heads = 4
+        builder.head_dim = 16
+        builder.use_xqa = False
+        builder._reservation_trtllm_prefill = False
+        builder.kv_cache_spec = SimpleNamespace(non_causal=False)
+        builder.model_config = SimpleNamespace(is_mm_prefix_lm=False, max_model_len=8)
+        builder.vllm_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=0, max_num_batched_tokens=0)
+        )
+        builder.enable_cuda_graph = False
+        return builder
+
+    small, large = make(8), make(4096)
+    assert small._default_workspace_buffer_size() < (
+        large._default_workspace_buffer_size()
+    )
+
+    with _managed_workspace():
+        # Pass 1 over every builder, smallest first so the arena grows after
+        # the small builder has already asked for its size.
+        for builder in (small, large):
+            builder.prepare_workspace_for_profiling(False)
+        arena_after_pass1 = current_workspace_manager().workspace_sizes_bytes()
+
+        # Pass 2 builds the wrappers against the settled arena.
+        for builder in (small, large):
+            builder.prepare_workspace_for_profiling(True)
+
+        assert len(created) == 2
+        backing = current_workspace_manager()._current_workspaces[0]
+        for wrapper, requested in created:
+            # No wrapper points at a freed allocation ...
+            assert wrapper._float_workspace_buffer.data_ptr() == backing.data_ptr()
+            # ... and each one still got at least the size it asked for.
+            assert _nbytes(backing) >= requested
+
+        # Materialization must not have grown the arena any further.
+        assert current_workspace_manager().workspace_sizes_bytes() == arena_after_pass1

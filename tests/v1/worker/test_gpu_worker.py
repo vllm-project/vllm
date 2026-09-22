@@ -15,7 +15,6 @@ from vllm.config.parallel import ParallelConfig
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
-    PersistentWorkspaceProfilingSupport,
 )
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import Worker, maybe_rocm_profiling_fallback
@@ -24,7 +23,6 @@ from vllm.v1.worker.startup_plan import (
     maybe_save_startup_plan,
 )
 from vllm.v1.worker.utils import requires_persistent_attention_workspace_profiling
-from vllm.v1.worker.workspace import get_num_workspace_ubatches
 
 
 @pytest.mark.parametrize(
@@ -35,8 +33,10 @@ from vllm.v1.worker.workspace import get_num_workspace_ubatches
         pytest.param(ParallelConfig(enable_dbo=True), 2, id="dbo"),
     ],
 )
-def test_num_workspace_ubatches_covers_all_configurations(parallel_config, expected):
-    assert get_num_workspace_ubatches(parallel_config) == expected
+def test_parallel_config_num_ubatches_covers_all_configurations(
+    parallel_config, expected
+):
+    assert max(1, parallel_config.num_ubatches) == expected
 
 
 @pytest.mark.parametrize("profile_persistent_workspace", [False, True])
@@ -53,9 +53,11 @@ def test_initialize_kv_cache_finalizes_persistent_workspace(
         initialize_kv_cache=lambda config, **kwargs: events.append(
             "initialize_kv_cache"
         ),
-        reserve_persistent_attention_workspace=lambda: events.append(
-            "reserve_workspace"
-        ),
+    )
+    monkeypatch.setattr(
+        gpu_worker,
+        "reserve_persistent_attention_workspace",
+        lambda runner: events.append("reserve_workspace"),
     )
     kv_cache_config = SimpleNamespace(
         num_blocks=8,
@@ -94,8 +96,14 @@ def _record_capture(events: list[str]) -> int:
 
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("profiling_support", [True, False])
+@pytest.mark.parametrize("grows_during_warmup", [False, True])
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 def test_warmup_locks_the_workspace_when_profiling_is_enabled(
-    monkeypatch, enforce_eager, profiling_support
+    monkeypatch,
+    enforce_eager,
+    profiling_support,
+    grows_during_warmup,
+    use_v2_model_runner,
 ):
     """The warmup-path lock follows the model's opt-in.
 
@@ -125,12 +133,56 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
         jit_monitor_mode="warn", jit_monitor_verbose=False
     )
     worker.device = torch.device("cpu")
-    worker.use_v2_model_runner = True
+    worker.use_v2_model_runner = use_v2_model_runner
+
+    class _Manager:
+        """The live arena; a warmup grows it the way a real wrapper would."""
+
+        def __init__(self):
+            self.sizes = (1024,)
+
+        def grow(self):
+            if grows_during_warmup:
+                self.sizes = (2048,)
+
+        def workspace_sizes_bytes(self):
+            return self.sizes
+
+        def assert_within(self, limits, phase):
+            if any(c > lim for c, lim in zip(self.sizes, limits)):
+                raise AssertionError(
+                    f"Attention workspace arena exceeded its profiled size "
+                    f"{phase}: profiled={limits}, current={self.sizes}."
+                )
+
+    manager = _Manager()
+    monkeypatch.setattr(gpu_worker_module, "current_workspace_manager", lambda: manager)
+
+    def _v1_sampler_warmup(hidden_states):
+        # V1's eager sampler warmup is the last thing that can size a
+        # workspace before the barrier.
+        events.append("v1_sampler")
+        manager.grow()
+
+    worker.scheduler_config = SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1)
     worker.model_runner = SimpleNamespace(
         lora_config=None,
         maybe_remove_all_loras=lambda cfg: None,
         capture_model=lambda: _record_capture(events),
-        reserve_persistent_attention_workspace=lambda: events.append("reserve"),
+        _profiled_persistent_workspace_sizes=(1024,),
+        is_pooling_model=False,
+        _dummy_run=lambda **kwargs: (None, None),
+        _dummy_sampler_run=_v1_sampler_warmup,
+    )
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_worker,
+        "reserve_persistent_attention_workspace",
+        lambda runner: events.append("reserve"),
     )
     worker.execute_model = None
     worker.sample_tokens = None
@@ -152,11 +204,12 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
     monkeypatch.setattr(
         gpu_worker_module, "lock_workspace", lambda: events.append("lock")
     )
-    monkeypatch.setattr(
-        gpu_worker_module,
-        "warmup_kernels",
-        lambda *a, **k: events.append("warmup_kernels"),
-    )
+
+    def _v2_warmup(*a, **k):
+        events.append("warmup_kernels")
+        manager.grow()
+
+    monkeypatch.setattr(gpu_worker_module, "warmup_kernels", _v2_warmup)
     monkeypatch.setattr(gpu_worker_module, "set_random_seed", lambda seed: None)
     monkeypatch.setattr(gpu_worker_module, "freeze_gc_heap", lambda: None)
     monkeypatch.setattr(
@@ -170,16 +223,27 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
     # on the defining module rather than on gpu_worker.
     monkeypatch.setattr(jit_monitor, "activate", lambda **kwargs: None)
 
+    grower = "warmup_kernels" if use_v2_model_runner else "v1_sampler"
+    if profiling_support and grows_during_warmup:
+        # Growth after materialization leaves the reserved wrappers on a
+        # replaced allocation, so the barrier has to fail before the lock.
+        with pytest.raises(AssertionError, match="before workspace lock"):
+            worker.compile_or_warm_up_model()
+        assert "lock" not in events
+        assert events.index("reserve") < events.index(grower)
+        return
+
     worker.compile_or_warm_up_model()
 
-    assert "warmup_kernels" in events
+    assert grower in events
     if enforce_eager:
         assert "capture" not in events
     if profiling_support:
         # Reserve first, then warm up, then lock: the warmup below the lock
         # executes real requests, so an attention wrapper can still grow the
         # workspace there.
-        assert events.index("reserve") < events.index("warmup_kernels")
+        # reserve -> warm up -> assert ceiling -> lock.
+        assert events.index("reserve") < events.index(grower)
         assert events.index("lock") == len(events) - 1
     else:
         # Nothing was reserved, so nothing may be locked here.
@@ -191,7 +255,7 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
     ("builder_support", "speculative", "elastic_ep", "expected"),
     [
         pytest.param(
-            [PersistentWorkspaceProfilingSupport.REQUIRED],
+            [True],
             False,
             False,
             True,
@@ -199,8 +263,8 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
         ),
         pytest.param(
             [
-                PersistentWorkspaceProfilingSupport.REQUIRED,
-                PersistentWorkspaceProfilingSupport.REQUIRED,
+                True,
+                True,
             ],
             False,
             False,
@@ -209,8 +273,8 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
         ),
         pytest.param(
             [
-                PersistentWorkspaceProfilingSupport.REQUIRED,
-                PersistentWorkspaceProfilingSupport.NEUTRAL,
+                True,
+                False,
             ],
             False,
             False,
@@ -219,8 +283,8 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
         ),
         pytest.param(
             [
-                PersistentWorkspaceProfilingSupport.REQUIRED,
-                PersistentWorkspaceProfilingSupport.UNSUPPORTED,
+                True,
+                None,
             ],
             False,
             False,
@@ -228,7 +292,7 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
             id="unsupported-vetoes-required",
         ),
         pytest.param(
-            [PersistentWorkspaceProfilingSupport.NEUTRAL],
+            [False],
             False,
             False,
             False,
@@ -237,14 +301,14 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
         pytest.param([object()], False, False, False, id="unknown-fails-closed"),
         pytest.param([], False, False, False, id="no-builders"),
         pytest.param(
-            [PersistentWorkspaceProfilingSupport.REQUIRED],
+            [True],
             True,
             False,
             False,
             id="speculative-fallback",
         ),
         pytest.param(
-            [PersistentWorkspaceProfilingSupport.REQUIRED],
+            [True],
             False,
             True,
             False,
@@ -259,7 +323,7 @@ def test_persistent_workspace_profiling_supports_neutral_builders(
         def __init__(self, support):
             self.support = support
 
-        def get_persistent_workspace_memory_profiling_support(self, config, spec):
+        def persistent_workspace_profiling_support(self, config, spec):
             return self.support
 
     class Backend:
@@ -299,19 +363,19 @@ def test_gdn_builder_is_neutral_for_persistent_workspace_profiling():
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 
     assert (
-        GDNAttentionMetadataBuilder.get_persistent_workspace_memory_profiling_support(
+        GDNAttentionMetadataBuilder.persistent_workspace_profiling_support(
             SimpleNamespace(), SimpleNamespace()
         )
-        is PersistentWorkspaceProfilingSupport.NEUTRAL
+        is False
     )
 
 
 def test_unknown_builder_fails_closed_for_persistent_workspace_profiling():
     assert (
-        AttentionMetadataBuilder.get_persistent_workspace_memory_profiling_support(
+        AttentionMetadataBuilder.persistent_workspace_profiling_support(
             SimpleNamespace(), SimpleNamespace()
         )
-        is PersistentWorkspaceProfilingSupport.UNSUPPORTED
+        is None
     )
 
 
@@ -560,8 +624,6 @@ def test_profiling_lease_outlives_the_closing_memory_measurement(monkeypatch):
     import weakref
     from contextlib import contextmanager
 
-    from vllm.v1.worker.workspace import PersistentWorkspaceLease
-
     # The lease has to be the only owner, so the builder is handed over and
     # this scope keeps nothing but weak references to it.
     handover = [_FakeProfilingBuilder()]
@@ -597,17 +659,19 @@ def test_profiling_lease_outlives_the_closing_memory_measurement(monkeypatch):
     )
     worker.requested_memory = ANY_FREE_MEMORY
 
-    def profile_cudagraph_memory(*, persistent_workspace_profiled):
-        assert persistent_workspace_profiled
+    def profile_cudagraph_memory():
         alive_at["cudagraph_profiling"] = _alive()
         return 0
 
     worker.model_runner = SimpleNamespace(
         model_memory_usage=0,
         profile_run=lambda: None,
-        prepare_profiling_workspace=lambda: PersistentWorkspaceLease([handover.pop()]),
         profile_cudagraph_memory=profile_cudagraph_memory,
-        record_persistent_attention_workspace_profile=lambda: None,
+    )
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "prepare_profiling_workspace",
+        lambda runner: [handover.pop()],
     )
 
     monkeypatch.setattr(gpu_worker_module, "maybe_apply_startup_plan", lambda w: None)
