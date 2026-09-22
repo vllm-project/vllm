@@ -28,13 +28,24 @@ def set_default_max_concurrency(n: int) -> None:
 
 class UvaBuffer:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        if not is_uva_available():
-            raise RuntimeError("UVA is not available")
+        self.is_uva = is_uva_available()
+        if not self.is_uva:
+            from vllm.platforms import current_platform
+            # Fallback to device memory
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
+            self.np = self.cpu.numpy()
+            self._uva = torch.zeros(size, dtype=dtype, device=current_platform.device_type)
+            return
+
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
         self._uva = get_accelerator_view_from_cpu_tensor(self.cpu)
 
     def uva(self, n: int | None = None) -> torch.Tensor:
+        if not getattr(self, "is_uva", True):
+            if n is None:
+                return self._uva.copy_(self.cpu, non_blocking=True)
+            return self._uva[:n].copy_(self.cpu[:n], non_blocking=True)
         return self._uva[:n] if n is not None else self._uva
 
 
