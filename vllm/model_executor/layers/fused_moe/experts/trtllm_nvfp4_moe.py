@@ -381,7 +381,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
         # Per-token: input is unquantized, quantize it here. Otherwise it was
         # already quantized in prepare() with the static global scale.
-        if self.expects_unquantized_inputs:
+        if self.per_token_activation:
             hidden_states, block_scale, per_token_scale = (
                 self._quantize_per_token_input(hidden_states)
             )
@@ -447,7 +447,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     ):
         assert self._supports_activation(activation)
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
-        assert a1q_scale is not None or self.expects_unquantized_inputs
+        assert a1q_scale is not None or self.per_token_activation
 
         # DeepEP produces int64 indexes.
         topk_ids = topk_ids.to(dtype=torch.int32)
@@ -546,7 +546,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         import flashinfer
 
         assert self._supports_activation(activation)
-        assert a1q_scale is not None or self.expects_unquantized_inputs
+        assert a1q_scale is not None or self.per_token_activation
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         assert (
@@ -558,7 +558,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         )
 
         # Per-token: input is unquantized, quantize it here (see modular apply).
-        if self.expects_unquantized_inputs:
+        if self.per_token_activation:
             hidden_states, block_scale, per_token_scale = (
                 self._quantize_per_token_input(hidden_states)
             )

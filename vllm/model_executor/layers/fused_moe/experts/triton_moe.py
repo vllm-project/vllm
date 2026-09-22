@@ -602,7 +602,7 @@ class TritonWNA16Experts(TritonExperts):
             kInt4Static32Asym,
             # other group sizes?
         ]
-        return weight_key in SUPPORTED_W and activation_key is None
+        return weight_key in SUPPORTED_W
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:

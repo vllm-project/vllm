@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8Static,
     kMxfp4Static,
     kMxfp8Static,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
@@ -538,8 +539,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        # The modular config describes unquantized inputs; optional A8
-        # quantization is handled internally via VLLM_MARLIN_INPUT_DTYPE.
+        # TODO (varun) : Enable activation quantization
         assert (
             quant_config.use_mxfp4_w4a16
             or quant_config.use_nvfp4_w4a16
@@ -585,9 +585,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             kInt4StaticAsym,
             kInt4Static32Asym,
         ]
-        # Internal INT8/FP8 input quantization does not implement arbitrary
-        # activation recipes requested through the oracle's activation key.
-        return weight_key in SUPPORTED_W and activation_key is None
+        return weight_key in SUPPORTED_W and activation_key != kNvfp4DynamicToken
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
