@@ -1782,7 +1782,6 @@ class OffloadingConnectorScheduler:
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
             preempted_req_ids=scheduler_output.preempted_req_ids or (),
         )
-        self.manager.on_schedule_end(schedule_end_context)
 
         # Flush jobs for preempted requests.
         for req_id in scheduler_output.preempted_req_ids or ():
@@ -1828,6 +1827,12 @@ class OffloadingConnectorScheduler:
         self._current_batch_load_jobs = {}
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
+
+        # Last manager call of the step, after every prepare_store and
+        # on_request_finished above. on_schedule_end is documented as running at
+        # the end of the step, and callers rely on that to bound the step's
+        # exclusive access to the manager.
+        self.manager.on_schedule_end(schedule_end_context)
         return meta
 
     def has_pending_push_work(self) -> bool:

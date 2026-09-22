@@ -734,6 +734,49 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
 
 
+def test_on_schedule_end_is_the_last_manager_call_of_a_step(request_runner):
+    """on_schedule_end must run after every other manager call of the step.
+
+    Callers bound a step's exclusive access to the manager by releasing at
+    on_schedule_end, so anything issued after it — notably prepare_store, which
+    evicts — would fall outside that window.
+    """
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=8,
+        async_scheduling=False,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    connector_scheduler = runner.connector_scheduler
+    build_meta = connector_scheduler.build_connector_meta
+    windows: list[list[str]] = []
+
+    def spy(scheduler_output):
+        first = len(runner.manager.mock_calls)
+        meta = build_meta(scheduler_output)
+        windows.append([name for name, _, _ in runner.manager.mock_calls[first:]])
+        return meta
+
+    connector_scheduler.build_connector_meta = spy
+
+    runner.new_request(token_ids=[0] * (block_size * 2))
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    assert windows, "build_connector_meta was never called"
+    assert any("prepare_store" in w for w in windows), (
+        "step must exercise the calls that follow on_schedule_end today"
+    )
+    assert any("on_request_finished" in w for w in windows)
+    for names in windows:
+        assert names[-1] == "on_schedule_end", (
+            f"on_schedule_end must be the last manager call of a step, got {names}"
+        )
+
+
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
     """A deferred lookup reports its async delay once it resolves."""
     runner = request_runner(

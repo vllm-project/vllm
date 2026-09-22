@@ -382,6 +382,10 @@ class OffloadingManager(ABC):
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
 
+        This is the last manager call of a step: every lookup(), prepare_load(),
+        prepare_store() and on_request_finished() for the step has already been
+        issued.
+
         Managers may override this to flush deferred work accumulated
         during the step (e.g., batched promotions).
         """

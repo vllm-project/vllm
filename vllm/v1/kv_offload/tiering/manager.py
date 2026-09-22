@@ -594,9 +594,9 @@ class TieringOffloadingManager(OffloadingManager):
     ) -> PrepareStoreOutput | None:
         """Prepare chunks to be stored from GPU to primary tier.
 
-        CRITICAL: This method calls _maybe_process_finished_jobs() FIRST to ensure
-        that any completed async transfers have their ref_cnt decremented
-        before the primary tier makes eviction decisions.
+        CRITICAL: This method polls for finished jobs FIRST to ensure that any
+        completed async transfers have their ref_cnt decremented before the
+        primary tier makes eviction decisions.
 
         For request-level tiers, chunks already present in the primary tier
         are immediately cascaded via submit_store().
@@ -620,7 +620,12 @@ class TieringOffloadingManager(OffloadingManager):
         #    not-yet-ready chunk's ref_cnt from -1 to 0 via complete_write(),
         #    making it evictable for the first time.
         # Both must be accounted for before the eviction decision below.
-        self._maybe_process_finished_jobs()
+        # Unconditional, not _maybe_process_finished_jobs(): eviction must see
+        # the freshest completions, and on_schedule_end now runs at the very end
+        # of the step, so the once-per-step gate would otherwise still be set by
+        # this step's first lookup() and skip the poll.
+        self._processed_jobs_this_step = True
+        self._process_finished_jobs()
 
         # Step 2: Store to primary tier (new chunks only).
         # Cascading of these newly-stored chunks to ALL secondary tiers
@@ -855,8 +860,8 @@ class TieringOffloadingManager(OffloadingManager):
         """End-of-schedule hook: process finished jobs, flush deferred
         promotions, and reset the per-step gate.
 
-        Called once per scheduler step from
-        OffloadingConnectorScheduler.build_connector_meta().
+        Called once per scheduler step, as the last manager call of the step,
+        from OffloadingConnectorScheduler.build_connector_meta().
         """
         # Catch-all poll: guarantees jobs are processed even on steps where
         # lookup()/prepare_store() were never called (e.g. no requests
@@ -871,6 +876,10 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
 
         self._flush_pending_promotions()
+        # Keys parked by this step's prepare_store cannot have completed yet, so
+        # they are simply re-parked here and retried on the next step. That is
+        # safe: _maybe_finalize_request() holds off while pending_cascade_keys is
+        # non-empty, so nothing finalizes early and the list still drains.
         self._flush_pending_cascades()
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
