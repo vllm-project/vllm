@@ -9,7 +9,8 @@ use std::sync::Arc;
 use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs, VisionPreprocessingContext};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::{ModalitySupport, MultimodalModelInfo, PreparedMedia, item};
+use super::timing::MM_STAGE_TARGET;
+use super::{MultimodalModelInfo, PreparedMedia, VisionModalitySupport, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
@@ -18,6 +19,12 @@ pub(super) const IMAGE_PRIMARY_KEY: &str = "pixel_values";
 impl MultimodalModelInfo {
     /// Preprocess all fetched image frames as one batch and build per-item
     /// features.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocess_image")
+    )]
     pub(super) async fn prepare_images(
         &self,
         frames: Vec<Arc<ImageFrame>>,
@@ -57,17 +64,16 @@ impl MultimodalModelInfo {
     /// conversion.
     async fn preprocess_images(
         &self,
-        support: &ModalitySupport,
+        support: &VisionModalitySupport,
         image_frames: &[Arc<ImageFrame>],
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreprocessedEncoderInputs> {
-        let config = support.config.clone();
-        let processor = support.processor;
+        let processor = Arc::clone(&support.processor);
         let images = image_frames.iter().map(|frame| frame.data().clone()).collect::<Vec<_>>();
 
         // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
-            Ok(processor.preprocess_with_context(&images, &config, &preprocessing_context)?)
+            Ok(processor.preprocess_with_context(&images, &preprocessing_context)?)
         })
         .await
         .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
