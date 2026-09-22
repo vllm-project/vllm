@@ -20,6 +20,7 @@ use super::error::TemplateError;
 use super::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption, detect_chat_template_content_format,
 };
+use super::generation::{render_generation, rewrite_generation_blocks};
 use super::tojson::hf_tojson_filter;
 use crate::renderer::hf::{TemplateMessage, TemplateTool};
 
@@ -36,6 +37,7 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
 
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
+    env.add_function("__hf_generation", render_generation);
 
     Ok(env)
 }
@@ -107,6 +109,7 @@ pub(super) struct CompiledChatTemplate {
 impl CompiledChatTemplate {
     /// Compile the given chat template string into a [`CompiledChatTemplate`].
     pub fn new(template: String, content_format: ChatTemplateContentFormatOption) -> Result<Self> {
+        let template = rewrite_generation_blocks(template)?;
         let content_format = match content_format {
             ChatTemplateContentFormatOption::Auto => detect_chat_template_content_format(&template),
             ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,

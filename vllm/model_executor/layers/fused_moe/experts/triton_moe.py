@@ -130,10 +130,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # INT8 requires at least 7.5 (Turing) on CUDA. ROCm CDNA GPUs
         # (e.g. MI2xx/MI3xx/gfx950) provide native INT8 matrix-core support and
         # the Triton int8_w8a8 fused MoE kernel handles them.
+        # XPU reaches the same Triton kernel through the same launcher, and both
+        # int8 activation-quant paths work there: per-token uses the Triton
+        # `per_token_quant_int8`, per-tensor resolves to the XPU branch of
+        # `scaled_int8_quant`, which is plain elementwise arithmetic.
         device_supports_int8 = (
-            current_platform.is_cuda()
-            and current_platform.has_device_capability((7, 5))
-        ) or current_platform.is_rocm()
+            (
+                current_platform.is_cuda()
+                and current_platform.has_device_capability((7, 5))
+            )
+            or current_platform.is_rocm()
+            or current_platform.is_xpu()
+        )
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
@@ -471,8 +479,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # Fuse SiLU+Mul + FP8 block quantize into a single kernel
         # when conditions permit (gated SiLU, fp8 block quant with
         # group_size=128, no LoRA requiring the BF16 intermediate).
+        # The fused kernel has no clamp parameter, so a configured
+        # SwiGLU clamp limit falls through to the unfused path.
         if (
             activation == MoEActivation.SILU
+            and self.activation_config.clamp_limit is None
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
@@ -596,9 +607,9 @@ class TritonWNA16Experts(TritonExperts):
     ) -> bool:
         SUPPORTED_W = [
             kInt4Static,
+            kInt4StaticAsym,
             kInt8Static,
             kInt4Static32,
-            kInt4StaticAsym,
             kInt4Static32Asym,
             # other group sizes?
         ]

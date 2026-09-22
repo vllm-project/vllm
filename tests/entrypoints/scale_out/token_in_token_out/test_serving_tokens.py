@@ -69,6 +69,7 @@ def server(request):
         # Option B: deterministic prefix caching
         # "--enable-prefix-caching",
         # "--deterministic-prefix-caching",
+        "--enable-scale-out",
     ]
 
     extra_args = getattr(request, "param", None)
@@ -79,11 +80,7 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(
-        MODEL_NAME,
-        args,
-        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -113,6 +110,29 @@ async def test_generate_endpoint(client):
     data = resp.json()
     assert "choices" in data
     assert data["choices"][0].get("sampling_mask") is None
+
+
+@pytest.mark.asyncio
+async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
+    """Explicit null max_tokens must not skip the min_tokens bound."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": None, "min_tokens": 2147483648},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "min_tokens" in resp.json()["error"]["message"]
+
+    followup = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 4},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=followup)
+    resp.raise_for_status()
 
 
 @pytest.mark.asyncio
@@ -423,6 +443,31 @@ async def test_stop_string_workflow(client, tokenizer, messages):
     completions_data = completions_resp.json()
     completions_res = completions_data["choices"][0]["message"]["content"]
     assert generate_res == completions_res
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="--tokens-only is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
+async def test_stop_strings_rejected_when_tokens_only(client):
+    """--tokens-only forces detokenize=False after request validation, so
+    stop strings must be rejected explicitly rather than silently ignored."""
+    sampling_params = {"max_tokens": 5, "stop": ["never"]}
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": sampling_params,
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "stop strings" in resp.json()["error"]["message"]
+
+    sampling_params["stop"] = None
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
 
 
 @pytest.mark.asyncio

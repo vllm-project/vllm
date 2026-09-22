@@ -3,9 +3,7 @@
 """Tests for smolvlm's multimodal preprocessing kwargs."""
 
 import pytest
-from packaging.version import Version
 from transformers import SmolVLMConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -13,10 +11,6 @@ from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
-@pytest.mark.skipif(
-    Version(TRANSFORMERS_VERSION) < Version("5.2.0"),
-    reason="See https://github.com/huggingface/transformers/pull/43948",
-)
 @pytest.mark.parametrize("model_id", ["HuggingFaceTB/SmolVLM2-2.2B-Instruct"])
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
+use super::timing::MM_STAGE_TARGET;
 use super::{ModalitySupport, MultimodalModelInfo, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
@@ -18,6 +19,12 @@ pub(super) const IMAGE_PRIMARY_KEY: &str = "pixel_values";
 impl MultimodalModelInfo {
     /// Preprocess all fetched image frames as one batch and build per-item
     /// features.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocess_image")
+    )]
     pub(super) async fn prepare_images(
         &self,
         frames: Vec<Arc<ImageFrame>>,

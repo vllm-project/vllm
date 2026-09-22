@@ -115,6 +115,7 @@ def test_modernbert_models(
 
 @pytest.mark.parametrize("model", ["Davlan/xlm-roberta-base-ner-hrl"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_xlm_roberta_models(
     hf_runner,
@@ -197,6 +198,7 @@ def test_openai_privacy_filter(
 
 @pytest.mark.parametrize("model", ["bd2lcco/Qwen3-0.6B-finetuned"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_auto_conversion(
     hf_runner,

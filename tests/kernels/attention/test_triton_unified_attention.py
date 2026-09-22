@@ -135,6 +135,7 @@ def ref_paged_attn(
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape
+    head_size_v = value_cache.shape[-1]
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
@@ -149,7 +150,7 @@ def ref_paged_attn(
 
         k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
         k = k[:kv_len]
-        v = value_cache[block_indices].view(-1, num_kv_heads, head_size)
+        v = value_cache[block_indices].view(-1, num_kv_heads, head_size_v)
         v = v[:kv_len]
 
         if q.shape[1] != k.shape[1]:

@@ -501,6 +501,50 @@ def test_rmsnorm_gated_forward_native_dtype(
     torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
+def test_rmsnorm_gated_3d_matches_flattened_2d(
+    default_vllm_config,
+    dtype: torch.dtype,
+) -> None:
+    """Qwen GDN now norms (N, H, D) in place of a flatten to (N*H, D).
+
+    Last-dim RMS + gate must match the flattened layout on both the native
+    and CUDA/HIP kernels, including a 3D z view that is not contiguous.
+    """
+    from vllm.model_executor.layers.layernorm import RMSNormGated
+
+    set_random_seed(42)
+    device = torch.device(DEVICE)
+    num_tokens, num_heads, head_dim = 5, 4, 64
+    layer = RMSNormGated(
+        head_dim,
+        eps=1e-5,
+        group_size=None,
+        norm_before_gate=True,
+        device=device,
+        dtype=dtype,
+    )
+
+    packed = torch.randn(num_tokens, num_heads, 2, head_dim, dtype=dtype, device=device)
+    x3 = packed[:, :, 0, :]
+    z3 = packed[:, :, 1, :]
+    assert not x3.is_contiguous()
+    assert not z3.is_contiguous()
+    x2 = x3.reshape(-1, head_dim).contiguous()
+    z2 = z3.reshape(-1, head_dim).contiguous()
+
+    native_3d = layer.forward_native(x3, z3)
+    native_2d = layer.forward_native(x2, z2).reshape(num_tokens, num_heads, head_dim)
+    torch.testing.assert_close(native_3d, native_2d, atol=0, rtol=0)
+
+    cuda_3d = layer.forward_cuda(x3, z3)
+    cuda_2d = layer.forward_cuda(x2, z2).reshape(num_tokens, num_heads, head_dim)
+    torch.testing.assert_close(cuda_3d, cuda_2d, atol=1e-3, rtol=1e-2)
+    torch.testing.assert_close(cuda_3d, native_3d, atol=1e-2, rtol=1e-2)
+    assert cuda_3d.shape == (num_tokens, num_heads, head_dim)
+
+
 if __name__ == "__main__":
     # Run a quick smoke test
     test_layer_norm_fwd_basic(128, 1024, torch.float16, 42, False)

@@ -213,9 +213,17 @@ def fused_kda_chunk(
 
     Args:
         qg: ``q * exp2(gk_cumsum)``, ``[1, T, H, 128]``.
+        w: chunk-local WY representation of the gated keys.
+        u: chunk-local WY representation of the values.
         kg_t: chunk-major transposed gated keys, ``[chunks, H, 128, 64]``.
+        aqk: intra-chunk query-key attention, ``[chunks, H, 64, 64]``.
         decay: ``exp2`` of each chunk's last gate row, ``[chunks, H, 128]``.
         out: output buffer, ``[1, T, H, 128]``; may alias ``u``'s source.
+        scale: scale applied to the query-key products.
+        cu_seqlens: int32 cumulative sequence lengths.
+        initial_state: fp32 per-sequence initial recurrent state, or ``None``.
+        output_final_state: whether to return the final recurrent state.
+        chunk_offsets: int32 per-sequence first chunk index.
         checkpoint_state: destination for the mid-prefill state snapshots,
             fp32 ``[rows, H, 128, 128]``. Without
             ``checkpoint_state_indices`` it is a staging buffer indexed by
@@ -239,6 +247,7 @@ def fused_kda_chunk(
         has_initial_state: bool ``[N]``; a false entry starts that sequence
             from a zero state and its cache row is read only, never before the
             walk writes it.
+
     """
     if state_cache is not None:
         if initial_state is not None or output_final_state:
@@ -286,9 +295,9 @@ def fused_kda_chunk(
         None if checkpoint_offsets is None else checkpoint_offsets.to(torch.int32),
         None
         if checkpoint_state_indices is None
-        else checkpoint_state_indices.to(torch.int32),
+        else checkpoint_state_indices.to(torch.int32).contiguous(),
         state_cache,
-        None if state_indices is None else state_indices.to(torch.int32),
+        None if state_indices is None else state_indices.to(torch.int32).contiguous(),
         has_initial_state,
     )
     return out, final_state

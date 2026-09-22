@@ -808,7 +808,6 @@ def test_models_fse_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Model construction resolves FSE consistently with Quark quantization."""
-
     quantization_config: dict[str, Any] = (
         get_deepseek_v4_quark_config(["layers.0.ffn.shared_experts"] if exclude else [])
         if model_type == "deepseek_v4"
@@ -832,6 +831,7 @@ def test_models_fse_init(
         runner_type="generate",
         is_moe=True,
         logits_processors=None,
+        rswa_window=None,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":

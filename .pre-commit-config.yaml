@@ -177,6 +177,21 @@ repos:
     files: ^\.github/mergify\.yml$
     pass_filenames: false
     additional_dependencies: [PyYAML, regex]
+  - id: check-buildkite-step-keys
+    name: Check every Buildkite step declares an explicit key
+    language: python
+    entry: python tools/pre_commit/check_buildkite_step_keys.py
+    files: ^\.buildkite/.*\.ya?ml$
+    pass_filenames: false
+    additional_dependencies: [PyYAML]
+  - id: check-test-tethering
+    name: Check new tests are wired into Buildkite CI
+    language: python
+    entry: python tools/pre_commit/check_test_tethering.py
+    files: ^(tests/.*\.py|\.buildkite/(test_areas|hardware_tests|intel_jobs)/.*\.yaml|\.buildkite/(test-amd|ci_config[^/]*)\.yaml|tools/pre_commit/test_tethering_allowlist\.txt)$
+    additional_dependencies: [PyYAML, regex]
+    verbose: true # full-scan `note:` lines are advisory, so the hook passes
+    require_serial: true # one full scan, not one per pre-commit file batch
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py "3.10"
@@ -285,7 +300,7 @@ repos:
     pass_filenames: false
     require_serial: true
     stages: [pre-commit] # Only run locally as Buildkite will cover this
-    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+    files: ^rust/(Cargo\.toml|proto/Cargo\.toml|src/.*/Cargo\.toml)$
   - id: rust-cargo-sort
     name: Rust - Sort Cargo manifest sections
     entry: tools/pre_commit/rust-check.sh sort --workspace
@@ -293,7 +308,7 @@ repos:
     pass_filenames: false
     require_serial: true
     stages: [pre-commit] # Only run locally as Buildkite will cover this
-    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+    files: ^rust/(Cargo\.toml|proto/Cargo\.toml|src/.*/Cargo\.toml)$
   - id: rust-cargo-fmt
     name: Rust - Format code
     entry: tools/pre_commit/rust-check.sh fmt
