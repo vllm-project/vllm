@@ -44,9 +44,9 @@ steps:
   parallelism: 3
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Core Operation Kernels Shard %N"
+      label: ":amd: (MI300) Core Operation Kernels Shard %N"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 40
       working_dir: "/vllm-workspace/tests"
       depends_on:
