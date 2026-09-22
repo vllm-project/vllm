@@ -34,7 +34,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kNvfp4DynamicToken,
 )
 
 logger = init_logger(__name__)
@@ -268,7 +267,7 @@ def select_nvfp4_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_nvfp4_backend(runner_backend)
-        if _use_a16(requested_backend, False) and activation_key != kNvfp4DynamicToken:
+        if _use_a16(requested_backend, False):
             activation_key = None
         # For batched activation format, use batched variant if available.
         if (

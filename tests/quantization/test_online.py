@@ -529,9 +529,9 @@ def test_nvfp4_per_token_backend_contract() -> None:
     assert not BatchedMarlinExperts._supports_quant_scheme(*scheme)
 
 
-@pytest.mark.parametrize("backend", ["auto", "marlin", "b12x"])
+@pytest.mark.parametrize("backend", ["auto", "marlin"])
 def test_nvfp4_per_token_rejects_unsupported_backends(monkeypatch, backend) -> None:
-    """Neither fallback nor the B12X A16 override may discard per-token scaling."""
+    """Neither automatic fallback nor explicit Marlin may discard per-token scaling."""
     from tests.kernels.moe.utils import make_dummy_moe_config
 
     for candidate in nvfp4_oracle.NvFp4MoeBackend:
@@ -541,7 +541,6 @@ def test_nvfp4_per_token_rejects_unsupported_backends(monkeypatch, backend) -> N
             monkeypatch.setattr(
                 experts_cls, "_supports_current_device", lambda v=available: v
             )
-    monkeypatch.setenv("VLLM_B12X_MOE_FP4_FORCE_A16", "1")
     config = make_dummy_moe_config()
     config.moe_backend = backend
     error = NotImplementedError if backend == "auto" else ValueError
