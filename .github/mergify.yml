@@ -15,6 +15,21 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
+- name: label-agents
+  description: Automatically apply agents label
+  conditions:
+    - label != stale
+    - -closed
+    - or:
+      - files=AGENTS.md
+      - files~=^\.agents/
+      - files~=^\.claude/
+      - files=docs/contributing/editing-agent-instructions.md
+  actions:
+    label:
+      add:
+        - agents
+
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
   conditions:
