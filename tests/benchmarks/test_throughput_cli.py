@@ -8,6 +8,7 @@ LoRA-assignment and MMVU cases below cover the pieces that are throughput-only
 serve-side dataset coverage.
 """
 
+import json
 import subprocess
 from types import SimpleNamespace
 
@@ -28,7 +29,8 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 
 @pytest.mark.benchmark
-def test_bench_throughput():
+def test_bench_throughput(tmp_path):
+    output_json = tmp_path / "throughput_output.json"
     command = [
         "vllm",
         "bench",
@@ -42,12 +44,17 @@ def test_bench_throughput():
         "--enforce-eager",
         "--load-format",
         "dummy",
+        "--output-json",
+        str(output_json),
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     print(result.stdout)
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    # https://github.com/vllm-project/vllm/issues/58100: --output-json must
+    # record model_id, matching `vllm bench serve`.
+    assert json.loads(output_json.read_text())["model_id"] == MODEL_NAME
 
 
 def test_bench_throughput_accepts_custom_audio_args():
