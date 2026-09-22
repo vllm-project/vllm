@@ -170,7 +170,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
     @staticmethod
-    def _check_chunk_metadata_override(builder_cls: type, backend: str) -> None:
+    def _check_chunk_metadata_override(
+        builder_cls: type["GDNAttentionMetadataBuilder"], backend: str
+    ) -> None:
         """Reject a subclass whose chunk metadata the AITER path would skip.
 
         AITER brings its own varlen prefill metadata and never calls

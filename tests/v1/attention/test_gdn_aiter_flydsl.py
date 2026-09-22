@@ -4,6 +4,7 @@
 import inspect
 import sys
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -25,8 +26,8 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 def _make_config(
     *,
     backend: str = "aiter_flydsl",
-    head_k_dim: int = 128,
-    head_v_dim: int = 128,
+    head_k_dim: int | None = 128,
+    head_v_dim: int | None = 128,
     dtype: torch.dtype = torch.bfloat16,
 ):
     return SimpleNamespace(
@@ -163,7 +164,7 @@ def test_prefill_metadata_is_built_for_the_kernels_chunk_size(monkeypatch):
     """The chunk size belongs to the AITER kernel, not to the caller."""
     cu_seqlens = torch.tensor([0, 70, 200], dtype=torch.int32)
     expected_metadata = object()
-    captured = {}
+    captured: dict[str, Any] = {}
 
     def fake_build(seq_lens_cpu, *, cu_seqlens, chunk_size):
         captured.update(
