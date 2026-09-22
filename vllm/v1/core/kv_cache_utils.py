@@ -1525,7 +1525,9 @@ def _get_kv_cache_groups_uniform_page_size(
         for names, specs in zip(layer_buckets, spec_buckets):
             try:
                 # A raise means that the specs are incompatible.
-                type(specs[0]).merge([*specs, layer_spec])
+                _merge_uniform_page_group_specs(
+                    {str(i): spec for i, spec in enumerate([*specs, layer_spec])}
+                )
             except (AssertionError, ValueError):
                 continue
             names.extend(layer_names)
@@ -1593,7 +1595,49 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
-    return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
+    logger.info(
+        "Uniform-page KV cache: %d groups, up to %d layers per group",
+        len(grouped_layers),
+        group_size,
+    )
+    return [
+        KVCacheGroupSpec(
+            layers,
+            _merge_uniform_page_group_specs(
+                {name: kv_cache_spec[name] for name in layers}
+            ),
+        )
+        for layers in grouped_layers
+    ]
+
+
+def _merge_uniform_page_group_specs(
+    specs: dict[str, KVCacheSpec],
+) -> KVCacheSpec:
+    """Preserve distinct full-attention shapes sharing one block table."""
+    values = list(specs.values())
+    first = values[0]
+    try:
+        return type(first).merge(values)
+    except (AssertionError, ValueError):
+        # Equal bytes alone are insufficient: retain block size, dtype,
+        # quantization and attention semantics. Only the tensor shape may vary.
+        if not all(type(spec) is FullAttentionSpec for spec in values):
+            raise
+        assert isinstance(first, FullAttentionSpec)
+        for spec in values:
+            assert isinstance(spec, FullAttentionSpec)
+            normalized = replace(
+                spec,
+                num_kv_heads=first.num_kv_heads,
+                head_size=first.head_size,
+                head_size_v=first.head_size_v,
+            )
+            if normalized != first or spec.page_size_bytes != first.page_size_bytes:
+                raise
+        merged = UniformTypeKVCacheSpecs.from_specs(specs)
+        assert merged is not None
+        return merged
 
 
 def _get_per_layer_spec(

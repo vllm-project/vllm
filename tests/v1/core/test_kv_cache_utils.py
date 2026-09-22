@@ -92,6 +92,62 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize("target_layers, expected_groups", [(8, 8), (16, 15)])
+def test_hybrid_draft_full_attention_shapes(target_layers, expected_groups):
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=256, dtype=torch.bfloat16
+    )
+    draft = replace(full, num_kv_heads=8, head_size=128, head_size_v=128)
+    sliding = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=4096,
+    )
+    mamba = MambaSpec(
+        block_size=32768,
+        shapes=((full.page_size_bytes // 2,),),
+        dtypes=(torch.bfloat16,),
+    )
+    specs = {f"mamba.{i}": mamba for i in range(target_layers * 3)}
+    specs.update({f"target.{i}": full for i in range(target_layers)})
+    specs.update({f"sliding.{i}": sliding for i in range(5)})
+    specs["draft"] = draft
+    groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(specs)
+    assert len(groups) == expected_groups
+    assert sorted(name for group in groups for name in group.layer_names) == sorted(
+        specs
+    )
+    for group in groups:
+        for name in group.layer_names:
+            assert kv_cache_utils._get_per_layer_spec(group, name) == specs[name]
+    draft_group = next(group for group in groups if "draft" in group.layer_names)
+    assert isinstance(draft_group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    assert any(name.startswith("target.") for name in draft_group.layer_names)
+    assert (
+        kv_cache_utils._get_kv_cache_bytes_per_block(groups) == 5 * full.page_size_bytes
+    )
+
+
+@pytest.mark.parametrize("difference", ["bytes", "block_size", "dtype", "non_causal"])
+def test_heterogeneous_full_attention_rejects_incompatible_specs(difference):
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=256, dtype=torch.bfloat16
+    )
+    draft = replace(full, num_kv_heads=8, head_size=128, head_size_v=128)
+    if difference == "bytes":
+        draft = replace(draft, num_kv_heads=4)
+    elif difference == "block_size":
+        draft = replace(draft, block_size=32, num_kv_heads=4)
+    elif difference == "dtype":
+        draft = replace(draft, dtype=torch.float16)
+    else:
+        draft = replace(draft, non_causal=True)
+    with pytest.raises((AssertionError, ValueError)):
+        kv_cache_utils._merge_uniform_page_group_specs({"target": full, "draft": draft})
+
+
 @pytest.mark.parametrize("gpu_block_size", [32, 64])
 @pytest.mark.parametrize("shared_host_pool", [False, True])
 def test_hisparse_hma_uses_resolved_gpu_block_size(
