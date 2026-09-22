@@ -1126,14 +1126,19 @@ class VllmConfig:
             )
 
         kv_transfer_config = self.kv_transfer_config
-        if (
-            kv_transfer_config is not None
-            and kv_transfer_config.is_kv_transfer_instance
-        ):
-            raise ValueError(
-                "--enable-return-routed-experts is incompatible with KV "
-                "connectors (PD disaggregation and KV cache offload)."
-            )
+        if kv_transfer_config is not None:
+            for connector_name in (
+                "NixlConnector",
+                "NixlPullConnector",
+                "NixlPushConnector",
+                "MoRIIOConnector",
+                "MooncakeConnector",
+            ):
+                if kv_transfer_config.has_connector(connector_name):
+                    raise ValueError(
+                        "--enable-return-routed-experts is incompatible with "
+                        f"{connector_name}; PD auxiliary output is not supported."
+                    )
 
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
@@ -1888,6 +1893,16 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        # After the platform hook, which has the last word on async scheduling.
+        if (
+            self.diffusion_config is not None
+            and self.scheduler_config.async_scheduling
+            and self.scheduler_config.scheduler_cls is None
+        ):
+            self.scheduler_config.scheduler_cls = (
+                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
+            )
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
