@@ -1883,6 +1883,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
 
 class DeepseekV4MixtureOfExperts(MixtureOfExperts):
     moe_mlp_layers: list["DeepseekV4MoE"]
+    model: nn.Module
 
     def set_moe_parameters(self) -> None:
         collect_moe_layers(
