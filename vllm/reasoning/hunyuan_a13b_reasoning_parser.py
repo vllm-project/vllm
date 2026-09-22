@@ -76,6 +76,10 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.sequence_index = 0
         self.token_buffer: list[int] = []
         self.text_buffer = ""
+        # DelegatingParser treats response-state as reasoning_ended so structured
+        # output can constrain the answer; keep routing deltas through this
+        # parser afterward so response_end_ids ("\n</answer>") are stripped.
+        self.post_reasoning_stream_filter = True
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self.current_state == "response"
