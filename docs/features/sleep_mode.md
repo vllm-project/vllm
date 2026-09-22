@@ -141,3 +141,43 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ## Limitation
 
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.
+
+### Preparing host capacity for the first sleep
+
+On CUDA with the `cumem` sleep backend, set
+`VLLM_SLEEP_PREPARE_BACKUP_MAX_BYTES` to a positive byte budget per worker to
+allocate pinned host buffers after model warmup and before serving. Sleep mode
+must also be enabled. The default is `0` (disabled).
+
+Preparation only allocates empty capacity for weight allocations. It does not
+copy or snapshot weights: level 1 sleep always copies their current contents,
+including in-place updates made after startup. This moves host allocation cost
+from the first sleep into startup; it does not eliminate that cost or the copy.
+
+The budget covers the sum of each prepared allocation's size rounded up to the
+next power of two. This conservatively bounds PyTorch's host allocation rounding,
+including requests above its rounding/cache thresholds that use exact sizes.
+If the full rounded capacity exceeds the budget, preparation allocates nothing
+and sleep uses its existing allocation path. An allocation `torch.OutOfMemoryError`
+or `MemoryError` also cancels preparation without changing device mappings.
+Other exceptions clear prepared references and propagate to the caller; unknown
+CUDA failures are not treated as a recoverable host-capacity shortage.
+In particular, some PyTorch versions report CUDA pinned-allocation exhaustion
+as `torch.AcceleratorError`, which propagates and fails startup. The optional
+preparation does not guarantee recovery from every host-allocation failure.
+
+This is **not a process-wide or machine-wide pinned-memory limit**. Existing
+PyTorch host cache, other host allocations and other workers are outside this
+budget. Configure it according to deployment memory limits and the number of
+workers. The operating system may terminate a process under memory pressure
+before Python can catch an allocation error.
+
+Prepared buffers are consumed once. They have no additional prepared reference
+after sleep, and wake-up drops the normal backup reference. Weight allocation or
+identity changes, level 2 sleep, discard, and allocator shutdown cancel unused
+preparation. Other tagged allocations do not invalidate it. There is no automatic
+replenishment; later sleeps use PyTorch's existing host allocator/cache behavior.
+Cancellation drops references only: PyTorch may retain freed pinned blocks in
+its cache. Preparation never flushes the process-wide host cache. If a separate
+policy releases that cache after wake-up, the next sleep pays allocation cost
+again.

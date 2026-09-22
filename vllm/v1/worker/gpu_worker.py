@@ -525,6 +525,12 @@ class Worker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        if current_platform.is_cuda():
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            if CuMemAllocator.instance is not None:
+                CuMemAllocator.instance._clear_prepared_sleep_backups()
+
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
@@ -949,6 +955,20 @@ class Worker(WorkerBase):
         # Startup is done; steady-state serving gets no benefit from torch
         # intra-op parallelism.
         set_torch_threads_for_runtime()
+
+        # Weight loading/postprocessing, graph capture and sampler warmup have
+        # finished. Prepare host capacity before the worker reports readiness.
+        if (
+            envs.VLLM_SLEEP_PREPARE_BACKUP_MAX_BYTES > 0
+            and self.model_config.enable_sleep_mode
+            and current_platform.is_cuda()
+            and self.model_config.sleep_mode_backend == "cumem"
+        ):
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            CuMemAllocator.get_instance()._prepare_sleep_backups(
+                envs.VLLM_SLEEP_PREPARE_BACKUP_MAX_BYTES
+            )
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
@@ -1459,6 +1479,12 @@ class Worker(WorkerBase):
             self.model_runner.reset_lora_state()
 
     def shutdown(self) -> None:
+        if current_platform.is_cuda():
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            if CuMemAllocator.instance is not None:
+                CuMemAllocator.instance._clear_prepared_sleep_backups()
+
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.

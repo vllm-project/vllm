@@ -139,3 +139,205 @@ class DummyBackend(SleepModeBackend):
     @classmethod
     def supports_durable_storage(cls) -> bool:
         return True
+
+
+@pytest.fixture
+def backup_allocator(monkeypatch):
+    """Use real allocator bookkeeping without allocating device memory."""
+    import vllm.device_allocator.cumem as cumem
+    from vllm.device_allocator import AllocationData
+
+    allocator = cumem.CuMemAllocator()
+    allocator.pointer_to_data = {
+        100: AllocationData((0, 3, 100, 1), "weights"),
+        200: AllocationData((0, 5, 200, 2), "weights"),
+        300: AllocationData((0, 100, 300, 3), "kv_cache"),
+    }
+    monkeypatch.setattr(cumem, "PIN_MEMORY", True)
+    return allocator
+
+
+def test_prepare_sleep_backups_default_disabled(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.delenv("VLLM_SLEEP_PREPARE_BACKUP_MAX_BYTES", raising=False)
+    assert envs.VLLM_SLEEP_PREPARE_BACKUP_MAX_BYTES == 0
+
+
+@pytest.mark.parametrize(
+    "budget, expected", [(0, 0), (-1, 0), (8, 0), (11, 0), (12, 12)]
+)
+def test_prepare_sleep_backups_rounded_budget(
+    backup_allocator, monkeypatch, budget, expected
+):
+    from unittest.mock import Mock
+
+    import torch
+
+    allocate = Mock()
+    monkeypatch.setattr(torch, "empty", allocate)
+    assert backup_allocator._prepare_sleep_backups(budget) == expected
+    assert allocate.call_count == (2 if expected else 0)
+    assert all(
+        d.cpu_backup_tensor is None for d in backup_allocator.pointer_to_data.values()
+    )
+    for call in allocate.call_args_list:
+        assert call.kwargs["pin_memory"] is True
+        assert call.kwargs["device"] == "cpu"
+
+
+@pytest.mark.parametrize("failure", ["out_of_memory", "memory", "unknown_runtime"])
+def test_prepare_sleep_backups_failure_releases_partial_capacity(
+    backup_allocator, monkeypatch, failure
+):
+    import weakref
+
+    import torch
+
+    refs: list[weakref.ReferenceType[torch.Tensor]] = []
+
+    def allocate(*args, **kwargs):
+        if refs:
+            if failure == "out_of_memory":
+                raise torch.OutOfMemoryError("injected pinned allocation failure")
+            if failure == "memory":
+                raise MemoryError("injected host allocation failure")
+            raise RuntimeError("injected unknown CUDA failure")
+        tensor = torch.Tensor([1])
+        refs.append(weakref.ref(tensor))
+        return tensor
+
+    monkeypatch.setattr(torch, "empty", allocate)
+    if failure == "unknown_runtime":
+        with pytest.raises(RuntimeError, match="injected unknown CUDA failure"):
+            backup_allocator._prepare_sleep_backups(12)
+    else:
+        assert backup_allocator._prepare_sleep_backups(12) == 0
+    assert refs[0]() is None
+    assert not backup_allocator._prepared_sleep_backups
+    assert all(not d.is_asleep for d in backup_allocator.pointer_to_data.values())
+    assert all(
+        d.cpu_backup_tensor is None for d in backup_allocator.pointer_to_data.values()
+    )
+
+
+@pytest.mark.parametrize(
+    "action", ["clear", "close", "malloc", "free", "discard", "level2"]
+)
+def test_prepare_sleep_backups_cancellation(backup_allocator, monkeypatch, action):
+    import weakref
+
+    import torch
+
+    import vllm.device_allocator.cumem as cumem
+
+    refs: list[weakref.ReferenceType[torch.Tensor]] = []
+
+    def allocate(*args, **kwargs):
+        tensor = torch.Tensor([1])
+        refs.append(weakref.ref(tensor))
+        return tensor
+
+    monkeypatch.setattr(torch, "empty", allocate)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda *args: None)
+    monkeypatch.setattr(cumem, "unmap_and_release", lambda handle: None)
+    assert backup_allocator._prepare_sleep_backups(12) == 12
+    if action == "clear":
+        backup_allocator._clear_prepared_sleep_backups()
+    elif action == "close":
+        backup_allocator.close()
+    elif action == "malloc":
+        backup_allocator.current_tag = "weights"
+        backup_allocator._python_malloc_callback((0, 7, 400, 4))
+    elif action == "free":
+        backup_allocator._python_free_callback(100)
+    elif action == "discard":
+        backup_allocator.discard("weights")
+    else:
+        backup_allocator.sleep(offload_tags=())
+    assert not backup_allocator._prepared_sleep_backups
+    assert all(ref() is None for ref in refs)
+
+
+def test_prepare_sleep_backups_unrelated_allocations(backup_allocator, monkeypatch):
+    import torch
+
+    monkeypatch.setattr(torch, "empty", lambda *args, **kwargs: torch.Tensor([1]))
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
+    assert backup_allocator._prepare_sleep_backups(12) == 12
+    backup_allocator.current_tag = "kv_cache"
+    backup_allocator._python_malloc_callback((0, 7, 400, 4))
+    backup_allocator._python_free_callback(400)
+    assert len(backup_allocator._prepared_sleep_backups) == 2
+    backup_allocator._clear_prepared_sleep_backups()
+
+
+@pytest.mark.parametrize("change", ["identity", "handle"])
+def test_prepare_sleep_backups_rejects_stale_allocation(
+    backup_allocator, monkeypatch, change
+):
+    from unittest.mock import Mock
+
+    import torch
+
+    import vllm.device_allocator.cumem as cumem
+    from vllm.device_allocator import AllocationData
+
+    allocate = Mock(side_effect=lambda *args, **kwargs: torch.Tensor([1]))
+    monkeypatch.setattr(torch, "empty", allocate)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(cumem, "unmap_and_release", lambda handle: None)
+    monkeypatch.setattr(cumem.libcudart, "cudaMemcpy", lambda *args: None)
+    assert backup_allocator._prepare_sleep_backups(12) == 12
+    data = backup_allocator.pointer_to_data[100]
+    if change == "identity":
+        backup_allocator.pointer_to_data[100] = AllocationData(data.handle, "weights")
+    else:
+        data.handle = (1, 3, 100, 1)
+    allocate.reset_mock()
+    backup_allocator.sleep(offload_tags=("weights",))
+    assert allocate.call_count == 2
+    assert not backup_allocator._prepared_sleep_backups
+
+
+@pytest.mark.parametrize("operation", ["reload", "shutdown_error"])
+def test_worker_cancels_prepared_backups(backup_allocator, monkeypatch, operation):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    import torch
+
+    import vllm.device_allocator.cumem as cumem
+    import vllm.v1.worker.gpu_worker as gpu_worker
+
+    monkeypatch.setattr(torch, "empty", lambda *args, **kwargs: torch.Tensor([1]))
+    monkeypatch.setattr(cumem.CuMemAllocator, "instance", backup_allocator)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda", lambda: True)
+    assert backup_allocator._prepare_sleep_backups(12) == 12
+    worker = object.__new__(gpu_worker.Worker)
+    if operation == "reload":
+        worker.vllm_config = None
+        monkeypatch.setattr(
+            gpu_worker, "set_current_vllm_config", lambda _: nullcontext()
+        )
+        calls = []
+        worker.model_runner = SimpleNamespace(
+            reload_weights=lambda: calls.append(
+                bool(backup_allocator._prepared_sleep_backups)
+            )
+        )
+        worker.reload_weights()
+        assert calls == [False]
+    else:
+
+        def fail_shutdown():
+            raise RuntimeError("injected communicator shutdown failure")
+
+        monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_shutdown", fail_shutdown)
+        with pytest.raises(
+            RuntimeError, match="injected communicator shutdown failure"
+        ):
+            worker.shutdown()
+    assert not backup_allocator._prepared_sleep_backups
