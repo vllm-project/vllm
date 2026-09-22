@@ -67,7 +67,6 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -89,7 +88,9 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             get_sparse_mla_index_group_max_rows(vllm_config),
         )
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config,
+            prefix=prefix,
+            defer_lm_head=True,
         )
         self.mtp_block = DeepseekV32DecoderLayer(
             vllm_config,
@@ -391,6 +392,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                     )
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
+                continue
+            if ".shared_head.head." in name:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
