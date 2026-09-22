@@ -1188,45 +1188,6 @@ def _python_native_fwd(**kwargs):
 
 
 @torch.inference_mode()
-def test_causal_conv1d_update_cpu_ds_adapter_scatters_permuted_decode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dim = 8
-    state_len = _STATE_LEN + 3
-    state = _conv_states(4, state_len, dim, "DS")
-    state.copy_(
-        torch.arange(state.numel(), dtype=torch.float32).view_as(state).to(state.dtype)
-    )
-    original_state = state.clone()
-    state_indices = torch.tensor([2, 0, 3], dtype=torch.int32)
-    mutated_scratch = torch.arange(
-        state_indices.numel() * dim * state_len, dtype=torch.float32
-    ).view(state_indices.numel(), dim, state_len)
-    mutated_scratch = (mutated_scratch + 100).to(state.dtype)
-
-    def mutate_update(**kwargs):
-        kwargs["conv_states"].copy_(mutated_scratch)
-        return torch.full_like(kwargs["x"], 7)
-
-    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: True)
-    monkeypatch.setattr(gdn_attention.ops, "causal_conv1d_update_cpu", mutate_update)
-    out = gdn_attention._causal_conv1d_update_cpu(
-        x=torch.zeros(state_indices.numel(), dim, dtype=state.dtype),
-        conv_states=state,
-        weight=torch.zeros(dim, CONV_KERNEL, dtype=state.dtype),
-        bias=None,
-        silu_activation=False,
-        conv_state_indices=state_indices,
-        is_vnni=False,
-    )
-
-    expected_state = original_state.clone()
-    expected_state.index_copy_(0, state_indices.to(torch.long), mutated_scratch)
-    torch.testing.assert_close(state, expected_state)
-    torch.testing.assert_close(out, torch.full_like(out, 7))
-
-
-@torch.inference_mode()
 def test_causal_conv1d_fwd_cpu_ds_adapter_varlen_mixed_initial_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

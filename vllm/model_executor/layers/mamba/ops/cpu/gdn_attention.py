@@ -206,12 +206,11 @@ def _cpu_gdn_attention_nonspec(
     use_cpp_conv = torch.cpu._is_avx512_bf16_supported()
 
     conv_state = layer.kv_cache[0]
-    is_dim_first = is_conv_state_dim_first()
     if use_cpp_conv:
-        if not is_dim_first:
+        if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(1, 2)
     else:
-        if not is_dim_first:
+        if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
         conv_weights = layer.conv1d.weight.view(
             layer.conv1d.weight.size(0), layer.conv1d.weight.size(2)
