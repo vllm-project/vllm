@@ -10,7 +10,7 @@ use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{ModalitySupport, MultimodalModelInfo, PreparedMedia, item};
+use super::{MultimodalModelInfo, PreparedMedia, VisionModalitySupport, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
@@ -63,15 +63,14 @@ impl MultimodalModelInfo {
     /// conversion.
     async fn preprocess_images(
         &self,
-        support: &ModalitySupport,
+        support: &VisionModalitySupport,
         image_frames: &[Arc<ImageFrame>],
     ) -> Result<PreprocessedEncoderInputs> {
-        let config = support.config.clone();
-        let processor = support.processor;
+        let processor = Arc::clone(&support.processor);
         let images = image_frames.iter().map(|frame| frame.data().clone()).collect::<Vec<_>>();
 
         // TODO: is it still necessary given that we've already in a dedicated runtime?
-        tokio::task::spawn_blocking(move || Ok(processor.preprocess(&images, &config)?))
+        tokio::task::spawn_blocking(move || Ok(processor.preprocess(&images)?))
             .await
             .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
     }
