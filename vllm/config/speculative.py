@@ -662,6 +662,30 @@ class SpeculativeConfig:
     def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         initial_architecture = hf_config.architectures[0]
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
+        if initial_architecture == "DeepseekOCRForCausalLM" and getattr(
+            hf_config, "mtp_num_heads", 0
+        ):
+            # Jina-OCR-v1 stores its FastMTP weights alongside the multimodal
+            # target checkpoint. The draft only needs the decoder config; using
+            # the VL wrapper here would leave EAGLEConfig with a dict-valued
+            # text_config that ModelConfig cannot inspect.
+            text_config = getattr(hf_config, "text_config", hf_config)
+            for key, value in hf_config.to_dict().items():
+                if key.startswith("mtp_") or key == "num_nextn_predict_layers":
+                    setattr(text_config, key, value)
+            if (
+                quantization_config := getattr(hf_config, "quantization_config", None)
+            ) is not None:
+                text_config.quantization_config = quantization_config
+            hf_config = text_config
+            hf_config.model_type = "deepseek_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["DeepSeekOCRMTPModel"],
+                }
+            )
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
@@ -683,7 +707,10 @@ class SpeculativeConfig:
             "glm_moe_dsa",
         ):
             hf_config.model_type = "deepseek_mtp"
-        if hf_config.model_type == "deepseek_mtp":
+        if (
+            hf_config.model_type == "deepseek_mtp"
+            and initial_architecture != "DeepseekOCRForCausalLM"
+        ):
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {
@@ -1354,7 +1381,19 @@ class SpeculativeConfig:
                 elif self.draft_model_config.hf_config.model_type in get_args(
                     MTPModelTypes
                 ):
-                    self.method = "mtp"
+                    # FastMTP recursively feeds each draft step's hidden state
+                    # into the next one. The EAGLE proposer implements that
+                    # chaining, while the standard MTP proposer re-grounds each
+                    # step on the target hidden state.
+                    self.method = (
+                        "eagle"
+                        if getattr(
+                            self.draft_model_config.hf_config,
+                            "mtp_recursive",
+                            False,
+                        )
+                        else "mtp"
+                    )
                     if (
                         self.target_model_config is not None
                         and self.target_model_config.hf_config.model_type
@@ -1368,7 +1407,8 @@ class SpeculativeConfig:
                             "speculative method 'dspark' instead of 'mtp'."
                         )
                     if (
-                        self.num_speculative_tokens > 1
+                        self.method == "mtp"
+                        and self.num_speculative_tokens > 1
                         and self.draft_model_config.hf_config.model_type
                         not in ("step3p5_mtp", "inkling_mtp")
                     ):
