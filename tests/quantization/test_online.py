@@ -540,7 +540,10 @@ def test_nvfp4_per_token_backend_contract() -> None:
     scheme = (kNvfp4Static, kNvfp4DynamicToken)
     for backend in nvfp4_oracle.NvFp4MoeBackend:
         for experts_cls in nvfp4_oracle.backend_to_kernel_cls(backend):
-            expected = backend == nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM
+            expected = backend in (
+                nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                nvfp4_oracle.NvFp4MoeBackend.HUMMING,
+            )
             assert experts_cls._supports_quant_scheme(*scheme) == expected, experts_cls
     assert not BatchedMarlinExperts._supports_quant_scheme(*scheme)
 
@@ -553,7 +556,10 @@ def test_nvfp4_per_token_rejects_unsupported_backends(monkeypatch, backend) -> N
     for candidate in nvfp4_oracle.NvFp4MoeBackend:
         for experts_cls in nvfp4_oracle.backend_to_kernel_cls(candidate):
             # Exercise scheme rejection independently of installed GPU kernels.
-            available = candidate != nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM
+            available = candidate not in (
+                nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                nvfp4_oracle.NvFp4MoeBackend.HUMMING,
+            )
             monkeypatch.setattr(
                 experts_cls, "_supports_current_device", lambda v=available: v
             )
