@@ -354,6 +354,7 @@ class EplbState:
         self,
         model: MixtureOfExperts,
         model_config: ModelConfig,
+        model_name: str | None = None,
     ):
         """Build the initial EPLB state."""
         self.validate_ep_configuration(model)
@@ -499,7 +500,7 @@ class EplbState:
             expert_load_pass=expert_load_pass,
             expert_load_pass_buffer=expert_load_pass_buffer,
             expert_load_window=expert_load_window,
-            model_name=model_config.model,
+            model_name=model_name or model_config.model,
             model=model,
             expert_buffer=expert_buffer,
             rebalanced=False,

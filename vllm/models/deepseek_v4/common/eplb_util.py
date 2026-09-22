@@ -3,22 +3,24 @@
 """Shared EPLB MoE registration helpers for DeepSeek V4 family models."""
 
 from collections.abc import Iterable
-from typing import Protocol
+from typing import Any
 
 import torch.nn as nn
 
+from vllm.config import ModelConfig
 
-class _Dsv4CollectableMoE(Protocol):
-    num_expert_groups: int
-    num_moe_layers: int
-    moe_layers: list[nn.Module]
-    moe_mlp_layers: list[nn.Module]
 
-    def extract_moe_parameters(self, example_moe: object | None) -> None: ...
+def dspark_draft_supports_eplb(draft_model_config: ModelConfig) -> bool:
+    """Return whether a DSpark draft can share EPLB state with the target.
+
+    Only DeepSeek-V4 DSpark drafts reuse the target expert layout. V4.1 drafts
+    use a smaller routed-expert count and cannot share EPLB state.
+    """
+    return getattr(draft_model_config.hf_config, "model_type", None) == "deepseek_v4"
 
 
 def collect_moe_layers(
-    moe_model: _Dsv4CollectableMoE,
+    moe_model: Any,
     layers: Iterable[nn.Module],
     config: object,
     *,

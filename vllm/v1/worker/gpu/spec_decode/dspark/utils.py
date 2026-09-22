@@ -6,6 +6,7 @@ import torch.nn as nn
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import get_draft_load_config
+from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
@@ -30,16 +31,6 @@ def _resolve_dspark_attention_backend(
             )
         return target_backend
     return None
-
-
-def dspark_draft_supports_eplb(draft_model_config: ModelConfig) -> bool:
-    """Return whether the DSpark draft shares the target EPLB topology.
-
-    Only DeepSeek-V4 DSpark drafts reuse the target expert layout. V4.1 drafts
-    use a smaller routed-expert count and cannot share EPLB state with the
-    target model.
-    """
-    return getattr(draft_model_config.hf_config, "model_type", None) == "deepseek_v4"
 
 
 def _get_dspark_parallel_config(

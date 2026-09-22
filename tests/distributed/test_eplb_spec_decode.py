@@ -10,11 +10,13 @@ import torch
 
 from tests.utils import large_gpu_mark
 from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.worker.gpu.eplb_utils import (
     EPLBController,
     draft_model_supports_eplb,
+    eplb_draft_model_name,
 )
 
 
@@ -70,11 +72,17 @@ class FakeEplbState:
     instances: list[FakeEplbState] = []
 
     def __init__(self, parallel_config, device: torch.device):
-        self.add_model_calls: list[tuple[object, object]] = []
+        self.add_model_calls: list[tuple[object, object, str | None]] = []
         FakeEplbState.instances.append(self)
 
-    def add_model(self, model: object, model_config: object) -> None:
-        self.add_model_calls.append((model, model_config))
+    def add_model(
+        self,
+        model: object,
+        model_config: object,
+        *,
+        model_name: str | None = None,
+    ) -> None:
+        self.add_model_calls.append((model, model_config, model_name))
 
 
 def _make_dsv4_dspark_hf_config() -> DeepseekV4Config:
@@ -165,6 +173,23 @@ def test_eplb_state_rejects_mismatched_dsv4_draft_redundant_experts():
         EplbState.validate_ep_configuration(state, target)
 
 
+def test_dspark_draft_supports_eplb_only_for_dsv4(dspark_vllm_config):
+    assert dspark_draft_supports_eplb(
+        dspark_vllm_config.speculative_config.draft_model_config
+    )
+    dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
+        "deepseek_v41"
+    )
+    assert not dspark_draft_supports_eplb(
+        dspark_vllm_config.speculative_config.draft_model_config
+    )
+
+
+def test_eplb_draft_model_name_adds_suffix(dspark_vllm_config):
+    draft_model_config = dspark_vllm_config.speculative_config.draft_model_config
+    assert eplb_draft_model_name(draft_model_config) == "dspark (draft)"
+
+
 def test_draft_model_supports_eplb_for_dsv4_dspark(dspark_vllm_config):
     draft = SimpleNamespace()
     assert draft_model_supports_eplb(
@@ -217,7 +242,11 @@ def test_eplb_registers_dspark_draft_model(
     assert registered is True
     assert controller.state is not None
     assert controller.state.add_model_calls == [
-        (draft, dspark_vllm_config.speculative_config.draft_model_config)
+        (
+            draft,
+            dspark_vllm_config.speculative_config.draft_model_config,
+            "dspark (draft)",
+        )
     ]
     assert speculator.eplb_state is controller.state
 
@@ -314,7 +343,7 @@ def test_eplb_skips_dspark_registration_with_dummy_weights(
                 "deepseek-ai/DeepSeek-V4-Flash-DSpark",
                 None,
                 4,
-                0.92,
+                0.95,
                 7,
             ),
             marks=large_gpu_mark(min_gb=80),
