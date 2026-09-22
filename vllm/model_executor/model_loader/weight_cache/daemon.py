@@ -41,6 +41,13 @@ The global TP rank of local GPU ``i`` on node ``r`` is
 ``r * (tp_size // nnodes) + i``, matching vLLM's contiguous per-node rank
 assignment, so each engine worker maps its shard from the daemon on its own
 node.
+
+With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
+starts a draft daemon group that caches the draft model. It uses its own cache
+key, Unix sockets (``*_draft.sock``) and rendezvous port
+(``--weight-cache-draft-master-port``, default ``--weight-cache-master-port +
+1``), so each process serves exactly one model role. Other draft types are not
+cached and keep loading from disk in the engine.
 """
 
 import contextlib
@@ -52,10 +59,15 @@ import signal
 import socket
 import sys
 from collections.abc import Callable
+from itertools import product
 
 import torch
 
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -77,6 +89,11 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     send_msg,
     verify_peer_is_owner,
 )
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    export_model_attrs,
+    format_daemon_role,
+    is_draft_model_cacheable,
+)
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
@@ -93,15 +110,19 @@ def export_entries(
     ``named_parameters``/``named_buffers`` are iterated with
     ``remove_duplicate=False`` so tied weights (e.g. ``lm_head.weight`` sharing
     storage with ``embed_tokens.weight``) are not silently dropped. Each unique
-    tensor is exported once; every additional name that refers to the same
+    tensor is exported once per call; every additional name that refers to the same
     tensor object is recorded in the returned alias map so the client can
     re-establish the shared identity instead of allocating uninitialized
     memory for it.
+
+    CUDA reduction arguments must be exported separately for each consumer so
+    that PyTorch registers a reference for each IPC mapping's lifetime.
 
     Returns:
         A ``(entries, aliases)`` pair where ``entries`` maps a canonical name to
         its ``TensorEntry`` and ``aliases`` maps each duplicate name to its
         canonical name.
+
     """
     entries: dict[str, TensorEntry] = {}
     aliases: dict[str, str] = {}
@@ -126,30 +147,6 @@ def export_entries(
     return entries, aliases
 
 
-def get_daemon_model(vllm_config: VllmConfig) -> torch.nn.Module:
-    """Load the daemon's model, composed from the configured loader.
-
-    Runs the quantization check after model creation but before the slow
-    weight load, so an unsupported method fails fast. Online quantization
-    always fails the check, so load_model's finalize step for it is
-    unnecessary here.
-    """
-    model_config = vllm_config.model_config
-    load_config = vllm_config.load_config
-    loader = get_model_loader(load_config)
-    device_config = vllm_config.device_config
-    target_device = torch.device(
-        device_config.device if load_config.device is None else load_config.device
-    )
-    with set_default_torch_dtype(model_config.dtype):
-        with target_device:
-            model = loader.create_model(vllm_config, model_config)
-        check_ipc_quant_support(model)
-        loader.load_weights(model, model_config)
-        process_weights_after_loading(model, model_config, target_device)
-    return model.eval()
-
-
 class WeightCacheDaemon:
     """Per-GPU process that loads one TP shard and serves CUDA IPC handles."""
 
@@ -160,21 +157,31 @@ class WeightCacheDaemon:
         local_rank: int,
         distributed_init_method: str,
         socket_dir: str | None = None,
+        is_draft: bool = False,
     ):
         self.vllm_config = vllm_config
+        # A draft daemon builds the draft with the target's VllmConfig, like
+        # the engine does; only the ModelConfig differs.
+        if is_draft:
+            spec = vllm_config.speculative_config
+            assert spec is not None and spec.draft_model_config is not None
+            self.model_config = spec.draft_model_config
+        else:
+            self.model_config = vllm_config.model_config
         self.tp_rank = tp_rank
         self.local_rank = local_rank
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
+        self.is_draft = is_draft
+        self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
-        self.entries: dict[str, TensorEntry] = {}
-        self.aliases: dict[str, str] = {}
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
-            vllm_config.model_config,
+            self.model_config,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
             tp_rank=tp_rank,
+            is_draft=is_draft,
         )
 
     def load_model(self) -> None:
@@ -189,17 +196,36 @@ class WeightCacheDaemon:
         )
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
-            self.model = get_daemon_model(self.vllm_config)
-        self._export_entries()
+            self.model = self.get_model()
         logger.info(
-            "Weight cache daemon rank %d cached %d tensors",
+            "Weight cache %s daemon rank %d loaded model",
+            self.role,
             self.tp_rank,
-            len(self.entries),
         )
 
-    def _export_entries(self) -> None:
-        assert self.model is not None
-        self.entries, self.aliases = export_entries(self.model)
+    def get_model(self) -> torch.nn.Module:
+        """Load the daemon's model, composed from the configured loader.
+
+        Runs the quantization check after model creation but before the slow
+        weight load, so an unsupported method fails fast. Online quantization
+        always fails the check, so load_model's finalize step for it is
+        unnecessary here.
+        """
+        vllm_config = self.vllm_config
+        model_config = self.model_config
+        load_config = vllm_config.load_config
+        loader = get_model_loader(load_config)
+        device_config = vllm_config.device_config
+        target_device = torch.device(
+            device_config.device if load_config.device is None else load_config.device
+        )
+        with set_default_torch_dtype(model_config.dtype):
+            with target_device:
+                model = loader.create_model(vllm_config, model_config)
+            check_ipc_quant_support(model)
+            loader.load_weights(model, model_config)
+            process_weights_after_loading(model, model_config, target_device)
+        return model.eval()
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
         """Serve requests until terminated.
@@ -211,6 +237,7 @@ class WeightCacheDaemon:
         Args:
             ready_callback: Invoked once the socket is bound and listening,
                 so the launcher can report overall readiness.
+
         """
         socket_path = self._socket_path
         ensure_private_socket_dir(
@@ -226,7 +253,10 @@ class WeightCacheDaemon:
         os.chmod(socket_path, 0o600)
         server.listen()
         logger.info(
-            "Weight cache daemon rank %d serving on %s", self.tp_rank, socket_path
+            "Weight cache %s daemon rank %d serving on %s",
+            self.role,
+            self.tp_rank,
+            socket_path,
         )
         if ready_callback is not None:
             ready_callback()
@@ -273,7 +303,11 @@ class WeightCacheDaemon:
 
     @property
     def _socket_path(self) -> str:
-        return get_socket_path(get_current_device_uuid(), self.socket_dir)
+        return get_socket_path(
+            get_current_device_uuid(),
+            self.socket_dir,
+            is_draft=self.is_draft,
+        )
 
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
@@ -295,31 +329,37 @@ class WeightCacheDaemon:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
             return
-        if not self.entries:
+        if self.model is None:
             send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
+        gpu_uuid = get_current_device_uuid()
+        entries, aliases = export_entries(self.model)
         send_msg(
             conn,
             {
                 "status": "ok",
-                "entries": self.entries,
-                "aliases": self.aliases,
-                "gpu_uuid": get_current_device_uuid(),
+                "entries": entries,
+                "aliases": aliases,
+                "attrs": export_model_attrs(self.model),
+                "gpu_uuid": gpu_uuid,
             },
         )
         logger.info_once(
-            "Weight cache daemon rank %d sent %d tensors (+%d aliases) to engine",
+            "Weight cache %s daemon rank %d sent %d tensors (+%d aliases) to engine",
+            self.role,
             self.tp_rank,
-            len(self.entries),
-            len(self.aliases),
+            len(entries),
+            len(aliases),
         )
 
     def _handle_release(self, conn: socket.socket) -> None:
-        self.entries.clear()
-        self.aliases.clear()
         self.model = None
         torch.accelerator.empty_cache()
-        logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
+        logger.info(
+            "Weight cache %s daemon rank %d released cached weights",
+            self.role,
+            self.tp_rank,
+        )
         send_msg(conn, {"status": "ok"})
 
 
@@ -329,13 +369,27 @@ def _run_daemon(
     vllm_config: VllmConfig,
     distributed_init_method: str,
     socket_dir: str | None,
-    ready_queue: "multiprocessing.Queue[int]",
+    ready_queue: "multiprocessing.Queue[tuple[str, int]]",
+    is_draft: bool = False,
 ) -> None:
     daemon = WeightCacheDaemon(
-        vllm_config, tp_rank, local_rank, distributed_init_method, socket_dir
+        vllm_config,
+        tp_rank,
+        local_rank,
+        distributed_init_method,
+        socket_dir,
+        is_draft,
     )
     daemon.load_model()
-    daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
+    daemon.serve_forever(ready_callback=lambda: ready_queue.put((daemon.role, tp_rank)))
+
+
+def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:
+    """VllmConfig for the draft daemon group"""
+    if not is_draft_model_cacheable(vllm_config.speculative_config):
+        return None
+    assert vllm_config.speculative_config is not None
+    return vllm_config.speculative_config.apply_draft_overrides(vllm_config)
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
@@ -372,6 +426,14 @@ def main() -> None:
         "serving) and match across nodes. Required when --nnodes > 1; defaults "
         "to a free port for single-node.",
     )
+    parser.add_argument(
+        "--weight-cache-draft-master-port",
+        type=int,
+        default=None,
+        help="Rendezvous port for the MTP draft daemon group. Defaults to "
+        "--weight-cache-master-port + 1 for multi-node, or a free port for "
+        "single-node.",
+    )
     args = parser.parse_args()
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
@@ -401,27 +463,56 @@ def main() -> None:
     master_port = args.weight_cache_master_port or get_open_port()
     distributed_init_method = get_distributed_init_method(master_addr, master_port)
 
+    # (is_draft, vllm_config, rendezvous) per daemon group.
+    groups: list[tuple[bool, VllmConfig, str]] = [
+        (False, vllm_config, distributed_init_method)
+    ]
+    draft_vllm_config = get_draft_daemon_config(vllm_config)
+    if draft_vllm_config is not None:
+        draft_master_port = args.weight_cache_draft_master_port or (
+            master_port + 1 if nnodes > 1 else get_open_port()
+        )
+        if draft_master_port == master_port:
+            raise ValueError(
+                "--weight-cache-draft-master-port must differ from "
+                "--weight-cache-master-port"
+            )
+        groups.append(
+            (
+                True,
+                draft_vllm_config,
+                get_distributed_init_method(master_addr, draft_master_port),
+            )
+        )
+
     ctx = multiprocessing.get_context("spawn")
-    ready_queue: multiprocessing.Queue[int] = ctx.Queue()
+    ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
     # Global TP rank of local GPU i on this node; local index == device index.
     global_ranks = [
         node_rank * local_world_size + local_rank
         for local_rank in range(local_world_size)
     ]
+    expected_ready = {
+        (format_daemon_role(is_draft), global_rank)
+        for (is_draft, _, _), global_rank in product(groups, global_ranks)
+    }
     procs = [
         ctx.Process(
             target=_run_daemon,
             args=(
                 global_rank,
                 local_rank,
-                vllm_config,
-                distributed_init_method,
+                config,
+                init_method,
                 args.weight_cache_socket_dir,
                 ready_queue,
+                is_draft,
             ),
-            name=f"vllm-weight-cache-daemon-{global_rank}",
+            name=f"vllm-weight-cache-{format_daemon_role(is_draft)}-{global_rank}",
         )
-        for local_rank, global_rank in enumerate(global_ranks)
+        for (is_draft, config, init_method), (local_rank, global_rank) in product(
+            groups, enumerate(global_ranks)
+        )
     ]
     for proc in procs:
         proc.start()
@@ -433,10 +524,10 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    ready_ranks: set[int] = set()
-    while len(ready_ranks) < local_world_size:
+    ready: set[tuple[str, int]] = set()
+    while len(ready) < len(expected_ready):
         try:
-            ready_ranks.add(ready_queue.get(timeout=1.0))
+            ready.add(ready_queue.get(timeout=1.0))
         except queue.Empty:
             dead = [p for p in procs if p.exitcode is not None]
             if dead:
@@ -453,10 +544,11 @@ def main() -> None:
     socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
     logger.info_once(
         "===== Weight cache daemon READY: node %d/%d serving %d local rank(s) "
-        "in %s =====",
+        "x %d role(s) in %s =====",
         node_rank,
         nnodes,
         local_world_size,
+        len(groups),
         socket_dir_msg,
     )
 

@@ -22,10 +22,17 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.config import HiSparseConfig, SpeculativeConfig, set_current_vllm_config
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+from vllm.config import (
+    CUDAGraphMode,
+    HiSparseConfig,
+    SpeculativeConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import mla_attention
 from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
@@ -238,8 +245,8 @@ def _dequantize_fp8_ds_mla_entry(
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion path.
-    """
 
+    """
     # The first kv_lora_rank bytes store FP8 latent values with one scale per
     # 128 element tile written as float32 right after the latent payload.
     scales = cache_slice.view(torch.float32)[kv_lora_rank // 4 : kv_lora_rank // 4 + 4]
@@ -276,8 +283,8 @@ def _quantize_dequantize_fp8_ds_mla(
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion in dequantization.
-    """
 
+    """
     if kv_c.numel() == 0:
         return kv_c.clone(), k_pe.clone()
 
@@ -414,7 +421,18 @@ def test_sparse_backend_decode_correctness(
     workspace_init,
     q_scale: float,
     k_scale: float,
+    monkeypatch,
 ):
+    if (
+        batch_name == "large_q_pure_prefill"
+        and backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype == "fp8_ds_mla"
+        and tensor_parallel_size == 4
+    ):
+        monkeypatch.setattr(
+            "vllm.v1.attention.backends.mla.flashmla_sparse.split_prefill_chunks",
+            lambda rows, capacity: [(i, i + 1) for i in range(len(rows))],
+        )
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
@@ -767,6 +785,10 @@ def test_sparse_backend_decode_correctness(
     )
 
     with torch.inference_mode():
+        if backend_cls == FlashMLASparseBackend and kv_cache_dtype == "fp8_ds_mla":
+            from vllm.v1.worker.workspace import current_workspace_manager
+
+            current_workspace_manager().lock()
         backend_output = mock_layer.forward_impl(
             query_vllm,
             kv_c_vllm,
@@ -895,6 +917,75 @@ def test_triton_convert_req_index_to_global_index_decode_only(
     )
 
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
+
+
+def test_index_group_convert_during_piecewise_capture():
+    """In piecewise cudagraph mode the indexer is captured while the convert
+    runs in the following eager break. The convert's side stream must not
+    wait on ``logical_topk_ready`` there: an event recorded inside a captured
+    segment is graph-local, and an eager wait on it raises
+    cudaErrorInvalidValue."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens, num_topk, num_requests, blocks_per_req, block_size = 8, 128, 4, 4, 16
+
+    logical_topk_indices = torch.randint(
+        0,
+        block_size * blocks_per_req,
+        (num_tokens, num_topk),
+        dtype=torch.int32,
+        device=device,
+    )
+    builder = SparseMLAIndexGroupBuilder(logical_topk_indices)
+    group, layer_index = builder.register_layer(is_index_producing_layer=True)
+    assert layer_index == 0 and group.has_indexer
+
+    req_id = torch.arange(num_tokens, dtype=torch.int32, device=device) % num_requests
+    block_table = torch.arange(
+        num_requests * blocks_per_req, dtype=torch.int32, device=device
+    ).view(num_requests, blocks_per_req)
+    attn_metadata = SimpleNamespace(
+        req_id_per_token=req_id, block_table=block_table, block_size=block_size
+    )
+    expected = triton_convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        logical_topk_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk,
+    )
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    marker = torch.zeros(1, device=device)
+    capture_stream = torch.cuda.Stream(device=device)
+    # torch.cuda.stream routes through vLLM's patched torch.cuda.set_stream,
+    # so current_stream() tracks the capture stream as in production.
+    with (
+        torch.cuda.stream(capture_stream),
+        set_forward_context(
+            None, vllm_config, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+        ),
+    ):
+        capture = BreakableCUDAGraphCapture()
+        with capture:
+            marker.add_(1)
+            # Record inside a captured segment, convert in the eager
+            # break — mirrors mla.py -> unified_mla_attention_with_output.
+            group.set_logical_topk_ready(layer_index)
+            capture.add_eager(
+                lambda: group.convert_logical_to_physical_topk(
+                    layer_index,
+                    logical_topk_indices,
+                    attn_metadata,
+                    block_stride_rows=None,
+                    return_valid_counts=False,
+                )
+            )
+            marker.add_(1)
+        capture.replay()
+        capture_stream.synchronize()
+
+    result = group.physical_topk_indices[:num_tokens]
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -1572,10 +1663,12 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
-# 384 is not a power of two, so it counts via the tiled atomic accumulation
-# rather than the single-tile path 128 takes.
-@pytest.mark.parametrize("num_topk_tokens", [128, 384])
-def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
+# Power-of-two, GLM's padded tile, and atomic fallback, with reused buffers.
+@pytest.mark.parametrize(
+    "num_topk_tokens,reuse_buffers",
+    [(128, False), (2176, False), (2176, True), (4224, False), (4224, True)],
+)
+def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers: bool):
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device(DEVICE_TYPE)
     num_tokens = 8
@@ -1588,8 +1681,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         num_requests * max_blocks_per_req, dtype=torch.int32, device=device
     ).view(num_requests, max_blocks_per_req)
 
-    # Create token indices with varying numbers of valid entries: half the row,
-    # a quarter of it, the whole row, then a single valid entry -- twice over.
+    # Include partly valid, fully valid, and empty selections for each request.
     token_indices = torch.full(
         (num_tokens, num_topk_tokens), -1, dtype=torch.int32, device=device
     )
@@ -1597,7 +1689,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         num_topk_tokens // 2,
         num_topk_tokens // 4,
         num_topk_tokens,
-        1,
+        0,
     ] * 2
     expected_valid = []
     for i in range(num_tokens):
@@ -1611,6 +1703,15 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         expected_valid, dtype=torch.int32, device=device
     )
 
+    buffers = {}
+    if reuse_buffers:
+        buffers = dict(
+            out=torch.full_like(token_indices, -99),
+            valid_counts_out=torch.full(
+                (num_tokens,), 99, dtype=torch.int32, device=device
+            ),
+        )
+
     # Test with return_valid_counts=True
     result, valid_counts = triton_convert_req_index_to_global_index(
         req_id,
@@ -1619,6 +1720,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         BLOCK_SIZE=block_size,
         NUM_TOPK_TOKENS=num_topk_tokens,
         return_valid_counts=True,
+        **buffers,
     )
 
     torch.testing.assert_close(valid_counts, expected_valid_tensor, rtol=0, atol=0)

@@ -32,7 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsCrossEncoding
+from .interfaces import SupportsCrossEncoding, SupportsLoRA
 from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
@@ -262,7 +262,7 @@ class ModernBertEncoderLayer(nn.Module):
 
 @support_torch_compile
 @default_pooling_type(seq_pooling_type="CLS")
-class ModernBertModel(nn.Module):
+class ModernBertModel(nn.Module, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.layers.": "encoder_layer.layers.",
@@ -270,6 +270,11 @@ class ModernBertModel(nn.Module):
             "model.": "",
         }
     )
+
+    packed_modules_mapping = {
+        "Wqkv": ["Wqkv"],
+        "Wi": ["Wi"],
+    }
 
     def __init__(
         self,

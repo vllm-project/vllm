@@ -172,8 +172,8 @@ def _init_kv_cache_quant(
         layer: The attention layer instance to initialize.
         quant_config: Optional quantization configuration.
         prefix: Layer name prefix for quantization method lookup.
-    """
 
+    """
     # Note [Register q/k/v/prob scales in state dict]
     # When calling model.to(device), only parameters/buffers in state dict are
     # moved. If not registering q/k/v/prob scales in state dict, there would
@@ -260,8 +260,7 @@ class Attention(nn.Module, AttentionLayerBase):
         head_size_v: int | None = None,
         **extra_impl_args,
     ) -> None:
-        """
-        The KV cache is stored inside this class and is accessed via
+        """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
         """
         super().__init__()
@@ -499,8 +498,7 @@ class Attention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        """
-        The KV cache is stored inside this class and is accessed via
+        """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
 
         Attention metadata (`attn_metadata`) is set using a context manager in
@@ -701,6 +699,7 @@ def get_attention_context(
 
         Note: attn_metadata may be None, but attn_layer and kv_cache are always
         extracted from the forward context.
+
     """
     forward_context: ForwardContext = get_forward_context()
     attn_metadata_raw = forward_context.attn_metadata
@@ -728,8 +727,7 @@ def unified_kv_cache_update(
     value: torch.Tensor,
     layer_name: LayerNameType,
 ) -> torch.Tensor:
-    """
-    Returns a dummy that is passed to unified_attention to signal a side effect and
+    """Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
