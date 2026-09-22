@@ -2851,7 +2851,7 @@ def test_empty_recv_is_reported_only_when_awaited(
     request is named in neither _recving_transfers nor _failed_recv_reqs and
     never reaches finished_recving. The scheduler has no other way to release a
     WAITING_FOR_REMOTE_KVS request, and there is no timeout, so it sits in
-    skipped_waiting holding its blocks for the life of the process.
+    async_load_waiting holding its blocks for the life of the process.
 
     Notify-only (awaiting_kvs=False): request_finished seeding an empty recv to
     free P's blocks for a request aborted before it was scheduled, or a readback
