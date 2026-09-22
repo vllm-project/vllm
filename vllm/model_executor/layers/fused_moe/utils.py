@@ -453,35 +453,6 @@ def normalize_batched_scales_shape(
     return scales
 
 
-@triton.jit
-def _pack_topk_ids_weights_kernel(
-    topk_ids_ptr,
-    topk_weights_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    USE_GDC: tl.constexpr,
-    launch_pdl: tl.constexpr,  # triton metadata
-):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
-        tl.extra.cuda.gdc_wait()
-    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    expert_id_shifted = expert_id << 16
-
-    weight = tl.load(topk_weights_ptr + offsets, mask=mask, other=0.0)
-    weight_bf16 = weight.to(tl.bfloat16)
-    weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
-
-    weight_int32 = weight_int16.to(tl.int32) & 0xFFFF
-
-    packed = expert_id_shifted | weight_int32
-    tl.store(output_ptr + offsets, packed, mask=mask)
-
-
 def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     """Estimate FlashInfer's MoE autotuning maximum token count.
 
