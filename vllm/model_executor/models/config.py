@@ -340,6 +340,16 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
         """
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+        model_config = vllm_config.model_config
+        if not model_config.is_diffusion:
+            if vllm_config.diffusion_config is not None:
+                raise ValueError(
+                    "Nemotron AR mode cannot be combined with --diffusion-config."
+                )
+            if "max_new_tokens" not in model_config.override_generation_config:
+                model_config.override_generation_config["max_new_tokens"] = None
+            return
+
         attention_config = vllm_config.attention_config
         if attention_config.backend == AttentionBackendEnum.FLASHINFER:
             raise ValueError(
@@ -1098,6 +1108,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
+    "NemotronLabsDiffusionForCausalLM": NemotronLabsDiffusionForBlockDiffusionConfig,
     "NemotronLabsDiffusionModel": NemotronLabsDiffusionForBlockDiffusionConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,

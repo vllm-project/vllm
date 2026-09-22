@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Nemotron Labs Diffusion: causal prefill/commit and masked block denoising."""
+"""Nemotron Labs Diffusion: masked block denoising or causal AR generation."""
 
 from __future__ import annotations
 
@@ -157,8 +157,11 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    @staticmethod
-    def get_model_state_cls():
+    def get_model_state_cls(self):
+        if self.ar_mode:
+            from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+            return DefaultModelState
         return NemotronLabsDiffusionModelState
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -166,6 +169,7 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.ar_mode = not vllm_config.model_config.is_diffusion
 
         self.model = LlamaModel(
             vllm_config=vllm_config,

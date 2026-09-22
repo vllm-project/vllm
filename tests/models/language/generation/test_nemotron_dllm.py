@@ -75,7 +75,9 @@ def test_attention_backend_supports_mixed_causality(flash_version):
         SimpleNamespace(
             attention_config=attention,
             model_config=SimpleNamespace(
-                hf_config=NemotronLabsDiffusionConfig(), override_generation_config={}
+                hf_config=NemotronLabsDiffusionConfig(),
+                override_generation_config={},
+                is_diffusion=True,
             ),
             diffusion_config=None,
             scheduler_config=None,
@@ -89,6 +91,77 @@ def test_attention_backend_supports_mixed_causality(flash_version):
     else:
         NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(config)
         assert attention.backend == AttentionBackendEnum.TRITON_ATTN
+
+
+@pytest.mark.parametrize(
+    "architecture,ar_mode,expected",
+    [
+        ("NemotronLabsDiffusionModel", False, True),
+        ("NemotronLabsDiffusionModel", True, False),
+        ("NemotronLabsDiffusionForCausalLM", False, False),
+        ("LLaDAModelLM", True, True),
+    ],
+)
+def test_ar_mode_diffusion_detection(architecture, ar_mode, expected):
+    from types import SimpleNamespace
+    from typing import cast
+
+    from vllm.config import ModelConfig
+    from vllm.config.model_arch import ModelArchitectureConfig
+
+    # A canvas remains in the checkpoint config even when serving AR. The
+    # scheduler must ignore it only for the Nemotron AR selectors.
+    config = object.__new__(ModelConfig)
+    config.hf_config = SimpleNamespace(canvas_length=32, ar_mode=ar_mode)
+    config.model_arch_config = cast(
+        ModelArchitectureConfig, SimpleNamespace(architectures=[architecture])
+    )
+    assert config.is_diffusion is expected
+
+
+@pytest.mark.parametrize("explicit_diffusion_config", [False, True])
+def test_ar_mode_config(explicit_diffusion_config):
+    from types import SimpleNamespace
+    from typing import cast
+
+    from vllm.config import VllmConfig
+    from vllm.config.attention import AttentionConfig
+    from vllm.config.diffusion import DiffusionConfig
+    from vllm.config.scheduler import SchedulerConfig
+    from vllm.model_executor.models.config import (
+        NemotronLabsDiffusionForBlockDiffusionConfig,
+    )
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    # AR permits FA3 and keeps ordinary scheduler concurrency defaults.
+    attention = AttentionConfig(
+        backend=AttentionBackendEnum.FLASH_ATTN, flash_attn_version=3
+    )
+    scheduler = SimpleNamespace(max_num_seqs=SchedulerConfig.DEFAULT_MAX_NUM_SEQS)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            attention_config=attention,
+            model_config=SimpleNamespace(
+                is_diffusion=False, override_generation_config={}
+            ),
+            diffusion_config=(
+                DiffusionConfig(canvas_length=32) if explicit_diffusion_config else None
+            ),
+            scheduler_config=scheduler,
+        ),
+    )
+    if explicit_diffusion_config:
+        with pytest.raises(ValueError, match="AR mode cannot be combined"):
+            NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
+                config
+            )
+    else:
+        NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(config)
+        assert config.diffusion_config is None
+        assert attention.flash_attn_version == 3
+        assert scheduler.max_num_seqs == SchedulerConfig.DEFAULT_MAX_NUM_SEQS
+        assert config.model_config.override_generation_config["max_new_tokens"] is None
 
 
 def test_diffusion_config_temperature():
@@ -544,3 +617,95 @@ def test_stochastic_rollouts(monkeypatch):
             lp = entry[tid]
             assert lp.rank is not None
             assert lp.logprob <= 1e-6 and lp.rank >= 1
+
+
+def _assert_ar_runner(obj):
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+    from vllm.v1.worker.gpu.sample.sampler import Sampler
+
+    runner = getattr(obj, "worker", obj).model_runner
+    assert type(runner.model_state) is DefaultModelState
+    assert type(runner.sampler) is Sampler
+
+
+@requires_gpu
+@requires_weights
+@pytest.mark.parametrize(
+    "hf_overrides",
+    [
+        {"ar_mode": True},
+        {"architectures": ["NemotronLabsDiffusionForCausalLM"]},
+    ],
+    ids=["ar_mode", "causal_architecture"],
+)
+def test_ar_logits_and_generation(monkeypatch, hf_overrides):
+    """Both AR selectors use causal HF logits and ordinary cached generation."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    from vllm import LLM, SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.inputs import TokensPrompt
+
+    tok, hf = _load_hf()
+    prompt = _prompt_ids(tok)
+    with torch.inference_mode():
+        # Native AR generation disables diffusion_lm on the HF attention
+        # layers; otherwise they discard even an explicitly causal mask.
+        hf_output, _ = hf.ar_generate(prompt, max_new_tokens=16, temperature=0.0)
+        hf_logits = hf(prompt, use_causal_mask=True).logits[0].float().cpu()
+    hf_tokens = hf_output[0, prompt.shape[1] :].tolist()
+    del hf
+    torch.accelerator.empty_cache()
+
+    llm = LLM(
+        model=MODEL_PATH,
+        hf_overrides=hf_overrides,
+        attention_config={"backend": "TRITON_ATTN"},
+        trust_remote_code=True,
+        enforce_eager=True,
+        max_model_len=MAX_MODEL_LEN,
+        gpu_memory_utilization=0.6,
+    )
+    try:
+        config = llm.llm_engine.vllm_config
+        assert not config.model_config.is_diffusion
+        assert config.diffusion_config is None
+        assert config.speculative_config is None
+        llm.llm_engine.collective_rpc(_assert_ar_runner)
+        prompt_ids = prompt[0].tolist()
+        vllm_logits = llm.llm_engine.collective_rpc(
+            partial(_vllm_manual_forward, token_ids=prompt_ids, causal_flag=True)
+        )[0]
+        # Compare every prompt position, so a bidirectional prefill cannot pass
+        # by agreeing only on the last position.
+        torch.testing.assert_close(vllm_logits[1:], hf_logits[1:], atol=0.6, rtol=0.0)
+        # BF16 kernel differences accumulate most on the BOS-only prefix
+        # (observed max 0.71); retain a bound there too.
+        torch.testing.assert_close(vllm_logits[0], hf_logits[0], atol=1.0, rtol=0.0)
+        assert vllm_logits[-1].argmax() == hf_logits[-1].argmax()
+
+        greedy = llm.generate(
+            TokensPrompt(prompt_token_ids=prompt_ids),
+            SamplingParams(temperature=0.0, max_tokens=16, logprobs=0),
+        )[0].outputs[0]
+        assert list(greedy.token_ids) == hf_tokens
+        assert greedy.logprobs is not None
+        # A fractional request temperature is legal for AR (diffusion accepts
+        # only the 0/1 selector). Exercise normal sampling and logprobs as well.
+        sampled = llm.generate(
+            [TokensPrompt(prompt_token_ids=prompt_ids)] * 2,
+            SamplingParams(
+                temperature=0.7, top_p=0.9, top_k=20, max_tokens=8, logprobs=0
+            ),
+        )
+        for output in sampled:
+            completion = output.outputs[0]
+            assert 0 < len(completion.token_ids) <= 8
+            assert completion.logprobs is not None
+            assert len(completion.logprobs) == len(completion.token_ids)
+            for token_id, entry in zip(completion.token_ids, completion.logprobs):
+                assert entry is not None
+                assert entry[token_id].logprob <= 1e-6
+    finally:
+        del llm
+        cleanup_dist_env_and_memory()
