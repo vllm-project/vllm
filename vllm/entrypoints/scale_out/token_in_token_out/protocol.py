@@ -340,6 +340,43 @@ class GenerateRequest(BaseModel):
         )
 
 
+class GenerateLogProb(BaseModel):
+    """A single (token, logprob) candidate on the generate wire protocol.
+
+    Unlike the OpenAI logprob shapes this carries the integer token id: the
+    generate server has no tokenizer, so decoding to a string belongs in
+    derender (or the coupled chat/completions path), not here.
+    """
+
+    token_id: int
+    # Matches the OpenAI shapes' sentinel for "no candidate was returned for
+    # this position", which the server emits when the sampled token is absent
+    # from the engine's top-k map.
+    logprob: float = -9999.0
+    rank: int | None = None
+
+
+class GenerateLogProbsContent(GenerateLogProb):
+    """The sampled token at one position, plus its top-k candidates.
+
+    ``top_logprobs`` is a list in rank order (rank 1 first), not a dict: JSON
+    turns dict keys into strings and the order would be implicit.
+    """
+
+    top_logprobs: list[GenerateLogProb] = []
+
+
+class GenerateLogProbs(BaseModel):
+    """Output logprobs for one choice.
+
+    ``content`` holds one entry per generated token. ``content=None`` is the
+    normal state when no per-token candidates were requested; it is not an
+    error.
+    """
+
+    content: list[GenerateLogProbsContent] | None = None
+
+
 class GenerateChoiceBase(BaseModel):
     """Fields shared by every `output_mode` of a non-streaming choice."""
 
@@ -368,8 +405,8 @@ class GenerateChoiceBase(BaseModel):
 
 
 class GenerateTokensChoice(GenerateChoiceBase):
-    logprobs: ChatCompletionLogProbs | None = None
-    """Logprobs whose tokens are `token_id:N` placeholders."""
+    logprobs: GenerateLogProbs | None = None
+    """Logprobs with integer token ids (no tokenizer on the generate server)."""
 
 
 class GenerateTextChoice(GenerateChoiceBase):
@@ -393,7 +430,7 @@ class GenerateStreamChoiceBase(BaseModel):
 
 
 class GenerateTokensStreamChoice(GenerateStreamChoiceBase):
-    logprobs: ChatCompletionLogProbs | None = None
+    logprobs: GenerateLogProbs | None = None
 
 
 class GenerateTextStreamChoice(GenerateStreamChoiceBase):
