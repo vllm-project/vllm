@@ -32,6 +32,10 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.aux_output_connector.worker import (
+    AuxOutputWorkerConnector,
+    get_aux_output_connector,
+)
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -39,10 +43,6 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
-    bind_routed_experts_capturer,
-)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -57,7 +57,6 @@ from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
-    get_dummy_encoder_profile_inputs,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -74,7 +73,6 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
     ModelRunnerOutput,
-    RoutedExpertsTensors,
 )
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -144,6 +142,7 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
     all_to_all_logits,
     gather_sampler_output,
 )
+from vllm.v1.worker.gpu.sample.logits_processor import build_custom_logits_processors
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -258,9 +257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            self.model_config
-        )
+        self.supports_mm_inputs = self.model_config.supports_multimodal_inputs
         self.uses_inputs_embeds = (
             self.supports_mm_inputs or self.model_config.enable_prompt_embeds
         )
@@ -348,22 +345,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        self.routed_experts_capturer: RoutedExpertsCapturer | None = None
+        # The AuxOutput Connector owns R3 capture, copying, and storage.
+        self.aux_output_connector: AuxOutputWorkerConnector | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
-
-    def init_routed_experts_capturer(self) -> None:
-        """Initialize target-model capture on every participating worker."""
-        self.routed_experts_capturer = RoutedExpertsCapturer(
-            max_num_batched_tokens=self.max_num_tokens,
-            vllm_config=self.vllm_config,
-            kv_cache_config=self.kv_cache_config,
-        )
-        bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -448,8 +437,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         # Initialize samplers. Model states may override via custom_sampler().
+        config_processors = self.model_config.logits_processors or ()
+        custom_logits_processors = build_custom_logits_processors(
+            self.vllm_config, self.req_states, self.is_pooling_model, config_processors
+        )
         if self.is_last_pp_rank and not self.is_pooling_model:
             sampler_kwargs: dict[str, Any] = {
+                "vllm_config": self.vllm_config,
                 "max_num_reqs": self.max_num_reqs,
                 "vocab_size": self.vocab_size,
                 "device": self.device,
@@ -458,8 +452,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "num_speculative_tokens": self.decode_query_len,
                 "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
                 "enable_trace_replay": self.model_config.enable_trace_replay,
-                "reasoning_config": self.vllm_config.reasoning_config,
                 "return_sampling_mask": self.model_config.return_sampling_mask,
+                "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
                 self.sampler = Sampler(**sampler_kwargs)
@@ -751,6 +745,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
+            # AuxOutput connector requires resolved kv_cache_config.
+            if self.vllm_config.aux_output_config.enabled:
+                self.aux_output_connector = get_aux_output_connector(
+                    self.model, self.vllm_config, kv_cache_config
+                )
+
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
         self.kv_block_zeroer = KVBlockZeroer(
@@ -790,6 +790,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
+        elif self.speculator is not None:
+            num_reqs = min(
+                num_reqs,
+                self.max_num_tokens // self.speculator.num_query_per_req,
+            )
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
         num_tokens_per_request = [
@@ -935,10 +940,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.mm_registry,
                     enable_cache=False,
                 )
-                dummy_mm_inputs = get_dummy_encoder_profile_inputs(
-                    self.mm_registry,
-                    mm_budget,
-                )
+                dummy_mm_inputs = mm_budget.get_dummy_encoder_profile_inputs()
                 self.model_state.encoder_runner.profile_encoder_cache(
                     dummy_mm_inputs, mm_budget
                 )
@@ -1151,9 +1153,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.is_last_pp_rank and new_req_data.sampling_params is not None:
                 assert self.sampler is not None
-                self.sampler.add_request(
-                    req_index, prompt_len, new_req_data.sampling_params
-                )
+                self.sampler.add_request(req_index, new_req_data.sampling_params)
                 assert self.prompt_logprobs_worker is not None
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
@@ -1258,21 +1258,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_toks, max_query_len, batch_state.has_prefill
         )
 
+    def _prepare_padding_mask(
+        self, num_tokens: int, num_tokens_after_padding: int
+    ) -> torch.Tensor:
+        is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
+        is_padding[:num_tokens].fill_(False)
+        is_padding[num_tokens:].fill_(True)
+        return is_padding
+
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
         batch_req_state: "BatchReqState",
         batch_desc: BatchExecutionDescriptor,
+        num_active_loras: int,
     ) -> InputBatch:
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
+        is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
         if envs.VLLM_MOE_SKIP_PADDING:
-            # Mark trailing cudagraph-padding rows so kernels can skip work for
-            # them when supported.
-            is_padding = self.input_buffers.is_padding
-            is_padding[:num_tokens].fill_(False)
-            is_padding[num_tokens:num_tokens_after_padding].fill_(True)
+            is_padding = self._prepare_padding_mask(
+                num_tokens, num_tokens_after_padding
+            )
 
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
@@ -1283,7 +1291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
-        if not draft_tokens:
+        if not draft_tokens and self.model_state.num_new_sampled_tokens_per_step == 1:
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
@@ -1314,9 +1322,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
 
-        adaptive_verification = (
-            self.adaptive_verification if num_draft_tokens_per_req is not None else None
-        )
+        # The general branch also serves a no-draft batch with k != 1, and
+        # compact_batch's budget is only primed when drafts are scheduled.
+        adaptive_verification = self.adaptive_verification if draft_tokens else None
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
         if adaptive_verification is not None:
             # num_scheduled_tokens represents the draft budget evenly distributed across
@@ -1346,7 +1354,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
-        if draft_tokens:
+        if num_draft_tokens_per_req is not None:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
             )
@@ -1398,6 +1406,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_logits_np,
                 batch_req_state.has_prefill,
                 batch_desc,
+                num_active_loras=num_active_loras,
             )
 
         # CPU upper bound on seq_lens; padded entries left at zero.
@@ -1440,7 +1449,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_prefill=batch_req_state.has_prefill,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -1525,7 +1534,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
-        if grammar_output is not None:
+        # A diffusion prefill has no logit rows even when a bitmask row
+        # arrived for it.
+        if grammar_output is not None and logits.shape[0] > 0:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
             self.structured_outputs_worker.apply_grammar_bitmask(
@@ -1637,6 +1648,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
+            if self.aux_output_connector is not None:
+                # Register this step before the GPU forward.
+                self.aux_output_connector.begin_step(
+                    scheduler_output.aux_output_connector_metadata
+                )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -1703,7 +1719,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cudagraph_stats = make_cudagraph_stats(batch_desc, num_toks)
             assert batch_req_state is not None
             input_batch = self.prepare_inputs(
-                scheduler_output, batch_req_state, batch_desc
+                scheduler_output, batch_req_state, batch_desc, num_active_loras
             )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
@@ -1733,6 +1749,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
+                # Profiling and warmup must route the dummy tokens to experts
+                # so MoE memory is measured and MoE kernels are exercised.
+                is_padding=not is_profile,
             )
             if self.pcp_manager is not None:
                 input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
@@ -1955,11 +1974,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
-        routed_experts = None
-        if not dummy_run and (capturer := self.routed_experts_capturer) is not None:
-            assert slot_mappings is not None
-            routed_experts = capturer.get_routed_experts(slot_mappings, num_toks)
-
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
@@ -1970,7 +1984,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             dp_sync=dp_sync,
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
-            routed_experts=routed_experts,
             cudagraph_stats=cudagraph_stats,
         )
 
@@ -2000,7 +2013,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dp_sync = self.execute_model_state.dp_sync
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
-        routed_experts = self.execute_model_state.routed_experts
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         self.execute_model_state = None
 
@@ -2069,6 +2081,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             cudagraph_stats=cudagraph_stats,
         )
+        pending_aux_output = None
+        if self.aux_output_connector is not None:
+            pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
+
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
@@ -2077,7 +2093,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
-            routed_experts=routed_experts,
+            pending_aux_output=pending_aux_output,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -2230,8 +2246,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.close()
         self.cudagraph_manager = None
         self.fast_prefill = None
+        self.pooling_runner = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
@@ -2302,7 +2321,6 @@ class ExecuteModelState(NamedTuple):
     dp_sync: DPSyncState | None
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
-    routed_experts: RoutedExpertsTensors | None
     cudagraph_stats: CUDAGraphStat | None
 
 
