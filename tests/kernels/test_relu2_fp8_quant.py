@@ -8,7 +8,10 @@ from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.vllm import OptimizationLevel
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    InputQuantScales,
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -23,10 +26,13 @@ requires_sm90 = pytest.mark.skipif(
 
 
 class _StaticFp8Linear(torch.nn.Module):
-    def __init__(self, input_scale: torch.Tensor) -> None:
+    def __init__(self, input_scale: torch.Tensor | None) -> None:
         super().__init__()
         self._input_quant_key = kFp8StaticTensorSym
-        self.input_scale = input_scale
+        self.activation_scale = input_scale
+        self._input_quant_scales = lambda layer: InputQuantScales(
+            static_scale=layer.activation_scale
+        )
 
 
 def _assert_fp8_bitwise_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
@@ -165,7 +171,7 @@ def test_relu2_static_fp8_quant_empty(o2_relu2_fp8_ops) -> None:
 
 
 @requires_sm90
-@pytest.mark.parametrize("unsupported", ["dtype", "layout", "scale"])
+@pytest.mark.parametrize("unsupported", ["dtype", "layout", "scale", "missing_scale"])
 @torch.inference_mode()
 def test_relu2_static_fp8_quant_falls_back(o2_relu2_fp8_ops, unsupported: str) -> None:
     x = torch.randn((17, 32), device="cuda", dtype=torch.bfloat16)
@@ -174,6 +180,8 @@ def test_relu2_static_fp8_quant_falls_back(o2_relu2_fp8_ops, unsupported: str) -
         x = x.to(torch.float16)
     elif unsupported == "layout":
         x = x.T
+    elif unsupported == "missing_scale":
+        scale = None
     else:
         scale = scale.to(torch.float16)
 

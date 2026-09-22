@@ -155,7 +155,7 @@ def _relu_squared_static_fp8_quant_supported(
     linear: LinearBase,
 ) -> bool:
     """Return whether the ReLU2 static-FP8 producer can consume this input."""
-    scale = getattr(linear, "input_scale", None)
+    scale = get_input_quant_scales(linear).static_scale
     return (
         isinstance(act_fn, ReLUSquaredActivation)
         and x.is_cuda
