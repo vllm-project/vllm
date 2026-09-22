@@ -36,6 +36,7 @@ from vllm.model_executor.kernels.linear.mxfp8.marlin import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -92,6 +93,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     kMxfp8Dynamic,
+    kNvfp4DynamicToken,
+    kNvfp4Static,
     weight_amax,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -508,64 +511,33 @@ def test_nvfp4_per_token_backend_contract() -> None:
     from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
         BatchedMarlinExperts,
     )
-    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
-        TrtLlmNvFp4ExpertsModular,
-        TrtLlmNvFp4ExpertsMonolithic,
-    )
-    from vllm.model_executor.layers.fused_moe.modular_kernel import (
-        FusedMoEActivationFormat,
-    )
-    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-        NvFp4MoeBackend,
-        backend_to_kernel_cls,
-    )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kNvfp4DynamicToken,
-        kNvfp4Static,
-    )
 
     scheme = (kNvfp4Static, kNvfp4DynamicToken)
-    for backend in NvFp4MoeBackend:
-        for experts_cls in backend_to_kernel_cls(backend):
-            expected = backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+    for backend in nvfp4_oracle.NvFp4MoeBackend:
+        for experts_cls in nvfp4_oracle.backend_to_kernel_cls(backend):
+            expected = backend == nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM
             assert experts_cls._supports_quant_scheme(*scheme) == expected, experts_cls
+            if expected:
+                supported, reason = experts_cls.is_supported_config(
+                    experts_cls,
+                    SimpleNamespace(is_act_and_mul=False),
+                    *scheme,
+                    experts_cls.activation_format(),
+                )
+                assert not supported
+                assert reason is not None and "non-gated" in reason
     assert not BatchedMarlinExperts._supports_quant_scheme(*scheme)
-
-    for experts_cls in (
-        TrtLlmNvFp4ExpertsMonolithic,
-        TrtLlmNvFp4ExpertsModular,
-    ):
-        supported, reason = experts_cls.is_supported_config(
-            experts_cls,
-            SimpleNamespace(is_act_and_mul=False),
-            *scheme,
-            FusedMoEActivationFormat.Standard,
-        )
-        assert not supported
-        assert reason == (
-            "kernel does not support per-token NVFP4 activation scaling "
-            "for non-gated MoE"
-        )
 
 
 @pytest.mark.parametrize("backend", ["auto", "marlin", "b12x"])
 def test_nvfp4_per_token_rejects_unsupported_backends(monkeypatch, backend) -> None:
     """Neither fallback nor the B12X A16 override may discard per-token scaling."""
     from tests.kernels.moe.utils import make_dummy_moe_config
-    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-        NvFp4MoeBackend,
-        backend_to_kernel_cls,
-        select_nvfp4_moe_backend,
-    )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kNvfp4DynamicToken,
-        kNvfp4Static,
-    )
 
-    for candidate in NvFp4MoeBackend:
-        for experts_cls in backend_to_kernel_cls(candidate):
+    for candidate in nvfp4_oracle.NvFp4MoeBackend:
+        for experts_cls in nvfp4_oracle.backend_to_kernel_cls(candidate):
             # Exercise scheme rejection independently of installed GPU kernels.
-            available = candidate != NvFp4MoeBackend.FLASHINFER_TRTLLM
+            available = candidate != nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM
             monkeypatch.setattr(
                 experts_cls, "_supports_current_device", lambda v=available: v
             )
@@ -575,7 +547,7 @@ def test_nvfp4_per_token_rejects_unsupported_backends(monkeypatch, backend) -> N
     error = NotImplementedError if backend == "auto" else ValueError
     reason = "No NvFp4 MoE backend" if backend == "auto" else "quantization scheme"
     with pytest.raises(error, match=reason):
-        select_nvfp4_moe_backend(config, kNvfp4Static, kNvfp4DynamicToken)
+        nvfp4_oracle.select_nvfp4_moe_backend(config, kNvfp4Static, kNvfp4DynamicToken)
 
 
 @pytest.mark.skipif(

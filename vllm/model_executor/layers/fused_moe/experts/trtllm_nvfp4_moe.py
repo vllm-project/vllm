@@ -239,10 +239,7 @@ class TrtLlmNvFp4ExpertsBase:
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
-        if (weight_key, activation_key) == (
-            kNvfp4Static,
-            kNvfp4DynamicToken,
-        ) and not moe_config.is_act_and_mul:
+        if activation_key == kNvfp4DynamicToken and not moe_config.is_act_and_mul:
             return False, (
                 "kernel does not support per-token NVFP4 activation scaling "
                 "for non-gated MoE"
@@ -350,11 +347,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         workspace1 = (0,)
         workspace2 = (0,)
 
-        # Static-global inputs arrive packed as uint8 (two FP4 values per
-        # byte). Per-token inputs remain BF16 until _invoke_kernel computes the
-        # row scale and quantizes them, so K is already the logical hidden dim.
-        expected_hidden_dim = K if self.expects_unquantized_inputs else K * 2
-        assert self.hidden_dim == expected_hidden_dim
+        # Per-token inputs are unpacked; otherwise each byte holds two FP4 values.
+        assert self.hidden_dim == (K if self.expects_unquantized_inputs else K * 2)
         output = (M, self.hidden_dim)
 
         return (workspace1, workspace2, output)
