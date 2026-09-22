@@ -780,7 +780,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "skip_attn must only be True for initial memory profiling."
             )
 
-        # Create a dummy scheduler output.
+        # Create a dummy scheduler output. Plain draft-model speculation adds
+        # one correction slot per request during prefill. The scheduler
+        # accounts for these slots, while dummy runs bypass the scheduler.
+        # Adjust the dummy token count only when the expanded draft batch
+        # would exceed the token budget.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
             # HACK(lucas): for now since the worker is shared between MRV1 and MRV2,
@@ -792,6 +796,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert num_tokens % self.decode_query_len == 0
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        if (
+            self.speculator is not None
+            and self.speculator.method == "draft_model"
+            and not uniform_decode
+        ):
+            reserved_draft_tokens = num_reqs
+            if num_tokens + reserved_draft_tokens > self.max_num_tokens:
+                num_tokens = self.max_num_tokens - reserved_draft_tokens
+
         num_tokens_per_request = [
             num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
             for i in range(num_reqs)
