@@ -128,6 +128,7 @@ class Mxfp4Config(QuantizationConfig):
             from vllm.model_executor.layers.quantization.compressed_tensors.utils import (  # noqa: E501
                 find_matched_target,
             )
+
             extra = [
                 t
                 for name, g in groups.items()
@@ -141,17 +142,20 @@ class Mxfp4Config(QuantizationConfig):
                 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
                     CompressedTensorsConfig,
                 )
+
                 self._k3_ct_config = CompressedTensorsConfig.from_config(dict(raw))
             method = self._k3_ct_config.get_quant_method(layer, prefix)
         except Exception as exc:  # noqa: BLE001 - never break the stock path
-            logger.warning_once("K3 fp8 linear delegation failed (%s); "
-                                "falling back to unquantized.", exc)
+            logger.warning_once(
+                "K3 fp8 linear delegation failed (%s); falling back to unquantized.",
+                exc,
+            )
             return None
         if method is not None:
             logger.info_once("K3: %s delegated to %s", prefix, type(method).__name__)
         return method
-    # --- end K3_FP8_LINEAR ---------------------------------------------------
 
+    # --- end K3_FP8_LINEAR ---------------------------------------------------
 
 
 class GptOssMxfp4Config(Mxfp4Config):

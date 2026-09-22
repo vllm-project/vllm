@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import sys
@@ -164,9 +163,7 @@ def select_tensor_names(src: Path, weight_map: dict, target: str) -> list[str]:
     if target not in COMPOSITE_TARGETS:
         suffix = match_suffix_for(target)
         return sorted(
-            name
-            for name in weight_map
-            if target in name and name.endswith(suffix)
+            name for name in weight_map if target in name and name.endswith(suffix)
         )
 
     spec = COMPOSITE_TARGETS[target]
@@ -175,7 +172,7 @@ def select_tensor_names(src: Path, weight_map: dict, target: str) -> list[str]:
     chosen = []
     for name in weight_map:
         matched = re.match(
-            r".*\.layers\.(\d+)\.%s\.([A-Za-z0-9_]+)\.weight$" % spec["family"], name
+            rf".*\.layers\.(\d+)\.{spec['family']}\.([A-Za-z0-9_]+)\.weight$", name
         )
         if not matched:
             continue
@@ -226,6 +223,8 @@ def _existing_narrowed(patterns, family: str) -> tuple[str | None, list[str]]:
             inner = pattern[len(prefix) : -len(").*")]
             return pattern, [m for m in inner.split("|") if m]
     return None, []
+
+
 # Default target. self_attn is the other one worth quantizing: 672 bf16 *_proj
 # weights, 72.16 GB -> 36.08 GB, roughly 3x shared_experts' surface, with the
 # same measured fp8 error (0.02634 vs 0.02646).
@@ -240,6 +239,8 @@ def ignore_pattern_for(target: str) -> str:
 def shard_prefix_for(target: str) -> str:
     """Output shard prefix; must be unique per target so overlays can coexist."""
     return f"model-fp8-{target.replace('_', '-')}-"
+
+
 # float8_e4m3fn saturates at 448; scales map each row's max onto that.
 FP8_MAX = 448.0
 # One output shard per this many tensors, to keep each file a sane size.
@@ -311,9 +312,7 @@ def rewrite_quant_config(config: dict, target: str = DEFAULT_TARGET) -> dict:
                 f"{', '.join(overlap)} already released from {leaf_family}'s ignore "
                 "entry by an earlier target; this overlay would double-quantize"
             )
-        narrowed = narrowed_ignore_pattern(
-            leaf_family, "|".join(already + released)
-        )
+        narrowed = narrowed_ignore_pattern(leaf_family, "|".join(already + released))
         quant["ignore"] = [
             narrowed if p == family_pattern else p for p in quant["ignore"]
         ]
@@ -339,10 +338,7 @@ def rewrite_quant_config(config: dict, target: str = DEFAULT_TARGET) -> dict:
         #   KeyError: '...shared_experts.down_proj.weight_scale'
         # because the module was built with weight_packed, not weight_scale.
         "targets": (
-            [
-                r"re:.*%s\.(%s)"
-                % (composite["family"], "|".join(composite["runtime_modules"]))
-            ]
+            [rf"re:.*{composite['family']}\.({'|'.join(composite['runtime_modules'])})"]
             if composite
             else [ignore_pattern_for(target)]
         ),
@@ -393,7 +389,6 @@ def quantize_rowwise(weight):
 
 
 def build(src: Path, dst: Path, target: str = DEFAULT_TARGET) -> int:
-    import torch
     from safetensors import safe_open
     from safetensors.torch import save_file
 
@@ -475,7 +470,6 @@ def check_unreferenced(
         dtype check cannot see -- a transposed or misaligned scale produces
         perfectly well-typed garbage.
     """
-    import torch
     from safetensors import safe_open
 
     weight_map = json.loads(_index_path(dst).read_text())["weight_map"]
