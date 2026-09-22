@@ -70,6 +70,37 @@ def test_get_raw_stream_patch():
         assert get_raw_stream is _cuda_getCurrentRawStream
 
 
+# Inductor can initialize CUDA even for CPU inputs.
+@pytest.mark.forked
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_e8m0_custom_op_fullgraph(use_v2, use_fresh_inductor_cache):
+    """E8M0 inputs must not prevent mutable custom-op decomposition."""
+    with torch.library._scoped_library("test_e8m0", "FRAGMENT") as lib:
+        lib.define("scale_(Tensor(a!) out, Tensor scale) -> ()")
+
+        @torch.library.impl(lib, "scale_", "CPU")
+        def scale_impl(out, scale):
+            out.mul_(scale.float())
+
+        @torch.library.register_fake("test_e8m0::scale_", lib=lib)
+        def scale_fake(out, scale):
+            return None
+
+        def forward(x, scale):
+            out = x.clone()
+            torch.ops.test_e8m0.scale_(out, scale)
+            return out
+
+        x = torch.randn(4, 4)
+        scale = torch.full((4,), 128, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        compiled = torch.compile(
+            forward,
+            fullgraph=True,
+            options={"enable_auto_functionalized_v2": use_v2},
+        )
+        torch.testing.assert_close(compiled(x, scale), x * 2)
+
+
 def test_copy_pass():
     vllm_config = VllmConfig()
     inductor_pass = FixFunctionalizationPass(vllm_config)
