@@ -322,11 +322,6 @@ FROM base-arch AS vllm-test-deps
 ARG PYTORCH_NIGHTLY=0
 ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
 
-# Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
-# Re-declared here because this stage is `FROM base-arch` (not `vllm-src`), so
-# it does not inherit the ARG/ENV defined there.
-ARG VLLM_CPU_X86=0
-
 WORKDIR /vllm-workspace
 
 # Test requirements are compiled from requirements/test/cuda.in into
@@ -335,16 +330,10 @@ WORKDIR /vllm-workspace
 COPY requirements/test/cpu.txt requirements/test/cpu.txt
 
 # cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop
-# packages unavailable on aarch64 (decord, terratorch) for arm builds. Also
-# drop the generic PyPI triton pulled in transitively (via xgrammar) on x86
-# builds, so it doesn't clobber the triton-cpu wheel installed further down
-# (see vllm-test and vllm-dev).
+# packages unavailable on aarch64 (decord, terratorch) for arm builds.
 RUN case "$(uname -m)" in \
     aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
-    esac && \
-    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        sed -i '/^triton==/d' requirements/test/cpu.txt; \
-    fi
+    esac
 
 # pytrec-eval-terrier bundles pre-C23 trec_eval sources. GCC 15 defaults to C23;
 # use C17 for test dependency builds without changing the vLLM compiler flags.
@@ -396,18 +385,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
-# requirements/test/cpu.txt has its transitive triton pin stripped out on x86
-# builds (see vllm-test-deps), so install the real triton-cpu wheel here.
+# requirements/test/cpu.txt pulls in a generic PyPI triton (via xgrammar)
+# that clobbers the triton-cpu wheel from requirements/cpu.txt; reinstall
+# cpu.txt to restore it.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    set -ex; \
-    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        TRITON_CPU_VERSION=3.8.0; \
-        case "$(python3 -c 'import sys; print(f"{sys.version_info[0]}{sys.version_info[1]}")')" in \
-            310) WHEEL_TAG="cp310-cp310" ;; \
-            311) WHEEL_TAG="cp311-cp311" ;; \
-            *) WHEEL_TAG="cp312-abi3" ;; \
-        esac; \
-        uv pip install "triton@https://github.com/triton-lang/triton-cpu/releases/download/v${TRITON_CPU_VERSION}/triton-${TRITON_CPU_VERSION}+cpu-${WHEEL_TAG}-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        uv pip install -r requirements/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/cpu.txt --torch-backend cpu; \
     fi
 
 ENTRYPOINT ["bash"]
@@ -415,30 +401,11 @@ ENTRYPOINT ["bash"]
 ######################### TEST IMAGE #########################
 FROM vllm-test-deps AS vllm-test
 
-# Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
-# Re-declared here because this stage is `FROM vllm-test-deps` (not
-# `vllm-src`), so it does not inherit the ARG/ENV defined there.
-ARG VLLM_CPU_X86=0
-
 WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
-
-# requirements/test/cpu.txt has its transitive triton pin stripped out on x86
-# builds (see vllm-test-deps), so install the real triton-cpu wheel here.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    set -ex; \
-    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        TRITON_CPU_VERSION=3.8.0; \
-        case "$(python3 -c 'import sys; print(f"{sys.version_info[0]}{sys.version_info[1]}")')" in \
-            310) WHEEL_TAG="cp310-cp310" ;; \
-            311) WHEEL_TAG="cp311-cp311" ;; \
-            *) WHEEL_TAG="cp312-abi3" ;; \
-        esac; \
-        uv pip install "triton@https://github.com/triton-lang/triton-cpu/releases/download/v${TRITON_CPU_VERSION}/triton-${TRITON_CPU_VERSION}+cpu-${WHEEL_TAG}-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
-    fi
 
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
