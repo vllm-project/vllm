@@ -21,6 +21,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
@@ -562,6 +563,9 @@ def minimax_m3_sparse_attn(
             _KV_SCALE_NONE,
         )
     )
+    # On-device tl.make_tensor_descriptor needs a registered scratch allocator
+    # (required on CUDA; no-op on ROCm).
+    set_triton_allocator(q.device)
     grid = (max_query_len, num_kv_heads, batch)
     _gqa_sparse_fwd_kernel[grid](
         q,
@@ -663,6 +667,9 @@ def minimax_m3_sparse_attn_decode(
     lse_partial = torch.empty(
         num_topk_chunks, total_q, num_heads, dtype=torch.float32, device=q.device
     )
+    # On-device tl.make_tensor_descriptor needs a registered scratch allocator
+    # (required on CUDA; no-op on ROCm).
+    set_triton_allocator(q.device)
     grid = (total_q * num_topk_chunks, num_kv_heads)
     _gqa_sparse_decode_kernel[grid](
         q,
