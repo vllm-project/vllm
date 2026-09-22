@@ -35,6 +35,7 @@ vllm-llm.workspace = true
 vllm-parser.workspace = true
 vllm-text.workspace = true
 vllm-tokenizer.workspace = true
+vllm-tracing.workspace = true
 xgrammar-structural-tag.workspace = true
 
 [dev-dependencies]
