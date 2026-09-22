@@ -2457,7 +2457,10 @@ def topk_hash_softplus_sqrt(
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
 ) -> None:
-    torch.ops._moe_C.topk_softplus_sqrt(
+    op = torch.ops._moe_C.topk_softplus_sqrt.default
+    nargs = len(op._schema.arguments)
+
+    args = (
         topk_weights,
         topk_indices,
         token_expert_indices,
@@ -2468,9 +2471,20 @@ def topk_hash_softplus_sqrt(
         input_tokens,
         hash_indices_table,
         is_padding,
-        bias_vl,
-        image_sentinel_lo,
     )
+
+    if nargs == 10:
+        if bias_vl is not None or image_sentinel_lo != 0:
+            raise RuntimeError(
+                "Loaded topk_softplus_sqrt kernel has the old 10-argument "
+                "interface, but non-default bias_vl/image_sentinel_lo "
+                "were requested."
+            )
+        op(*args)
+    elif nargs == 12:
+        op(*args, bias_vl, image_sentinel_lo)
+    else:
+        raise RuntimeError(f"Unexpected topk_softplus_sqrt schema: {op._schema}")
 
 
 def grouped_topk(
