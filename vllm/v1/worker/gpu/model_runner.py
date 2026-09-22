@@ -153,6 +153,9 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.spec_decode.draft_model.speculator import (
+    PlainDraftModelSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
     verify_supports_aux_hidden_states_over_pp,
@@ -802,8 +805,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
         if (
-            self.speculator is not None
-            and self.speculator.method == "draft_model"
+            isinstance(self.speculator, PlainDraftModelSpeculator)
             and not uniform_decode
         ):
             reserved_draft_tokens = num_reqs
