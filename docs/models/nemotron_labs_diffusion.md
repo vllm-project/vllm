@@ -4,6 +4,12 @@
 block diffusion. Prompt prefill and completed-block KV refresh use causal
 attention; denoising uses bidirectional attention within the current block.
 
+The same implementation supports the **3B and 8B text checkpoints** with
+architecture `NemotronLabsDiffusionModel`. Layer counts, hidden dimensions,
+attention heads, and RoPE settings are read from the checkpoint configuration;
+no size-specific architecture override is needed. Both sizes support diffusion,
+AR, and greedy linear speculation.
+
 ```bash
 vllm serve nvidia/Nemotron-Labs-Diffusion-3B \
     --attention-backend TRITON_ATTN \
@@ -89,3 +95,26 @@ rule; floating-point differences between attention shapes can still change
 close argmax decisions. Denoising thresholds and iteration limits do not apply
 to linear speculation. Use the original diffusion architecture, without
 `ar_mode` or the causal architecture alias.
+
+## 8B checkpoints
+
+Point the server at the 8B checkpoint directly, using the same decoding options:
+
+```bash
+vllm serve /path/to/Nemotron-Labs-Diffusion-8B \
+    --max-num-seqs 8 \
+    --diffusion-config '{"algorithm": "linear_spec", "canvas_length": 32}'
+```
+
+Use `--hf-overrides '{"ar_mode": true}'` instead of `--diffusion-config` for AR,
+or omit both options for confidence-threshold diffusion. The 8B checkpoint's
+own RoPE configuration determines its context limit; the 3B context settings
+are not substituted.
+
+The model test suite accepts either size through `NEMOTRON_DLM_MODEL_PATH`:
+
+```bash
+NEMOTRON_DLM_MODEL_PATH=/path/to/Nemotron-Labs-Diffusion-8B \
+    .venv/bin/python -m pytest --confcutdir=tests/models/language/generation \
+    tests/models/language/generation/test_nemotron_dllm.py -v
+```

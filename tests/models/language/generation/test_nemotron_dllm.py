@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reveal-rule unit tests and GPU model parity/generation checks.
 
-Set NEMOTRON_DLM_MODEL_PATH to a local Nemotron-Labs-Diffusion-3B checkpoint to
-run weight-dependent tests. Synthetic reveal rules run eagerly on CPU; GPU
+Set NEMOTRON_DLM_MODEL_PATH to a local Nemotron Labs Diffusion 3B or 8B
+checkpoint to run weight-dependent tests. Synthetic reveal rules run eagerly on CPU; GPU
 model tests exercise the compiled sampler with the checkpoint's vocabulary.
 """
 
+import json
 import os
 from functools import partial
 from typing import Any
@@ -46,6 +47,48 @@ def test_config_registration():
     # canvas_length is the field ModelConfig.is_diffusion keys off of.
     assert cfg.canvas_length == 32
     assert cfg.mask_token_id == 100
+
+
+@pytest.mark.parametrize(
+    "hidden_size,intermediate_size,num_layers,rope_factor",
+    [(3072, 9216, 26, 16.0), (4096, 14336, 34, 8.0)],
+    ids=["3b", "8b"],
+)
+def test_checkpoint_dimensions_and_rope(
+    tmp_path, hidden_size, intermediate_size, num_layers, rope_factor
+):
+    """Loading 8B must preserve its dimensions and RoPE, not 3B defaults."""
+    from vllm.transformers_utils.config import get_config
+    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
+
+    checkpoint = {
+        "model_type": "nemotron_labs_diffusion",
+        "architectures": ["NemotronLabsDiffusionModel"],
+        "hidden_size": hidden_size,
+        "intermediate_size": intermediate_size,
+        "num_hidden_layers": num_layers,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "max_position_embeddings": int(16384 * rope_factor),
+        "block_size": 32,
+        "mask_token_id": 100,
+        "rope_parameters": {
+            "rope_type": "yarn",
+            "rope_theta": 1000000.0,
+            "factor": rope_factor,
+            "original_max_position_embeddings": 16384,
+            "llama_4_scaling_beta": 0.1,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(checkpoint))
+    config = get_config(str(tmp_path), trust_remote_code=False)
+    assert isinstance(config, NemotronLabsDiffusionConfig)
+    for key, value in checkpoint.items():
+        assert getattr(config, key) == value, key
+    assert config.canvas_length == checkpoint["block_size"]
 
 
 def test_arch_in_model_registry():
@@ -390,11 +433,28 @@ def _install_tf_compat():
         mu.sdpa_mask_older_torch = mu.sdpa_mask
 
 
+@pytest.fixture
+def fp32_reference(monkeypatch):
+    """Isolate architecture parity from BF16 rounding and Triton TF32 dots."""
+    precision = torch.get_float32_matmul_precision()
+    monkeypatch.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "highest")
+    monkeypatch.setenv("TRITON_F32_DEFAULT", "ieee")
+    torch.set_float32_matmul_precision("highest")
+    yield
+    torch.set_float32_matmul_precision(precision)
+
+
+def _load_tokenizer():
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+
+
 def _load_hf(dtype=torch.bfloat16, device="cuda"):
     _install_tf_compat()
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoModel
 
-    tok = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    tok = _load_tokenizer()
     model = (
         AutoModel.from_pretrained(MODEL_PATH, trust_remote_code=True, torch_dtype=dtype)
         .to(device)
@@ -486,12 +546,12 @@ def _vllm_manual_forward(obj, token_ids, causal_flag):
 # ---------------------------------------------------------------------------
 @requires_gpu
 @requires_weights
-def test_logits_parity(monkeypatch):
+def test_logits_parity(monkeypatch, fp32_reference):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     from vllm import LLM
     from vllm.distributed import cleanup_dist_env_and_memory
 
-    tok, hf = _load_hf()
+    tok, hf = _load_hf(dtype=torch.float32)
     prompt = _prompt_ids(tok)
     canvas = torch.full(
         (1, CANVAS_LENGTH), MASK_TOKEN_ID, dtype=prompt.dtype, device=prompt.device
@@ -501,9 +561,14 @@ def test_logits_parity(monkeypatch):
 
     with torch.no_grad():
         hf_logits = hf(seq).logits[0].float().cpu()  # fully bidirectional
+    del hf
+    torch.accelerator.empty_cache()
 
     llm = LLM(
         model=MODEL_PATH,
+        dtype="float32",
+        max_num_batched_tokens=128,
+        max_num_seqs=4,
         attention_config={"backend": "TRITON_ATTN"},
         trust_remote_code=True,
         enforce_eager=True,
@@ -515,7 +580,8 @@ def test_logits_parity(monkeypatch):
         partial(_vllm_manual_forward, token_ids=token_ids, causal_flag=False)
     )[0]
 
-    del llm, hf
+    llm.llm_engine.engine_core.shutdown()
+    del llm
     cleanup_dist_env_and_memory()
 
     canvas_slice = slice(prompt.shape[1], seq.shape[1])
@@ -525,10 +591,8 @@ def test_logits_parity(monkeypatch):
     argmax_match = (hf_c.argmax(-1) == vl_c.argmax(-1)).float().mean().item()
     max_diff = (hf_c - vl_c).abs().max().item()
 
-    # argmax-exact is the correctness gate; magnitude diff is bf16-ULP scale
-    # (logit magnitude ~30, ULP ~0.25) across different attention kernels.
     assert argmax_match == 1.0, f"argmax mismatch on canvas: {argmax_match:.4f}"
-    assert max_diff < 0.6, f"logit max|diff| too large: {max_diff:.4f}"
+    assert max_diff < 1e-3, f"logit max|diff| too large: {max_diff:.6f}"
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +606,7 @@ def test_greedy_generation(monkeypatch):
     from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.inputs import TokensPrompt
 
-    tok, _ = _load_hf(device="cpu")
+    tok = _load_tokenizer()
     prompt_ids = _prompt_ids(tok, device="cpu")[0].tolist()
 
     llm = LLM(
@@ -575,7 +639,7 @@ def test_stochastic_rollouts(monkeypatch):
     from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.inputs import TokensPrompt
 
-    tok, _ = _load_hf(device="cpu")
+    tok = _load_tokenizer()
     msgs = [{"role": "user", "content": "Tell me a short story about a robot."}]
     enc = tok.apply_chat_template(msgs, add_generation_prompt=True)
     prompt_ids = enc["input_ids"] if not isinstance(enc, list) else enc
@@ -633,7 +697,7 @@ def _assert_ar_runner(obj):
     ],
     ids=["ar_mode", "causal_architecture"],
 )
-def test_ar_logits_and_generation(monkeypatch, hf_overrides):
+def test_ar_logits_and_generation(monkeypatch, hf_overrides, fp32_reference):
     """Both AR selectors use causal HF logits and ordinary cached generation."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
@@ -641,7 +705,7 @@ def test_ar_logits_and_generation(monkeypatch, hf_overrides):
     from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.inputs import TokensPrompt
 
-    tok, hf = _load_hf()
+    tok, hf = _load_hf(dtype=torch.float32)
     prompt = _prompt_ids(tok)
     with torch.inference_mode():
         # Native AR generation disables diffusion_lm on the HF attention
@@ -654,6 +718,9 @@ def test_ar_logits_and_generation(monkeypatch, hf_overrides):
 
     llm = LLM(
         model=MODEL_PATH,
+        dtype="float32",
+        max_num_batched_tokens=128,
+        max_num_seqs=4,
         hf_overrides=hf_overrides,
         attention_config={"backend": "TRITON_ATTN"},
         trust_remote_code=True,
@@ -673,10 +740,7 @@ def test_ar_logits_and_generation(monkeypatch, hf_overrides):
         )[0]
         # Compare every prompt position, so a bidirectional prefill cannot pass
         # by agreeing only on the last position.
-        torch.testing.assert_close(vllm_logits[1:], hf_logits[1:], atol=0.6, rtol=0.0)
-        # BF16 kernel differences accumulate most on the BOS-only prefix
-        # (observed max 0.71); retain a bound there too.
-        torch.testing.assert_close(vllm_logits[0], hf_logits[0], atol=1.0, rtol=0.0)
+        torch.testing.assert_close(vllm_logits, hf_logits, atol=1e-3, rtol=0.0)
         assert vllm_logits[-1].argmax() == hf_logits[-1].argmax()
 
         greedy = llm.generate(
@@ -701,7 +765,9 @@ def test_ar_logits_and_generation(monkeypatch, hf_overrides):
                 assert entry is not None
                 assert entry[token_id].logprob <= 1e-6
     finally:
+        llm.llm_engine.engine_core.shutdown()
         del llm
+        torch._dynamo.reset()
         cleanup_dist_env_and_memory()
 
 

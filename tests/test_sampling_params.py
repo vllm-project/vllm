@@ -117,14 +117,16 @@ def test_diffusion_extra_args_are_validated_without_a_served_canvas():
 def test_narrow_diffusion_canvas_requires_async_scheduling(
     async_scheduling, extra_args
 ):
+    diffusion_config = DiffusionConfig(canvas_length=8)
     processor = SimpleNamespace(
         model_config=MockModelConfig(is_diffusion=True),
         vllm_config=SimpleNamespace(
-            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
+            diffusion_config=diffusion_config,
         ),
         speculative_config=None,
         structured_outputs_config=None,
-        diffusion_config=DiffusionConfig(canvas_length=8),
+        diffusion_config=diffusion_config,
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
     )
