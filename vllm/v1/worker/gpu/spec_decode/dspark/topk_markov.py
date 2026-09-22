@@ -328,30 +328,7 @@ def compute_markov_bias_top_ids(
     *,
     chunk: int = 512,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Top-``m`` draft ids and fp32 bias values of the bigram bias.
-
-    Returns:
-        ids:    ``[target_vocab, m]`` int32 tensor of top-m draft-token ids.
-        values: ``[target_vocab, m]`` float32 tensor of the unscaled fp32 bias
-                ``W1[v] @ W2[candidate]^T`` for each (prev, candidate) pair,
-                matching the fp32 accumulation the walk kernel uses at runtime.
-
-    ``bias[v] = scale * W1[v] @ W2^T`` is exactly the full-vocab Markov
-    projection row the dense head computes at runtime, so the top-m ids are the
-    dense head's own favourite continuations of token ``v`` -- derived from the
-    trained weights, never retrained or re-fitted.
-
-    They are what the base-logit candidates systematically miss: the backbone
-    fills every draft slot with the mask token, so its logit ranking describes
-    the slot in isolation, while the chain direction comes from the bias. Giving
-    the walk a small precomputed bigram candidate set (a ``[V, m]`` int32 table)
-    lets it reach those tokens without a ``[r] @ [r, V]`` projection per step.
-
-    The returned fp32 bias values eliminate the online ``W1[prev] @ W2[c]``
-    dot product for static candidates: each ``(prev, candidate)`` pair's bias
-    depends only on the fixed weights, so the walk kernel can load the
-    precomputed value directly instead of gathering and reducing a ``W2`` row.
-    """
+    """Top-``m`` draft ids and fp32 bias values of the bigram bias."""
     if m <= 0:
         raise ValueError("markov_bias_topk must be > 0 to build a bigram table")
     device = w1.device
