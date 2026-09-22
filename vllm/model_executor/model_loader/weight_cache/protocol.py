@@ -137,15 +137,17 @@ def get_socket_path(
     *,
     is_draft: bool = False,
 ) -> str:
-    """Socket path of a daemon group; ``is_draft=False`` is the target."""
-    directory = get_socket_dir(socket_dir)
-    return os.path.join(
-        directory,
-        SOCKET_NAME_TEMPLATE.format(
-            gpu_uuid=gpu_uuid,
-            role=format_socket_role_suffix(is_draft),
-        ),
+    """Socket path of a daemon group; ``is_draft=False`` is the target.
+
+    The GPU uuid is hashed to keep the name well under the AF_UNIX path
+    limit (~108 bytes) even with the draft role suffix.
+    """
+    gpu_id = safe_hash(gpu_uuid.encode()).hexdigest()
+    name = SOCKET_NAME_TEMPLATE.format(
+        gpu_uuid=gpu_id,
+        role=format_socket_role_suffix(is_draft),
     )
+    return os.path.join(get_socket_dir(socket_dir), name)
 
 
 def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
