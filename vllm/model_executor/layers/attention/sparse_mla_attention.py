@@ -859,6 +859,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             dense_mask_mod,
             offset_dense_mask_mod,
         )
+        from vllm.v1.attention.backends.fa_utils import uses_fa4_hd256_kernel
         from vllm.vllm_flash_attn import flash_attn_varlen_func
 
         if dense_mask is None:
@@ -901,6 +902,11 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             "aux_tensor_leading_dims": [2],
             "causal": causal,
         }
+        if uses_fa4_hd256_kernel(q.shape[-1], v.shape[-1]):
+            # FA4's Blackwell head_size=256 kernel asserts `not is_split_kv`, so the
+            # split-KV heuristic must not fire here. The dense FA path already pins
+            # num_splits for this kernel; this call site was missing the same guard.
+            kwargs["num_splits"] = 1
 
         return flash_attn_varlen_func(**kwargs)
 
