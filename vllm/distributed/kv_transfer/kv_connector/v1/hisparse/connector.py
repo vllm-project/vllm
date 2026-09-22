@@ -106,21 +106,6 @@ class HiSparseConnectorScheduler:
         # HiSparse rebinds worker state every step, so the load must start
         # before the forward rather than being deferred to post-forward.
         scheduler_output.has_sync_kv_loads = True
-        scheduler_output.block_table_updates = (
-            self.coordinator.take_block_table_updates() or None
-        )
-        command = self.coordinator.build_offload_command()
-        host_block_copies = self.coordinator.take_host_block_copies()
-        source_group_id = self.coordinator.host_group_id
-        assert source_group_id is not None
-        source_block_ids = [
-            block_id
-            for request in scheduler_output.scheduled_new_reqs
-            for block_id in request.block_ids[source_group_id]
-        ]
-        for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
-            if new_block_ids is not None:
-                source_block_ids.extend(new_block_ids[source_group_id])
         num_computed_tokens = {
             request.req_id: request.num_computed_tokens
             for request in scheduler_output.scheduled_new_reqs
@@ -141,6 +126,28 @@ class HiSparseConnectorScheduler:
                 scheduler_output.num_scheduled_tokens.items()
             )
         )
+        self.coordinator.advance_scheduled(
+            (
+                request_id,
+                min(start + count, self.requests[request_id].num_tokens),
+            )
+            for request_id, start, count in scheduled_requests
+        )
+        scheduler_output.block_table_updates = (
+            self.coordinator.take_block_table_updates() or None
+        )
+        command = self.coordinator.build_offload_command()
+        host_block_copies = self.coordinator.take_host_block_copies()
+        source_group_id = self.coordinator.host_group_id
+        assert source_group_id is not None
+        source_block_ids = [
+            block_id
+            for request in scheduler_output.scheduled_new_reqs
+            for block_id in request.block_ids[source_group_id]
+        ]
+        for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
+            if new_block_ids is not None:
+                source_block_ids.extend(new_block_ids[source_group_id])
         row_mirrors = {}
         for request_id, scheduled_start, scheduled_count in scheduled_requests:
             mirror_start = scheduled_start

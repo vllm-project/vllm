@@ -2551,20 +2551,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         assert self.coordinator is not None
         self.coordinator.commit_computed_blocks(request_id, num_host_pages)
 
-    def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-        *,
-        replay_boundaries: Sequence[int],
-    ) -> None:
-        assert self.coordinator is not None
-        if self is not self.coordinator.resident_managers[0]:
-            return
-        self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
-        self.coordinator.update_residency(request.request_id)
-
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
