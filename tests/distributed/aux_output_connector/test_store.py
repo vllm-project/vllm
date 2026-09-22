@@ -111,7 +111,8 @@ def remote_store(monkeypatch, request):
     native = Mock()
 
     def put(keys, values):
-        remote.update(zip(keys, values, strict=True))
+        for key, value in zip(keys, values, strict=True):
+            remote.setdefault(key, value)
         return 0
 
     native.put_batch.side_effect = put
@@ -172,6 +173,98 @@ def test_mooncake_worker_and_publisher_reuse_prefix_and_finalize_tail(remote_sto
         _SchedulerRequest("second", [], num_tokens=11, finished=True), output["second"]
     )
     assert remote_store.get_concatenated(keys) == rows.tobytes()
+    worker.close()
+
+
+@pytest.mark.parametrize("prompt_length", [6, 8, 9])
+@pytest.mark.parametrize("local_hit", [0, 4])
+def test_mooncake_pd_import_preserves_local_hits_and_old_keys(
+    remote_store, prompt_length, local_hit
+):
+    """D restores only skipped positions; completed imports survive a local hit."""
+    rows = np.arange(72, dtype=np.uint8).reshape(12, *_SHAPE)
+    source = rows[:prompt_length].copy()
+    # Distinguish P's recomputed boundary and locally cached prefix from D's.
+    source[prompt_length - 1] = 200
+    source[:local_hit] = 201
+    source_keys = [f"prefill-{i}" for i in range(0, prompt_length, _BLOCK_SIZE)]
+    objects = [
+        BlockObject(key, source[i : i + _BLOCK_SIZE].tobytes())
+        for key, i in zip(source_keys, range(0, prompt_length, _BLOCK_SIZE))
+    ]
+    remote_store.put(objects)
+    worker = _make_worker(1)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
+    worker._key_namespace = "decoder:"
+    hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
+    if local_hit:
+        remote_store.put(
+            [
+                BlockObject(
+                    routed_experts_keys(hashes[:1], "decoder:0")[0], rows[:4].tobytes()
+                )
+            ]
+        )
+    step = _metadata(
+        0,
+        [_request_metadata("decode", prompt_length - 1, 13 - prompt_length, 0, hashes)],
+        {},
+    )
+    step.metadata.remote_prefixes["decode"] = (local_hit, source_keys)
+    output = _process_output(
+        worker, step, rows[prompt_length - 1 :], ["decode"], np.array([0])
+    )["decode"]
+    assert remote_store.get_concatenated(output.block_keys) == rows.tobytes()
+    assert remote_store.get_concatenated(source_keys) == source.tobytes()
+    assert not set(source_keys) & set(output.block_keys)
+    # No handoff manifest on the next request: D's own cache is self-contained.
+    step = _metadata(0, [_request_metadata("local", 11, 1, 0, hashes)], {"decode": []})
+    output = _process_output(worker, step, rows[11:], ["local"], np.array([0]))["local"]
+    assert remote_store.get_concatenated(output.block_keys) == rows.tobytes()
+    worker.close()
+
+
+@pytest.mark.parametrize("prefix", [None, {"block_size": 8, "keys": ["full"]}])
+def test_remote_kv_requires_r3_handoff_manifest(prefix):
+    connector = _make_connector()
+    request = _SchedulerRequest(
+        "decode",
+        [b"a" * 32],
+        num_tokens=7,
+        num_output_tokens=0,
+        prefill_stats=SimpleNamespace(
+            num_local_cached_tokens=4, num_external_cached_tokens=2
+        ),
+    )
+    scheduled = SimpleNamespace(num_scheduled_tokens={"decode": 1})
+    request.kv_transfer_params = {"aux_output_prefix": prefix}
+    with pytest.raises(ValueError, match="aux_output_prefix"):
+        connector.build_connector_meta(scheduled, {"decode": request})
+    connector = _make_connector()
+    request.kv_transfer_params = {
+        "aux_output_prefix": {"block_size": _BLOCK_SIZE, "keys": ["full", "tail"]}
+    }
+    metadata = connector.build_connector_meta(scheduled, {"decode": request})
+    assert metadata.remote_prefixes == {"decode": (4, ["full", "tail"])}
+
+
+def test_mooncake_pd_missing_tail_fails_closed(remote_store):
+    worker = _make_worker(1)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
+    step = _metadata(0, [_request_metadata("decode", 1, 1, 0, [])], {})
+    step.metadata.remote_prefixes["decode"] = (0, ["missing-tail"])
+    with pytest.raises(BlockObjectStoreError, match="missing-tail"):
+        _process_output(
+            worker,
+            step,
+            np.zeros((1, *_SHAPE), dtype=_DTYPE),
+            ["decode"],
+            np.array([0]),
+        )
     worker.close()
 
 
@@ -394,6 +487,9 @@ class _SchedulerRequest:
     num_computed_tokens: int = 0
     num_in_flight_tokens: int = 0
     finished: bool = False
+    prefill_stats: SimpleNamespace | None = None
+    num_preemptions: int = 0
+    kv_transfer_params: dict | None = None
     sampling_params: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0, stop=[])
     )

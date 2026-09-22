@@ -51,6 +51,7 @@ class _WorkerRequestState:
     pending_outputs: int = 0
     # Terminal event received; teardown waits for in-flight step outputs.
     finished: bool = False
+    remote_prefix: tuple[int, list[str]] | None = None
 
 
 @dataclass
@@ -249,6 +250,9 @@ class AuxOutputWorkerConnector:
             capture_start = token_start
             capture_cursor = state.capture_cursor
             if capture_cursor is None:
+                block_batches.append(
+                    (state, self._restore_prefix(request_id, state, capture_start))
+                )
                 capture_cursor = capture_start
 
             assert capture_start >= capture_cursor, (
@@ -325,6 +329,49 @@ class AuxOutputWorkerConnector:
         if self._return_keys and outputs:
             store.flush()
         return outputs
+
+    def _restore_prefix(
+        self, request_id: str, state: _WorkerRequestState, token_start: int
+    ) -> list[tuple[int, np.ndarray]]:
+        """Import remote KV's R3, preserving local hits and the recomputed suffix."""
+        buffer, store = self._buffer, self._store
+        assert buffer is not None and store is not None
+        block_size = buffer.block_size
+        completed = []
+        prefix = state.remote_prefix
+        state.remote_prefix = None
+        if prefix is not None:
+            local_start, keys = prefix
+            assert self._return_keys and local_start % block_size == 0
+            if token_start > local_start:
+                rows = materialize_routed_experts(
+                    store,
+                    keys[
+                        local_start // block_size : (token_start - 1) // block_size + 1
+                    ],
+                    shape_per_token=buffer.shape_per_token,
+                    dtype=buffer.dtype,
+                )
+                if len(rows) < token_start - local_start:
+                    raise ValueError("Remote auxiliary prefix does not cover loaded KV")
+                # Publish under D's namespace too, so later local KV hits do not
+                # depend on a router resending the P-side manifest.
+                completed = buffer.capture(
+                    request_id, local_start, rows[: token_start - local_start]
+                )
+                return completed
+        if token_start % block_size:
+            block_start = token_start // block_size * block_size
+            rows = materialize_routed_experts(
+                store,
+                state.aux_output_keys[
+                    block_start // block_size : block_start // block_size + 1
+                ],
+                shape_per_token=buffer.shape_per_token,
+                dtype=buffer.dtype,
+            )
+            buffer.capture(request_id, block_start, rows[: token_start - block_start])
+        return completed
 
     def _publish_blocks(
         self,
@@ -410,6 +457,8 @@ class AuxOutputWorkerConnector:
                     assert emit_start <= state.emit_cursor, (
                         "auxiliary output Scheduler emit cursor moved ahead"
                     )
+            for request_id, prefix in metadata.remote_prefixes.items():
+                self._requests[request_id].remote_prefix = prefix
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
