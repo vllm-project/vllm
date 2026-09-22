@@ -85,7 +85,7 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         self,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Interleave the rotary embedding"""
+        """Interleave the rotary embedding."""
         cos_sin = self.cos_sin_cache[positions]
         mrope_section_3d = [1] * len(self.mrope_dim)
         mrope_dim = self.mrope_dim
@@ -139,8 +139,7 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
     def get_mrope_interleaved_id_list(
         a: int, b: int, c: int, force_last: bool = False
     ) -> list[int]:
-        """
-        Generate an interleaved list of indices for multi-modal rotary embedding.
+        """Generate an interleaved list of indices for multi-modal rotary embedding.
 
         Args:
             a: Number of indices for first modality
@@ -150,6 +149,7 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
 
         Returns:
             List of interleaved indices
+
         """
         if force_last:
             a -= 1

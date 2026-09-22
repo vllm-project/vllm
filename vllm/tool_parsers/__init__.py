@@ -42,6 +42,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv4_engine_tool_parser",
         "DeepSeekV4EngineToolParser",
     ),
+    "deepseek_v41": (
+        "deepseekv41_engine_tool_parser",
+        "DeepSeekV41EngineToolParser",
+    ),
     "cohere_command3": (
         "cohere_command_tool_parser",
         "CohereCommand3ToolParser",
@@ -94,6 +98,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hy_v3_tool_parser",
         "HYV3ToolParser",
     ),
+    "hy_v4": (
+        "hy_v4_tool_parser",
+        "HYV4ToolParser",
+    ),
     "internlm": (
         "internlm2_tool_parser",
         "Internlm2ToolParser",
@@ -113,6 +121,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "kimi_k3": (
         "kimi_k3_tool_parser",
         "KimiK3ToolParser",
+    ),
+    "k2_horizon": (
+        "k2_horizon_tool_parser",
+        "K2HorizonToolParser",
     ),
     "llama3_json": (
         "llama_tool_parser",

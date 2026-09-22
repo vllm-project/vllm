@@ -57,6 +57,7 @@ def _get_mla_prefill_backend_priorities(
 
     Returns:
         List of backends in priority order (highest priority first).
+
     """
     from vllm.platforms import current_platform
 
@@ -104,13 +105,16 @@ def get_mla_prefill_backend(
 
     Returns:
         The selected prefill backend class.
+
     """
     from vllm.platforms import current_platform
 
+    if current_platform.is_cpu():
+        logger.info_once("Using CPU SDPA MLA prefill backend.")
+        return MLAPrefillBackendEnum.CPU.get_class()
+
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
-        if current_platform.is_cpu():
-            return MLAPrefillBackendEnum.CPU_NATIVE.get_class()
         logger.info_once(
             "Device capability not available, using FlashAttention MLA prefill backend."
         )
@@ -171,6 +175,7 @@ def _auto_select_mla_prefill_backend(
 
     Returns:
         The selected prefill backend class.
+
     """
     priorities = _get_mla_prefill_backend_priorities(
         device_capability,

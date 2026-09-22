@@ -9,7 +9,7 @@ from vllm.entrypoints.generate.generative_scoring.serving import (
     GenerativeScoringResponse,
     ServingGenerativeScoring,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     validate_json_request,

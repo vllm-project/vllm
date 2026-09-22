@@ -3,7 +3,7 @@
 """Unit tests for Anthropic-to-OpenAI request conversion.
 
 Tests the image source handling and tool_result content parsing in
-AnthropicServingMessages._convert_anthropic_to_openai_request().
+AnthropicServingMessages.to_chat_completion_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
@@ -32,6 +32,11 @@ from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     _build_anthropic_usage,
 )
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -39,19 +44,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    PromptTokenUsageInfo,
-    UsageInfo,
-)
+from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.exceptions import VLLMValidationError
 
-_convert = AnthropicServingMessages._convert_anthropic_to_openai_request
+_convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
 
@@ -179,6 +178,56 @@ class TestImageContentBlocks:
         assert parts[1] == {
             "type": "image_url",
             "image_url": {"url": "https://example.com/cat.png"},
+        }
+
+
+# ======================================================================
+# vllm_xargs pass-through
+# ======================================================================
+
+
+class TestVllmXargs:
+    def test_vllm_xargs_passed_through(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": 7,
+            },
+        )
+
+        result = _convert(request)
+
+        assert result.vllm_xargs == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": 7,
+        }
+
+    def test_vllm_xargs_reaches_sampling_params_with_kv_transfer(self):
+        kv_transfer_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+        }
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": "kept",
+            },
+            kv_transfer_params=kv_transfer_params,
+        )
+
+        converted = _convert(request)
+        sampling_params = converted.to_sampling_params(
+            max_tokens=converted.max_completion_tokens or 0,
+            default_sampling_params={},
+        )
+
+        assert converted.kv_transfer_params == kv_transfer_params
+        assert sampling_params.extra_args == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": "kept",
+            "kv_transfer_params": kv_transfer_params,
         }
 
 
@@ -431,7 +480,7 @@ class TestThinkingBlockConversion:
     """
 
     def test_thinking_plus_text_in_assistant_message(self):
-        """thinking + text → reasoning field + plain-string content."""
+        """Thinking + text → reasoning field + plain-string content."""
         request = _make_request(
             [
                 {"role": "user", "content": "Write me some code."},
@@ -493,7 +542,7 @@ class TestThinkingBlockConversion:
         assert asst.get("content") is None
 
     def test_thinking_plus_tool_use_in_assistant_message(self):
-        """thinking + tool_use: reasoning field set, tool_calls populated."""
+        """Thinking + tool_use: reasoning field set, tool_calls populated."""
         request = _make_request(
             [
                 {"role": "user", "content": "What is 2+2?"},
@@ -1560,6 +1609,32 @@ class TestStopSequenceReason:
         msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
         assert msg_deltas[0]["delta"]["stop_reason"] == "stop_sequence"
         assert msg_deltas[0]["delta"]["stop_sequence"] == "</tool>"
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_stop_string_emits_explicit_null_stop_sequence(self):
+        """exclude_unset=True drops stop_sequence unless it is set explicitly."""
+
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(delta=DeltaMessage(content="hi"))
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert len(msg_deltas) == 1
+        assert msg_deltas[0]["delta"]["stop_reason"] == "end_turn"
+        assert "stop_sequence" in msg_deltas[0]["delta"]
+        assert msg_deltas[0]["delta"]["stop_sequence"] is None
 
 
 # ======================================================================

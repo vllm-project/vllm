@@ -8,7 +8,6 @@ import torch
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
@@ -24,13 +23,12 @@ from vllm.model_executor.layers.fused_moe import (
     SharedExperts,
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
+    resolve_fp8_moe_weight_block_shape,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -52,6 +50,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape,
+    validate_fp8_block_shape_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
@@ -63,11 +62,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
-    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
     cutlass_fp8_supported,
     normalize_e4m3fn_to_e4m3fnuz,
 )
@@ -75,7 +72,11 @@ from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
@@ -85,8 +86,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
-
-logger = init_logger(__name__)
 
 
 class Fp8Config(QuantizationConfig):
@@ -216,7 +215,7 @@ class Fp8Config(QuantizationConfig):
                     Fp8PerTensorOnlineMoEMethod,
                 )
 
-                return Fp8PerTensorOnlineMoEMethod(layer=layer)
+                return Fp8PerTensorOnlineMoEMethod(moe=layer.moe_config)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -247,12 +246,14 @@ class Fp8LinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The quantization config.
+
     """
+
+    supports_pre_processed_weights = True
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
@@ -368,6 +369,19 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            # Weights are already in runtime format; the only state tensor
+            # export cannot carry is the `input_scale = None` stamp that dynamic
+            # activation quantization relies on, since create_weights never
+            # registered that parameter.
+            if not self.act_q_static and not hasattr(layer, "input_scale"):
+                layer.input_scale = None
+            # Marlin reads marlin_input_dtype in apply_weights; it lives on the
+            # method (not exported with the weights), so restore it here too.
+            if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
+                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+            return
+
         if self.use_marlin:
             if not self.block_quant:
                 # Canonicalize to (K, N) for the kernel.
@@ -472,7 +486,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     Args:
         quant_config: The quantization config.
+
     """
+
+    supports_pre_processed_weights = True
 
     def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(layer.moe_config)
@@ -483,9 +500,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
 
+        self.weight_scale_refine: tuple[int, int] | None = None
+        self.moe_block_shape = self.weight_block_size
+
         # Set weight key and activation key for kernel compatibility
         if self.block_quant:
-            weight_key = kFp8Static128BlockSym
+            assert self.weight_block_size is not None
+            # Adapt the checkpoint block shape to TP sharding before
+            # building the weight key.
+            self.moe_block_shape, self.weight_scale_refine = (
+                resolve_fp8_moe_weight_block_shape(
+                    self.moe,
+                    self.weight_block_size,
+                    kFp8Dynamic128Sym,
+                    self.quant_config.is_checkpoint_fp8_serialized,
+                )
+            )
+            weight_key = create_fp8_quant_key(
+                static=True, group_shape=GroupShape(*self.moe_block_shape)
+            )
             activation_key = kFp8Dynamic128Sym
         else:
             weight_key = kFp8StaticTensorSym
@@ -521,29 +554,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         if self.block_quant:
             assert self.weight_block_size is not None
+            assert self.moe_block_shape is not None
+            moe_block_shape = self.moe_block_shape
             layer.weight_block_size = self.weight_block_size
-            tp_size = get_tensor_model_parallel_world_size()
             block_n, block_k = (
                 self.weight_block_size[0],
                 self.weight_block_size[1],
             )
-            # NOTE: To ensure proper alignment of the block-wise quantization
-            # scales, the output_size of the weights for both the gate and up
-            # layers must be divisible by block_n.
-            # Required by column parallel or enabling merged weights
-            if intermediate_size_per_partition % block_n != 0:
-                raise ValueError(
-                    f"The output_size of gate's and up's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_n = {block_n}."
+            if self.weight_scale_refine is None:
+                validate_fp8_block_shape_moe(
+                    intermediate_size_per_partition,
+                    self.weight_block_size,
                 )
-            if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
-                # Required by row parallel
-                raise ValueError(
-                    f"The input_size of down's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_k = {block_k}."
-                )
+            else:
+                # Use the refined block grid for the scale parameters; the
+                # loader upsamples the checkpoint scales accordingly.
+                tp_size = get_tensor_model_parallel_world_size()
+                if intermediate_size_per_partition % block_n != 0:
+                    block_n, block_k = moe_block_shape
+                if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
+                    block_n, block_k = moe_block_shape
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -675,6 +705,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
+        self._init_moe_kernel(layer)
+
+    def _init_moe_kernel(self, layer: RoutedExperts) -> None:
+        """Build the MoE kernel from the layer's current (converted) weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -687,6 +721,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if is_weights_pre_processed():
+            # Weights are already in kernel format; rebuild the kernel only.
+            self._init_moe_kernel(layer)
+            return
+
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight
@@ -749,7 +788,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            block_shape=self.weight_block_size,
+            block_shape=self.moe_block_shape,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
@@ -823,9 +862,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
-    """
-    Supports loading kv-cache scaling factors from FP8 checkpoints.
-    """
+    """Supports loading kv-cache scaling factors from FP8 checkpoints."""
 
     def __init__(self, quant_config: Fp8Config):
         super().__init__(quant_config)
