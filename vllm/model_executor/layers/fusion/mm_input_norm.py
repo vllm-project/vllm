@@ -512,17 +512,24 @@ class FusedMMInputNorm(CustomOp):
         """XPU fused custom kernel path.
 
         On XPU, fuse the whole rescale + normalise into a single custom
-        kernel."""
-
+        kernel. The eager path materializes an fp32 intermediate and then
+        casts back, which adds device-side compute that cancels the
+        bandwidth saving of transferring uint8 pixel_values. The fused
+        kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
+        """
         patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
 
-        y = torch.ops.vllm.xpu_fused_input_norm(
-            grid_thw, self.weight, self.bias, visual_dtype
-        )
-        if out_view is None:
-            return y
-        out_view.copy_(y)
-        return out_view
+        if grid_thw.dtype == torch.uint8 and self.weight.dtype == torch.float32:
+            y = torch.ops.vllm.xpu_fused_input_norm(
+                grid_thw, self.weight, self.bias, visual_dtype
+            )
+            if out_view is None:
+                return y
+            out_view.copy_(y)
+            return out_view
+
+        # Fall back to native for unsupported dtypes on XPU.
+        return self.forward_native(grid_thw, visual_dtype, out)
 
     def forward_oot(
         self,
