@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Host-only cache-format gating; mocked architectures are not GPU validation."""
 
+import inspect
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
@@ -19,11 +20,15 @@ def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
 
     scorer = Mock(return_value=torch.zeros((2, 64), dtype=torch.float32))
     decode_module = ModuleType("aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4")
-    decode_module.flydsl_pa_mqa_logits_fp4 = scorer
+    monkeypatch.setattr(
+        decode_module, "flydsl_pa_mqa_logits_fp4", scorer, raising=False
+    )
     prefill_module = ModuleType(
         "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill"
     )
-    prefill_module.flydsl_pa_mqa_logits_fp4_prefill = Mock()
+    monkeypatch.setattr(
+        prefill_module, "flydsl_pa_mqa_logits_fp4_prefill", Mock(), raising=False
+    )
     monkeypatch.setitem(
         sys.modules,
         "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4",
@@ -64,6 +69,7 @@ def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
     assert scorer.call_args.kwargs["cta_info"] is cta_info
     assert scorer.call_args.kwargs["total_ctas"] == 512
 
+
 def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch):
     import torch
 
@@ -71,11 +77,15 @@ def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch):
 
     scorer = Mock(return_value=torch.zeros((3, 192), dtype=torch.float32))
     decode_module = ModuleType("aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4")
-    decode_module.flydsl_pa_mqa_logits_fp4 = Mock()
+    monkeypatch.setattr(
+        decode_module, "flydsl_pa_mqa_logits_fp4", Mock(), raising=False
+    )
     prefill_module = ModuleType(
         "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill"
     )
-    prefill_module.flydsl_pa_mqa_logits_fp4_prefill = scorer
+    monkeypatch.setattr(
+        prefill_module, "flydsl_pa_mqa_logits_fp4_prefill", scorer, raising=False
+    )
     monkeypatch.setitem(
         sys.modules,
         "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4",
@@ -200,9 +210,10 @@ def _platform(monkeypatch, *, rocm, capability=100, gfx950=True):
     monkeypatch.setattr(indexer, "current_platform", platform)
     # Avoid importing ROCm driver libraries on CUDA/CPU hosts.
     rocm_module = ModuleType("vllm.platforms.rocm")
-    rocm_module.on_gfx950 = Mock(return_value=gfx950)
+    gfx_probe = Mock(return_value=gfx950)
+    monkeypatch.setattr(rocm_module, "on_gfx950", gfx_probe, raising=False)
     monkeypatch.setitem(sys.modules, "vllm.platforms.rocm", rocm_module)
-    return platform, rocm_module.on_gfx950
+    return platform, gfx_probe
 
 
 @pytest.mark.parametrize("rocm", [False, True])
@@ -249,6 +260,82 @@ def test_rocm_fp4_rejects_context_parallelism_before_aiter(monkeypatch, dcp, pcp
     with pytest.raises(ValueError, match="DCP=PCP=1"):
         indexer.dsa_indexer_uses_fp4(_config("mxfp4", dcp=dcp, pcp=pcp))
     aiter_probe.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        None,
+        ("decode", "flydsl_pa_mqa_logits_fp4", "cta_info"),
+        ("decode", "flydsl_pa_mqa_logits_fp4", "total_ctas"),
+        ("decode", "compute_varctx_schedule", "cta_info_out"),
+        ("decode", "compute_varctx_schedule", "next_n"),
+        ("decode", "compute_varctx_schedule", None),
+        ("prefill", "flydsl_pa_mqa_logits_fp4_prefill", "cta_info"),
+        ("prefill", "flydsl_pa_mqa_logits_fp4_prefill", "n_ctas"),
+        ("prefill", "compute_prefill_schedule", "max_seq_len"),
+        ("prefill", "compute_prefill_schedule", None),
+    ],
+)
+def test_aiter_fp4_probe_checks_schedule_abi(monkeypatch, missing):
+    _platform(monkeypatch, rocm=True)
+    modules = {name: SimpleNamespace() for name in ("decode", "prefill", "common")}
+    signatures: dict[str, dict[str, tuple[str, ...]]] = {
+        "decode": {
+            "flydsl_pa_mqa_logits_fp4": ("cta_info", "total_ctas"),
+            "compute_varctx_schedule": (
+                "block_k",
+                "parallel_unit_num",
+                "max_seq_len",
+                "next_n",
+                "cta_info_out",
+            ),
+        },
+        "prefill": {
+            "flydsl_pa_mqa_logits_fp4_prefill": ("cta_info", "n_ctas"),
+            "compute_prefill_schedule": ("block_k", "parallel_unit_num", "max_seq_len"),
+        },
+        "common": {"_i32_buffer": ("byte_offset",)},
+    }
+    for name in ("decode", "prefill"):
+        suffix = "_prefill" if name == "prefill" else ""
+        for function in (
+            f"build_pa_mqa_logits_fp4{suffix}_module",
+            f"compile_pa_mqa_logits_fp4{suffix}",
+        ):
+            signatures[name][function] = (
+                "kv_page_stride",
+                "kv_scale_page_stride",
+                "block_table_stride",
+            )
+    for name, functions in signatures.items():
+        for function, parameters in functions.items():
+            if missing == (name, function, None):
+                continue
+            signature = inspect.Signature(
+                [
+                    inspect.Parameter(parameter, inspect.Parameter.KEYWORD_ONLY)
+                    for parameter in parameters
+                    if missing != (name, function, parameter)
+                ]
+            )
+            setattr(modules[name], function, Mock(__signature__=signature))
+    package = ModuleType("aiter.ops.flydsl.kernels.mqa_logits")
+    monkeypatch.setattr(package, "pa_mqa_logits_fp4", modules["decode"], raising=False)
+    monkeypatch.setattr(
+        package, "pa_mqa_logits_fp4_prefill", modules["prefill"], raising=False
+    )
+    monkeypatch.setattr(
+        package, "pa_mqa_logits_fp4_common", modules["common"], raising=False
+    )
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    monkeypatch.setattr(indexer.logger, "warning", Mock())
+    indexer.aiter_mxfp4_available.cache_clear()
+    try:
+        assert indexer.dsa_indexer_uses_fp4(_config("mxfp4")) is (missing is None)
+        assert indexer.logger.warning.call_count == (missing is not None)
+    finally:
+        indexer.aiter_mxfp4_available.cache_clear()
 
 
 def test_missing_aiter_falls_back_to_fp8_with_warning(monkeypatch):
