@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import MethodType
 from unittest.mock import MagicMock
 
 import pytest
@@ -101,6 +102,9 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
     impl.dcp_world_size = 8
     impl.dcp_rank = 3
     impl.cp_kv_cache_interleave_size = 1
+    impl._flattened_decode_metadata = MethodType(
+        flashinfer_mla.FlashInferMLAImpl._flattened_decode_metadata, impl
+    )
 
     num_reqs, query_len = 2, 3
     num_tokens = num_reqs * query_len
