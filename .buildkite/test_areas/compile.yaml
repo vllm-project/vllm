@@ -69,11 +69,11 @@ steps:
     - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
   mirror:
     amd:
-      label: ':amd: (MI355) Fusion and Compile FP8'
+      label: ":amd: (MI355) Fusion and Compile FP8"
       dind: false
       device: mi355_2
       num_devices: 2
-      working_dir: /vllm-workspace/
+      working_dir: "/vllm-workspace/"
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -88,7 +88,7 @@ steps:
       - vllm/model_executor/kernels/linear/
       - vllm/model_executor/models/llama.py
       commands:
-      - rocm-smi
+      - amd-smi
       # MLA static FP8 and distributed AR/RMS are owned by the existing ROCm jobs.
       - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
       - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
