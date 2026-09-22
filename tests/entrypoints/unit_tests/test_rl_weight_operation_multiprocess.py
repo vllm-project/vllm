@@ -35,11 +35,17 @@ CHILD_RECORD = """
 import sys, time
 from vllm.entrypoints.serve.dev.rlhf.metrics import weight_operation_metrics
 
-operation, ready_path, hold_seconds = sys.argv[1], sys.argv[2], float(sys.argv[3])
+operation, ready_path, hold_seconds, held_operation = (
+    sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
+)
 metrics = weight_operation_metrics()
-# Staying inside the block holds the in-flight gauge at 1 (the recorder's own
-# increment) so the parent can scrape a non-zero value.
+# Record one operation through to completion, so its counter and duration are
+# written to the mmap file.
 with metrics.record(operation):
+    pass
+# Then hold a second operation open: staying inside the block keeps the
+# in-flight gauge at 1 (the recorder's own increment) while the parent scrapes.
+with metrics.record(held_operation):
     open(ready_path, "w").close()
     time.sleep(hold_seconds)
 """
@@ -47,10 +53,15 @@ with metrics.record(operation):
 # Each test uses its own operation labels, so a recorder left behind by an
 # earlier test can never inflate a later test's series.
 OP_AGGREGATE = "probe_aggregate"
+OP_AGGREGATE_HELD = "probe_aggregate_held"
 OP_SEPARATE_A = "probe_separate_a"
+OP_SEPARATE_A_HELD = "probe_separate_a_held"
 OP_SEPARATE_B = "probe_separate_b"
+OP_SEPARATE_B_HELD = "probe_separate_b_held"
 OP_STALE_ALIVE = "probe_stale_alive"
+OP_STALE_ALIVE_HELD = "probe_stale_alive_held"
 OP_STALE_DEAD = "probe_stale_dead"
+OP_STALE_DEAD_HELD = "probe_stale_dead_held"
 OP_LAZY = "probe_lazy"
 
 
@@ -69,16 +80,28 @@ def _child_env(multiproc_dir: str) -> dict[str, str]:
 
 
 def _spawn_recorder(
-    multiproc_dir: str, operation: str, name: str, hold_seconds: float = 300
+    multiproc_dir: str,
+    operation: str,
+    held_operation: str,
+    name: str,
+    hold_seconds: float = 300,
 ) -> tuple[subprocess.Popen, str]:
-    """Start a child that records one operation and holds its gauge.
+    """Start a child that completes `operation` and holds `held_operation` open.
 
     Uses a ready file instead of a stdout handshake: the child's stderr carries
     vLLM import warnings, and an unread pipe would fill up and block the child.
     """
     ready_path = os.path.join(multiproc_dir, f"ready_{name}")
     proc = subprocess.Popen(
-        [sys.executable, "-c", CHILD_RECORD, operation, ready_path, str(hold_seconds)],
+        [
+            sys.executable,
+            "-c",
+            CHILD_RECORD,
+            operation,
+            ready_path,
+            str(hold_seconds),
+            held_operation,
+        ],
         env=_child_env(multiproc_dir),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -142,40 +165,45 @@ def test_multiprocess_aggregates_operations_duration_and_in_flight(
     tmp_path, monkeypatch
 ):
     multiproc_dir = str(tmp_path)
-    update_a, _ = _spawn_recorder(multiproc_dir, OP_AGGREGATE, "a")
-    update_b, _ = _spawn_recorder(multiproc_dir, OP_AGGREGATE, "b")
-    try:
-        text = _scrape(monkeypatch, multiproc_dir)
-    finally:
-        _stop_recorder(update_a)
-        _stop_recorder(update_b)
-
-    # Two processes each recorded one operation: counters and histogram counts
-    # sum, and livesum makes the held gauges add up.
-    labels = f'operation="{OP_AGGREGATE}"'
-    assert _sample(text, PREFIX + "operations_total", f'{labels},status="success"') == 2
-    assert _sample(text, PREFIX + "operation_duration_seconds_count", labels) == 2
-    assert _sample(text, PREFIX + "operations_in_flight", labels) == 2
-
-
-def test_different_operations_stay_separate_across_processes(tmp_path, monkeypatch):
-    multiproc_dir = str(tmp_path)
-    first, _ = _spawn_recorder(multiproc_dir, OP_SEPARATE_A, "u")
-    second, _ = _spawn_recorder(multiproc_dir, OP_SEPARATE_B, "f")
+    first, _ = _spawn_recorder(multiproc_dir, OP_AGGREGATE, OP_AGGREGATE_HELD, "a")
+    second, _ = _spawn_recorder(multiproc_dir, OP_AGGREGATE, OP_AGGREGATE_HELD, "b")
     try:
         text = _scrape(monkeypatch, multiproc_dir)
     finally:
         _stop_recorder(first)
         _stop_recorder(second)
 
-    label_a = f'operation="{OP_SEPARATE_A}"'
-    label_b = f'operation="{OP_SEPARATE_B}"'
-    for labels in (label_a, label_b):
+    # Two processes each completed one operation and are each holding one open:
+    # counters and histogram counts sum, and livesum makes the gauges add up.
+    labels = f'operation="{OP_AGGREGATE}"'
+    held = f'operation="{OP_AGGREGATE_HELD}"'
+    assert _sample(text, PREFIX + "operations_total", f'{labels},status="success"') == 2
+    assert _sample(text, PREFIX + "operation_duration_seconds_count", labels) == 2
+    assert _sample(text, PREFIX + "operations_in_flight", held) == 2
+
+
+def test_different_operations_stay_separate_across_processes(tmp_path, monkeypatch):
+    multiproc_dir = str(tmp_path)
+    first, _ = _spawn_recorder(multiproc_dir, OP_SEPARATE_A, OP_SEPARATE_A_HELD, "u")
+    second, _ = _spawn_recorder(multiproc_dir, OP_SEPARATE_B, OP_SEPARATE_B_HELD, "f")
+    try:
+        text = _scrape(monkeypatch, multiproc_dir)
+    finally:
+        _stop_recorder(first)
+        _stop_recorder(second)
+
+    for operation, held in (
+        (OP_SEPARATE_A, OP_SEPARATE_A_HELD),
+        (OP_SEPARATE_B, OP_SEPARATE_B_HELD),
+    ):
+        labels = f'operation="{operation}"'
         assert (
             _sample(text, PREFIX + "operations_total", f'{labels},status="success"')
             == 1
         )
-        assert _sample(text, PREFIX + "operations_in_flight", labels) == 1
+        assert (
+            _sample(text, PREFIX + "operations_in_flight", f'operation="{held}"') == 1
+        )
     # The operation label is what separates them; summing is not meaningful.
     assert _sample(text, PREFIX + "operations_total", 'status="success"') is None
 
@@ -184,35 +212,24 @@ def test_mark_process_dead_clears_stale_in_flight(tmp_path, monkeypatch):
     from prometheus_client import multiprocess
 
     multiproc_dir = str(tmp_path)
-    alive, _ = _spawn_recorder(multiproc_dir, OP_STALE_ALIVE, "alive")
-    dead, _ = _spawn_recorder(multiproc_dir, OP_STALE_DEAD, "dead")
+    alive, _ = _spawn_recorder(
+        multiproc_dir, OP_STALE_ALIVE, OP_STALE_ALIVE_HELD, "alive"
+    )
+    dead, _ = _spawn_recorder(multiproc_dir, OP_STALE_DEAD, OP_STALE_DEAD_HELD, "dead")
     dead_pid = _stop_recorder(dead)
+    dead_held = f'operation="{OP_STALE_DEAD_HELD}"'
+    alive_held = f'operation="{OP_STALE_ALIVE_HELD}"'
     try:
         before = _scrape(monkeypatch, multiproc_dir)
-        assert (
-            _sample(
-                before, PREFIX + "operations_in_flight", f'operation="{OP_STALE_DEAD}"'
-            )
-            == 1
-        )
+        assert _sample(before, PREFIX + "operations_in_flight", dead_held) == 1
 
         multiprocess.mark_process_dead(dead_pid, multiproc_dir)
 
         after = _scrape(monkeypatch, multiproc_dir)
         # The dead process's held gauge is gone instead of lingering forever.
-        assert (
-            _sample(
-                after, PREFIX + "operations_in_flight", f'operation="{OP_STALE_DEAD}"'
-            )
-            is None
-        )
+        assert _sample(after, PREFIX + "operations_in_flight", dead_held) is None
         # The live process is unaffected.
-        assert (
-            _sample(
-                after, PREFIX + "operations_in_flight", f'operation="{OP_STALE_ALIVE}"'
-            )
-            == 1
-        )
+        assert _sample(after, PREFIX + "operations_in_flight", alive_held) == 1
     finally:
         _stop_recorder(alive)
 
@@ -223,7 +240,10 @@ def test_metrics_are_created_lazily_after_multiprocess_setup(tmp_path):
     code = (
         "from vllm.entrypoints.serve.dev.rlhf import metrics;"
         "print('before', metrics._metrics is not None);"
-        f"metrics.weight_operation_metrics().in_flight.labels(operation='{OP_LAZY}').inc();"
+        f"m = metrics.weight_operation_metrics();"
+        f"m.operations.labels(operation='{OP_LAZY}', status='success').inc();"
+        f"m.duration.labels(operation='{OP_LAZY}').observe(1.0);"
+        f"m.in_flight.labels(operation='{OP_LAZY}').inc();"
         "print('after', metrics._metrics is not None)"
     )
     out = subprocess.run(
@@ -238,6 +258,7 @@ def test_metrics_are_created_lazily_after_multiprocess_setup(tmp_path):
     assert "before False" in out.stdout
     assert "after True" in out.stdout
 
+    # All three families became mmap-backed only because setup ran before use.
     files = os.listdir(multiproc_dir)
     assert any(name.startswith("counter_") for name in files), files
     assert any(name.startswith("gauge_livesum_") for name in files), files
