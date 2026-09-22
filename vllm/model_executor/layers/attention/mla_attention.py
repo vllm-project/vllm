@@ -202,7 +202,7 @@ import functools
 import itertools
 import math
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
@@ -2256,6 +2256,25 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
 
+    @staticmethod
+    def _resolve_non_causal_multi_token_decode(
+        layer_names: list[str],
+        static_forward_context: Mapping[str, Any],
+    ) -> bool:
+        """Whether this builder's layers run a non-causal multi-token decode.
+
+        ``MLAAttentionSpec.merge`` unions the flag across every layer in a KV
+        cache group, so a group that also holds the DSpark draft reports True
+        on the spec passed to every builder in that group. Read the layers this
+        builder actually serves instead of that merged spec.
+        """
+        return any(
+            getattr(
+                static_forward_context[name], "non_causal_multi_token_decode", False
+            )
+            for name in layer_names
+        )
+
     def _validate_dspark_dcp_support(self, supports_dcp_with_varlen: bool) -> None:
         speculative_config = getattr(self.vllm_config, "speculative_config", None)
         parallel_config = self.vllm_config.parallel_config
@@ -2370,8 +2389,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        self.non_causal_multi_token_decode = getattr(
-            kv_cache_spec, "non_causal_multi_token_decode", False
+        # Do not read this from kv_cache_spec: merge() unions the flag across
+        # the KV group, so a shared target/draft group would mark the target
+        # builder as non-causal.
+        self.non_causal_multi_token_decode = (
+            self._resolve_non_causal_multi_token_decode(
+                layer_names, self.compilation_config.static_forward_context
+            )
         )
         self._validate_dspark_dcp_support(supports_dcp_with_varlen)
 
