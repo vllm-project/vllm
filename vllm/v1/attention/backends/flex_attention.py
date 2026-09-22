@@ -106,6 +106,10 @@ class FlexAttentionBackend(AttentionBackend):
         return "FLEX_ATTENTION"
 
     @classmethod
+    def supports_rswa(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_sliding_window(cls) -> bool:
         return True
 
@@ -161,8 +165,7 @@ def physical_to_logical_mapping(
     block_size: int,
     total_blocks: int,
 ) -> torch.Tensor:
-    """
-    Creates an inverse mapping from physical block locations to logical indices.
+    """Creates an inverse mapping from physical block locations to logical indices.
 
     The original block_table maps from logical blocks to physical locations:
 
@@ -235,6 +238,7 @@ def physical_to_logical_mapping(
         A tensor of shape [max_reqs, total_blocks] where each entry
         physical_to_logical[req_id, physical_block] contains the logical
         block index for that physical block, or -1 if unused.
+
     """
     max_reqs, max_num_blocks = block_table.shape
     device = block_table.device
@@ -271,8 +275,7 @@ def unique_static_unsorted(
     ignored_val: int = 0,  # value to ignore
     pad_val: int = -1,  # sentinel for unused slots
 ) -> torch.Tensor:
-    """
-    - Keeps the first occurrence of each non-zero value while preserving order,
+    """- Keeps the first occurrence of each non-zero value while preserving order,
       then left-packs those uniques and fills the rest with `pad_val`.
     - Returns (packed, keep_mask) with the *same shape* as `x`.
     - Requires that all values be in the range [0, M]
@@ -282,6 +285,7 @@ def unique_static_unsorted(
 
     Example:
     x =[3, 1, 0, 1, 2], M=3, ignored_val=0 => [3, 1, 2, -1, -1]
+
     """
     if not (-1 <= pad_val <= M):
         raise ValueError("`pad_val` must lie in [-1, M]")
@@ -345,6 +349,7 @@ class BlockSparsityHint(NamedTuple):
         hint_fn: (q_block_idx [num_tokens, 1], kv_block_idx [1, num_kv_blocks],
             block_size int) -> bool Tensor [num_tokens, num_kv_blocks].
             Returns True for block pairs that may contain non-masked elements.
+
     """
 
     hint_fn: _block_sparsity_hint_signature
@@ -431,6 +436,7 @@ class FlexAttentionMetadata:
 
         Returns:
             tuple of (is_valid, logical_q_idx, logical_kv_idx)
+
         """
         # Map query indices to corresponding request indices
         q_req = request_lookup[q_idx]
@@ -508,7 +514,6 @@ class FlexAttentionMetadata:
         Note that the sliding window mask here is bidirectional, we need
         to mask it with the bidirectional/causal mask for encoder/decoder.
         """
-
         if self.sliding_window is None:
             raise ValueError("sliding_window must be set for sliding window attention")
 
@@ -536,7 +541,6 @@ class FlexAttentionMetadata:
 
     def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
         """Creates the prefix LM mask_mod function for FlexAttention."""
-
         assert self.doc_ids is not None
         request_lookup = self.doc_ids
 
@@ -583,7 +587,6 @@ class FlexAttentionMetadata:
         far-away generated tokens that fall outside the window and outside the
         prefix.
         """
-
         assert self.doc_ids is not None
         assert self.rswa_prefix_lens is not None
         assert self.rswa_window is not None
@@ -1287,14 +1290,22 @@ class FlexAttentionImpl(AttentionImpl):
         """Forward pass with FLexAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization; not supported
+                by this backend.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(

@@ -7,6 +7,7 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import glob
 import os
 import shutil
 import subprocess
@@ -21,7 +22,6 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
 from vllm.platforms import current_platform
 
 DAEMON_TIMEOUT_S = 600
@@ -30,10 +30,19 @@ DAEMON_TIMEOUT_S = 600
 class WeightCacheDaemon:
     """Context manager running the real weight cache daemon as a subprocess."""
 
-    def __init__(self, model: str, tp_size: int, extra_args: list[str] | None = None):
+    def __init__(
+        self,
+        model: str,
+        tp_size: int,
+        extra_args: list[str] | None = None,
+        num_groups: int = 1,
+    ):
         # Short base path: Unix socket paths are limited to ~107 characters.
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
         self.tp_size = tp_size
+        # Each daemon group (target plus cached drafts) binds one socket per
+        # local rank.
+        self.num_sockets = tp_size * num_groups
         self._cmd = [
             sys.executable,
             "-m",
@@ -79,9 +88,7 @@ class WeightCacheDaemon:
         # Poll for the socket files rather than a log line: model loading can
         # pull in JIT compilers that swap the process's stderr and swallow
         # everything logged afterwards, making log-based readiness flaky.
-        expected = [
-            get_socket_path(gpu_id, self.socket_dir) for gpu_id in range(self.tp_size)
-        ]
+        pattern = os.path.join(self.socket_dir, "vllm_weight_cache_*.sock")
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if self._proc.poll() is not None:
@@ -89,7 +96,7 @@ class WeightCacheDaemon:
                     f"Weight cache daemon exited with {self._proc.returncode}:\n"
                     f"{self._logs()}"
                 )
-            if all(os.path.exists(path) for path in expected):
+            if len(glob.glob(pattern)) >= self.num_sockets:
                 return
             time.sleep(1.0)
         raise TimeoutError(
@@ -114,6 +121,9 @@ class ModelCase:
     images: list | None = None
     llm_kwargs: dict[str, Any] = field(default_factory=dict)
     daemon_args: list[str] = field(default_factory=list)
+    # Daemon groups the launcher starts; 2 when a cached draft group joins the
+    # target group (MTP/EAGLE speculative decoding).
+    daemon_groups: int = 1
 
 
 def generate(
@@ -174,14 +184,41 @@ K3_CASE = ModelCase(
     daemon_args=["--trust-remote-code"],
 )
 
+# Qwen3.5-0.8B ships one MTP layer in the target checkpoint, so method="mtp"
+# loads the draft from the same model. The daemon must cache it in its draft
+# group for the warm runs (fallback=False) to succeed.
+QWEN_MTP_CASE = ModelCase(
+    model="Qwen/Qwen3.5-0.8B",
+    prompts=[
+        "Hello, my name is",
+        "The capital of France is",
+    ],
+    llm_kwargs=dict(
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+    ),
+    daemon_args=[
+        "--speculative-config",
+        '{"method": "mtp", "num_speculative_tokens": 1}',
+    ],
+    daemon_groups=2,
+)
 
-@pytest.mark.parametrize("case", [QWEN_CASE, K3_CASE], ids=["qwen3.5", "kimi-k3"])
+
+@pytest.mark.parametrize(
+    "case",
+    [QWEN_CASE, K3_CASE, QWEN_MTP_CASE],
+    ids=["qwen3.5", "kimi-k3", "qwen3.5-mtp"],
+)
 def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     """Cold start falls back to disk; warm restarts load weights via CUDA IPC.
 
     All runs must produce outputs identical to a default-loader baseline. The
     warm runs disable the disk fallback, so they only pass if the weights
-    really came from the daemon.
+    really came from the daemon — for the MTP case, both the target's and the
+    draft's daemon groups.
     """
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
@@ -201,7 +238,12 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
         cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
 
-    with WeightCacheDaemon(case.model, tp_size=1, extra_args=case.daemon_args) as d:
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=1,
+        extra_args=case.daemon_args,
+        num_groups=case.daemon_groups,
+    ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         # Warm restart: a second engine lifetime against the same daemon.
         restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
