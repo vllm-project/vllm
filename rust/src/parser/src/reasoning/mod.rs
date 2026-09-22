@@ -61,6 +61,8 @@ pub type Glm47ReasoningParser = DeepSeekV3ReasoningParser;
 // TODO: kimi k2 may implicitly end reasoning by starting a tool call section
 // using <|tool_calls_section_begin|>, we should support that.
 pub type KimiK2ReasoningParser = DeepSeekV3ReasoningParser;
+/// MiMo V2 uses bare `<think>...</think>` delimiters.
+pub type MiMoReasoningParser = DeepSeekV3ReasoningParser;
 /// MiniMax M2 currently shares the Qwen3 reasoning parser.
 pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
 
