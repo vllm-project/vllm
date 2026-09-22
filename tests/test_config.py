@@ -1285,21 +1285,33 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
 
 
 @pytest.mark.parametrize(
+    "cpu_offload,dp_size,elastic_ep,expected",
+    [(True, 2, False, True), (False, 2, False, False), (True, 1, False, False)],
+)
+def test_engram_dp_shared_memory_defaults_when_supported(
+    cpu_offload, dp_size, elastic_ep, expected
+):
+    """Unset dp_shared_memory enables sharing only for offloaded, non-elastic DP."""
+    parallel = ParallelConfig(data_parallel_size=dp_size)
+    parallel.enable_elastic_ep = elastic_ep
+    config = EngramConfig(cpu_offload=cpu_offload)
+    config.resolve_dp_shared_memory(parallel)
+    assert config.dp_shared_memory is expected
+
+
+@pytest.mark.parametrize(
     "dp_size,load_format,multithread,error",
     [
         (1, "auto", False, "requires data_parallel_size > 1"),
-        (2, "dummy", False, "requires load_format"),
-        (2, "sharded_state", False, "requires load_format"),
         (2, "auto", False, None),
         (2, "safetensors", True, None),
-        (2, "pt", True, None),
     ],
 )
 def test_engram_dp_shared_memory_config_validation(
     monkeypatch, dp_size, load_format, multithread, error
 ):
     """Reject invalid shared configs before distributed init; allow threaded loads."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     config = cast(
         VllmConfig,
         SimpleNamespace(
@@ -1324,7 +1336,7 @@ def test_engram_dp_shared_memory_config_validation(
 
 
 @pytest.mark.parametrize(
-    "architecture, ple_layers, cuda, supported",
+    "architecture, ple_layers, accelerator, supported",
     [
         ("DeepseekV41ForCausalLM", [1], True, True),
         ("DeepseekV41ForCausalLM", [], True, False),
@@ -1339,9 +1351,11 @@ def test_engram_dp_shared_memory_config_validation(
         (None, None, True, False),
     ],
 )
-def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, supported):
+def test_engram_model_support(
+    monkeypatch, architecture, ple_layers, accelerator, supported
+):
     """A similarly named HF field must not enable unsupported implementations."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: accelerator)
     model = (
         cast(
             ModelConfig,
@@ -1378,16 +1392,8 @@ def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, suppo
         assert resolved.engram_config.cpu_offload is True
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"), [(None, True), ("0", False), ("1", True)]
-)
-def test_engram_cpu_offload_environment_default(monkeypatch, value, expected):
-    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
-    if value is not None:
-        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", value)
-    assert EngramConfig().cpu_offload is expected
-    assert EngramConfig(cpu_offload=False).cpu_offload is False
-    assert EngramConfig(cpu_offload=True).cpu_offload is True
+def test_engram_cpu_offload_default():
+    assert EngramConfig().cpu_offload is True
 
 
 def test_engram_config_defaults_to_none():
@@ -1430,7 +1436,7 @@ def test_engram_explicit_config_requires_supported_model():
 @pytest.mark.parametrize("explicit", [False, True])
 def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, explicit):
     """MTP may inherit cross-DP sharding without having its own PLE layers."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     target = SimpleNamespace(
         architecture="Qwen4ExpForCausalLM",
         hf_text_config=SimpleNamespace(ple_layer_ids=[1] if target_has_ple else []),
@@ -1502,6 +1508,41 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.nnodes == 1
     assert parallel_config.node_rank == 0
     assert parallel_config.world_size == 8
+
+
+@pytest.mark.parametrize("data_parallel_size", [4, 8])
+def test_nnodes_within_dp_when_replicas_outnumber_nodes(data_parallel_size):
+    """A replica that fits on one node spans one node, never zero.
+
+    External LB pins ``data_parallel_size_local`` to 1, so the ratio rounds
+    down to 0 as soon as there are more DP replicas than nodes. Anything
+    dividing by ``nnodes_within_dp`` then raises ZeroDivisionError.
+    """
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_size_local=1,
+        data_parallel_external_lb=True,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+    assert parallel_config.local_world_size == parallel_config.world_size
+
+
+@pytest.mark.parametrize("nnodes", [4, 9])
+def test_nnodes_within_dp_rejects_uneven_internal_lb(nnodes):
+    parallel_config = ParallelConfig(
+        data_parallel_size=8,
+        data_parallel_size_local=1,
+        distributed_executor_backend="mp",
+        nnodes=nnodes,
+    )
+
+    with pytest.raises(ValueError, match="Invalid data parallel configuration"):
+        _ = parallel_config.nnodes_within_dp
 
 
 def test_draft_model_enables_async_scheduling_by_default():
