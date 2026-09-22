@@ -104,15 +104,43 @@ def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
         VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
 
 
-@pytest.mark.parametrize("connector", ["MooncakeStoreConnector", "OffloadingConnector"])
+@pytest.mark.parametrize(
+    ("connector", "blocked"),
+    [
+        ("NixlConnector", True),
+        ("NixlPullConnector", True),
+        ("NixlPushConnector", True),
+        ("MoRIIOConnector", True),
+        ("MooncakeConnector", True),
+        ("MooncakeStoreConnector", False),
+        ("OffloadingConnector", False),
+        ("LMCacheConnectorV1", False),
+        ("LMCacheMPConnector", False),
+        ("SimpleCPUOffloadConnector", False),
+    ],
+)
 @pytest.mark.parametrize("kv_role", ["kv_both", "kv_producer", "kv_consumer"])
-def test_aux_output_allows_kv_offload_but_rejects_pd(connector, kv_role):
+@pytest.mark.parametrize("multi", [False, True])
+def test_aux_output_connector_policy_is_independent_of_role(
+    connector, blocked, kv_role, multi
+):
     config = _config(connector=connector, kv_role=kv_role)
-    if kv_role == "kv_both":
-        VllmConfig._verify_aux_output_compatibility(config)
-    else:
-        with pytest.raises(ValueError, match="PD disaggregation is not supported"):
+    if multi:
+        config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role=kv_role,
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"},
+                    {"kv_connector": connector, "kv_role": kv_role},
+                ]
+            },
+        )
+    if blocked:
+        with pytest.raises(ValueError, match=f"incompatible with {connector}"):
             VllmConfig._verify_aux_output_compatibility(config)
+    else:
+        VllmConfig._verify_aux_output_compatibility(config)
 
 
 @pytest.mark.parametrize(
