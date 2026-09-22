@@ -245,19 +245,20 @@ class GateLinear(ReplicatedLinear):
             output = bf16x3_router_gemm(x, self.weight)
             return self._return(output)
 
-        # Tier 4: bf16→fp32 GEMM, cuBLAS on CUDA or the AITER tuned GEMM on ROCm.
-        # At most one is ever eligible: cuBLAS needs is_cuda(), AITER is_rocm().
+        # Tier 4: bf16→fp32 GEMM, the AITER tuned GEMM on ROCm or cuBLAS elsewhere.
+        # The torch.mm epilogue below is eligible on ROCm too, so AITER is tried
+        # first to keep it reachable there.
         if x.dtype == torch.bfloat16:
-            if self.allow_cublas_router_gemm:
-                output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
-                return self._return(output)
-
             if self.allow_aiter_router_gemm:
                 output = torch.ops.vllm.rocm_aiter_router_gemm(
                     x,
                     self.weight,
                     self.out_dtype if self.out_dtype is not None else self.weight.dtype,
                 )
+                return self._return(output)
+
+            if self.allow_cublas_router_gemm:
+                output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
                 return self._return(output)
 
         # Tier 5: F.linear (ReplicatedLinear)
