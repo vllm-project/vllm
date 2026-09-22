@@ -168,20 +168,21 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.sample_indices.zero_()
         self.sample_pos.zero_()
         self.sample_idx_mapping.fill_(-1)
-        assert self.query_cudagraph_manager is not None
-        self.query_cudagraph_manager.capture(
-            self._generate_draft,
-            self.input_buffers,
-            self.block_tables,
-            self.attn_groups,
-            self.kv_cache_config,
-            self.max_model_len,
-            causal=self._group_causal,
-            progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
-        )
-
         manager = self.decode_cudagraph_manager
         if manager is None:
+            assert self.query_cudagraph_manager is not None
+            self.query_cudagraph_manager.capture(
+                self._generate_draft,
+                self.input_buffers,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
+                self.max_model_len,
+                causal=self._group_causal,
+                progress_bar_desc=(
+                    f"Capturing {self._speculator_name.lower()} CUDA graphs"
+                ),
+            )
             return
 
         def create_forward_fn(
@@ -213,7 +214,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
 
             def forward(cg_mode: CUDAGraphMode) -> None:
-                self._precompute_context_kv(num_context)
+                self._precompute_context_kv(0, num_context)
                 # Record the builder's GPU updates so replay refreshes metadata too.
                 attn_metadata = self._build_uniform_attn_metadata(
                     desc,
@@ -373,19 +374,21 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
-    def _precompute_context_kv(self, num_tokens: int, dummy_run: bool = False) -> None:
+    def _precompute_context_kv(
+        self, start: int, end: int, dummy_run: bool = False
+    ) -> None:
         if dummy_run:
             context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
         elif self._layer_group_idx is not None:
             context_slots = [
-                self._context_slot_mappings[gidx][:num_tokens]
+                self._context_slot_mappings[gidx][start:end]
                 for gidx in self._layer_group_idx
             ]
         else:
-            context_slots = self._context_slot_mappings[0][:num_tokens]
+            context_slots = self._context_slot_mappings[0][start:end]
         self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_tokens],
-            self.context_positions[:num_tokens],
+            self.hidden_states[start:end],
+            self.context_positions[start:end],
             context_slots,
         )
 
@@ -504,9 +507,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             if dp_sync is not None
             else (None, num_query_tokens)
         )
+        manager = self.decode_cudagraph_manager
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
-            self.query_cudagraph_manager,
+            manager or self.query_cudagraph_manager,
             num_reqs,
             num_batch_tokens,
             uniform_token_count=self.num_query_per_req,
@@ -520,27 +524,29 @@ class DFlashSpeculator(DraftModelSpeculator):
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
 
-        manager = self.decode_cudagraph_manager
-        if (
-            manager is not None
-            and batch_desc.cg_mode == CUDAGraphMode.FULL
-            and not dummy_run
-            and not input_batch.has_prefill
-        ):
+        if manager is not None and batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert batch_desc.num_reqs is not None
+            # The graph precomputes a fixed num_context rows of context K/V.
             num_context = min(
                 batch_desc.num_reqs * (self.num_speculative_steps + 1),
                 self.max_num_tokens,
             )
-            self.context_positions[num_target_tokens:num_context].zero_()
-            self._context_slot_mappings[:, num_target_tokens:num_context].fill_(
-                PAD_SLOT_ID
-            )
+            if dummy_run:
+                # Dummy block tables are placeholders: write no context K/V.
+                self._context_slot_mappings[:, :num_context].fill_(PAD_SLOT_ID)
+            elif num_target_tokens <= num_context:
+                self.context_positions[num_target_tokens:num_context].zero_()
+                self._context_slot_mappings[:, num_target_tokens:num_context].fill_(
+                    PAD_SLOT_ID
+                )
+            else:
+                # Prefill context beyond the graph's rows is stored before replay.
+                self._precompute_context_kv(num_context, num_target_tokens)
             self._prepare_eplb_forward(num_query_tokens)
             manager.run_fullgraph(batch_desc)
             return self.draft_tokens[:num_reqs]
 
-        self._precompute_context_kv(num_target_tokens, dummy_run)
+        self._precompute_context_kv(0, num_target_tokens, dummy_run)
 
         # Rebuild the draft attention metadata even when replaying the FULL
         # graph so that any attention metadata builder state is updated.
