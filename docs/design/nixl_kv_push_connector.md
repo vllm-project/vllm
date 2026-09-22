@@ -223,7 +223,13 @@ Invariants enforced when the remote regions are aligned:
   remote descriptor list is rebuilt per rank.
 
 Decode-side PP is unsupported because completions are counted per
-consumer rank. Mamba/SSM hybrids are unsupported under PP.
+consumer rank. MLA+SSM hybrids, including Kimi KDA+MLA, use the same layer
+alignment for PP push. Attention descriptors precede the conv/SSM descriptors;
+each section follows local layer order. Attention uses kernel-block capacities,
+while conv/SSM sub-regions use logical-state capacities and each peer's page
+stride. This preserves the existing TP split handles: MLA is replicated and
+SSM state is sharded. Each producer stage must contain an MLA layer; other
+SSM hybrid layouts, including CSA-linear, remain unsupported under PP.
 
 ## Scheduler-side responsibilities
 

@@ -54,7 +54,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMappi
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_request, make_nixl_push_scheduler
@@ -1690,6 +1690,24 @@ def test_layer_group_ids_route_descriptor_blocks(region_num_blocks, expected):
         region_num_blocks=region_num_blocks,
     )
     assert desc_ids.tolist() == expected
+
+
+def test_kimi_layer_descriptor_ids_preserve_ssm_logical_blocks():
+    worker = _layer_routing_worker([["mla", "kda"]], {"mla": 0, "kda": 1})
+    worker._has_mamba = True
+    worker._conv_decomp = MagicMock(local_conv_offsets=((0, 8), (8, 8), (16, 8)))
+    worker._group_spec_types = (MLAAttentionSpec, MambaSpec)
+    worker._ssm_region_indices = [0]
+
+    desc_ids = worker._compute_desc_ids(
+        block_ids=[[1, 2], [3]],
+        dst_num_blocks=12,
+        block_size_ratio=None,
+        physical_blocks_per_logical=2,
+        region_num_blocks=[8, 12],
+    )
+
+    assert desc_ids.tolist() == [1, 2, 11, 17, 23, 29]
 
 
 def test_layer_metadata_round_trip():
