@@ -383,6 +383,13 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 hf_config, "canvas_length", 32
             )
 
+        # Use the ordinary generation defaults; explicit request temperatures
+        # always take precedence over this compatibility setting.
+        if vllm_config.diffusion_config.temperature is not None:
+            model_config.override_generation_config.setdefault(
+                "temperature", vllm_config.diffusion_config.temperature
+            )
+
         # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
         # fp32 transients, so cap concurrency when the user didn't pass
         # --max-num-seqs (same policy as DiffusionGemma).

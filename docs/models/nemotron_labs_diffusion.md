@@ -19,8 +19,19 @@ remaining masks before the block is committed.
 
 `DiffusionConfig.max_denoising_steps` limits iterations **per block** and defaults
 to the canvas length. `SamplingParams.max_tokens` controls the response length.
-Set request temperature to `0` for greedy decoding or `1` to use the engine's
-`DiffusionConfig.temperature`. Confidence is measured before temperature scaling.
+Use ordinary request temperatures: `0` is greedy, `0.7` samples at temperature
+0.7, and `1` samples at temperature 1. Different temperatures can share a batch.
+For example, pass `SamplingParams(temperature=0.7, top_p=0.9)` to `LLM.generate`.
+Temperature scaling precedes top-k/top-p filtering and applies to returned
+sampling logprobs. Confidence is measured using unscaled logits over the retained
+candidates.
+
+`DiffusionConfig.temperature`, when provided, sets the default for requests that
+omit temperature; it no longer overrides explicit request temperatures.
+`--override-generation-config '{"temperature": 0.7}'` sets the same standard
+default and takes precedence over `DiffusionConfig.temperature`. Without either
+setting, the checkpoint's ordinary generation defaults apply (temperature 1 if
+unspecified). The previous `1` selector for an engine temperature is removed.
 The `low_confidence` policy instead reveals a scheduled number of the most
 confident positions; `leftmost` reveals that number from left to right.
 

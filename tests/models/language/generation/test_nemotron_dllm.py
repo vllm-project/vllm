@@ -167,9 +167,7 @@ def test_ar_mode_config(explicit_diffusion_config):
 def test_diffusion_config_temperature():
     from vllm.config.diffusion import DiffusionConfig
 
-    # Engine-wide denoising temperature (per-request temperature is rejected
-    # for diffusion models); unset -> model default (greedy for masked
-    # diffusion). Negative values are invalid.
+    # Nemotron uses this as a default; negative values are invalid.
     assert DiffusionConfig(canvas_length=32).temperature is None
     assert DiffusionConfig(canvas_length=32, temperature=1.0).temperature == 1.0
     with pytest.raises(ValueError):
@@ -205,9 +203,7 @@ def test_masked_step_sampling_semantics(eager_sampler):
             "rk": torch.zeros(MAX_REQS, CL, dtype=torch.int32, device=device),
         }
 
-    def run_step(
-        st, logits, temperature, leftmost=False, steps=max_steps, req_temp=1.0
-    ):
+    def run_step(st, logits, temperature, leftmost=False, steps=max_steps):
         sampled = torch.zeros(1, CL, dtype=torch.int32, device=device)
         num_sampled = torch.zeros(1, dtype=torch.int32, device=device)
         draft = torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device)
@@ -218,7 +214,7 @@ def test_masked_step_sampling_semantics(eager_sampler):
             zero,  # decode_idx
             zero,  # all_slots
             torch.full((1,), CL, dtype=torch.int64, device=device),
-            torch.full((1,), req_temp, dtype=torch.float32, device=device),
+            torch.full((1,), temperature, dtype=torch.float32, device=device),
             st["canvas"],
             st["step"],
             st["phase"],
@@ -230,7 +226,7 @@ def test_masked_step_sampling_semantics(eager_sampler):
             max_denoising_steps=steps,
             mask_token_id=mask_id,
             CL=CL,
-            temperature=temperature,
+            all_greedy=temperature == 0,
             capture_logprobs=True,
             leftmost=leftmost,
             threshold_mode=False,
@@ -284,13 +280,6 @@ def test_masked_step_sampling_semantics(eager_sampler):
         assert torch.equal(st["rk"][0][unm], ranks[unm])
         draws.append(tuple(toks[unm].tolist()))
     assert len(set(draws)) >= 2, f"3 seeds gave identical draws: {draws}"
-
-    # Per-request greedy on a sampling engine (temperature=0 requests, e.g.
-    # greedy validation during RL): zero Gumbel noise for that row -> argmax.
-    st = fresh_state()
-    run_step(st, logits1, 1.0, req_temp=0.0)
-    unm = st["canvas"][0] != mask_id
-    assert torch.equal(st["canvas"][0][unm], x0[unm])
 
     # Leftmost selection: reveal order is strictly position order even when
     # a rightmost position is by far the most confident (leftmost-reveal RL
@@ -351,7 +340,7 @@ def test_threshold_unmasking_and_commit(max_steps, valid_length, eager_sampler):
             max_denoising_steps=max_steps,
             mask_token_id=mask,
             CL=width,
-            temperature=0.0,
+            all_greedy=True,
             capture_logprobs=True,
             leftmost=False,
             threshold_mode=True,
@@ -565,8 +554,7 @@ def test_greedy_generation(monkeypatch):
     )
     out = llm.generate(
         TokensPrompt(prompt_token_ids=prompt_ids),
-        # Engine temperature defaults to greedy.
-        SamplingParams(temperature=1.0, max_tokens=CANVAS_LENGTH),
+        SamplingParams(temperature=0.0, max_tokens=CANVAS_LENGTH),
     )
     del llm
     cleanup_dist_env_and_memory()
@@ -580,8 +568,7 @@ def test_greedy_generation(monkeypatch):
 @requires_gpu
 @requires_weights
 def test_stochastic_rollouts(monkeypatch):
-    """diffusion_config temperature=1.0 -> distinct rollouts with sane
-    per-token logprobs captured at unmask time (the RL rollout contract)."""
+    """Mixed request temperatures override defaults and return reveal logprobs."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     from vllm import LLM, SamplingParams
     from vllm.distributed import cleanup_dist_env_and_memory
@@ -599,16 +586,23 @@ def test_stochastic_rollouts(monkeypatch):
         enforce_eager=True,
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=0.6,
-        diffusion_config={"temperature": 1.0},
+        diffusion_config={"temperature": 0.0},
     )
+    assert llm.get_default_sampling_params().temperature == 0.0
+    temperatures = [0.0, 0.7, 1.0, 1.5]
     outs = llm.generate(
-        [TokensPrompt(prompt_token_ids=list(prompt_ids))] * 4,
-        SamplingParams(temperature=1.0, max_tokens=2 * CANVAS_LENGTH, logprobs=0),
+        [TokensPrompt(prompt_token_ids=list(prompt_ids))] * len(temperatures),
+        [
+            SamplingParams(
+                temperature=t, top_p=0.9, max_tokens=2 * CANVAS_LENGTH, logprobs=0
+            )
+            for t in temperatures
+        ],
     )
     del llm
     cleanup_dist_env_and_memory()
     texts = {o.outputs[0].text for o in outs}
-    assert len(texts) >= 2, f"4 rollouts at T=1 were identical: {texts}"
+    assert len(texts) >= 2, f"Mixed-temperature rollouts were identical: {texts}"
     for o in outs:
         c = o.outputs[0]
         assert c.logprobs is not None and len(c.logprobs) == len(c.token_ids)
@@ -690,8 +684,7 @@ def test_ar_logits_and_generation(monkeypatch, hf_overrides):
         )[0].outputs[0]
         assert list(greedy.token_ids) == hf_tokens
         assert greedy.logprobs is not None
-        # A fractional request temperature is legal for AR (diffusion accepts
-        # only the 0/1 selector). Exercise normal sampling and logprobs as well.
+        # Exercise fractional-temperature sampling and logprobs as well.
         sampled = llm.generate(
             [TokensPrompt(prompt_token_ids=prompt_ids)] * 2,
             SamplingParams(
@@ -709,3 +702,76 @@ def test_ar_logits_and_generation(monkeypatch, hf_overrides):
     finally:
         del llm
         cleanup_dist_env_and_memory()
+
+
+def test_temperature_precedes_top_p(monkeypatch):
+    from vllm.model_executor.models import nemotron_dllm
+    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
+
+    monkeypatch.setattr(nemotron_dllm, "apply_top_k_top_p", apply_top_k_top_p_pytorch)
+    logits = torch.tensor([[0.6, 0.3, 0.1, 10.0]]).log().repeat(3, 1)
+    filtered = nemotron_dllm._filter_sampling_logits(
+        logits, torch.tensor([0.0, 0.5, 2.0]), None, torch.full((3,), 0.7), 3
+    )
+    # At T=0.5 the leading token alone exceeds top_p; at T=1 or T=2 it
+    # takes two. The mask must not consume the nucleus probability budget.
+    expected = torch.tensor(
+        [
+            [True, True, False, False],
+            [True, False, False, False],
+            [True, True, False, False],
+        ]
+    )
+    assert torch.equal(filtered.isfinite(), expected)
+    torch.testing.assert_close(filtered[expected], logits[expected])
+
+
+def test_mixed_temperature_distribution_and_logprobs(eager_sampler):
+    from vllm.model_executor.models.nemotron_dllm import _compiled_masked_step
+
+    # Many independent positions give a low-variance check of the actual
+    # sampling law, not just the temperatures attached to returned logprobs.
+    rows, width, vocab, mask = 3, 4096, 3, 2
+    temperatures = torch.tensor([0.0, 0.5, 2.0])
+    logits = torch.tensor([0.0, 1.0, float("-inf")]).expand(rows, width, vocab)
+    slots = torch.arange(rows)
+    canvas = torch.full((rows, width), mask, dtype=torch.int64)
+    logprobs = torch.zeros(rows, width)
+    torch.manual_seed(17)
+    processed = _compiled_masked_step(
+        logits.reshape(-1, vocab),
+        slots,
+        slots,
+        slots,
+        torch.full((rows,), width),
+        temperatures,
+        canvas,
+        torch.zeros(rows, dtype=torch.int32),
+        torch.zeros(rows, dtype=torch.bool),
+        logprobs,
+        torch.zeros(rows, width, dtype=torch.int32),
+        torch.zeros(rows, width, dtype=torch.int32),
+        torch.zeros(rows, dtype=torch.int32),
+        torch.zeros_like(canvas),
+        max_denoising_steps=1,
+        mask_token_id=mask,
+        CL=width,
+        all_greedy=False,
+        capture_logprobs=True,
+        leftmost=False,
+        threshold_mode=True,
+        log_threshold=0.0,
+    )
+    assert (canvas[0] == 1).all()
+    for row, temperature in enumerate(temperatures.tolist()):
+        distribution = torch.distributions.Categorical(
+            logits=torch.tensor([0.0, 1.0]) / (temperature or 1.0)
+        )
+        torch.testing.assert_close(logprobs[row], distribution.log_prob(canvas[row]))
+        torch.testing.assert_close(
+            processed[row].log_softmax(-1).gather(-1, canvas[row, :, None]).squeeze(-1),
+            logprobs[row],
+        )
+        if temperature > 0:
+            frequency = (canvas[row] == 1).float().mean()
+            assert abs(frequency - distribution.probs[1]) < 0.03

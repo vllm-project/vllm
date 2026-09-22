@@ -43,8 +43,9 @@ def test_diffusion_rejects_unsupported_params(kwargs: dict):
         params.verify(MockModelConfig(is_diffusion=True), None, None, None)
 
 
-def test_nemotron_diffusion_accepts_greedy():
-    params = SamplingParams(temperature=0.0)
+@pytest.mark.parametrize("temperature", [0.0, 0.7, 1.0, 1.5])
+def test_nemotron_diffusion_accepts_request_temperature(temperature):
+    params = SamplingParams(temperature=temperature)
     params.verify(
         MockModelConfig(
             is_diffusion=True, architectures=["NemotronLabsDiffusionModel"]

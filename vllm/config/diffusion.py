@@ -28,11 +28,10 @@ class DiffusionConfig:
     If not set, read from the model's generation_config.json."""
 
     temperature: float | None = Field(default=None, ge=0)
-    """Sampling temperature for the denoising sampler (engine-wide, since
-    per-request sampling parameters are not supported for diffusion models).
-    0 means greedy. If not set, read from the model's generation_config.json
-    (model-specific key, e.g. ``diffusion_temperature``), defaulting to
-    greedy for masked-diffusion models."""
+    """Sampling temperature for the denoising sampler. Nemotron uses this as
+    a generation default; explicit per-request temperatures take precedence.
+    Other models may use an engine-wide schedule. 0 means greedy. If unset,
+    the model's generation defaults apply."""
 
     selection_policy: (
         Literal["low_confidence", "leftmost", "confidence_threshold"] | None

@@ -222,6 +222,22 @@ def _compute_num_rejected(
     return torch.where(is_denoise, query_lens, num_rejected)
 
 
+def _filter_sampling_logits(
+    logits: torch.Tensor,
+    temperatures: torch.Tensor,
+    top_k: torch.Tensor | None,
+    top_p: torch.Tensor | None,
+    mask_token_id: int,
+) -> torch.Tensor:
+    """Select sampling candidates after temperature scaling, excluding masks."""
+    logits = logits.float().clone()
+    logits[:, mask_token_id] = float("-inf")
+    temperatures = torch.where(temperatures > 0, temperatures, 1.0)
+    filtered = apply_top_k_top_p(logits / temperatures[:, None], top_k, top_p)
+    # Retain unscaled logits for the confidence-based reveal policy.
+    return logits.masked_fill_(filtered.isneginf(), float("-inf"))
+
+
 @torch.compile(dynamic=True)
 def _compiled_masked_step(
     # Logits from the model [num_decode * CL, vocab]
@@ -246,7 +262,7 @@ def _compiled_masked_step(
     max_denoising_steps: int,
     mask_token_id: int,
     CL: int,
-    temperature: float,
+    all_greedy: bool,
     capture_logprobs: bool,
     leftmost: bool,
     threshold_mode: bool,
@@ -276,14 +292,13 @@ def _compiled_masked_step(
     mask_index = (cur_canvas == mask_token_id) & valid
 
     # ---- x0 + confidence (prob of chosen token) at masked positions ----
-    if temperature > 0:
+    if not all_greedy:
         # Gumbel-max: argmax(logits + T*g) ~ softmax(logits / T).
         # Rows whose request asked for greedy (per-request temperature 0)
         # get zero noise and reduce to argmax.
         u = torch.rand_like(logits_3d).clamp_min(1e-20)
         gumbel = -torch.log(-torch.log(u))
-        row_scale = temperature * (req_temps > 0).to(logits_3d.dtype)
-        x0 = (logits_3d + row_scale[:, None, None] * gumbel).argmax(dim=-1)
+        x0 = (logits_3d + req_temps[:, None, None] * gumbel).argmax(dim=-1)
     else:
         x0 = logits_3d.argmax(dim=-1)  # [num_decode, CL]
     chosen_logits = logits_3d.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
@@ -321,15 +336,14 @@ def _compiled_masked_step(
         transfer = mask_index & (ranks < k.unsqueeze(1))
 
     # ---- At-unmask logprob/rank capture (sampling distribution) ----
+    sample_logits = logits_3d
     if capture_logprobs:
-        if temperature > 0 and temperature != 1.0:
-            row_temp = torch.where(req_temps > 0, temperature, 1.0)
-            sample_logits = logits_3d / row_temp[:, None, None]
-            chosen_lp = sample_logits.gather(-1, x0.unsqueeze(-1)).squeeze(
-                -1
-            ) - sample_logits.logsumexp(dim=-1)
-        else:
-            chosen_lp = x0_logprob
+        # Greedy requests report unscaled model logprobs, as in AR sampling.
+        row_temp = torch.where(req_temps > 0, req_temps, 1.0)
+        sample_logits = logits_3d / row_temp[:, None, None]
+        chosen_lp = sample_logits.gather(-1, x0.unsqueeze(-1)).squeeze(
+            -1
+        ) - sample_logits.logsumexp(dim=-1)
         chosen_rank = (
             (logits_3d >= chosen_logits.unsqueeze(-1)).sum(dim=-1).to(torch.int32)
         )
@@ -387,7 +401,7 @@ def _compiled_masked_step(
     # Feed the canvas back to the scheduler as next step's draft tokens.
     draft_tokens[all_slots, :CL] = canvas[all_slots]
 
-    return logits_3d
+    return sample_logits
 
 
 class NemotronLabsDiffusionRequestStates:
@@ -475,15 +489,6 @@ class NemotronLabsDiffusionModelState(ModelState):
             or gen_config.get("max_denoising_steps")
             or canvas_length
         )
-        # Denoising sampler temperature (engine-wide; per-request temperature
-        # uses 0/1 to select greedy/the engine schedule). None-checks rather
-        # than `or` since 0.0 is a valid explicit setting.
-        temperature = diffusion_config.temperature if diffusion_config else None
-        if temperature is None:
-            temperature = gen_config.get("diffusion_temperature")
-        if temperature is None:
-            temperature = 0.0
-        self.sampling_temperature = float(temperature)
         selection = (
             (diffusion_config.selection_policy if diffusion_config else None)
             or gen_config.get("diffusion_selection_policy")
@@ -524,7 +529,6 @@ class NemotronLabsDiffusionModelState(ModelState):
             sampler=sampler,
             vocab_size=self.model_config.get_vocab_size(),
             diffusion_states=self.diffusion_states,
-            temperature=self.sampling_temperature,
             selection_policy=self.selection_policy,
             confidence_threshold=self.confidence_threshold,
         ), None
@@ -616,7 +620,7 @@ _NO_PENALTIES_STATE = SimpleNamespace(output_bin_counts=None)
 
 
 class MaskedDiffusionSampler:
-    """Masked diffusion with engine temperature and per-request greedy override.
+    """Masked diffusion with per-request sampling temperatures.
 
     The default threshold policy reveals all confident positions and guarantees
     at least one reveal per step. ``logprobs=0`` returns each token's logprob at
@@ -628,7 +632,6 @@ class MaskedDiffusionSampler:
         sampler: Any,
         vocab_size: int,
         diffusion_states: NemotronLabsDiffusionRequestStates,
-        temperature: float = 0.0,
         selection_policy: str = "confidence_threshold",
         confidence_threshold: float = 0.9,
     ):
@@ -638,7 +641,6 @@ class MaskedDiffusionSampler:
         self.diffusion_states = diffusion_states
         self.canvas_length = diffusion_states.canvas_length
         self.mask_token_id = diffusion_states.mask_token_id
-        self.temperature = temperature
         self.leftmost = selection_policy == "leftmost"
         self.threshold_mode = selection_policy == "confidence_threshold"
         # Compared against per-position chosen-token logprobs (natural log).
@@ -805,14 +807,20 @@ class MaskedDiffusionSampler:
         )
 
         if num_decode > 0:
+            token_slots = decode_slots.repeat_interleave(
+                valid_canvas_len, output_size=int(valid_canvas_len_np.sum())
+            )
             top_k, top_p = self.sampling_states.get_top_k_top_p(
-                decode_slots.repeat_interleave(
-                    valid_canvas_len, output_size=int(valid_canvas_len_np.sum())
-                ),
-                decode_slots_np,
+                token_slots, decode_slots_np
             )
             if top_k is not None or top_p is not None:
-                logits = apply_top_k_top_p(logits.float(), top_k, top_p)
+                logits = _filter_sampling_logits(
+                    logits,
+                    self.sampling_states.temperature.gpu[token_slots],
+                    top_k,
+                    top_p,
+                    self.mask_token_id,
+                )
 
         # Pad any truncated canvas back to CL so the uniform-CL sampler math
         # holds. Padded positions are zeroed (uniform logits) and are treated
@@ -860,7 +868,9 @@ class MaskedDiffusionSampler:
             max_denoising_steps=int(states.max_denoising_steps),
             mask_token_id=int(states.mask_token_id),
             CL=CL,
-            temperature=self.temperature,
+            all_greedy=bool(
+                (self.sampling_states.temperature.np[decode_slots_np] == 0).all()
+            ),
             capture_logprobs=max_num_logprobs >= 0,
             leftmost=self.leftmost,
             threshold_mode=self.threshold_mode,

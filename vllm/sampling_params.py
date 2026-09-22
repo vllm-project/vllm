@@ -1051,13 +1051,13 @@ class SamplingParams(
         if not model_config.is_diffusion:
             return
 
-        # Nemotron's masked sampler supports a per-request greedy override;
-        # other diffusion models retain their engine-level schedule.
-        greedy_masked = self.temperature == 0.0 and (
+        # Nemotron supports ordinary per-request temperatures; other
+        # diffusion models retain their engine-level schedule.
+        per_request_temperature = (
             "NemotronLabsDiffusionModel" in model_config.architectures
         )
         if (
-            (self.temperature != 1.0 and not greedy_masked)
+            (self.temperature != 1.0 and not per_request_temperature)
             or self.min_p > _SAMPLING_EPS
             or self.seed is not None
             or self.min_tokens > 0
