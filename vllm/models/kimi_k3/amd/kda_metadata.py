@@ -35,6 +35,7 @@ def _chunk_metadata_kernel(
     BLOCK_T: tl.constexpr,
 ):
     i_n = tl.program_id(0)
+    i_t = tl.program_id(1)
     offs_n = tl.arange(0, BLOCK_N)
     is_seq = offs_n < N
     bos = tl.load(cu_seqlens + offs_n, mask=is_seq, other=0).to(tl.int32)
@@ -44,11 +45,15 @@ def _chunk_metadata_kernel(
     base = tl.sum(tl.where(offs_n < i_n, nt, 0))
     num_chunks = tl.sum(tl.where(offs_n == i_n, nt, 0))
 
-    tl.store(chunk_offsets + i_n, base)
-    if i_n == 0:
-        tl.store(chunk_offsets + N, tl.sum(nt))
+    # The offsets are per sequence, not per chunk block, so only the first
+    # block of each sequence writes them.
+    if i_t == 0:
+        tl.store(chunk_offsets + i_n, base)
+        if i_n == 0:
+            tl.store(chunk_offsets + N, tl.sum(nt))
 
-    for t0 in range(0, num_chunks, BLOCK_T):
+    t0 = i_t * BLOCK_T
+    if t0 < num_chunks:
         offs_t = t0 + tl.arange(0, BLOCK_T)
         mask_t = offs_t < num_chunks
         row = (base + offs_t) * 2
@@ -72,7 +77,14 @@ def prepare_chunk_metadata_device(
     chunk_offsets = torch.empty(
         num_seqs + 1, dtype=torch.int64, device=cu_seqlens.device
     )
-    _chunk_metadata_kernel[(num_seqs,)](
+    # One program per (sequence, chunk block) rather than one per sequence.
+    # With a single long sequence the old grid was one workgroup walking every
+    # chunk serially -- at 194k prompt tokens and chunk_size 64 that is ~3000
+    # iterations in one workgroup while the rest of the GPU idles.
+    chunks_per_seq = (seq_lens + chunk_size - 1) // chunk_size
+    max_chunks_per_seq = int(chunks_per_seq.max()) if num_seqs else 0
+    num_chunk_blocks = max(1, triton.cdiv(max_chunks_per_seq, _BLOCK_T))
+    _chunk_metadata_kernel[(num_seqs, num_chunk_blocks)](
         cu_seqlens,
         chunk_indices,
         chunk_offsets,
