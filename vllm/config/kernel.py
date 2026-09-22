@@ -164,6 +164,7 @@ SparseIndexerTopkBackend = Literal[
     "per_row",
     "flashinfer",
     "torch",
+    "aiter",
 ]
 
 # Architectures whose model code wires up the flashinfer moe_ep experts. MTP
@@ -278,7 +279,7 @@ class KernelConfig:
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
-    - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
+    - "auto": The chain (aiter -> cooperative -> persistent -> per_row);
       the other backends are opt-in
     - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
     - "cooperative": Use vLLM's cooperative_topk kernel
@@ -286,6 +287,9 @@ class KernelConfig:
     - "per_row": Use vLLM's top_k_per_row_decode kernel
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
     - "torch": Use a plain torch.topk implementation (debug reference)
+    - "aiter": Use AITER's top_k_per_row_decode kernel (ROCm gfx950 only,
+      requires VLLM_ROCM_USE_AITER); shapes outside its measured perf window
+      silently fall back to "per_row"
 
     Explicit values raise RuntimeError when their constraints are not met.
     """

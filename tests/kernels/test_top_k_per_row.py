@@ -636,8 +636,8 @@ def test_top_k_per_row_decode_gfx950_k512_masked_graph_replay() -> None:
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
 def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        _get_aiter_top_k_kernel,
         _launch_aiter_top_k_per_row_prefill,
     )
 
@@ -647,17 +647,15 @@ def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
     top_k = 4
     indices = torch.empty((3, top_k), dtype=torch.int32, device="cuda")
 
-    aiter_topk_kernel = _get_aiter_top_k_kernel(
+    if not rocm_aiter_ops.is_indexer_top_k_supported(
         is_prefill=True,
         compress_ratio=4,
         num_rows=logits.shape[0],
         on_gfx950=True,
-    )
-    if aiter_topk_kernel is None:
+    ):
         pytest.skip("AITER top-k is unavailable")
     assert (
         _launch_aiter_top_k_per_row_prefill(
-            aiter_topk_kernel,
             logits,
             row_starts,
             row_ends,
@@ -683,10 +681,7 @@ def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
 def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
     num_speculative_tokens: int,
 ) -> None:
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        _get_aiter_top_k_kernel,
-        _launch_aiter_top_k_per_row_decode,
-    )
+    from vllm._aiter_ops import rocm_aiter_ops
 
     query_tokens = num_speculative_tokens + 1
     offsets = torch.arange(query_tokens, dtype=torch.int32, device="cuda")
@@ -701,20 +696,19 @@ def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
     top_k = 4
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
-    aiter_topk_kernel = _get_aiter_top_k_kernel(
+    if not rocm_aiter_ops.is_indexer_top_k_supported(
         is_prefill=False,
         compress_ratio=4,
         num_rows=num_rows,
         max_valid_seq_len=seq_lens.max().item(),
         on_gfx950=True,
-    )
-    if aiter_topk_kernel is None:
+    ):
         pytest.skip("AITER top-k is unavailable")
     assert (
-        _launch_aiter_top_k_per_row_decode(
-            aiter_topk_kernel,
+        rocm_aiter_ops.indexer_top_k_decode(
             logits,
-            seq_lens,
+            1,
+            seq_lens.reshape(-1),
             indices,
             top_k,
         )
@@ -730,7 +724,8 @@ def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
 
 
 def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse
+    from vllm import _aiter_ops
+    from vllm._aiter_ops import rocm_aiter_ops
 
     def prefill_kernel(*args, **kwargs) -> None:
         pass
@@ -739,71 +734,56 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
         pass
 
     monkeypatch.setattr(
-        rocm_aiter_mla_sparse,
+        _aiter_ops,
         "_get_aiter_topk_ops",
         lambda: (prefill_kernel, decode_kernel),
     )
-    get_kernel = rocm_aiter_mla_sparse._get_aiter_top_k_kernel
+    is_supported = rocm_aiter_ops.is_indexer_top_k_supported
 
     eligible_cases = [
-        (
-            dict(is_prefill=True, compress_ratio=4, num_rows=1, on_gfx950=True),
-            prefill_kernel,
+        dict(is_prefill=True, compress_ratio=4, num_rows=1, on_gfx950=True),
+        dict(
+            is_prefill=False,
+            compress_ratio=4,
+            num_rows=1,
+            max_valid_seq_len=65_536,
+            on_gfx950=True,
         ),
-        (
-            dict(
-                is_prefill=False,
-                compress_ratio=4,
-                num_rows=1,
-                max_valid_seq_len=65_536,
-                on_gfx950=True,
-            ),
-            decode_kernel,
+        dict(
+            is_prefill=False,
+            compress_ratio=4,
+            num_rows=257,
+            max_valid_seq_len=250_000,
+            num_columns=524_288,
+            on_gfx950=True,
         ),
-        (
-            dict(
-                is_prefill=False,
-                compress_ratio=4,
-                num_rows=257,
-                max_valid_seq_len=250_000,
-                num_columns=524_288,
-                on_gfx950=True,
-            ),
-            decode_kernel,
+        dict(
+            is_prefill=False,
+            compress_ratio=2,
+            num_rows=385,
+            max_valid_seq_len=250_000,
+            num_columns=524_288,
+            topk_tokens=512,
+            on_gfx950=True,
         ),
-        (
-            dict(
-                is_prefill=False,
-                compress_ratio=2,
-                num_rows=385,
-                max_valid_seq_len=250_000,
-                num_columns=524_288,
-                topk_tokens=512,
-                on_gfx950=True,
-            ),
-            decode_kernel,
-        ),
-        (
-            dict(
-                is_prefill=False,
-                compress_ratio=2,
-                num_rows=384,
-                max_valid_seq_len=50_000,
-                num_columns=1_048_577,
-                topk_tokens=512,
-                on_gfx950=True,
-            ),
-            decode_kernel,
+        dict(
+            is_prefill=False,
+            compress_ratio=2,
+            num_rows=384,
+            max_valid_seq_len=50_000,
+            num_columns=1_048_577,
+            topk_tokens=512,
+            on_gfx950=True,
         ),
     ]
-    for kwargs, expected_kernel in eligible_cases:
-        assert get_kernel(**kwargs) is expected_kernel
+    for kwargs in eligible_cases:
+        assert is_supported(**kwargs) is True
 
     def fail_if_imported() -> None:
         pytest.fail("ineligible shapes must not import AITER top-k")
 
     monkeypatch.setattr(
-        rocm_aiter_mla_sparse,
+        _aiter_ops,
         "_get_aiter_topk_ops",
         fail_if_imported,
     )
@@ -841,17 +821,17 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
         ),
     ]
     for kwargs in ineligible_cases:
-        assert get_kernel(**kwargs) is None
+        assert is_supported(**kwargs) is False
 
-    monkeypatch.setattr(rocm_aiter_mla_sparse, "_get_aiter_topk_ops", lambda: None)
+    monkeypatch.setattr(_aiter_ops, "_get_aiter_topk_ops", lambda: None)
     assert (
-        get_kernel(
+        is_supported(
             is_prefill=True,
             compress_ratio=4,
             num_rows=1,
             on_gfx950=True,
         )
-        is None
+        is False
     )
 
 
@@ -1927,3 +1907,118 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     if not is_sm100:
         with pytest.raises(RuntimeError, match="SM100a/SM103a"):
             resolve("deep_select")
+
+
+def _patch_aiter_topk(monkeypatch, decode_kernel, on_gfx950: bool = True) -> None:
+    from vllm import _aiter_ops
+
+    monkeypatch.setattr(_aiter_ops, "_on_gfx950", lambda: on_gfx950)
+    monkeypatch.setattr(
+        _aiter_ops, "_get_aiter_topk_ops", lambda: (decode_kernel, decode_kernel)
+    )
+
+
+def _make_topk(backend: str):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+
+    cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
+    with set_current_vllm_config(cfg):
+        return SparseIndexerTopk()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_sparse_indexer_topk_aiter_requires_rocm() -> None:
+    """Explicitly requesting the ROCm-only backend must fail fast elsewhere."""
+    logits = torch.randn(8, 4096, dtype=torch.float32, device="cuda")
+    with pytest.raises(RuntimeError, match="ROCm"):
+        _make_topk("aiter").resolve_backend(logits, 2048, 8)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+def test_sparse_indexer_topk_backend_resolution_aiter(monkeypatch) -> None:
+    """On gfx950 "auto" prefers aiter, and an explicit request validates only
+    hard capability: the shape-dependent perf gate must not raise."""
+
+    def decode_kernel(*args, **kwargs) -> None:
+        pass
+
+    _patch_aiter_topk(monkeypatch, decode_kernel)
+    logits = torch.randn(8, 4096, dtype=torch.float32, device="cuda")
+
+    assert _make_topk("auto").resolve_backend(logits, 2048, 8) == "aiter"
+    assert _make_topk("aiter").resolve_backend(logits, 2048, 8) == "aiter"
+    # A shape the perf gate declines still resolves; forward() falls back.
+    assert _make_topk("aiter").resolve_backend(logits, 512, 8) == "aiter"
+    # "auto" must never hand AITER a k it does not support, e.g. the
+    # select_k = 1024 // 4 the kpool indexer produces.
+    assert _make_topk("auto").resolve_backend(logits, 256, 8) == "per_row"
+    with pytest.raises(RuntimeError, match="topk_tokens must be in"):
+        _make_topk("aiter").resolve_backend(logits, 3000, 8)
+
+    _patch_aiter_topk(monkeypatch, decode_kernel, on_gfx950=False)
+    assert _make_topk("auto").resolve_backend(logits, 2048, 8) == "per_row"
+    with pytest.raises(RuntimeError, match="gfx950"):
+        _make_topk("aiter").resolve_backend(logits, 2048, 8)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+@torch.inference_mode()
+def test_sparse_indexer_topk_aiter_falls_back_to_per_row(monkeypatch) -> None:
+    """Whenever the AITER gate declines, the decode top-k must still run
+    through top_k_per_row_decode instead of being skipped."""
+    from vllm.model_executor.layers import indexer_topk
+
+    def decode_kernel(*args, **kwargs) -> None:
+        pytest.fail("AITER must not run when its gate declines")
+
+    _patch_aiter_topk(monkeypatch, decode_kernel)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        indexer_topk.ops, "top_k_per_row_decode", lambda *args: calls.append(args)
+    )
+
+    num_rows = 8
+    logits = torch.randn(num_rows, 4096, dtype=torch.float32, device="cuda")
+    seq_lens = torch.full((num_rows, 1), 4096, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, 1024), dtype=torch.int32, device="cuda")
+    op = _make_topk("auto")
+
+    # No pooling, so the gate has no compressed rows to work with.
+    op(logits, seq_lens, 1, indices, 1024, 4096)
+    # topk_tokens == 512 on a narrow batch: the native kernel wins.
+    op(logits, seq_lens, 1, indices, 512, 4096, compress_ratio=4)
+    # Past the measured compressed-context boundary (64Ki pools).
+    op(logits, seq_lens, 1, indices, 1024, 4 * (64 * 1024 + 1), compress_ratio=4)
+    assert len(calls) == 3
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+@torch.inference_mode()
+def test_sparse_indexer_topk_aiter_expands_mtp_row_ends(monkeypatch) -> None:
+    """AITER's decode kernel only implements the next_n == 1 form, so spec
+    decode batches must be handed the equivalent expanded per-row ends."""
+    from vllm.model_executor.layers import indexer_topk
+
+    recorded: dict = {}
+
+    def decode_kernel(logits, next_n, seq_lens, *args, **kwargs) -> None:
+        recorded["next_n"] = next_n
+        recorded["row_ends"] = seq_lens.tolist()
+
+    _patch_aiter_topk(monkeypatch, decode_kernel)
+    monkeypatch.setattr(
+        indexer_topk.ops,
+        "top_k_per_row_decode",
+        lambda *args: pytest.fail("the AITER gate accepts this shape"),
+    )
+
+    next_n = 2
+    logits = torch.randn(4, 4096, dtype=torch.float32, device="cuda")
+    seq_lens = torch.tensor([[100], [200]], dtype=torch.int32, device="cuda")
+    indices = torch.empty((4, 1024), dtype=torch.int32, device="cuda")
+
+    _make_topk("auto")(logits, seq_lens, next_n, indices, 1024, 800, compress_ratio=4)
+
+    assert recorded["next_n"] == 1
+    assert recorded["row_ends"] == [99, 100, 199, 200]

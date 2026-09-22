@@ -10,6 +10,7 @@ from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.workspace import current_workspace_manager
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
@@ -163,6 +164,16 @@ class SparseIndexerTopk(torch.nn.Module):
             current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
         )
+        self._is_rocm = current_platform.is_rocm()
+        self._aiter_arch = False
+        self._aiter_capable = False
+        if self._is_rocm:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            self._aiter_arch = rocm_aiter_ops.is_indexer_top_k_arch_supported()
+            self._aiter_capable = (
+                self._aiter_arch and rocm_aiter_ops.is_indexer_top_k_importable()
+            )
 
     def resolve_backend(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
@@ -193,6 +204,19 @@ class SparseIndexerTopk(torch.nn.Module):
                     f"inputs violate DeepSelect's constraints: dtype={logits.dtype},"
                     f" stride={logits.stride()}, topk={topk_tokens}"
                 )
+        elif self._backend == "aiter":
+            # Only hard capability is validated here. The shape-dependent perf
+            # gate is applied in forward(), which falls back to per_row.
+            if not self._is_rocm:
+                failures.append("requires a ROCm platform")
+            elif not self._aiter_arch:
+                failures.append("requires gfx950")
+            elif not self._aiter_capable:
+                failures.append("aiter.ops.topk is not importable")
+            if topk_tokens not in (512, 1024, 2048, 4096):
+                failures.append(
+                    f"topk_tokens must be in (512, 1024, 2048, 4096), got {topk_tokens}"
+                )
         elif self._backend == "flashinfer":
             if not self._is_cuda:
                 failures.append("requires a CUDA platform")
@@ -215,13 +239,15 @@ class SparseIndexerTopk(torch.nn.Module):
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
-        """The priority chain: cooperative -> persistent -> per_row.
+        """The priority chain: aiter -> cooperative -> persistent -> per_row.
         deep_select/flashinfer/torch are opt-in only.
 
         cooperative_topk is preferred whenever it is applicable, i.e. within
         its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
         persistent_topk.
         """
+        if self._aiter_capable and topk_tokens in (512, 1024, 2048, 4096):
+            return "aiter"
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):
@@ -283,9 +309,15 @@ class SparseIndexerTopk(torch.nn.Module):
         topk_indices: torch.Tensor,
         topk_tokens: int,
         max_seq_len: int,
+        *,
+        compress_ratio: int = 1,
     ) -> None:
         """Run the resolved decode top-k implementation, writing into
-        topk_indices (int32, -1 fill for rows shorter than topk_tokens)."""
+        topk_indices (int32, -1 fill for rows shorter than topk_tokens).
+
+        max_seq_len is token-granular; compress_ratio is the number of tokens
+        each column of `logits` covers (kpool size / indexer compression).
+        """
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
         if backend == "deep_select":
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
@@ -344,15 +376,47 @@ class SparseIndexerTopk(torch.nn.Module):
             ) < row_ends.unsqueeze(1)
             indices = torch.where(in_range, indices, -1)
             topk_indices.copy_(indices)
+        elif backend == "aiter":
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_indexer_top_k_supported(
+                is_prefill=False,
+                compress_ratio=compress_ratio,
+                num_rows=logits.shape[0],
+                max_valid_seq_len=cdiv(max_seq_len, compress_ratio),
+                num_columns=logits.shape[1],
+                topk_tokens=topk_tokens,
+            ):
+                # AITER's decode kernel only implements the 1D/next_n == 1
+                # form, which is equivalent once the ragged ends are expanded.
+                rocm_aiter_ops.indexer_top_k_decode(
+                    logits,
+                    1,
+                    self._row_ends(seq_lens, next_n, logits.shape[0]),
+                    topk_indices,
+                    topk_tokens,
+                )
+            else:
+                self._per_row(logits, seq_lens, next_n, topk_indices, topk_tokens)
         else:
             assert backend == "per_row", f"unknown topk backend: {backend}"
-            ops.top_k_per_row_decode(
-                logits,
-                next_n,
-                seq_lens,
-                topk_indices,
-                logits.shape[0],
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            self._per_row(logits, seq_lens, next_n, topk_indices, topk_tokens)
+
+    @staticmethod
+    def _per_row(
+        logits: torch.Tensor,
+        seq_lens: torch.Tensor,
+        next_n: int,
+        topk_indices: torch.Tensor,
+        topk_tokens: int,
+    ) -> None:
+        ops.top_k_per_row_decode(
+            logits,
+            next_n,
+            seq_lens,
+            topk_indices,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            topk_tokens,
+        )

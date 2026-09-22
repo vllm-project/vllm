@@ -8,10 +8,11 @@ import vllm.envs as envs
 from vllm import _custom_ops  # noqa: F401  # registers the torch.ops._C kernels
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config_or_none
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.models.glm5next.amd.ops import kpool_compress as kpool_ops
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -117,6 +118,7 @@ def sparse_attn_indexer_kpool(
     # path and when the tail cache is disabled.
     tail_kv_cache: torch.Tensor | None = None,
     tail_prefix: str | None = None,
+    topk_backend: str = "auto",
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -580,15 +582,22 @@ def sparse_attn_indexer_kpool(
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        torch.ops._C.top_k_per_row_decode(
+        # FULL graphs are not keyed by context length, so the kernel choice
+        # baked in at capture must hold for any replay: use the worst-case
+        # bound instead of this batch's context length.
+        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            topk_max_seq_len = max_pool_len * index_kpool
+        else:
+            topk_max_seq_len = attn_metadata_narrowed.max_seq_len
+
+        get_indexer_topk(topk_backend)(
             logits,
-            next_n,
             seq_lens,
+            next_n,
             topk_dst,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
             select_k,
+            topk_max_seq_len,
+            compress_ratio=index_kpool,
         )
 
         # Resolve to token-level indices in the output buffer.
@@ -664,6 +673,10 @@ class SparseAttnIndexerKpool(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        cfg = get_current_vllm_config_or_none()
+        self.topk_backend = (
+            cfg.kernel_config.sparse_indexer_topk_backend if cfg is not None else "auto"
+        )
 
     def forward_hip(
         self,
@@ -726,6 +739,7 @@ class SparseAttnIndexerKpool(CustomOp):
             positions,
             self.tail_cache.kv_cache if self.tail_cache is not None else None,
             self.tail_cache.prefix if self.tail_cache is not None else None,
+            self.topk_backend,
         )
 
     def forward_native(
