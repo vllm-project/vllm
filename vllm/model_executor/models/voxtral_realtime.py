@@ -27,9 +27,8 @@ from vllm.model_executor.models.voxtral import (
     VoxtralProcessingInfo,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing import ProcessorInputs, TimingContext
 from vllm.multimodal.processing.processor import (
     MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
@@ -38,23 +37,19 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .utils import (
-    _flatten_embeddings,
-)
+from .utils import _flatten_embeddings
 
 logger = init_logger(__name__)
 
 
 class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
-    def __init__(
+    def _cached_apply_hf_processor(
         self,
-        info: _I,
-        dummy_inputs: BaseDummyInputsBuilder[_I],
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
-    ) -> None:
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult:
         # realtime can't make use of a cache yet
-        super().__init__(info, dummy_inputs, cache=None)
+        return self._apply_hf_processor(inputs, timing_ctx)
 
     def _maybe_apply_prompt_updates(
         self,
