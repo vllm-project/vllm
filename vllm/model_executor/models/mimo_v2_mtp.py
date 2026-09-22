@@ -266,7 +266,12 @@ class MiMoV2MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        pending_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
+        # The pairing state must outlive this call: AutoWeightsLoader delegates
+        # per contiguous group of names, so a pair can straddle two calls and
+        # would otherwise be dropped silently.
+        pending_qkv_proj = getattr(self, "_pending_qkv_proj", None)
+        if pending_qkv_proj is None:
+            self._pending_qkv_proj = pending_qkv_proj = {}
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
