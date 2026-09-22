@@ -1598,11 +1598,14 @@ class VllmConfig:
 
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.warning_once(
-                "Enforce eager set, disabling torch.compile and CUDAGraphs. "
-                "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
+                "Enforce eager set, disabling torch.compile, CUDAGraphs, and JIT "
+                "kernel warmup. This is equivalent to setting -cc.mode=none "
+                "-cc.cudagraph_mode=none and "
+                "--kernel_config.enable_jit_warmup=False"
             )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            self.kernel_config.enable_jit_warmup = False
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
@@ -1893,6 +1896,16 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        # After the platform hook, which has the last word on async scheduling.
+        if (
+            self.diffusion_config is not None
+            and self.scheduler_config.async_scheduling
+            and self.scheduler_config.scheduler_cls is None
+        ):
+            self.scheduler_config.scheduler_cls = (
+                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
+            )
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
