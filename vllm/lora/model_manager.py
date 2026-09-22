@@ -8,7 +8,7 @@ from typing import TypeVar
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
@@ -134,6 +134,9 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         self._last_mapping: LoRAMapping | None = None
         self._last_slot_layout: tuple[int | None, ...] | None = None
+        self._runtime_lora_skip_enabled = (
+            vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        )
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
 
@@ -386,13 +389,13 @@ class LoRAModelManager:
 
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
-                module.reset_lora(index)
+                module.reset_lora_slot(index)
                 logger.debug(
                     "No LoRA weights found for module %s, skipping.", module_name
                 )
                 continue
 
-            module.set_lora(
+            module.set_lora_slot(
                 index,
                 module_lora.lora_a,
                 module_lora.lora_b,
@@ -604,6 +607,7 @@ class LoRAModelManager:
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(punica_wrapper)
+            new_module.set_runtime_lora_skip_enabled(self._runtime_lora_skip_enabled)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA), (
