@@ -182,10 +182,13 @@ Responses and Chat Completions responses:
 }
 ```
 
-Each category uses the same timing concepts as the aggregate metrics, scoped to
-tokens in that category. Both category TTFT values use the request's scheduled
-time as their common origin. A zero-token category remains present with
-`token_count: 0` and `null` timing fields.
+Each category reports timing scoped to its classified tokens. Both category
+TTFT values use the request's scheduled time as their common origin. Category
+generation time spans its first and last observed token batches; mean ITL
+divides that interval by `token_count - 1`, and category throughput is its
+reciprocal. Unlike aggregate `tokens_per_second`, category throughput excludes
+the category's TTFT. A zero-token category remains present with `token_count: 0`
+and `null` timing fields.
 
 Token timing has engine output-batch resolution. When one output batch contains
 multiple tokens, including tokens on both sides of a reasoning/content
