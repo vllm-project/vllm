@@ -10,7 +10,8 @@ The endpoint picks one of two strategies per model:
   The target language is forwarded as the decoder prompt so the model chooses the
   output language: NLLB/M2M100 resolve the code to a ``forced_bos_token_id``,
   while bilingual Marian implies the target and ignores it. An unknown code is
-  rejected with a 400 before generation (:meth:`_validate_target_language`).
+  rejected with a 400 before generation (:meth:`_validate_target_language`). Both
+  a non-streaming response and incremental SSE streaming are supported.
 * **Decoder-only / instruct models (chat-delegation).** The request is wrapped
   in an instruction prompt and handed to :class:`OpenAIServingChat`, reusing the
   full generation pipeline; the chat response is reshaped into the translation
@@ -40,6 +41,7 @@ from vllm.entrypoints.openai.translation_text.protocol import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.logger import init_logger
+from vllm.sampling_params import RequestOutputKind
 
 logger = init_logger(__name__)
 
@@ -142,11 +144,13 @@ class OpenAIServingTextTranslation(BaseServing):
         self,
         request: TranslationRequest,
         raw_request: Request | None = None,
-    ) -> TranslationResponse | ErrorResponse:
+    ) -> AsyncGenerator[str, None] | TranslationResponse | ErrorResponse:
         """Direct-generate path for encoder-decoder MT models: the source text
         becomes the encoder's single "text" modality and generation runs straight
-        through the engine. Streaming is not supported here and is rejected
-        cleanly rather than silently returning a non-streamed body.
+        through the engine. Non-streaming returns a :class:`TranslationResponse`;
+        ``stream=True`` returns an async generator of SSE lines. Setup errors (no
+        engine, unsupported target language) are returned synchronously as an
+        :class:`ErrorResponse` before any streaming begins.
         """
         if self.engine_client is None:
             return self.create_error_response(
@@ -154,13 +158,6 @@ class OpenAIServingTextTranslation(BaseServing):
                 "for the encoder-decoder generation path.",
                 err_type="InternalServerError",
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-        if request.stream:
-            return self.create_error_response(
-                "Streaming is not yet supported for encoder-decoder translation "
-                'models; retry with "stream": false.',
-                err_type="BadRequestError",
-                status_code=HTTPStatus.BAD_REQUEST,
             )
 
         # Reject an unsupported target language before generation: otherwise the
@@ -171,12 +168,19 @@ class OpenAIServingTextTranslation(BaseServing):
             return lang_error
 
         request_id = self._base_request_id(raw_request) or f"transl-{time.time()}"
-        # Greedy by default: best translation quality, and matches the parity tests.
+        # Greedy by default: best translation quality, and matches the parity
+        # tests. Streaming asks the engine for incremental deltas (each output
+        # carries only the new text); non-streaming keeps cumulative output.
         sampling_params = SamplingParams(
             temperature=request.temperature if request.temperature is not None else 0.0,
             top_p=request.top_p if request.top_p is not None else 1.0,
             max_tokens=request.max_tokens,
             seed=request.seed,
+            output_kind=(
+                RequestOutputKind.DELTA
+                if request.stream
+                else RequestOutputKind.CUMULATIVE
+            ),
         )
 
         # Source is the encoder's single "text" modality; the target language is
@@ -190,6 +194,11 @@ class OpenAIServingTextTranslation(BaseServing):
             },
             "decoder_prompt": request.target_language,
         }
+
+        if request.stream:
+            return self._translation_direct_stream_generator(
+                request, prompt, sampling_params, request_id
+            )
 
         try:
             generator = self.engine_client.generate(prompt, sampling_params, request_id)
@@ -241,6 +250,61 @@ class OpenAIServingTextTranslation(BaseServing):
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             ),
         )
+
+    async def _translation_direct_stream_generator(
+        self,
+        request: TranslationRequest,
+        prompt: dict,
+        sampling_params: SamplingParams,
+        request_id: str,
+    ) -> AsyncGenerator[str, None]:
+        """Stream the direct-generate path as translation SSE chunks.
+
+        ``sampling_params.output_kind`` is ``DELTA``, so each ``RequestOutput``
+        carries only the newly generated text; we forward it verbatim as the
+        chunk delta (no per-chunk stripping -- that would corrupt token spacing).
+        The stream always terminates with ``data: [DONE]``. A generation error is
+        surfaced as a single error data line so the client is not left hanging.
+        """
+        response_id = (
+            request_id if request_id.startswith("transl-") else f"transl-{request_id}"
+        )
+        created = int(time.time())
+        try:
+            async for res in self.engine_client.generate(
+                prompt, sampling_params, request_id
+            ):
+                if not res.outputs:
+                    continue
+                output = res.outputs[0]
+                delta_text = output.text
+                finish_reason = output.finish_reason
+                # Skip empty non-final deltas (keep-alive noise); always emit the
+                # final chunk so the client sees ``finish_reason``.
+                if not delta_text and finish_reason is None:
+                    continue
+                chunk = TranslationStreamResponse(
+                    id=response_id,
+                    created=created,
+                    model=request.model,
+                    choices=[
+                        TranslationStreamResponseChoice(
+                            index=0,
+                            delta=TranslationDelta(translated_text=delta_text or None),
+                            finish_reason=finish_reason,
+                        )
+                    ],
+                )
+                yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Error during streaming encoder-decoder translation")
+            err = self.create_error_response(
+                f"Translation generation failed: {exc}",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            yield f"data: {err.model_dump_json(exclude_none=True)}\n\n"
+        yield "data: [DONE]\n\n"
 
     def _validate_target_language(
         self, request: TranslationRequest

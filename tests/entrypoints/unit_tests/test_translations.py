@@ -201,15 +201,71 @@ async def test_direct_generate_dispatch_prompt_and_response():
     assert resp.usage.total_tokens == 7
 
 
+class _StreamingEngine:
+    """Stub engine whose ``generate`` yields incremental (DELTA) outputs."""
+
+    def __init__(self, deltas):
+        # deltas: list of (text, finish_reason) tuples.
+        self._deltas = deltas
+        self.captured = {}
+
+    async def generate(self, prompt, sampling_params, request_id, **kwargs):
+        self.captured["prompt"] = prompt
+        self.captured["sampling_params"] = sampling_params
+        self.captured["request_id"] = request_id
+        for i, (text, finish) in enumerate(self._deltas):
+            yield _FakeRequestOutput(
+                _FakeOutput(text=text, token_ids=[i], finish_reason=finish),
+                prompt_token_ids=[],
+            )
+
+
 @pytest.mark.asyncio
-async def test_direct_generate_rejects_streaming():
-    h = _make_direct_handler(_default_engine())
+async def test_direct_generate_streams_sse_chunks():
+    engine = _StreamingEngine([("Hallo", None), (" Welt", None), ("", "stop")])
+    h = _make_direct_handler(engine)
     req = TranslationRequest(
-        model="opus-mt", text="Hello", target_language="de", stream=True
+        model="opus-mt", text="Hello world", target_language="de", stream=True
+    )
+    gen = await h._create_translation_direct(req, None)
+
+    lines = [c.strip() async for c in gen]
+    assert lines[-1] == "data: [DONE]"
+    # The engine is asked for incremental deltas, not cumulative text.
+    from vllm.sampling_params import RequestOutputKind
+
+    assert engine.captured["sampling_params"].output_kind == RequestOutputKind.DELTA
+
+    parsed = [
+        json.loads(line[len("data:") :]) for line in lines if "[DONE]" not in line
+    ]
+    assert parsed[0]["object"] == "translation.chunk"
+    assert parsed[0]["id"].startswith("transl-")
+    assert parsed[0]["choices"][0]["delta"]["translated_text"] == "Hallo"
+    assert parsed[1]["choices"][0]["delta"]["translated_text"] == " Welt"
+    # Final chunk carries the finish reason (empty delta is dropped).
+    assert parsed[-1]["choices"][0]["finish_reason"] == "stop"
+    # Concatenated deltas reconstruct the full translation.
+    text = "".join(
+        p["choices"][0]["delta"].get("translated_text") or "" for p in parsed
+    )
+    assert text == "Hallo Welt"
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_streaming_rejects_unknown_language():
+    # Pre-validation runs before streaming begins: an unknown target still yields
+    # a synchronous 400 (ErrorResponse), never a half-open stream.
+    engine = _StreamingEngine([("x", "stop")])
+    engine.renderer = _FakeRenderer(_FakeProcessor(known={"deu_Latn"}))
+    h = _make_direct_handler(engine)
+    req = TranslationRequest(
+        model="nllb", text="Hello", target_language="xx_Yyyy", stream=True
     )
     resp = await h._create_translation_direct(req, None)
     assert isinstance(resp, ErrorResponse)
     assert resp.error.code == 400
+    assert "prompt" not in engine.captured
 
 
 @pytest.mark.asyncio
