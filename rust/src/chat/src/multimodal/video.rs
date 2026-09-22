@@ -16,6 +16,7 @@ use vllm_engine_core_client::protocol::multimodal::{
     SliceSpec,
 };
 
+use super::timing::MM_STAGE_TARGET;
 use super::{ModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, tensor};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
@@ -32,6 +33,12 @@ impl MultimodalModelInfo {
     /// Unlike images, each clip runs through the preprocessor independently
     /// (a batch of one), so its tensors are complete per item and need no
     /// cross-item slicing.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocess_video")
+    )]
     pub(super) async fn prepare_videos(
         &self,
         clips: Vec<Arc<VideoClip>>,
