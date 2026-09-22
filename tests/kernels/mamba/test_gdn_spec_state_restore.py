@@ -28,8 +28,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 
 @pytest.mark.parametrize("recover_state", [False, True])
-@pytest.mark.parametrize("interleaved", [False, True])
-def test_rocm_decode_routes_state_recovery(recover_state, interleaved):
+def test_rocm_decode_routes_state_recovery(recover_state):
     """AITER decode must not bypass recovery after a speculative step."""
     metadata = GDNAttentionMetadata(
         num_prefills=0,
@@ -49,7 +48,6 @@ def test_rocm_decode_routes_state_recovery(recover_state, interleaved):
     out = torch.ones(2, 1, 2)
     layer = types.SimpleNamespace(
         prefix="gdn",
-        gqa_interleaved_layout=interleaved,
         _forward_core_decode_aiter=Mock(),
         prepare_gdn_attention_core_inputs=Mock(return_value=(qkv, z, b, a)),
         _forward_core=Mock(),
@@ -57,7 +55,7 @@ def test_rocm_decode_routes_state_recovery(recover_state, interleaved):
     context = types.SimpleNamespace(attn_metadata={"gdn": metadata})
     with patch.object(gdn, "get_forward_context", return_value=context):
         gdn.QwenGatedDeltaNetAttention._forward_core_rocm(layer, qkvz, ba, z_out, out)
-    if interleaved and not recover_state:
+    if not recover_state:
         layer._forward_core_decode_aiter.assert_called_once_with(
             qkvz=qkvz,
             ba=ba,

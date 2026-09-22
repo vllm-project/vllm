@@ -106,6 +106,82 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
+### Dynamic registration
+
+Alternatively, let the external launcher register ready instances over HTTP.
+No vLLM configuration changes or worker registration threads are required.
+Set `ADMIN_API_KEY` on the proxy and supply it as `X-API-Key` for registration
+and removal. These are trusted control-plane APIs; do not expose them publicly.
+
+```bash
+export ADMIN_API_KEY="your-admin-key"
+python disagg_epd_proxy.py --port 8000 --dynamic-registration
+```
+
+Omit the static server URL flags and register every stage. The roles determine
+the topology: `encode` + `prefill_decode` gives E+PD; `encode` + `prefill` +
+`decode` gives E+P+D. Standalone `decode` always requires an available `prefill`,
+even when D registers first or all P instances go offline; otherwise requests
+return `503`. The proxy rejects mixing combined PD with standalone P/D,
+including unhealthy instances still in the registry. Explicitly remove the
+old topology's P/D or PD registrations before switching topologies.
+
+After each instance is ready, the launcher registers its reachable HTTP URL:
+
+```bash
+curl --fail-with-body http://proxy-host:8000/instances \
+    -H "X-API-Key: $ADMIN_API_KEY" -H 'Content-Type: application/json' \
+    -d '{"role":"encode","url":"http://e-host:8001"}'
+curl --fail-with-body http://proxy-host:8000/instances \
+    -H "X-API-Key: $ADMIN_API_KEY" -H 'Content-Type: application/json' \
+    -d '{"role":"prefill_decode","url":"http://pd-host:8002"}'
+```
+
+For E+P+D, register P with `role: "prefill"` and D with `role: "decode"`.
+Example and NIXL EC connectors need no additional registration fields.
+For Mooncake, register `ec_zmq_addrs` on the **EC consumer** (`prefill_decode`
+or `prefill`), using its configured `ec_ip` and `ec_port`. Keep the fixed-port
+layout: supply the TP-rank-0 address for each DP replica, in DP-rank order;
+replica `r` uses `ec_port + r * tensor_parallel_size`. The connector discovers
+the remaining TP ranks itself. For example, DP=2, TP=2, `ec_port=19019`:
+
+```json
+{
+  "role": "prefill_decode",
+  "url": "http://pd-host:8002",
+  "dp_size": 2,
+  "ec_zmq_addrs": ["tcp://pd-host:19019", "tcp://pd-host:19021"]
+}
+```
+
+The proxy selects one consumer replica and uses it for both the encoder push
+and the consumer HTTP request. Standalone D does not need EC control addresses.
+Port allocation and avoiding collisions remain the launcher's responsibility.
+
+Inspect or remove instances without restarting the proxy:
+
+```bash
+curl http://proxy-host:8000/instances
+curl --fail-with-body -X DELETE \
+    'http://proxy-host:8000/instances?url=http://e-host:8001' \
+    -H "X-API-Key: $ADMIN_API_KEY"
+```
+
+Registration is idempotent. The proxy probes registered instances every
+`--probe-interval` seconds (default 5), with `--probe-timeout` seconds per probe
+(default 2). After `--fail-threshold` consecutive failures (default 3), it stops
+sending new requests to that instance. Healthy instances rejoin automatically;
+unreachable ones are forgotten after `--evicted-ttl` seconds (default 900;
+`0` retains them indefinitely). Removal stops new routing; already routed
+requests retain their selected endpoints, so drain requests before stopping
+the instance. The launcher must re-register instances after a proxy restart.
+
+The example launch scripts also support this flow: export `ADMIN_API_KEY` and
+set `DYNAMIC_REGISTRATION=1` when running `disagg_1e1pd_example.sh` or
+`disagg_1e1p1d_example.sh`. Their default remains static routing.
+
+### Static configuration
+
 The proxy batches images from the same user request assigned to the same encoder.
 Set the proxy environment variable `ENCODER_MAX_BATCH_SIZE` to limit the number
 of images per encoder subrequest. It defaults to `0` (unlimited); `1` sends each
@@ -137,6 +213,6 @@ For E + P + D setup:
 ```bash
 $ python disagg_encoder_proxy.py \
       --encode-servers-urls "http://e1:8001,http://e2:8001" \
-      --prefill-servers-urls "http://p1:8003,http://p2:8004" \ 
+      --prefill-servers-urls "http://p1:8003,http://p2:8004" \
       --decode-servers-urls "http://d1:8005,http://d2:8006"
 ```
