@@ -1870,13 +1870,19 @@ def _mhc_delayed_pre_tail(
 _OPS_REGISTERED = False
 
 
-def _sync_aiter_situv2_moe_env() -> None:
-    """Mirror the SiTUv2 MoE toggle into AITER's a4w4 dispatch env.
+_AITER_SITUV2_ACT_ENV = {
+    "a8w4": "AITER_SITUV2_A8W4",
+    "a4w4": "AITER_SITUV2_A4W4",
+}
 
-    AITER selects afp8 vs afp4 activation kernels via AITER_SITUV2_A8W4 /
-    AITER_SITUV2_A4W4 (see ROCm/aiter fused_moe.py, A8W4 checked first).
-    When VLLM_ROCM_USE_AITER_MOE_SITUV2 is enabled we route to a4w4
-    (afp4_wfp4_fp4 kernels) and clear any legacy AITER_SITUV2_A8W4 override.
+
+def _sync_aiter_situv2_moe_env() -> None:
+    """Mirror VLLM_ROCM_USE_AITER_MOE_SITUV2 into AITER's SiTUv2 dispatch env.
+
+    AITER picks the SiTUv2 activation dtype from AITER_SITUV2_A8W4 /
+    AITER_SITUV2_A4W4 (see ROCm/aiter fused_moe.py, A8W4 checked first) and
+    defaults to bf16 (a16w4). Exactly one of the two is set for a8w4/a4w4
+    and both are cleared for a16w4, so the vLLM option is authoritative.
 
     Requires AITER with ROCm/aiter#4463 (first tagged in v0.1.20): a4w4
     dispatch plus kimik3_a4w4_{un,}tuned_fmoe.csv. Older AITER still runs
@@ -1887,11 +1893,12 @@ def _sync_aiter_situv2_moe_env() -> None:
 
     import vllm.envs as envs
 
-    if envs.VLLM_ROCM_USE_AITER_MOE_SITUV2:
-        os.environ["AITER_SITUV2_A4W4"] = "1"
-        os.environ.pop("AITER_SITUV2_A8W4", None)
-    else:
-        os.environ.pop("AITER_SITUV2_A4W4", None)
+    selected = _AITER_SITUV2_ACT_ENV.get(envs.VLLM_ROCM_USE_AITER_MOE_SITUV2)
+    for name in _AITER_SITUV2_ACT_ENV.values():
+        if name == selected:
+            os.environ[name] = "1"
+        else:
+            os.environ.pop(name, None)
 
 
 class rocm_aiter_ops:
@@ -1917,7 +1924,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
-        VLLM_ROCM_USE_AITER_MOE_SITUV2: Controls SiTUv2 FlyDSL MoE (a4w4).
+        VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
+            dtype (a16w4 | a8w4 | a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
     Note:
@@ -2131,9 +2139,25 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fused_moe_situv2_enabled(cls) -> bool:
-        # _MOE_SITUV2 is a variant of aiter fused moe, so aiter
-        # fused moe must be enabled as well.
-        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2
+        """True when a low-precision (a8w4/a4w4) SiTUv2 activation is selected."""
+        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2 != "a16w4"
+
+    @classmethod
+    @if_aiter_supported
+    def get_fused_moe_situv2_activation(cls) -> str:
+        """SiTUv2 activation dtype name: a16w4, a8w4 or a4w4."""
+        return cls._MOE_SITUV2
+
+    @classmethod
+    @if_aiter_supported
+    def is_fused_moe_situv2_gate_up_interleaved(cls) -> bool:
+        """Whether the SiTUv2 kernels expect gate/up-interleaved w13.
+
+        The a8w4 FlyDSL stage-1 kernels (_gui_) are interleaved; a16w4 and
+        a4w4 are separated. Weight shuffle (oracle/mxfp4.py) and gate_mode
+        (experts/rocm_aiter_moe.py) must both use this.
+        """
+        return cls._MOE_SITUV2 == "a8w4"
 
     @classmethod
     @if_aiter_supported
