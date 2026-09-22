@@ -5,23 +5,39 @@
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.model_executor.warmup.jit_warmup import (
+    kernel_launcher,
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.block_table import get_block_table_width
+
+
+def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
+    """Bounds of the runs of adjacent rows that belong to one request: run
+    ``r`` is rows ``[bounds[r], bounds[r + 1])``.
+
+    Under PCP a rank holds two adjacent chunk rows of a split prefill; the
+    sparse backends give such a run one KV region.
+    """
+    assert req_idx.size > 0
+    bounds = np.flatnonzero(np.r_[True, req_idx[1:] != req_idx[:-1], True])
+    assert bounds.size - 1 == np.unique(req_idx).size, (
+        "rows of one request must be adjacent"
+    )
+    return bounds
 
 
 def flat_kv_row_view(
@@ -69,8 +85,8 @@ class ConvertReqIndexToGlobalIndexKernel(
         block_table_stride: int
 
     @staticmethod
-    @triton.jit(do_not_specialize=["max_num_blocks_per_req"])
-    def kernel(
+    @triton.jit(do_not_specialize=["max_num_blocks_per_req", "workspace_rank_stride"])
+    def sparse_mla_index_remap_kernel(
         req_id_ptr,  # int32 [num_tokens]
         block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
         token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
@@ -78,20 +94,22 @@ class ConvertReqIndexToGlobalIndexKernel(
         valid_count_ptr,  # int32 [num_tokens] - output valid count per row
         prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
         workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
+        workspace_rank_stride,  # rows per DCP rank of a gathered prefill workspace
         # shapes (compile-time where possible)
         max_num_blocks_per_req,
         BLOCK_SIZE: tl.constexpr,
         BLOCK_STRIDE_ROWS: tl.constexpr,
         BLOCK_N: tl.constexpr,  # tile width along columns
+        NUM_TOPK_TOKENS: tl.constexpr,
         HAS_PREFILL: tl.constexpr,
         COUNT_VALID: tl.constexpr,  # whether to count valid indices
-        # BLOCK_N == NUM_TOPK_TOKENS: one program owns the row, so the valid count
+        # BLOCK_N >= NUM_TOPK_TOKENS: one program owns the query, so its count
         # is an in-register reduction and needs no atomic.
         SINGLE_TILE: tl.constexpr,
         # When set, scatter valid slots to a contiguous prefix [0, valid_count) using
         # valid_count_ptr as an atomic slot allocator (DCP filtering leaves interior
         # -1 gaps; the trtllm-gen sparse kernel reads the first valid_count entries).
-        # Requires COUNT_VALID and an out buffer pre-filled with -1. Order within the
+        # Requires COUNT_VALID; multi-tile output must be pre-filled with -1. The
         # prefix is unspecified (only the selected set matters).
         COMPACT_TO_FRONT: tl.constexpr,
         # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
@@ -119,7 +137,7 @@ class ConvertReqIndexToGlobalIndexKernel(
 
         # Load token indices for this tile
         ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
-        tok = tl.load(ti_ptr)  # int32
+        tok = tl.load(ti_ptr, mask=indice_id < NUM_TOPK_TOKENS, other=-1)
 
         # Only token == -1 should propagate as -1
         is_invalid_tok = tok < 0
@@ -146,7 +164,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         # Guard block_table access
         valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
         bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-        is_invalid_tok |= ~valid_block | is_remote
+        is_invalid_tok |= ~valid_block | (is_remote & ~is_prefill)
         base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
         out_val = base * BLOCK_STRIDE_ROWS + inblock_off
 
@@ -155,7 +173,11 @@ class ConvertReqIndexToGlobalIndexKernel(
             workspace_start = tl.load(
                 workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
             )
-            prefill_out = workspace_start + tok
+            # Under DCP the prefill workspace is the all-gather of every rank's
+            # shard, rank-major. With DCP_SIZE == 1 this is workspace_start + tok.
+            prefill_out = (
+                owning_rank * workspace_rank_stride + workspace_start + local_idx
+            )
             out_val = tl.where(is_prefill, prefill_out, out_val)
         out_val = tl.where(is_invalid_tok, -1, out_val)
 
@@ -176,10 +198,19 @@ class ConvertReqIndexToGlobalIndexKernel(
             dest = base + local_offset
             out_ptr_dest = out_ptr + token_id * out_stride0 + dest * out_stride1
             tl.store(out_ptr_dest, out_val, mask=is_valid == 1)
+            if SINGLE_TILE:
+                # This program owns both the compacted prefix and its padding.
+                # The stores are disjoint, so no separate initialization is needed.
+                tl.store(
+                    out_ptr + token_id * out_stride0 + indice_id * out_stride1,
+                    -1,
+                    mask=(indice_id >= tile_valid_count)
+                    & (indice_id < NUM_TOPK_TOKENS),
+                )
         else:
             # Store results in place (input column == output column).
             out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-            tl.store(out_ptr_ij, out_val)
+            tl.store(out_ptr_ij, out_val, mask=indice_id < NUM_TOPK_TOKENS)
 
             # Accumulate the tile's valid count into the row total; a single tile's
             # reduction *is* the total.
@@ -189,6 +220,9 @@ class ConvertReqIndexToGlobalIndexKernel(
                     tl.store(valid_count_ptr + token_id, tile_valid_count)
                 else:
                     tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+
+    # Keep the warmup wrapper interface while exposing a descriptive CUDA symbol.
+    kernel = sparse_mla_index_remap_kernel
 
     def dispatch(  # type: ignore[override]
         self,
@@ -232,12 +266,28 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         dcp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
-        num_topk_tokens = vllm_config.model_config.hf_config.index_topk
+        num_topk_tokens = vllm_config.model_config.hf_text_config.index_topk
         max_num_blocks = cdiv(
             vllm_config.model_config.max_model_len,
             block_size * dcp_size,
         )
         max_num_blocks_per_req = get_block_table_width(max_num_blocks, block_size)
+        pcp_dcp_combos = []
+        if (
+            vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and dcp_size > 1
+        ):
+            # PCP + DCP attends prefill rows over a DCP-gathered workspace.
+            pcp_dcp_combos.append(
+                dict(
+                    HAS_PREFILL_WORKSPACE=True,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=True,
+                    DCP_SIZE=dcp_size,
+                    DCP_RANK=dcp_rank,
+                    DCP_INTERLEAVE=dcp_interleave,
+                )
+            )
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
@@ -280,6 +330,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                     DCP_RANK=dcp_rank,
                     DCP_INTERLEAVE=dcp_interleave,
                 ),
+                *pcp_dcp_combos,
             ),
             BLOCK_SIZE=block_size,
             BLOCK_STRIDE_ROWS=block_stride_rows,
@@ -316,6 +367,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 int32_ptr if compile_key.has_prefill_workspace else None
             ),
             max_num_blocks_per_req=1,
+            workspace_rank_stride=1,
             BLOCK_SIZE=compile_key.block_size,
             BLOCK_STRIDE_ROWS=compile_key.block_stride_rows,
             BLOCK_N=compile_key.block_n,
@@ -339,6 +391,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         prefill_workspace_request_ids: torch.Tensor | None,
         prefill_workspace_starts: torch.Tensor | None,
         *,
+        workspace_rank_stride: int,
         max_num_blocks_per_req: int,
         BLOCK_SIZE: int,
         BLOCK_STRIDE_ROWS: int,
@@ -381,17 +434,19 @@ def _remap_tiling(
     Counting the valid slots per row is the only reason the column tiles have to
     talk to each other, so when counting give one program the whole row: the
     count becomes an in-register reduction plus a plain store, needing neither
-    atomics nor a zero-initialized counter. The row is one ``tl.arange``, so this
-    needs a power-of-two width; other top-k sizes stay tiled and atomic.
+    atomics nor a zero-initialized counter. Pad modest non-power-of-two widths
+    (including GLM's 2176 entries) to one tile; larger widths stay tiled and atomic.
 
     Returns:
         (single_tile, block_n, tiles_per_row, num_warps)
+
     """
-    single_tile = (
-        count_valid and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
+    padded_width = triton.next_power_of_2(NUM_TOPK_TOKENS)
+    single_tile = count_valid and (
+        padded_width == NUM_TOPK_TOKENS or padded_width <= 4096
     )
     if single_tile:
-        return True, NUM_TOPK_TOKENS, 1, 8
+        return True, padded_width, 1, 8
     return False, BLOCK_N, NUM_TOPK_TOKENS // BLOCK_N, 4
 
 
@@ -406,10 +461,15 @@ def triton_convert_req_index_to_global_index(
     HAS_PREFILL_WORKSPACE: bool = False,
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
+    prefill_workspace_rank_stride: int | None = None,
+    dcp_size: int = 1,
+    dcp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
     return_valid_counts: bool = False,
+    out: torch.Tensor | None = None,
+    valid_counts_out: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    out[token_id, indice_id] =
+    """out[token_id, indice_id] =
         block_table[req_id[token_id],
             token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
         + token_indices[token_id, indice_id] % BLOCK_SIZE
@@ -458,20 +518,37 @@ def triton_convert_req_index_to_global_index(
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    # When return_valid_counts, the kernel scatters valid entries to a
-    # contiguous prefix [0, valid_count) and leaves the tail unwritten, so
-    # pre-fill -1 there. flash_mla_sparse_fwd then bounds attention to
-    # [:topk_length] == exactly the valid set (no dropped tokens).
-    if return_valid_counts:
-        out = torch.full_like(token_indices_c, -1)
+    # Only multi-tile compaction needs separate padding initialization.
+    if out is None:
+        out = (
+            torch.full_like(token_indices_c, -1)
+            if return_valid_counts and not single_tile
+            else torch.empty_like(token_indices_c)
+        )
     else:
-        out = torch.empty_like(token_indices_c)
+        assert out.dtype == token_indices_c.dtype
+        assert out.device == token_indices_c.device
+        assert out.shape == token_indices_c.shape
+        assert out.is_contiguous()
+        if return_valid_counts and not single_tile:
+            out.fill_(-1)
 
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
-        # Zero-init only matters for the atomic accumulation path.
-        alloc = torch.empty if single_tile else torch.zeros
-        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
+        if valid_counts_out is None:
+            # Zero-init only matters for the atomic accumulation path.
+            alloc = torch.empty if single_tile else torch.zeros
+            valid_counts = alloc(
+                num_tokens, dtype=torch.int32, device=token_indices.device
+            )
+        else:
+            assert valid_counts_out.dtype == torch.int32
+            assert valid_counts_out.device == token_indices.device
+            assert valid_counts_out.shape == (num_tokens,)
+            assert valid_counts_out.is_contiguous()
+            valid_counts = valid_counts_out
+            if not single_tile:
+                valid_counts.zero_()
 
     # Prepare prefill pointers
     if HAS_PREFILL_WORKSPACE:
@@ -489,6 +566,7 @@ def triton_convert_req_index_to_global_index(
         prefill_workspace_request_ids,
         prefill_workspace_starts,
         # shapes / constexprs
+        workspace_rank_stride=prefill_workspace_rank_stride or 0,
         max_num_blocks_per_req=max_num_blocks_per_req,
         BLOCK_SIZE=BLOCK_SIZE,
         BLOCK_STRIDE_ROWS=(
@@ -499,10 +577,9 @@ def triton_convert_req_index_to_global_index(
         HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
         COUNT_VALID=return_valid_counts,
         COMPACT_TO_FRONT=return_valid_counts,
-        # DCP disabled (no-op de-interleave)
-        DCP_SIZE=1,
-        DCP_RANK=0,
-        DCP_INTERLEAVE=1,
+        DCP_SIZE=dcp_size,
+        DCP_RANK=dcp_rank,
+        DCP_INTERLEAVE=cp_kv_cache_interleave_size,
     )
 
     if return_valid_counts:
@@ -570,13 +647,13 @@ def triton_filter_and_convert_dcp_index(
     token_indices_c = token_indices.contiguous()
 
     # The compaction uses the valid-count buffer as a slot allocator, so it
-    # requires counting. Pre-fill out with -1 so the unwritten tail stays -1.
+    # requires counting. Only the multi-tile path needs pre-filled padding.
     count_valid = return_valid_counts or compact_valid_to_front
 
     # The compaction builds on the counting, so it shares the tiling.
     single_tile, _, _, _ = _remap_tiling(NUM_TOPK_TOKENS, BLOCK_N, count_valid)
 
-    if compact_valid_to_front:
+    if compact_valid_to_front and not single_tile:
         out = torch.full_like(token_indices_c, -1)
     else:
         out = torch.empty_like(token_indices_c)
@@ -596,6 +673,7 @@ def triton_filter_and_convert_dcp_index(
         # No prefill workspace on the DCP decode path.
         None,
         None,
+        workspace_rank_stride=0,
         max_num_blocks_per_req=max_num_blocks_per_req,
         BLOCK_SIZE=BLOCK_SIZE,
         BLOCK_STRIDE_ROWS=(
@@ -618,3 +696,46 @@ def triton_filter_and_convert_dcp_index(
 
 
 _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL = ConvertReqIndexToGlobalIndexKernel()
+
+
+@triton.jit(do_not_specialize=["num_tokens"])
+def sparse_mla_prepare_safe_lengths_kernel(
+    indices_ptr,
+    counts_ptr,
+    safe_lengths_ptr,
+    num_tokens,
+    index_stride0: tl.constexpr,
+    count_stride: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    count = tl.load(counts_ptr + token * count_stride, token < num_tokens, other=1)
+    tl.store(safe_lengths_ptr + token, tl.maximum(count, 1), token < num_tokens)
+    # TRTLLM's NoPE sparse kernel requires at least one valid KV-cache entry.
+    tl.store(
+        indices_ptr + token * index_stride0, 0, (token < num_tokens) & (count == 0)
+    )
+
+
+def prepare_sparse_mla_safe_lengths(
+    physical_indices: torch.Tensor, valid_counts: torch.Tensor
+) -> torch.Tensor:
+    """Install dummy slots for empty queries and return nonzero kernel lengths.
+
+    Preserve the raw counts so empty outputs and LSE can be neutralized later.
+    """
+    num_tokens = valid_counts.numel()
+    safe_lengths = torch.empty(
+        (num_tokens,), dtype=valid_counts.dtype, device=valid_counts.device
+    )
+    if num_tokens:
+        sparse_mla_prepare_safe_lengths_kernel[(triton.cdiv(num_tokens, 256),)](
+            physical_indices,
+            valid_counts,
+            safe_lengths,
+            num_tokens,
+            physical_indices.stride(0),
+            valid_counts.stride(0),
+            BLOCK=256,
+        )
+    return safe_lengths
