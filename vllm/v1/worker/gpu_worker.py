@@ -1496,8 +1496,18 @@ class Worker(WorkerBase):
                 self.weight_transfer_engine.reset_weight_update_target()
                 raise
 
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update session."""
+    def finish_weight_update(self, checksum: bool = False) -> dict[str, str] | None:
+        """Finish the current weight update session.
+
+        Args:
+            checksum: Whether to return this worker's weight digests. Hashing
+                every weight copies each one to the host, so it stays opt-in.
+
+        Returns:
+            This worker's rank-qualified weight digests when requested,
+            otherwise None. They are taken after the transfer engine reports
+            the update complete, so they describe the committed weights.
+        """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1514,6 +1524,10 @@ class Worker(WorkerBase):
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
             self.model_runner.reset_lora_state()
+
+        if not checksum:
+            return None
+        return self.compute_weight_checksums()
 
     def shutdown(self) -> None:
         gc.unfreeze()

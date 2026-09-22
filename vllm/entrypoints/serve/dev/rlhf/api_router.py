@@ -208,9 +208,20 @@ async def update_weights(raw_request: Request):
 async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
+    checksum: Annotated[bool, Body(embed=True)] = False,
 ):
-    await engine_client(raw_request).finish_weight_update(weight_version)
-    return JSONResponse(content={"message": "Weight update finished"})
+    """Commit the weight update, optionally returning weight digests.
+
+    ``checksum`` hashes every covered weight copy-side, so it is opt-in and
+    reported as a snapshot of this instance rather than of the whole group.
+    """
+    checksums = await engine_client(raw_request).finish_weight_update(
+        weight_version, checksum=checksum
+    )
+    content: dict[str, Any] = {"message": "Weight update finished"}
+    if checksums is not None:
+        content["checksums"] = checksums
+    return JSONResponse(content=content)
 
 
 @router.post("/update_weight_version")
