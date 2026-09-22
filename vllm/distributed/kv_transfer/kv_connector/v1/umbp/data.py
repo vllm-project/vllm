@@ -454,6 +454,7 @@ class KVLayoutPlanner:
         key: str,
         block_id: int,
         *,
+        group_id: int | None = None,
         request_id: str | None = None,
         generation: int = 0,
         token_start: int | None = None,
@@ -465,6 +466,7 @@ class KVLayoutPlanner:
             key,
             block_id,
             self._base_addresses,
+            group_id=group_id,
             request_id=request_id,
             generation=generation,
             token_start=token_start,
@@ -477,6 +479,7 @@ class KVLayoutPlanner:
         block_id: int,
         base_addresses: dict[str, int],
         *,
+        group_id: int | None = None,
         request_id: str | None = None,
         generation: int = 0,
         token_start: int | None = None,
@@ -485,9 +488,16 @@ class KVLayoutPlanner:
         """Lower one GPU block into a deterministic scatter/gather plan."""
         if block_id < 0:
             raise ValueError("block_id must be non-negative")
+        regions = (
+            self.regions
+            if group_id is None
+            else tuple(region for region in self.regions if region.group_id == group_id)
+        )
+        if group_id is not None and not regions:
+            raise ValueError(f"KV layout does not contain cache group {group_id}")
         ranges: list[KVRange] = []
-        partial_object_offset = 0
-        for region in self.regions:
+        object_offset = 0
+        for region in regions:
             try:
                 base_address = base_addresses[region.layer_name]
             except KeyError as exc:
@@ -535,14 +545,13 @@ class KVLayoutPlanner:
                         stride=physical_stride,
                         length=overlap_end - overlap_start,
                         object_offset=(
-                            partial_object_offset + overlap_start - byte_start
-                            if token_start is not None
+                            object_offset + overlap_start - byte_start
+                            if group_id is not None or token_start is not None
                             else region.object_offset + part * physical_stride
                         ),
                     )
                 )
-            if token_start is not None:
-                partial_object_offset += partial_length
+            object_offset += partial_length
         return BlockTransferPlan(
             key=key,
             block_id=block_id,

@@ -84,6 +84,7 @@ class UMBPStoreConnectorWorker:
             physical = self.layout.plan_registered_block(
                 plan.key,
                 plan.block_id,
+                group_id=plan.group_id,
                 request_id=plan.request_id,
                 generation=plan.generation,
                 token_start=plan.token_start,
