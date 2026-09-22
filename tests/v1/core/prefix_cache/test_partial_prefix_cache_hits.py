@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
     SlidingWindowSpec,
+    get_mamba_prefill_checkpoint_position,
 )
 
 
@@ -684,6 +685,81 @@ def test_transient_checkpoint_evicts_retained_boundary_hash():
     assert manager.block_pool.get_cached_block(boundary_hash, [1]) is None
     checkpoint_hash = request.block_hashes[112 // hash_block_size - 1]
     assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+
+@pytest.mark.parametrize("prompt_len", [120, 104, 96])
+def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
+    """At the default match unit the hybrid coordinator hands ``cache_blocks``
+    a block-aligned token count, which is below the prompt length whenever the
+    prompt is not block-aligned. The prompt-end checkpoint is the replay
+    boundary and must stay published under retention_interval=0; only a
+    mid-prompt checkpoint is transient.
+    """
+    hash_block_size = mamba_block_size = 32
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = 0
+    assert not manager.coordinator.enable_partial_hash_hits
+
+    request = make_request("producer", list(range(prompt_len)), hash_block_size, sha256)
+    assert manager.allocate_slots(request, request.num_tokens) is not None
+    checkpoint_position = get_mamba_prefill_checkpoint_position(
+        prompt_len, hash_block_size, drop_eagle_block=False
+    )
+    checkpoint_hash = request.block_hashes[checkpoint_position // hash_block_size - 1]
+    hit = manager.block_pool.get_cached_block(checkpoint_hash, [1])
+    assert hit is not None
+    assert hit[0].block_hash_num_tokens == checkpoint_position
+
+    manager.free(request)
+    replay = make_request("replay", list(range(prompt_len)), hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == checkpoint_position
+
+
+@pytest.mark.parametrize("retention_interval,reserved", [(None, True), (0, False)])
+def test_intermediate_chunk_checkpoint_reserved_only_under_dense_retention(
+    retention_interval, reserved
+):
+    """A checkpoint inside a chunk that does not finish the prefill is only
+    publishable under dense retention. With retention_interval=0 it would be
+    evicted as transient, so the block is not reserved in the first place;
+    the prefill-end checkpoint is reserved either way.
+    """
+    hash_block_size = 16
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=32,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = retention_interval
+    mamba_manager = manager.coordinator.single_type_managers[1]
+
+    request = make_request("producer", list(range(240)), hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    free_before = manager.block_pool.get_num_free_blocks()
+
+    # Mid-prompt chunk: the chunk-keyed position (112) is inside it. Blocks:
+    # the attention blocks, the running mamba block, plus the checkpoint.
+    assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
+    assert (request.request_id in mamba_manager._checkpoints) == reserved
+    allocated = free_before - manager.block_pool.get_num_free_blocks()
+    assert allocated == 128 // hash_block_size + 1 + int(reserved)
+
+    request.num_computed_tokens = 128
+    manager.new_step_starts()
+    # Final chunk: the prefill-end checkpoint at 224 is reserved either way.
+    assert manager.allocate_slots(request, 112) is not None
+    assert mamba_manager._checkpoints[request.request_id][0] == 224
+    end_hash = request.block_hashes[224 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(end_hash, [1]) is not None
 
 
 def test_eagle_block_aligned_checkpoint_replaces_newer_hash():

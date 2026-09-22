@@ -208,8 +208,8 @@ class SingleTypeKVCacheManager(ABC):
                 (SWA, chunked-local).
             prefill_end: The token index the request's prefill ends at, the
                 same value the scheduler splits chunks against. Mamba needs it
-                to place the prefill checkpoint; 0 means the caller does not
-                track a prefill and no checkpoint is reserved.
+                to place the prefill checkpoint; 0 (dense retention) keeps the
+                chunk-keyed reservation.
 
         Returns:
             The number of blocks to allocate.
@@ -1784,8 +1784,10 @@ class MambaManager(SingleTypeKVCacheManager):
             # Keyed on the whole prefill, not this chunk: the helper returns a
             # boundary strictly below what it is given, so a chunk-relative
             # position falls inside every chunk and reserves a block on each.
+            # Dense retention (prefill_end == 0) keeps the per-chunk reservation.
+            prefill_end_only = prefill_end > 0
             checkpoint_position = get_mamba_prefill_checkpoint_position(
-                prefill_end,
+                prefill_end if prefill_end_only else num_tokens,
                 self.block_pool.hash_block_size,
                 self.drop_eagle_checkpoint_block,
             )
@@ -1794,7 +1796,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 total_computed_tokens,
                 num_tokens,
                 checkpoint_position,
-                prefill_end,
+                prefill_end if prefill_end_only else 0,
             ):
                 checkpoint_position = 0
             checkpoint_block = int(checkpoint_position > 0)
@@ -2048,6 +2050,28 @@ class MambaManager(SingleTypeKVCacheManager):
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
 
+    def _is_reachable_checkpoint(
+        self, request: Request, checkpoint_position: int
+    ) -> bool:
+        """Whether a reserved checkpoint sits where another request can resume at.
+
+        Decide if checkpoints are reachable (scheduler's `prefill_end` or shared
+        prefix boundaries) from checkpoint positions rather than `num_tokens`, as
+        `num_tokens` can be rounded down to scheduler block size by hybrid
+        coordinator, and the final chunk of a prompt whose length is not multiple
+        of the size can be classified as transient and unpublished.
+        """
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        prefill_end_checkpoint = get_mamba_prefill_checkpoint_position(
+            prefill_end,
+            self.block_pool.hash_block_size,
+            self.drop_eagle_checkpoint_block,
+        )
+        return checkpoint_position in (
+            prefill_end_checkpoint,
+            request.shared_prefix_boundary,
+        )
+
     def _cache_partial_tail_block(
         self,
         request: Request,
@@ -2062,10 +2086,8 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
-            if (
-                retention_interval == 0
-                and num_tokens < request.num_prompt_tokens
-                and checkpoint_position != request.shared_prefix_boundary
+            if retention_interval == 0 and not self._is_reachable_checkpoint(
+                request, checkpoint_position
             ):
                 # retention_interval == 0 keeps this transient checkpoint
                 # request-local. The slot may carry a hash from this step's
