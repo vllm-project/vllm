@@ -17,6 +17,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -51,6 +52,7 @@ def mock_kv(matched_tokens: int, is_async: bool, num_defers_before_matching: int
 def create_scheduler(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
+    max_num_active_seqs: int | None = None,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
@@ -74,6 +76,7 @@ def create_scheduler(
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
     per_request_spec_decode_metrics: str = "none",
+    scheduling_policy: SchedulerPolicy = "fcfs",
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -87,6 +90,7 @@ def create_scheduler(
 
     Returns:
       {class}`Scheduler` instance
+
     """
     model_config = ModelConfig(
         model=model,
@@ -104,6 +108,7 @@ def create_scheduler(
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
+        max_num_active_seqs=max_num_active_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
@@ -113,6 +118,7 @@ def create_scheduler(
         is_encoder_decoder=model_config.is_encoder_decoder,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
+        policy=scheduling_policy,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

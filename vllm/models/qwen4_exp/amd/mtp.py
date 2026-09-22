@@ -78,9 +78,19 @@ def _remap_ignored_layers(
     return remapped
 
 
+def _remap_quantized_layers(
+    quantized_layers: dict[str, dict],
+    mtp_start_layer_idx: int,
+) -> dict[str, dict]:
+    """Map checkpoint MTP layer indices to standalone draft indices."""
+    return {
+        _remap_ignored_layers([name], mtp_start_layer_idx)[0]: layer_info
+        for name, layer_info in quantized_layers.items()
+    }
+
+
 def _remap_mtp_weight_name(name: str) -> str | None:
     """Map Qwen4Exp checkpoint paths into the standalone draft model."""
-
     for checkpoint_prefix in (
         "model.language_model.",
         "language_model.",
@@ -135,6 +145,13 @@ def _make_draft_vllm_config(
                 draft_quant_config,
                 "exclude_modules",
                 _remap_ignored_layers(exclude_modules, mtp_start_layer_idx),
+            )
+        quantized_layers = getattr(draft_quant_config, "quantized_layers", None)
+        if quantized_layers:
+            setattr(  # noqa: B010
+                draft_quant_config,
+                "quantized_layers",
+                _remap_quantized_layers(quantized_layers, mtp_start_layer_idx),
             )
 
     draft_vllm_config = replace(
@@ -242,7 +259,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
     def _iter_qsa_attentions(self):
         """Yield MTP attention modules that own a QSA indexer."""
-
         for layer in self.layers:
             attention = getattr(layer, "self_attn", None)
             if (
@@ -253,13 +269,11 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
     def set_skip_topk(self, skip: bool) -> None:
         """Select on MTP step 0 and reuse its QSA indices on later steps."""
-
         for attention in self._iter_qsa_attentions():
             attention.indexer.skip_topk = skip
 
     def compact_topk_indices(self, row_indices: torch.Tensor) -> None:
         """Keep each request's target-aligned step-0 sparse-index row."""
-
         num_rows = row_indices.numel()
         for attention in self._iter_qsa_attentions():
             buffer = attention.topk_indices_buffer
