@@ -50,6 +50,40 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.mark.parametrize(
+    "tp,ep,hidden,hc,multicast,expected",
+    [
+        (4, False, 5120, 4, 1, True),
+        (2, False, 5120, 4, 1, False),
+        (4, True, 5120, 4, 1, False),
+        (4, False, 4096, 4, 1, False),
+        (4, False, 5120, 2, 1, False),
+        (4, False, 5120, 4, 0, False),
+    ],
+)
+def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
+    monkeypatch, tp, ep, hidden, hc, multicast, expected
+):
+    """Eligibility depends on kernel inputs, not serving or attention settings."""
+    from vllm.models.deepseek_v41.nvidia.ops import mhc
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp, enable_expert_parallel=ep
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(hidden_size=hidden, hc_mult=hc)
+        ),
+    )
+    group = SimpleNamespace(
+        device_communicator=SimpleNamespace(
+            ca_comm=SimpleNamespace(mnnvl_lamport_ag_multicast_ptr=multicast)
+        )
+    )
+    monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    assert mhc.supports_mhc_all_reduce(config) is expected
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize(
     "num_tokens,hc_mult,hidden_size",
@@ -505,7 +539,7 @@ def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried, capture_
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("entry", ["broadcast", "pipeline", "residual", "engram"])
 @pytest.mark.parametrize(
-    "mhc_mode", ["disabled", "overlap", "piecewise", "large_batch"]
+    "mhc_mode", ["disabled", "eager", "overlap", "piecewise", "large_batch"]
 )
 def test_deepseek_v41_decoder_mixes_match_torch(
     entry, mhc_mode, monkeypatch, default_vllm_config
@@ -523,6 +557,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.rms_norm_eps = 1e-20
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
+    decoder.fuse_mhc_all_reduce = False
     decoder.mhc_stream = None
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -533,7 +568,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         ):
             pytest.skip("SM100 DeepGEMM required for overlap")
         decoder.mhc_stream = torch.cuda.Stream()
-    if mhc_mode in ("piecewise", "large_batch"):
+    if mhc_mode in ("eager", "piecewise", "large_batch"):
 
         def unexpected_overlap(*args, **kwargs):
             pytest.fail("unsupported execution must retain native mHC")
@@ -589,15 +624,42 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     from vllm.forward_context import set_forward_context
 
     mode = CUDAGraphMode.PIECEWISE if mhc_mode == "piecewise" else CUDAGraphMode.NONE
+    overlap_calls = []
+    if mhc_mode == "overlap":
+        from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_pre_delayed_overlap
+
+        def checked_overlap(*args, **kwargs):
+            overlap_calls.append(torch.cuda.is_current_stream_capturing())
+            return mhc_pre_delayed_overlap(*args, **kwargs)
+
+        for module in ("model", "ops.mhc"):
+            monkeypatch.setattr(
+                f"vllm.models.deepseek_v41.nvidia.{module}.mhc_pre_delayed_overlap",
+                checked_overlap,
+            )
     with set_forward_context(None, default_vllm_config, cudagraph_runtime_mode=mode):
         actual = decoder(x, positions, None, **kwargs)
+        if mhc_mode == "overlap":
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = decoder(x, positions, None, **kwargs)
+            graph.replay()
+            assert overlap_calls and all(overlap_calls)
 
     def reference(*args, norm_weight, norm_eps, **kwargs):
         post, res, collapsed, pre = mhc_pre_delayed_torch(*args, **kwargs)
         return post, res, decoder.attn_norm(collapsed), pre
 
     def fused_reference(
-        x, residual, post_mix, res_mix, *args, capture_aux=False, stream=None, **kw
+        x,
+        residual,
+        post_mix,
+        res_mix,
+        *args,
+        capture_aux=False,
+        stream=None,
+        reduce_results=False,
+        **kw,
     ):
         residual = mhc_post_torch(x, residual, post_mix, res_mix)
         aux = residual.mean(dim=1) if capture_aux else residual.new_empty(0)
@@ -638,6 +700,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.rms_norm_eps = 1e-6
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
+    decoder.fuse_mhc_all_reduce = False
     decoder.mhc_stream = None
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
