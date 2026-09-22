@@ -5070,10 +5070,14 @@ steps:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
 
-- label: ':amd: (MI355) MRV2 Sampler JIT Warmup'
-  dind: false
+- label: ":amd: (MI355) MRV2 Sampler JIT Warmup"
   timeout_in_minutes: 10
-  working_dir: /vllm-workspace/
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - tests/jit_monitor/
   - tests/models/utils.py
@@ -5089,11 +5093,3 @@ steps:
   - vllm/envs.py
   commands:
   - pytest -v -s tests/jit_monitor/test_no_runtime_jit_rocm.py --timeout=300
-  agent_pool: mi355_1
-  num_gpus: 1
-  mirror_hardwares:
-  - amdexperimental
-  - amdproduction
-  - amdgfx950nightly
-  - amdmi355
-  optional: true

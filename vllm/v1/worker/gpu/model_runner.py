@@ -446,8 +446,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 register_top_k_top_p_warmups,
             )
 
-            # V2 sampling calls the native kernels without constructing the
-            # V1 TopKTopPSampler that normally registers these providers.
+            # V2 bypasses TopKTopPSampler, which registers native warmups.
+            # CUDA also needs these for its FlashInfer fallback paths.
             with self.jit_warmup_registry.activate():
                 register_top_k_top_p_warmups()
 
