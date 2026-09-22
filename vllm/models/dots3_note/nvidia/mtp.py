@@ -48,7 +48,7 @@ class Dots3NoteMultiTokenPredictorLayer(nn.Module):
             prefix=f"{prefix}.eh_proj",
         )
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config, prefix=prefix, quant_config=None
         )
         self.mtp_block = Dots3NoteDecoderLayer(
             vllm_config=vllm_config,
