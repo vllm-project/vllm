@@ -307,6 +307,8 @@ def _get_static_sequence_length(
 ) -> int:
     if is_single_sequence:
         return total_tokens
+    # MI355X performance gate: 192 head-sequences is 16 sequences at H=12.
+    # Static loops win through 16; dynamic loops win at 32 for short queries.
     if (
         uniform_sequence_length is not None
         and uniform_sequence_length > 1
