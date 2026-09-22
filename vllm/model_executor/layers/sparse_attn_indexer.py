@@ -35,6 +35,7 @@ from vllm.utils.deep_gemm import (
     has_deep_gemm,
 )
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -404,7 +405,7 @@ def _rocm_fp4_sparse_attn_indexer(
                     chunk_topk,
                     chunk_topk.stride(0),
                     TOP_K=topk_tokens,
-                    PADDED_TOP_K=triton.next_power_of_2(topk_tokens),
+                    PADDED_TOP_K=next_power_of_2(topk_tokens),
                     num_warps=8,
                 )
                 continue
