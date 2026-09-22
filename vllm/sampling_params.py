@@ -774,6 +774,20 @@ class SamplingParams(
                 value=self.bad_words,
             )
 
+        if self.allowed_token_ids:
+            # Only a bad word that is one token long bans a token at the first
+            # step. A longer one bans its last token after its prefix appeared.
+            banned_at_start = {
+                ids[0] for ids in self._bad_words_token_ids if len(ids) == 1
+            }
+            if banned_at_start.issuperset(self.allowed_token_ids):
+                raise VLLMValidationError(
+                    "bad_words bans every token in allowed_token_ids, "
+                    "so no token can be generated.",
+                    parameter="allowed_token_ids",
+                    value=self.allowed_token_ids,
+                )
+
     @cached_property
     def sampling_type(self) -> SamplingType:
         if self.temperature < _SAMPLING_EPS:

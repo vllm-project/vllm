@@ -322,6 +322,50 @@ def test_bad_word_skips_empty_optional_prefixed_tokenization():
     assert params.bad_words_token_ids == [[321]]
 
 
+class WordTokenizer:
+    """One id per word. The space-prefixed form encodes to the same ids, so
+    update_from_tokenizer keeps one entry per word."""
+
+    max_token_id = 1024
+    _ids = {"red": [5], "blue": [7], "redblue": [5, 7]}
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return list(self._ids[text.strip()])
+
+
+@pytest.mark.parametrize(
+    ("allowed_token_ids", "bad_words"),
+    [
+        ([5], ["red"]),
+        ([5, 7], ["red", "blue"]),
+    ],
+)
+def test_bad_words_that_ban_every_allowed_token_are_rejected(
+    allowed_token_ids, bad_words
+):
+    params = SamplingParams(allowed_token_ids=allowed_token_ids, bad_words=bad_words)
+
+    with pytest.raises(VLLMValidationError, match="bans every token") as exc_info:
+        params.update_from_tokenizer(WordTokenizer())
+
+    assert exc_info.value.parameter == "allowed_token_ids"
+
+
+@pytest.mark.parametrize(
+    ("allowed_token_ids", "bad_words"),
+    [
+        ([5, 7], ["red"]),
+        ([5], ["redblue"]),
+    ],
+)
+def test_allowed_tokens_that_survive_bad_words_are_accepted(
+    allowed_token_ids, bad_words
+):
+    params = SamplingParams(allowed_token_ids=allowed_token_ids, bad_words=bad_words)
+
+    params.update_from_tokenizer(WordTokenizer())
+
+
 # --- Beam search: beam width / n honor the sequence cap --------------------
 
 
