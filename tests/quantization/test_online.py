@@ -506,30 +506,58 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
         ModelConfig(model=str(tmp_path), quantization="fp8_per_channel")
 
 
-def test_nvfp4_per_token_rejects_one_sided_before_buffer_allocation(
-    monkeypatch,
+@pytest.mark.parametrize("per_token_activation", [False, True])
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_nvfp4_one_sided_sizes_dispatched_activations(
+    monkeypatch, per_token_activation: bool, input_dtype: torch.dtype
 ) -> None:
     from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        flashinfer_one_sided_dispatch_layout,
+    )
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
     from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
         TrtLlmNvFp4ExpertsModular,
     )
 
-    config = make_dummy_moe_config()
+    config = make_dummy_moe_config(hidden_dim=6144, in_dtype=input_dtype)
     config.moe_parallel_config.dp_size = 2
     config.moe_parallel_config.ep_size = 2
     config.moe_parallel_config.use_ep = True
     config.moe_parallel_config.all2all_backend = "flashinfer_nvlink_one_sided"
-    prepare = Mock(side_effect=AssertionError("must reject before allocating buffers"))
-    monkeypatch.setattr(nvfp4_oracle, "maybe_make_prepare_finalize", prepare)
-    with pytest.raises(NotImplementedError, match="flashinfer_nvlink_one_sided"):
+    expert_quant_config = FusedMoEQuantConfig.make("nvfp4")
+
+    def check_dispatch_layout(*, quant_config, input_dtype, **kwargs):
+        assert quant_config is expert_quant_config
+        layout = flashinfer_one_sided_dispatch_layout(
+            config.hidden_dim, quant_config, input_dtype=input_dtype
+        )
+        if per_token_activation:
+            assert input_dtype == config.in_dtype
+            assert (
+                layout.x_bytes_per_token == config.hidden_dim * config.in_dtype.itemsize
+            )
+            assert layout.x_sf_bytes_per_token == 0
+        else:
+            assert input_dtype is None
+            assert layout.x_bytes_per_token == config.hidden_dim // 2
+            assert layout.x_sf_bytes_per_token == config.hidden_dim // 16
+        assert expert_quant_config.quant_dtype == "nvfp4"
+        raise RuntimeError("dispatch layout verified before allocation")
+
+    monkeypatch.setattr(
+        nvfp4_oracle, "maybe_make_prepare_finalize", check_dispatch_layout
+    )
+    with pytest.raises(
+        RuntimeError, match="dispatch layout verified before allocation"
+    ):
         nvfp4_oracle.make_nvfp4_moe_kernel(
-            moe_quant_config=Mock(),
+            moe_quant_config=expert_quant_config,
             moe_config=config,
             experts_cls=TrtLlmNvFp4ExpertsModular,
             backend=nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
-            per_token_activation=True,
+            per_token_activation=per_token_activation,
         )
-    prepare.assert_not_called()
 
 
 def test_nvfp4_per_token_backend_contract() -> None:
