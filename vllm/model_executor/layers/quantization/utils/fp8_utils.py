@@ -1260,6 +1260,34 @@ def validate_fp8_block_shape(
                 )
 
 
+_FP8_MOE_EP_HINT = (
+    " This usually means tensor parallelism is sharding the MoE intermediate "
+    "size across an FP8 block-quantized expert. Pass --enable-expert-parallel "
+    "so each rank keeps the full intermediate size and shards experts instead."
+)
+
+
+def fp8_moe_tp_requires_expert_parallel(
+    moe_intermediate_size: int,
+    tp_size: int,
+    block_n: int,
+) -> bool:
+    """Return whether TP-sharding an FP8 MoE N-dim would violate block_n.
+
+    Without expert parallelism, each rank owns
+    ``moe_intermediate_size / tp_size`` of the fused gate/up dimension.
+    Block-wise FP8 requires that per-rank size to be divisible by ``block_n``.
+    Expert parallelism keeps the full N on every rank and shards experts
+    instead, which is the usual fix for sparse checkpoints such as
+    Qwen3.8-Flash-Next-FP8 (N=640, block_n=128, TP>1).
+    """
+    if moe_intermediate_size <= 0 or tp_size <= 1 or block_n <= 0:
+        return False
+    if moe_intermediate_size % tp_size != 0:
+        return False
+    return (moe_intermediate_size // tp_size) % block_n != 0
+
+
 def validate_fp8_block_shape_moe(
     intermediate_size_per_partition: int,
     block_size: list[int],
@@ -1279,6 +1307,7 @@ def validate_fp8_block_shape_moe(
             f"The output_size of gate's and up's weight = "
             f"{intermediate_size_per_partition} is not divisible by "
             f"weight quantization block_n = {block_n}."
+            f"{_FP8_MOE_EP_HINT}"
         )
     if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
         # Required by row parallel
@@ -1286,6 +1315,7 @@ def validate_fp8_block_shape_moe(
             f"The input_size of down's weight = "
             f"{intermediate_size_per_partition} is not divisible by "
             f"weight quantization block_k = {block_k}."
+            f"{_FP8_MOE_EP_HINT}"
         )
 
 

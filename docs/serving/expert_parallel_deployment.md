@@ -67,6 +67,8 @@ For example, with `TP=2, DP=4` (8 GPUs total):
 !!! note "Key Difference from Data Parallel Deployment"
     Without `--enable-expert-parallel`, MoE layers would use tensor parallelism (forming a TP group of size `TP × DP`), similar to dense models. With EP enabled, expert layers switch to expert parallelism, which can provide better efficiency and locality for MoE models.
 
+    For FP8 block-quantized MoE, TP-sharding the expert intermediate size must stay divisible by `weight_block_size[0]` (usually 128). Checkpoints such as Qwen3.8-Flash-Next-FP8 (`moe_intermediate_size=640`) fail this at TP 2/4/8 unless expert parallelism is enabled. vLLM auto-enables EP in that case; pass `--enable-expert-parallel` explicitly to make the layout obvious.
+
 ### Example Command
 
 The following command serves a `DeepSeek-V3-0324` model with 1-way tensor parallel, 8-way (attention) data parallel, and 8-way expert parallel. The attention weights are replicated across all GPUs, while the expert weights are split across GPUs. It will work on a H200 (or H20) node with 8 GPUs. For H100, you can try to serve a smaller model or refer to the multi-node deployment section.
