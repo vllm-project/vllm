@@ -1126,14 +1126,19 @@ class VllmConfig:
             )
 
         kv_transfer_config = self.kv_transfer_config
-        if (
-            kv_transfer_config is not None
-            and kv_transfer_config.is_kv_transfer_instance
-        ):
-            raise ValueError(
-                "--enable-return-routed-experts is incompatible with KV "
-                "connectors (PD disaggregation and KV cache offload)."
-            )
+        if kv_transfer_config is not None:
+            for connector_name in (
+                "NixlConnector",
+                "NixlPullConnector",
+                "NixlPushConnector",
+                "MoRIIOConnector",
+                "MooncakeConnector",
+            ):
+                if kv_transfer_config.has_connector(connector_name):
+                    raise ValueError(
+                        "--enable-return-routed-experts is incompatible with "
+                        f"{connector_name}; PD auxiliary output is not supported."
+                    )
 
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
@@ -1520,6 +1525,15 @@ class VllmConfig:
                     "Async scheduling is disabled for ROCm DeepEP "
                     "high-throughput DBO because that combination can corrupt "
                     "DP+EP generation accuracy."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.parallel_config.pipeline_parallel_size > 1
+                and not self.use_v2_model_runner
+            ):
+                logger.warning_once(
+                    "Async scheduling is disabled because the V1 model runner "
+                    "does not support it with pipeline parallelism."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -2961,6 +2975,20 @@ class VllmConfig:
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallel")
+
+        # Note(arpera):
+        # MRV1 + PP>1 + async sched + structured output
+        # does not work in vLLM. For more info see:
+        # https://github.com/vllm-project/vllm/issues/45014
+        # Since recently MRV1 has been deprecated then
+        # there was decided not to fix the issue but instead
+        # to disallow such configuration.
+        # At the same time MRV2 works fine in this case.
+        if (
+            self.parallel_config.pipeline_parallel_size > 1
+            and self.scheduler_config.async_scheduling
+        ):
+            unsupported.append("pipeline parallelism with async scheduling")
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
