@@ -116,6 +116,13 @@ def test_tp2_ar_rms_fp8_fusions(
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
     model_kwargs["disable_custom_all_reduce"] = False
+    if current_platform.is_rocm() and "llama-3" in model_name_lower:
+        model_kwargs.update(
+            gpu_memory_utilization=0.01,
+            kv_cache_memory_bytes=64 * 1024**2,
+            max_num_batched_tokens=1024,
+            max_num_seqs=32,
+        )
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,

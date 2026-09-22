@@ -751,6 +751,7 @@ def run_kda_projection_overlap(
 
     Returns:
         The Q/K/V/G projection, F_B output, and beta projection.
+
     """
     num_tokens = hidden_states.shape[0]
     qkvg_weight = packed_weight[:_KDA_QKVG_SIZE]

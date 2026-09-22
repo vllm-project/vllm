@@ -43,3 +43,22 @@ steps:
   commands:
     - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      label: ":amd: (MI355) V1 Attention Shard %N"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 125
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/config/attention.py
+      - vllm/model_executor/layers/attention
+      - vllm/v1/attention
+      - tests/v1/attention
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT

@@ -4,10 +4,7 @@ import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.sample.ops.topk_topp_sampler import (
-    apply_top_k_top_p,
-    register_top_k_top_p_warmups,
-)
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
@@ -21,7 +18,6 @@ class SamplingStates:
     def __init__(self, max_num_reqs: int, vocab_size: int):
         self.max_num_reqs = max_num_reqs
         self.vocab_size = vocab_size
-        register_top_k_top_p_warmups()
 
         self.temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.top_k = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
@@ -42,14 +38,18 @@ class SamplingStates:
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(NO_LOGPROBS)
 
-    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
-        self.temperature.np[req_idx] = sampling_params.temperature
-        self.top_p.np[req_idx] = sampling_params.top_p
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
+        temperature = sampling_params.temperature
         top_k = sampling_params.top_k
+        top_p = sampling_params.top_p
+        min_p = sampling_params.min_p
+
+        self.temperature.np[req_idx] = temperature
+        self.top_p.np[req_idx] = top_p
         if top_k <= 0 or top_k > self.vocab_size:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
-        self.min_p.np[req_idx] = sampling_params.min_p
+        self.min_p.np[req_idx] = min_p
 
         seed = sampling_params.seed
         self.seeds_set[req_idx] = seed is not None
@@ -63,6 +63,13 @@ class SamplingStates:
         elif num_logprobs == -1:
             num_logprobs = self.vocab_size
         self.num_logprobs[req_idx] = num_logprobs
+
+        return temperature != 0.0 and (
+            temperature != 1.0
+            or min_p != 0.0
+            or top_k != self.vocab_size
+            or top_p != 1.0
+        )
 
     def apply_staged_writes(self) -> None:
         self.temperature.copy_to_uva()

@@ -53,7 +53,7 @@ def _reference(
         dtype=x.dtype,
         device=x.device,
     )
-    dist.reduce_scatter_single(output, partial, group=group)
+    dist.reduce_scatter_tensor(output, partial, group=group)
     return output
 
 
@@ -85,11 +85,15 @@ def _run_mode(
     rank: int,
     world_size: int,
     weights: dict[int, torch.Tensor],
+    gemm_factory=None,
 ) -> None:
     # cute_dsl is unavailable off CUDA, so import it only inside the GPU worker.
-    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
+    if gemm_factory is None:
+        from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
 
-    gemm_rs_ar = GemmRsAr(
+        gemm_factory = GemmRsAr
+
+    gemm_rs_ar = gemm_factory(
         max_M=max(M for M, _ in _SHAPES),
         N=_N,
         all_reduce=all_reduce,
@@ -177,7 +181,12 @@ def _run_mode(
     del gemm_rs_ar, capture_stream, graph, graph_output
 
 
-def _worker(local_rank: int, world_size: int, master_port: int) -> None:
+def _worker(
+    local_rank: int,
+    world_size: int,
+    master_port: int,
+    rocm_projection: bool = False,
+) -> None:
     # This module pulls in cute_dsl, which is unavailable off CUDA, so importing
     # it at module level would fail collection. Import it where it is used, as
     # `kda.py` does.
@@ -215,6 +224,18 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
 
     # Production binds one mode per worker; exercise both mode-bound instances
     # sequentially in this test without implying that both are initialized.
+    gemm_factory = None
+    if rocm_projection:
+        from functools import partial
+
+        from tests.kernels.test_kimi_k3_amd_output_projection import (
+            AmdProjectionCollective,
+        )
+
+        gemm_factory = partial(
+            AmdProjectionCollective, weights=weights, world_size=world_size
+        )
+
     for all_reduce in (False, True):
         _run_mode(
             all_reduce=all_reduce,
@@ -223,6 +244,7 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
             rank=rank,
             world_size=world_size,
             weights=weights,
+            gemm_factory=gemm_factory,
         )
     cleanup_dist_env_and_memory()
 
