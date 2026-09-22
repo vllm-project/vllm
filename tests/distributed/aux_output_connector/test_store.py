@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import sys
 import threading
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
@@ -20,6 +22,7 @@ from vllm.distributed.aux_output_connector.connector import (
 from vllm.distributed.aux_output_connector.mooncake import (
     MooncakeBlockObjectStore,
     MooncakeOutputPublisher,
+    create_mooncake_block_store,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -36,6 +39,7 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
+from vllm.distributed.mooncake_store import MooncakeStoreConfig
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
@@ -46,6 +50,57 @@ pytestmark = pytest.mark.cpu_test
 _SHAPE = (3, 2)
 _DTYPE = np.dtype("uint8")
 _BLOCK_SIZE = 4
+
+
+@pytest.mark.parametrize("aux_config", ["separate", "shared", "missing", "offload"])
+def test_mooncake_aux_configuration_is_explicit(monkeypatch, tmp_path, aux_config):
+    """Aux selects its own configuration without changing KV's default entry."""
+    kv_path, aux_path = tmp_path / "kv.json", tmp_path / "aux.json"
+    kv_path.write_text(json.dumps({"master_server_address": "kv:50051"}))
+    aux_path.write_text(
+        json.dumps(
+            {
+                "master_server_address": "aux:50051",
+                "metadata_server": "P2PHANDSHAKE",
+                "mode": "standalone-store",
+                "global_segment_size": 0,
+                "local_buffer_size": 4096,
+                "tenant_id": "rl",
+                "enable_offload": aux_config == "offload",
+            }
+        )
+    )
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(kv_path))
+    name = "VLLM_AUX_OUTPUT_MOONCAKE_CONFIG_PATH"
+    monkeypatch.delenv(name, raising=False)
+    if aux_config != "missing":
+        monkeypatch.setenv(name, str(kv_path if aux_config == "shared" else aux_path))
+    native = Mock()
+    native.setup.return_value = 0
+    factory = Mock(return_value=native)
+    monkeypatch.setitem(
+        sys.modules, "mooncake.store", SimpleNamespace(MooncakeDistributedStore=factory)
+    )
+    assert MooncakeStoreConfig.load_from_config().master_server_address == "kv:50051"
+    if aux_config in ("missing", "offload"):
+        with pytest.raises(
+            ValueError, match=name if aux_config == "missing" else "enable_offload"
+        ):
+            create_mooncake_block_store(object_nbytes=24)
+        factory.assert_not_called()
+        return
+    store = create_mooncake_block_store(object_nbytes=24)
+    publisher = MooncakeOutputPublisher(
+        AuxRequestOutput(0, np.zeros((1, *_SHAPE), dtype=_DTYPE)), _BLOCK_SIZE
+    )
+    calls = native.setup.call_args_list
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0].args[6] == ("kv:50051" if aux_config == "shared" else "aux:50051")
+    if aux_config == "separate":
+        assert calls[0].args[1:6] == ("P2PHANDSHAKE", 0, 4096, "rdma", "")
+        assert calls[0].kwargs == {"tenant_id": "rl"}
+    publisher.close()
+    store.close()
 
 
 @pytest.fixture
