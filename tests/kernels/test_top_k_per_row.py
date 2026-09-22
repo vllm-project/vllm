@@ -648,7 +648,6 @@ def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
     indices = torch.empty((3, top_k), dtype=torch.int32, device="cuda")
 
     if not rocm_aiter_ops.is_indexer_top_k_supported(
-        indexer="dsa",
         is_prefill=True,
         compress_ratio=4,
         num_rows=logits.shape[0],
@@ -697,7 +696,6 @@ def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
     if not rocm_aiter_ops.is_indexer_top_k_supported(
-        indexer="dsa",
         is_prefill=False,
         compress_ratio=4,
         num_rows=num_rows,
@@ -738,64 +736,28 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
     is_supported = rocm_aiter_ops.is_indexer_top_k_supported
 
     eligible_cases = [
-        dict(indexer="dsa", is_prefill=True, compress_ratio=4, num_rows=1),
+        dict(is_prefill=True, compress_ratio=4, num_rows=1),
+        dict(is_prefill=False, compress_ratio=4, num_rows=1, max_valid_seq_len=65_536),
         dict(
-            indexer="dsa",
-            is_prefill=False,
-            compress_ratio=4,
-            num_rows=1,
-            max_valid_seq_len=65_536,
-        ),
-        dict(
-            indexer="dsa",
             is_prefill=False,
             compress_ratio=4,
             num_rows=257,
             max_valid_seq_len=250_000,
-            num_columns=524_288,
         ),
         dict(
-            indexer="dsa",
-            is_prefill=False,
-            compress_ratio=2,
-            num_rows=385,
-            max_valid_seq_len=250_000,
-            num_columns=524_288,
-            topk_tokens=512,
-        ),
-        dict(
-            indexer="dsa",
             is_prefill=False,
             compress_ratio=2,
             num_rows=384,
-            max_valid_seq_len=50_000,
-            num_columns=1_048_577,
-            topk_tokens=512,
+            max_valid_seq_len=1_048_576,
         ),
     ]
     for kwargs in eligible_cases:
         assert is_supported(**kwargs) is True
 
     ineligible_cases = [
-        dict(indexer="dsa", is_prefill=True, compress_ratio=1, num_rows=1),
+        dict(is_prefill=True, compress_ratio=1, num_rows=1),
+        dict(is_prefill=False, compress_ratio=4, num_rows=1, max_valid_seq_len=65_537),
         dict(
-            indexer="dsa",
-            is_prefill=False,
-            compress_ratio=2,
-            num_rows=384,
-            max_valid_seq_len=1_048_576,
-            num_columns=1_048_576,
-            topk_tokens=512,
-        ),
-        dict(
-            indexer="dsa",
-            is_prefill=False,
-            compress_ratio=4,
-            num_rows=1,
-            max_valid_seq_len=65_537,
-        ),
-        dict(
-            indexer="dsa",
             is_prefill=False,
             compress_ratio=4,
             num_rows=256,
@@ -806,32 +768,19 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
         assert is_supported(**kwargs) is False
 
     _enable_aiter_topk(monkeypatch, enabled=False)
-    assert (
-        is_supported(indexer="dsa", is_prefill=True, compress_ratio=4, num_rows=1)
-        is False
-    )
+    assert is_supported(is_prefill=True, compress_ratio=4, num_rows=1) is False
 
 
-def test_kpool_topk_skips_the_dsv4_native_window(monkeypatch) -> None:
-    """The in-tree decode kernel's advantage window was measured on DSV4's
-    compressed-KV logits, so it must not hold back the kpool indexer."""
+def test_dsv4_native_top_k_window() -> None:
+    """The in-tree decode kernel's measured advantage band over AITER, which
+    applies to the DSV4 indexer only."""
     from vllm._aiter_ops import rocm_aiter_ops
 
-    _enable_aiter_topk(monkeypatch)
-    shape = dict(
-        is_prefill=False,
-        compress_ratio=4,
-        num_rows=128,
-        max_valid_seq_len=50_000,
-        num_columns=524_288,
-        topk_tokens=512,
-    )
-    is_supported = rocm_aiter_ops.is_indexer_top_k_supported
-    assert is_supported(indexer="dsa", **shape) is False
-    assert is_supported(indexer="kpool", **shape) is True
-
-    shape["max_valid_seq_len"] = 65_537
-    assert is_supported(indexer="kpool", **shape) is False
+    prefers_native = rocm_aiter_ops.dsv4_indexer_prefers_native_top_k
+    assert prefers_native(num_rows=128, num_columns=524_288, topk_tokens=512) is True
+    assert prefers_native(num_rows=385, num_columns=524_288, topk_tokens=512) is False
+    assert prefers_native(num_rows=128, num_columns=1_048_577, topk_tokens=512) is False
+    assert prefers_native(num_rows=128, num_columns=524_288, topk_tokens=1024) is False
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
@@ -1957,6 +1906,31 @@ def test_sparse_indexer_topk_backend_resolution_aiter(monkeypatch) -> None:
     assert _make_topk("auto").resolve_backend(logits, 2048, 8) == "per_row"
     with pytest.raises(RuntimeError, match="gfx950"):
         _make_topk("aiter").resolve_backend(logits, 2048, 8)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+@torch.inference_mode()
+def test_sparse_indexer_topk_ignores_the_dsv4_native_window(monkeypatch) -> None:
+    """A narrow k=512 decode batch is the band the in-tree kernel wins on
+    DSV4's compressed-KV logits. That window is applied at the DSV4 call site,
+    so the shared dispatcher must still reach AITER here."""
+    from vllm.model_executor.layers import indexer_topk
+
+    calls: list[tuple] = []
+    _patch_aiter_topk(monkeypatch, lambda *args: calls.append(args))
+    monkeypatch.setattr(
+        indexer_topk.ops,
+        "top_k_per_row_decode",
+        lambda *args: pytest.fail("the AITER gate accepts this shape"),
+    )
+
+    num_rows = 8
+    logits = torch.randn(num_rows, 4096, dtype=torch.float32, device="cuda")
+    seq_lens = torch.full((num_rows, 1), 4096, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, 512), dtype=torch.int32, device="cuda")
+
+    _make_topk("auto")(logits, seq_lens, 1, indices, 512, 4096, compress_ratio=4)
+    assert len(calls) == 1
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")

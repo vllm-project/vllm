@@ -4,7 +4,7 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -2489,32 +2489,18 @@ class rocm_aiter_ops:
     def is_indexer_top_k_supported(
         cls,
         *,
-        indexer: Literal["dsa", "kpool"],
         is_prefill: bool,
         compress_ratio: int,
         num_rows: int,
         max_valid_seq_len: int | None = None,
-        num_columns: int | None = None,
-        topk_tokens: int = 1024,
     ) -> bool:
         """Whether AITER's sparse indexer top-k beats the in-tree kernel for
-        this shape. The in-tree decode kernel's advantage window was measured
-        on DSV4's compressed-KV logits, so it applies to ``indexer="dsa"``
-        only.
-        """
+        this shape."""
         if compress_ratio <= 1 or not cls.is_indexer_top_k_enabled():
             return False
 
         if not is_prefill:
             assert max_valid_seq_len is not None
-            if (
-                indexer == "dsa"
-                and topk_tokens == 512
-                and 0 < num_rows <= 384
-                and num_columns is not None
-                and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
-            ):
-                return False
             # AITER v0.1.19 decode is one-block only. This measured gfx950
             # FP32/k=1024 compressed-row boundary is independent of the native
             # split-count boundary in sampler.cu.
@@ -2525,6 +2511,22 @@ class rocm_aiter_ops:
                 return False
 
         return True
+
+    @staticmethod
+    def dsv4_indexer_prefers_native_top_k(
+        *,
+        num_rows: int,
+        num_columns: int,
+        topk_tokens: int,
+    ) -> bool:
+        """The in-tree decode kernel's measured advantage window over AITER.
+        Tuned on DSV4's compressed-KV logits, so it applies to that indexer
+        only."""
+        return (
+            topk_tokens == 512
+            and 0 < num_rows <= 384
+            and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
+        )
 
     @staticmethod
     def indexer_top_k_decode(

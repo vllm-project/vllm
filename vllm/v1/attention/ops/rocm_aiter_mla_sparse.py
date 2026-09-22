@@ -1272,7 +1272,6 @@ def rocm_aiter_sparse_attn_indexer(
             num_rows = logits.shape[0]
 
             if rocm_aiter_ops.is_indexer_top_k_supported(
-                indexer="dsa",
                 is_prefill=True,
                 compress_ratio=compress_ratio,
                 num_rows=num_rows,
@@ -1372,11 +1371,12 @@ def rocm_aiter_sparse_attn_indexer(
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
         if rocm_aiter_ops.is_indexer_top_k_supported(
-            indexer="dsa",
             is_prefill=False,
             compress_ratio=compress_ratio,
             num_rows=num_rows,
             max_valid_seq_len=max_compressed_seq_len,
+        ) and not rocm_aiter_ops.dsv4_indexer_prefers_native_top_k(
+            num_rows=num_rows,
             num_columns=logits.shape[1],
             topk_tokens=topk_tokens,
         ):
