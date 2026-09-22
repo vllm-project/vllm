@@ -132,6 +132,11 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     if current_platform.is_rocm() and indexer_dtype == torch.float8_e4m3fn:
         pytest.skip("the ROCm QSA indexer cache is bf16-only")
 
+    # The FP8 comparison below is a one-ulp bound on data this test generates,
+    # so an unseeded run decides for itself whether it reproduces a rounding
+    # difference. Seed it, or the kernel's bit-exactness is only sampled.
+    torch.manual_seed(0)
+
     device = "cuda"
     rope_params = {
         "partial_rotary_factor": 0.25,

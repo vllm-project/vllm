@@ -291,9 +291,15 @@ def _qsa_pre_indexer_kernel(
             # which ROCm's Triton rejects ("'tt.addptr' op failed to verify
             # that result type matches ptr type"), so select the loaded values
             # instead. The two masks are complementary, so no lane fetches from
-            # both and memory traffic is unchanged. Dropping the pointer select
-            # also makes the tl.multiple_of hint unnecessary, because Triton can
-            # now see each base's alignment directly.
+            # both and memory traffic is unchanged.
+            #
+            # Both bases still need the alignment stated explicitly. Without it
+            # Triton vectorizes these loads differently, which reorders the
+            # pooling reduction below; float addition is not associative, so the
+            # compressed rows stop matching the unfused path bit for bit and an
+            # FP8 cache rounds a near-zero pooled value to the wrong code.
+            current_base = tl.multiple_of(current_base, (8, 8))
+            cached_base = tl.multiple_of(cached_base, (8, 8))
             from_chunk = valid & source_in_chunk[:, None] & source_tokens_valid[:, None]
             from_cache = valid & source_in_cache[:, None] & state_block_valid
             current = tl.load(current_base + dims[None, :], mask=from_chunk, other=0.0)
