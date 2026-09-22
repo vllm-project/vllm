@@ -75,6 +75,21 @@ def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
     )
 
 
+def test_diffusion_extra_args_are_validated_without_a_served_canvas():
+    # No --diffusion-config: the canvas is unknown, the ids are still checked
+    # and a read-only request is still normalised.
+    params = SamplingParams(
+        max_tokens=64,
+        extra_args={"diffusion_seed_canvas": [0, 1], "diffusion_read_only": True},
+    )
+    _verify_diffusion(params, canvas_length=None)
+    assert params.ignore_eos is True
+
+    bad = SamplingParams(extra_args={"diffusion_seed_canvas": [0, 10**9]})
+    with pytest.raises(VLLMValidationError, match="ids must be in"):
+        _verify_diffusion(bad, canvas_length=None)
+
+
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.parametrize(
     "extra_args",

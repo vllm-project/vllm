@@ -131,10 +131,16 @@ class InputProcessor:
 
             self.validate_logits_processors_params(params)
 
-            if self.diffusion_config is not None and self.model_config.is_diffusion:
+            if self.model_config.is_diffusion:
+                # Without --diffusion-config the served canvas is unknown here;
+                # the ids and the read-only normalisation are still checked.
                 validate_diffusion_sampling_params(
                     params,
-                    canvas_length=self.diffusion_config.canvas_length,
+                    canvas_length=(
+                        self.diffusion_config.canvas_length
+                        if self.diffusion_config is not None
+                        else None
+                    ),
                     vocab_size=self.model_config.get_vocab_size(),
                     async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
                 )

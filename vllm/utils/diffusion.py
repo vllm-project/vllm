@@ -95,7 +95,10 @@ def validate_diffusion_sampling_params(
         params.ignore_eos = True
 
     check(
-        bool(async_scheduling) or width is None or width == canvas_length,
+        bool(async_scheduling)
+        or width is None
+        or canvas_length is None
+        or width == canvas_length,
         "A diffusion_canvas_length smaller than the served canvas "
         "requires --async-scheduling.",
     )
