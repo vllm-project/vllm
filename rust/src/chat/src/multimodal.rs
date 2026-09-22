@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use itertools::{Either, izip};
+use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
@@ -139,9 +140,11 @@ impl MultimodalModelContext {
         preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> Result<Option<Arc<dyn VisionPreProcessor>>> {
-        Ok(model_spec
-            .vision_processor(&self.metadata(), preprocessor_config, modality)?
-            .map(Arc::from))
+        match model_spec.vision_processor(&self.metadata(), preprocessor_config, modality) {
+            Ok(processor) => Ok(Some(Arc::from(processor))),
+            Err(ModelRegistryError::UnsupportedModality { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Resolve an audio preprocessor for one loaded model.
