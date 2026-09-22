@@ -26,7 +26,7 @@ use llm_multimodal::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
-use tracing::warn;
+use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
 use vllm_text::Prompt;
@@ -47,6 +47,7 @@ mod video;
 
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
+use vllm_tracing::timing::{mm_request_span, mm_stage_span};
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -562,7 +563,10 @@ pub(crate) async fn finalize_rendered_prompt(
             .map_err(|error| multimodal!("{error}"))?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
-    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
+    let prepared = info
+        .prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype)
+        .instrument(mm_request_span(&request.request_id))
+        .await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
 }
@@ -753,27 +757,52 @@ impl MultimodalModelInfo {
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
     ) -> Result<MmFeatures> {
-        let media_parts_len = media_parts.len();
-        if media_parts_len == 0 {
+        if media_parts.is_empty() {
             return Ok(Vec::new());
         }
+        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype)
+            .instrument(mm_stage_span("preprocessor_total"))
+            .await
+    }
+
+    /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
+    /// span aggregated per request by the `vllm-tracing` timing layer.
+    async fn prepare_multimodal_timed(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+        prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
+    ) -> Result<MmFeatures> {
+        let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
-        let fetched = self.fetch_media(media_parts).await?;
+        let fetched =
+            self.fetch_media(media_parts).instrument(mm_stage_span("media_fetch")).await?;
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared
-                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_images(fetched.images, fetched.image_uuids, model_dtype)
+                    .instrument(mm_stage_span("preprocess_image"))
+                    .await?,
+            );
         }
         if !fetched.videos.is_empty() {
-            prepared
-                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype)
+                    .instrument(mm_stage_span("preprocess_video"))
+                    .await?,
+            );
         }
         if !fetched.audios.is_empty() {
-            prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
+            prepared.push(
+                self.prepare_audios(fetched.audios, fetched.audio_uuids)
+                    .instrument(mm_stage_span("preprocess_audio"))
+                    .await?,
+            );
         }
 
-        let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
+        let mut ranges = mm_stage_span("prompt_expansion")
+            .in_scope(|| expand_prompt_token_ids(prompt_token_ids, &prepared))?;
 
         let mut features = Vec::with_capacity(media_parts_len);
         for media in prepared {
