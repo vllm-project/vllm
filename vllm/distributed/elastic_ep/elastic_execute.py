@@ -550,10 +550,7 @@ class ElasticEPScalingExecutor:
         is_async_enabled = eplb_state.is_async
         run_async = async_op and is_async_enabled
         eplb_state.is_async = run_async
-        if rank_mapping is None:
-            eplb_state.rearrange()
-        else:
-            eplb_state.rearrange(rank_mapping=rank_mapping)
+        eplb_state.rearrange(rank_mapping=rank_mapping, use_last_expert_load=True)
         if not run_async:
             # Wait for non-blocking expert resharding copies before continuing
             # the Elastic EP reconfiguration.
