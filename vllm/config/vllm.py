@@ -1598,11 +1598,14 @@ class VllmConfig:
 
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.warning_once(
-                "Enforce eager set, disabling torch.compile and CUDAGraphs. "
-                "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
+                "Enforce eager set, disabling torch.compile, CUDAGraphs, and JIT "
+                "kernel warmup. This is equivalent to setting -cc.mode=none "
+                "-cc.cudagraph_mode=none and "
+                "--kernel_config.enable_jit_warmup=False"
             )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            self.kernel_config.enable_jit_warmup = False
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
