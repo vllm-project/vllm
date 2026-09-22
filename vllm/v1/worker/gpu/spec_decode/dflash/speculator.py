@@ -110,7 +110,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         ).repeat(self.max_num_reqs)
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
-        self.decode_cudagraph_manager: CudaGraphManager | None = None
+        self.draft_step_cudagraph_manager: CudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
 
     @property
@@ -155,7 +155,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             and self.pcp_manager is None
             and self.block_tables.cp_size == 1
         ):
-            self.decode_cudagraph_manager = CudaGraphManager(
+            self.draft_step_cudagraph_manager = CudaGraphManager(
                 self.vllm_config,
                 self.device,
                 cudagraph_mode,
@@ -168,7 +168,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.sample_indices.zero_()
         self.sample_pos.zero_()
         self.sample_idx_mapping.fill_(-1)
-        manager = self.decode_cudagraph_manager
+        manager = self.draft_step_cudagraph_manager
         if manager is None:
             assert self.query_cudagraph_manager is not None
             self.query_cudagraph_manager.capture(
@@ -237,7 +237,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         manager.capture(
             create_forward_fn,
-            f"Capturing {self._speculator_name.lower()} decode-step CUDA graphs",
+            f"Capturing {self._speculator_name.lower()} draft-step CUDA graphs",
         )
 
     def load_draft_model(
@@ -507,7 +507,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             if dp_sync is not None
             else (None, num_query_tokens)
         )
-        manager = self.decode_cudagraph_manager
+        manager = self.draft_step_cudagraph_manager
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             manager or self.query_cudagraph_manager,
