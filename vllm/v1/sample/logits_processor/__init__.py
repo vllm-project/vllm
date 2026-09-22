@@ -126,11 +126,6 @@ def _load_logitsprocs_by_fqcns(
             continue
 
         logger.debug("- Loading logits processor %s", logitproc)
-        if ":" not in logitproc:
-            raise ValueError(
-                f"Logits processor FQCN {logitproc!r} is missing the required ':' "
-                "separator. Expected format: '<module>:<type>'"
-            )
         parts = logitproc.split(":")
         if len(parts) != 2:
             raise ValueError(
