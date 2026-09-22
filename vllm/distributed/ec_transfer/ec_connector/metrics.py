@@ -145,16 +145,18 @@ class ECConnectorProm:
         vllm_config: VllmConfig,
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
+        metric_types: dict[type[PromMetric], type[PromMetricT]] | None = None,
     ):
         self.prom_metrics: ECConnectorPromMetrics | None = None
         ec_transfer_config = vllm_config.ec_transfer_config
         if ec_transfer_config and ec_transfer_config.ec_connector:
             connector_cls = ECConnectorFactory.get_connector_class(ec_transfer_config)
-            metric_types = {
-                Gauge: self._gauge_cls,
-                Counter: self._counter_cls,
-                Histogram: self._histogram_cls,
-            }
+            if metric_types is None:
+                metric_types = {
+                    Gauge: self._gauge_cls,
+                    Counter: self._counter_cls,
+                    Histogram: self._histogram_cls,
+                }
             self.prom_metrics = connector_cls.build_prom_metrics(
                 vllm_config,
                 metric_types,

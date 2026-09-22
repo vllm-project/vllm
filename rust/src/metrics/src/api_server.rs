@@ -100,7 +100,7 @@ impl ApiServerMetrics {
         let weight_operation_requests = WeightOperationCounterFamily::default();
         registry.register(
             "vllm:rl_weight_update_requests",
-            "Dispatched weight-operation RPCs by outcome.",
+            "Dispatched HTTP weight operations by outcome.",
             weight_operation_requests.clone(),
         );
 
@@ -109,14 +109,14 @@ impl ApiServerMetrics {
         );
         registry.register(
             "vllm:rl_weight_update_request_duration_seconds",
-            "Duration of an individual weight-operation RPC.",
+            "Duration of a dispatched HTTP weight operation.",
             weight_operation_duration_seconds.clone(),
         );
 
         let weight_operation_requests_in_flight = WeightOperationGaugeFamily::default();
         registry.register(
             "vllm:rl_weight_update_requests_in_flight",
-            "Currently awaited weight-operation RPCs.",
+            "Currently awaited HTTP weight operations.",
             weight_operation_requests_in_flight.clone(),
         );
 
@@ -130,7 +130,7 @@ impl ApiServerMetrics {
         }
     }
 
-    /// Record one dispatched weight-operation RPC.
+    /// Record one dispatched HTTP weight operation.
     pub fn record_weight_operation(
         &self,
         operation: &'static str,
@@ -138,20 +138,22 @@ impl ApiServerMetrics {
         let labels = WeightOperationLabels { operation };
         let in_flight = self
             .weight_operation_requests_in_flight
-            .get_or_create(&labels);
+            .get_or_create_owned(&labels);
         in_flight.inc();
         WeightOperationRecorder {
             operation,
             started_at: Instant::now(),
             requests: self.weight_operation_requests.clone(),
-            duration: self.weight_operation_duration_seconds.get_or_create(&labels),
+            duration: self
+                .weight_operation_duration_seconds
+                .get_or_create_owned(&labels),
             in_flight,
             completed: false,
         }
     }
 }
 
-/// Completes a weight-operation observation when its RPC returns or is dropped.
+/// Completes a weight-operation observation when it succeeds or is dropped.
 pub struct WeightOperationRecorder {
     operation: &'static str,
     started_at: Instant,

@@ -6372,6 +6372,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
         })
     })
     .await;
+    let metrics_before = METRICS.render().unwrap();
 
     let mut responses = Vec::new();
     for (method, path, body) in [
@@ -6434,6 +6435,33 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
         );
     }
     engine_task.await.expect("mock engine task");
+    let metrics_after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_requests_total",
+            Some("operation=\"update\",status=\"success\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &metrics_after,
+            "vllm:rl_weight_update_request_duration_seconds_count",
+            Some("operation=\"update\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_value(
+            &metrics_after,
+            "vllm:rl_weight_update_requests_in_flight",
+            Some("operation=\"update\""),
+        ),
+        Some(0.0)
+    );
     expect_test::expect![[r#"
         [
             "{\"message\":\"Weight transfer initialized\"}",
@@ -6460,6 +6488,7 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
         })
     })
     .await;
+    let metrics_before = METRICS.render().unwrap();
 
     for (path, body) in [
         ("/init_weight_transfer_engine", "{"),
@@ -6488,6 +6517,20 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
             .await
             .expect("call app");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+    let metrics_after = METRICS.render().unwrap();
+    for (operation, status) in [("init", "error"), ("update", "error"), ("finish", "error")] {
+        assert_eq!(
+            metric_delta(
+                &metrics_before,
+                &metrics_after,
+                "vllm:rl_weight_update_requests_total",
+                Some(&format!(
+                    "operation=\"{operation}\",status=\"{status}\""
+                )),
+            ),
+            0.0
+        );
     }
     engine_task.abort_and_join().await;
 }

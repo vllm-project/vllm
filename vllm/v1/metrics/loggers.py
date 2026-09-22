@@ -514,7 +514,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             },
         )
         self.ec_connector_prom = self._ec_connector_cls(
-            vllm_config, labelnames, per_engine_labelvalues
+            vllm_config,
+            labelnames,
+            per_engine_labelvalues,
+            metric_types={
+                Gauge: self._gauge_cls,
+                Counter: self._counter_cls,
+                Histogram: self._histogram_cls,
+            },
         )
         self.perf_metrics_prom = self._perf_metrics_cls(
             vllm_config,

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HTTP weight-operation telemetry, not cluster-wide transfer-session state.
 
-Only dispatched RPCs are counted. Rejected input never enters the recorder.
-Durations cover individual RPC awaits, not the interval from start to finish.
+Only dispatched operations are counted. Rejected input never enters the recorder.
+Durations cover one frontend weight operation, not a transfer-session lifetime.
 """
 
 from collections.abc import Iterator
@@ -22,20 +22,20 @@ class WeightOperationMetrics:
     def __init__(self, registry: CollectorRegistry = REGISTRY):
         self.requests = Counter(
             "vllm:rl_weight_update_requests_total",
-            "Dispatched HTTP weight-operation RPCs by outcome.",
+            "Dispatched HTTP weight operations by outcome.",
             ["operation", "status"],
             registry=registry,
         )
         self.duration = Histogram(
             "vllm:rl_weight_update_request_duration_seconds",
-            "Duration of an individual HTTP weight-operation RPC.",
+            "Duration of a dispatched HTTP weight operation.",
             ["operation"],
             registry=registry,
             buckets=(0.01, 0.1, 1, 10, 30, 60, 120, 300, 600),
         )
         self.in_flight = Gauge(
             "vllm:rl_weight_update_requests_in_flight",
-            "Currently awaited HTTP weight-operation RPCs.",
+            "Currently awaited HTTP weight operations.",
             ["operation"],
             registry=registry,
             multiprocess_mode="livesum",

@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use vllm_metrics::METRICS;
 
 use crate::error::{ApiError, invalid_request};
 use crate::state::AppState;
@@ -62,11 +63,13 @@ pub async fn init_weight_transfer_engine(
         )
     })?;
 
+    let recorder = METRICS.api_server.record_weight_operation("init");
     state
         .engine_core_client()
         .init_weight_transfer_engine(init_info)
         .await
         .map_err(|error| utility_call_error("init_weight_transfer_engine", error))?;
+    recorder.success();
 
     Ok(Json(MessageResponse {
         message: "Weight transfer initialized",
@@ -77,11 +80,13 @@ pub async fn init_weight_transfer_engine(
 pub async fn start_weight_update(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    let recorder = METRICS.api_server.record_weight_operation("start");
     state
         .engine_core_client()
         .start_weight_update()
         .await
         .map_err(|error| utility_call_error("start_weight_update", error))?;
+    recorder.success();
 
     Ok(Json(MessageResponse {
         message: "Weight update started",
@@ -92,11 +97,13 @@ pub async fn start_weight_update(
 pub async fn start_draft_weight_update(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    let recorder = METRICS.api_server.record_weight_operation("start_draft");
     state
         .engine_core_client()
         .start_draft_weight_update()
         .await
         .map_err(|error| utility_call_error("start_draft_weight_update", error))?;
+    recorder.success();
 
     Ok(Json(MessageResponse {
         message: "Draft weight update started",
@@ -122,11 +129,13 @@ pub async fn update_weights(
             )
         })?;
 
+    let recorder = METRICS.api_server.record_weight_operation("update");
     state
         .engine_core_client()
         .update_weights(update_info)
         .await
         .map_err(|error| utility_call_error("update_weights", error))?;
+    recorder.success();
 
     Ok(Json(MessageResponse {
         message: "Weights updated",
@@ -142,6 +151,7 @@ pub async fn finish_weight_update(
     let request = body?.map(|Json(request)| request).unwrap_or_default();
 
     let client = state.engine_core_client();
+    let recorder = METRICS.api_server.record_weight_operation("finish");
     client
         .finish_weight_update()
         .await
@@ -152,6 +162,7 @@ pub async fn finish_weight_update(
             .await
             .map_err(|error| utility_call_error("set_weight_version", error))?;
     }
+    recorder.success();
 
     Ok(Json(MessageResponse {
         message: "Weight update finished",
