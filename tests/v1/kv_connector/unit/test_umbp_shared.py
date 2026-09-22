@@ -103,6 +103,7 @@ def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
     parallel = {
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
+        "decode_context_parallel_size": 1,
         "world_size": 1,
     }
     parallel.update(parallel_overrides)
@@ -432,6 +433,40 @@ def test_scheduler_async_lookup_defers_then_returns_hit():
     scheduler.close()
 
     assert result == (32, False)
+
+
+def test_scheduler_emits_async_load_without_scheduled_model_tokens():
+    config = _kv_cache_config()
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "load_async": True}),
+        config,
+        _SchedulerHandle([True]),
+        BlockIdentityCodec(UMBPNamespace("async-load")),
+    )
+    request = SimpleNamespace(
+        request_id="async-load",
+        num_tokens=32,
+        block_hashes=[b"a", b"b"],
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([7],)),
+        16,
+    )
+    metadata = scheduler.build_connector_meta(
+        SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids=set(),
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+            num_scheduled_tokens={},
+        )
+    )
+
+    assert [plan.block_id for plan in metadata.load_requests["async-load"]] == [7]
+    assert scheduler._pending_loads == {}
 
 
 def test_scheduler_reset_clears_pending_lookup_state():
@@ -834,6 +869,15 @@ class _WorkerHandle:
     def wait(self, job):
         return job
 
+    def poll(self, job):
+        if job.status in (
+            TransferJobStatus.COMPLETED,
+            TransferJobStatus.FAILED,
+            TransferJobStatus.CANCELLED,
+        ):
+            return job
+        return None
+
     def publish(self, job):
         self.published = job
 
@@ -853,6 +897,38 @@ class _LayerRecordingWorkerHandle(_WorkerHandle):
     def wait(self, job):
         self.wait_calls.append(job)
         return super().wait(job)
+
+    def poll(self, job):
+        return None
+
+
+class _DelayedLoadWorkerHandle(_WorkerHandle):
+    def load(self, plans):
+        self.load_job = TransferJobState(tuple(plans))
+        self.load_job.start()
+        return self.load_job
+
+
+def test_worker_polls_async_load_without_forward_execution():
+    handle = _DelayedLoadWorkerHandle()
+    worker = UMBPStoreConnectorWorker(handle, layerwise_load=True)
+    plan = BlockTransferPlan("async-load", 1, request_id="req")
+    worker.start_load_kv(
+        None,
+        UMBPConnectorMetadata(
+            async_load=True,
+            load_plans=[plan],
+            load_requests={"req": [plan]},
+        ),
+    )
+
+    assert worker._layer_load_jobs == {}
+    assert set(worker._load_jobs) == {"req"}
+    assert worker.get_finished(set()) == (None, None)
+
+    handle.load_job.complete()
+
+    assert worker.get_finished(set()) == (None, {"req"})
 
 
 class _CancellableWorkerHandle(_WorkerHandle):
@@ -910,7 +986,7 @@ def test_worker_waits_for_layers_independently():
     assert worker.get_finished({"req"}) == (None, None)
     worker.wait_for_layer_load("layer2")
     assert len(handle.wait_calls) == 2
-    assert worker.get_finished({"req"}) == (None, {"req"})
+    assert worker.get_finished({"req"}) == (None, None)
 
 
 def test_worker_falls_back_to_bulk_when_layerwise_is_unsupported():
@@ -928,7 +1004,7 @@ def test_worker_falls_back_to_bulk_when_layerwise_is_unsupported():
     worker.start_load_kv(
         None,
         UMBPConnectorMetadata(
-            async_load=True,
+            async_load=False,
             load_plans=[plan],
             load_requests={"req": [plan]},
         ),
