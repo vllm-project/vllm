@@ -14,6 +14,9 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as ngram_embedding_module
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
@@ -35,8 +38,125 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
+    PleShortConvAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import MambaSpec
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("full_graph", [False, True])
+@pytest.mark.parametrize(
+    "query_lens,drafts,spec_rows,non_spec_rows,token_order",
+    [
+        pytest.param([4, 2, 0], [3, 1, -1], [0, 1], [], None, id="spec-padding"),
+        pytest.param(
+            [3, 1, 2, 5, 0],
+            [2, -1, 1, -1, -1],
+            [0, 2],
+            [1, 3],
+            [0, 1, 2, 4, 5, 3, 6, 7, 8, 9, 10],
+            id="mixed-padding",
+        ),
+        pytest.param([1, 5], [-1, -1], [], [0, 1], None, id="non-spec"),
+    ],
+)
+def test_ple_metadata_preserves_request_and_token_order(
+    device, full_graph, query_lens, drafts, spec_rows, non_spec_rows, token_order
+):
+    """Preserve state routing, acceptance and prefill offsets without GPU sync."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    device = torch.device(device)
+    config = VllmConfig()
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=3
+    )
+    config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.FULL if full_graph else CUDAGraphMode.NONE
+    )
+    config.compilation_config.max_cudagraph_capture_size = 32
+    builder = PleShortConvAttentionMetadataBuilder(
+        MambaSpec(block_size=16, shapes=((16, 64),), dtypes=(torch.float32,)),
+        ["ple"],
+        config,
+        device,
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[q + 16 for q in query_lens], query_lens=query_lens),
+        16,
+        device,
+        arange_block_indices=True,
+    )
+    common.is_prefilling = torch.tensor(
+        [q > 1 and d < 0 for q, d in zip(query_lens, drafts)]
+    )
+    # Token padding is independent of the sum of per-request query lengths.
+    common.num_actual_tokens += 3
+    accepted = torch.arange(1, len(query_lens) + 1, dtype=torch.int32, device=device)
+    drafts_cpu = torch.tensor(drafts, dtype=torch.int32)
+    sync_mode = torch.cuda.get_sync_debug_mode() if device.type == "cuda" else None
+    if sync_mode is not None:
+        torch.cuda.set_sync_debug_mode("error")
+    try:
+        metadata = builder.build(
+            0,
+            common,
+            num_accepted_tokens=accepted,
+            num_decode_draft_tokens_cpu=drafts_cpu,
+        )
+    finally:
+        if sync_mode is not None:
+            torch.cuda.set_sync_debug_mode(sync_mode)
+
+    def check(actual, expected):
+        torch.testing.assert_close(
+            actual, torch.tensor(expected, dtype=actual.dtype, device=device)
+        )
+
+    assert metadata.num_spec_decodes == len(spec_rows)
+    assert metadata.num_decodes == sum(query_lens[i] == 1 for i in non_spec_rows)
+    assert metadata.num_prefills == sum(query_lens[i] > 1 for i in non_spec_rows)
+    if spec_rows:
+        torch.testing.assert_close(
+            metadata.spec_state_indices_tensor[: len(spec_rows)],
+            common.block_table_tensor[spec_rows, 0],
+        )
+        torch.testing.assert_close(
+            metadata.num_accepted_tokens[: len(spec_rows)], accepted[spec_rows]
+        )
+        check(
+            metadata.spec_query_start_loc[: len(spec_rows) + 1],
+            [0, *accumulate(query_lens[i] for i in spec_rows)],
+        )
+        if full_graph and not non_spec_rows:
+            check(metadata.spec_state_indices_tensor[len(spec_rows) :], [NULL_BLOCK_ID])
+            check(metadata.num_accepted_tokens[len(spec_rows) :], [1])
+            check(
+                metadata.spec_query_start_loc[len(spec_rows) + 1 :], [sum(query_lens)]
+            )
+            assert (
+                metadata.spec_state_indices_tensor.data_ptr()
+                == builder.spec_state_indices_tensor.data_ptr()
+            )
+    if non_spec_rows:
+        torch.testing.assert_close(
+            metadata.state_indices_tensor, common.block_table_tensor[non_spec_rows, 0]
+        )
+        prefill_lens = [query_lens[i] for i in non_spec_rows if query_lens[i] > 1]
+        check(metadata.query_start_loc_p, [0, *accumulate(prefill_lens)])
+        check(metadata.has_initial_states_p, [True] * len(prefill_lens))
+    if token_order is not None:
+        check(
+            torch.cat((metadata.spec_token_indx, metadata.non_spec_token_indx)),
+            token_order,
+        )
+    else:
+        assert metadata.spec_token_indx is None
+        assert metadata.non_spec_token_indx is None
+    assert metadata.nums_dict is None
+    assert metadata.batch_ptr is None
+    assert metadata.token_chunk_offset_ptr is None
 
 
 def _mock_etp_group(
@@ -1501,6 +1621,11 @@ def _make_conv_metadata(
             else None
         ),
         non_spec_query_start_loc=(non_spec_query_start_loc if has_non_spec else None),
+        query_start_loc_p=(
+            non_spec_query_start_loc[case.num_decodes :] - case.num_decodes
+            if num_prefills
+            else None
+        ),
         has_initial_states_p=(
             torch.arange(num_prefills, device=device) % 2 == 0 if num_prefills else None
         ),

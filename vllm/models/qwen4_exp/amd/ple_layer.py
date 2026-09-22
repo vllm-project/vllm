@@ -615,14 +615,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         num_decode_tokens: int,
         num_prefill_tokens: int,
     ) -> torch.Tensor:
-        # ``non_spec_query_start_loc`` covers the non-spec (decode + prefill)
-        # requests and equals ``query_start_loc`` when spec-decode is inactive.
-        non_spec_query_start_loc = metadata.non_spec_query_start_loc
-        if non_spec_query_start_loc is None:
+        query_start_loc_p = metadata.query_start_loc_p
+        if query_start_loc_p is None:
             raise ValueError("query_start_loc is required for prefill short-conv")
-        query_start_loc_p = (
-            non_spec_query_start_loc[-num_prefills - 1 :] - num_decode_tokens
-        )
         # The metadata builder guarantees that the prefill query offsets start
         # at 0 and end at num_prefill_tokens. Avoid reading those values here,
         # since doing so would force a device-to-host synchronization.
