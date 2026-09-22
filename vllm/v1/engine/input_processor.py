@@ -32,6 +32,7 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.kv_hints import KvHintsEnvelope
 
 logger = init_logger(__name__)
 
@@ -62,7 +63,7 @@ class InputProcessor:
 
         self.renderer = renderer or renderer_from_config(vllm_config)
 
-        self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
+        self.supports_mm_inputs = model_config.supports_multimodal_inputs
         self.mm_encoder_cache_size = 0
         self.skip_prompt_length_check = False
         if self.supports_mm_inputs:
@@ -318,6 +319,7 @@ class InputProcessor:
         data_parallel_rank: int | None = None,
         resumable: bool = False,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> EngineCoreRequest:
         self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
@@ -461,6 +463,7 @@ class InputProcessor:
             trace_headers=trace_headers,
             resumable=resumable,
             session_id=session_id,
+            kv_hints=kv_hints,
         )
 
     def _validate_prompt_len(

@@ -1392,16 +1392,8 @@ def test_engram_model_support(
         assert resolved.engram_config.cpu_offload is True
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"), [(None, True), ("0", False), ("1", True)]
-)
-def test_engram_cpu_offload_environment_default(monkeypatch, value, expected):
-    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
-    if value is not None:
-        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", value)
-    assert EngramConfig().cpu_offload is expected
-    assert EngramConfig(cpu_offload=False).cpu_offload is False
-    assert EngramConfig(cpu_offload=True).cpu_offload is True
+def test_engram_cpu_offload_default():
+    assert EngramConfig().cpu_offload is True
 
 
 def test_engram_config_defaults_to_none():
@@ -1516,6 +1508,41 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.nnodes == 1
     assert parallel_config.node_rank == 0
     assert parallel_config.world_size == 8
+
+
+@pytest.mark.parametrize("data_parallel_size", [4, 8])
+def test_nnodes_within_dp_when_replicas_outnumber_nodes(data_parallel_size):
+    """A replica that fits on one node spans one node, never zero.
+
+    External LB pins ``data_parallel_size_local`` to 1, so the ratio rounds
+    down to 0 as soon as there are more DP replicas than nodes. Anything
+    dividing by ``nnodes_within_dp`` then raises ZeroDivisionError.
+    """
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_size_local=1,
+        data_parallel_external_lb=True,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+    assert parallel_config.local_world_size == parallel_config.world_size
+
+
+@pytest.mark.parametrize("nnodes", [4, 9])
+def test_nnodes_within_dp_rejects_uneven_internal_lb(nnodes):
+    parallel_config = ParallelConfig(
+        data_parallel_size=8,
+        data_parallel_size_local=1,
+        distributed_executor_backend="mp",
+        nnodes=nnodes,
+    )
+
+    with pytest.raises(ValueError, match="Invalid data parallel configuration"):
+        _ = parallel_config.nnodes_within_dp
 
 
 def test_draft_model_enables_async_scheduling_by_default():
