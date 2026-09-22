@@ -392,7 +392,7 @@ class HarmonyParser(DelegatingParser):
         self, token_ids: Sequence[int]
     ) -> TokenPhaseCounts | None:
         if self._processed_token_count != len(token_ids):
-            return self._analyze_complete_output(token_ids)[0]
+            return self._analyze_complete_output(token_ids)
         return TokenPhaseCounts(
             reasoning=self._reasoning_token_count,
             content=self._content_token_count,
@@ -416,11 +416,9 @@ class HarmonyParser(DelegatingParser):
         if self._processed_token_count == len(token_ids):
             return self._reasoning_token_count
 
-        return self._analyze_complete_output(token_ids)[1]
+        return self._analyze_complete_output(token_ids).reasoning
 
-    def _analyze_complete_output(
-        self, token_ids: Sequence[int]
-    ) -> tuple[TokenPhaseCounts, int]:
+    def _analyze_complete_output(self, token_ids: Sequence[int]) -> TokenPhaseCounts:
         """Analyze a complete output without changing streaming state."""
         parser = get_streamable_parser_for_assistant()
         usage_reasoning_token_count = 0
@@ -438,16 +436,13 @@ class HarmonyParser(DelegatingParser):
             is_payload_token = not encoding.is_special_token(token_id)
             if segment_type == _SegmentType.CONTENT and is_payload_token:
                 content_token_count += 1
-        return (
-            TokenPhaseCounts(
-                reasoning=usage_reasoning_token_count,
-                content=content_token_count,
-                unclassified=max(
-                    0,
-                    len(token_ids) - usage_reasoning_token_count - content_token_count,
-                ),
+        return TokenPhaseCounts(
+            reasoning=usage_reasoning_token_count,
+            content=content_token_count,
+            unclassified=max(
+                0,
+                len(token_ids) - usage_reasoning_token_count - content_token_count,
             ),
-            usage_reasoning_token_count,
         )
 
     def adjust_request(
