@@ -12,6 +12,11 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     compress_norm_rope_store_triton,
     compress_norm_rope_store_two_stage_triton,
@@ -21,6 +26,7 @@ from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     _SAVE_PARTIAL_STATES_KERNEL,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -30,10 +36,162 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+_C128_RATIO = 128
+
+
+def _c128_ring_capacity(num_speculative_tokens: int) -> int:
+    span = _C128_RATIO + num_speculative_tokens
+    return _C128_RATIO * ((span + _C128_RATIO - 1) // _C128_RATIO)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "block_table_stride",
+        "num_actual_tokens",
+        "num_tokens",
+        "num_reqs",
+    ],
+    do_not_specialize_on_alignment=["block_table_ptr", "positions_ptr"],
+)
+def _build_c128_ring_metadata_kernel(
+    block_table_ptr,
+    block_table_stride,
+    query_start_loc_ptr,
+    token_to_req_ptr,
+    positions_ptr,
+    slot_mapping_ptr,
+    tail_slot_mapping_ptr,
+    num_actual_tokens,
+    num_tokens,
+    num_reqs,
+    CAPACITY: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    query_batch_end = tl.load(query_start_loc_ptr + num_reqs)
+    valid = (offsets < num_actual_tokens) & (offsets < query_batch_end)
+    req = tl.load(token_to_req_ptr + offsets, mask=valid, other=0).to(tl.int64)
+    query_end = tl.load(query_start_loc_ptr + req + 1, mask=valid, other=0)
+    position = tl.load(positions_ptr + offsets, mask=valid, other=0)
+    block = tl.load(block_table_ptr + req * block_table_stride, mask=valid, other=-1)
+    valid &= block >= 0
+    slot = block.to(tl.int64) * CAPACITY + position % CAPACITY
+    keep_tail = valid & (offsets + CAPACITY >= query_end)
+    store = offsets < num_tokens
+    tl.store(slot_mapping_ptr + offsets, tl.where(valid, slot, -1), mask=store)
+    tl.store(tail_slot_mapping_ptr + offsets, tl.where(keep_tail, slot, -1), mask=store)
+
+
+def _build_c128_ring_metadata_warmup_inputs(*, capacity: int) -> dict[str, Any]:
+    int32 = TritonWarmupTensor(torch.int32)
+    int64 = TritonWarmupTensor(torch.int64)
+    return dict(
+        block_table=int32,
+        query_start_loc=int32,
+        token_to_req=int32,
+        positions=int64,
+        slot_mapping=int64,
+        tail_slot_mapping=int64,
+        num_actual_tokens=2,
+        num_tokens=2,
+        num_reqs=1,
+        capacity=capacity,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_build_c128_ring_metadata_kernel,
+    warmup_inputs=_build_c128_ring_metadata_warmup_inputs,
+)
+def _build_c128_ring_metadata(
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    token_to_req: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    tail_slot_mapping: torch.Tensor,
+    num_actual_tokens: int,
+    num_tokens: int,
+    num_reqs: int,
+    capacity: int,
+) -> DispatchSpec:
+    return (triton.cdiv(num_tokens, 256),), dict(
+        block_table_stride=block_table.stride(0),
+        CAPACITY=capacity,
+        BLOCK=256,
+    )
+
+
+_BUILD_C128_RING_METADATA_KERNEL = _build_c128_ring_metadata
+
+
+def build_c128_ring_metadata(
+    slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    num_actual_tokens: int,
+    num_reqs: int,
+    capacity: int,
+    token_to_req_indices: torch.Tensor | None = None,
+    out_slots: torch.Tensor | None = None,
+    out_tail_slots: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map C128 rows to a per-request ring and select the saved suffix."""
+    if capacity < _C128_RATIO or capacity % _C128_RATIO != 0:
+        raise ValueError("C128 ring capacity must be a positive multiple of 128")
+    if out_slots is None:
+        out_slots = torch.empty_like(slot_mapping)
+    if out_tail_slots is None:
+        out_tail_slots = torch.empty_like(slot_mapping)
+    num_tokens = slot_mapping.numel()
+    if num_actual_tokens == 0 or num_reqs == 0:
+        out_slots.fill_(-1)
+        out_tail_slots.fill_(-1)
+        return out_slots, out_tail_slots
+
+    if token_to_req_indices is None:
+        tokens = torch.arange(num_actual_tokens, device=slot_mapping.device)
+        token_to_req_indices = torch.searchsorted(
+            query_start_loc[1 : num_reqs + 1], tokens, right=True
+        ).to(torch.int32)
+
+    if positions.is_cuda:
+        _BUILD_C128_RING_METADATA_KERNEL(
+            block_table,
+            query_start_loc,
+            token_to_req_indices,
+            positions,
+            out_slots,
+            out_tail_slots,
+            num_actual_tokens,
+            num_tokens,
+            num_reqs,
+            capacity,
+        )
+        return out_slots, out_tail_slots
+
+    out_slots.fill_(-1)
+    out_tail_slots.fill_(-1)
+    rows = torch.arange(num_actual_tokens, device=slot_mapping.device)
+    query_batch_end = query_start_loc[num_reqs]
+    valid_rows = rows < query_batch_end
+    req = token_to_req_indices[:num_actual_tokens].long().clamp(max=num_reqs - 1)
+    pos = positions[:num_actual_tokens].long()
+    blocks = block_table[:num_reqs, 0].index_select(0, req).long()
+    valid = valid_rows & (blocks >= 0)
+    slots = blocks * capacity + pos.remainder(capacity)
+    out_slots[:num_actual_tokens] = torch.where(valid, slots, -1)
+    query_ends = query_start_loc[1 : num_reqs + 1].index_select(0, req)
+    keep_tail = valid & (rows + capacity >= query_ends)
+    out_tail_slots[:num_actual_tokens] = torch.where(keep_tail, slots, -1)
+    return out_slots, out_tail_slots
 
 
 def _prefer_two_stage_compressor() -> bool:
@@ -85,6 +243,9 @@ class CompressorMetadata:
     block_size: int
 
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
+    tail_slot_mapping: torch.Tensor | None = None  # [num_tokens]
+    query_start_loc: torch.Tensor | None = None  # [num_reqs + 1]
+    is_circular: bool = False
     num_decode_tokens: int | None = None
     c128_boundary: bool | None = None
 
@@ -94,14 +255,30 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
-        mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
+        assert isinstance(
+            self.kv_cache_spec,
+            SlidingWindowMLASpec | MLAAttentionSpec | CircularBufferSpec,
+        )
+        mla_spec = cast(
+            SlidingWindowMLASpec | MLAAttentionSpec | CircularBufferSpec,
+            self.kv_cache_spec,
+        )
         self.block_size = mla_spec.block_size
+        self.is_circular = isinstance(mla_spec, CircularBufferSpec)
 
+        max_num_batched_tokens = (
+            self.vllm_config.scheduler_config.max_num_batched_tokens
+        )
         self.token_to_req_indices = torch.zeros(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
+            max_num_batched_tokens,
             dtype=torch.int32,
             device=self.device,
+        )
+        self.slot_mapping_buffer = torch.empty(
+            max_num_batched_tokens, dtype=torch.int64, device=self.device
+        )
+        self.tail_slot_mapping_buffer = torch.empty(
+            max_num_batched_tokens, dtype=torch.int64, device=self.device
         )
 
     def build(
@@ -113,6 +290,25 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
             self.token_to_req_indices
         )
+        num_tokens = common_attn_metadata.slot_mapping.numel()
+        if self.is_circular:
+            positions = common_attn_metadata.positions
+            assert positions is not None
+            slot_mapping, tail_slot_mapping = build_c128_ring_metadata(
+                common_attn_metadata.slot_mapping,
+                common_attn_metadata.block_table_tensor,
+                common_attn_metadata.query_start_loc,
+                positions,
+                common_attn_metadata.num_actual_tokens,
+                common_attn_metadata.num_reqs,
+                self.block_size,
+                token_to_req_indices=token_to_req_indices,
+                out_slots=self.slot_mapping_buffer[:num_tokens],
+                out_tail_slots=self.tail_slot_mapping_buffer[:num_tokens],
+            )
+        else:
+            slot_mapping = common_attn_metadata.slot_mapping
+            tail_slot_mapping = slot_mapping
         num_decode_tokens = None
         if _prefer_two_stage_compressor():
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
@@ -122,15 +318,21 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.scheduler_config.async_scheduling
             and self.vllm_config.speculative_config is not None
         )
+        block_table = common_attn_metadata.block_table_tensor
+        if not self.is_circular:
+            block_table = block_table.clamp_(min=0)
         return CompressorMetadata(
-            block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
-            slot_mapping=common_attn_metadata.slot_mapping,
+            block_table=block_table,
+            slot_mapping=slot_mapping,
             block_size=self.block_size,
             token_to_req_indices=token_to_req_indices,
+            tail_slot_mapping=tail_slot_mapping,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            is_circular=self.is_circular,
             num_decode_tokens=num_decode_tokens,
             c128_boundary=(
                 _get_c128_boundary(common_attn_metadata)
-                if self.block_size == 8 and not async_spec_decode
+                if self.is_circular and not async_spec_decode
                 else None
             ),
         )
@@ -156,15 +358,12 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 
         assert self.dtype == torch.float32
         assert compress_ratio in [4, 128]
+        self.compress_ratio = compress_ratio
         coff = 1 + (compress_ratio == 4)
         self.sliding_window = coff * compress_ratio
-        # Block size is constrained by tensor sharing between compressor states
-        # and KV blocks. Since compressor states share the same physical tensor
-        # as KV blocks, they must use the same page size.
-        # The KV block shape [256//4, head_dim] = [64, 584] determines:
-        # - C4 compressor block shape [4, 2*512*2*4] -> block_size = 4
-        # - C128 compressor block shape [8, 512*2*4] -> block_size = 8
-        # TODO(yifan): make block size automatically determined and configurable.
+        # C4 still shares the legacy paged layout and therefore keeps block size
+        # 4. C128 replaces this value with its per-request ring capacity in the
+        # cache spec.
         if compress_ratio == 4:
             self.block_size = 4
         elif compress_ratio == 128:
@@ -181,6 +380,14 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # full-cache rows share state pages with contiguous KV pages, so padding
         # would break page matching.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+        if self.compress_ratio == 128:
+            return CircularBufferSpec(
+                block_size=_c128_ring_capacity(vllm_config.num_speculative_tokens),
+                num_kv_heads=1,
+                head_size=self.state_dim,
+                head_size_v=0,
+                dtype=self.dtype,
+            )
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
@@ -313,6 +520,12 @@ class DeepseekCompressor(nn.Module):
             )
 
         if vllm_config.kernel_config.enable_jit_warmup:
+            if self.compress_ratio == 128 and (
+                current_platform.is_cuda() or current_platform.is_rocm()
+            ):
+                _BUILD_C128_RING_METADATA_KERNEL.register_warmup(
+                    capacity=_c128_ring_capacity(vllm_config.num_speculative_tokens)
+                )
             _SAVE_PARTIAL_STATES_KERNEL.register_warmup(
                 head_dim=self.head_dim,
                 compress_ratio=self.compress_ratio,
@@ -375,6 +588,11 @@ class DeepseekCompressor(nn.Module):
         )
         token_to_req_indices = state_metadata.token_to_req_indices
         slot_mapping = state_metadata.slot_mapping
+        tail_slot_mapping = state_metadata.tail_slot_mapping
+        query_start_loc = state_metadata.query_start_loc
+        assert token_to_req_indices is not None
+        assert tail_slot_mapping is not None
+        assert query_start_loc is not None
         num_actual = slot_mapping.shape[0]
         block_table = state_metadata.block_table
         block_size = state_metadata.block_size
@@ -389,24 +607,27 @@ class DeepseekCompressor(nn.Module):
             else {"launch_pdl": False}
         )
 
-        # Store the KV and score (with fused APE addition) in the state.
+        # C4 stores before compression. C128 reads current-chunk rows directly
+        # and saves only the ring tail after compression, so a long chunk cannot
+        # wrap and overwrite an earlier group before that group is consumed.
         # NOTE: PDL is disabled — both this kernel and the compress kernels
         # below depend on preceding kernel outputs (kv/score from the cublas
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        _SAVE_PARTIAL_STATES_KERNEL(
-            kv=kv,
-            score=score,
-            ape=self.ape,
-            positions=positions,
-            state_cache=state_cache,
-            slot_mapping=slot_mapping,
-            block_size=block_size,
-            state_width=state_width,
-            compress_ratio=self.compress_ratio,
-            pdl_kwargs=pdl_kwargs,
-        )
+        if not state_metadata.is_circular:
+            _SAVE_PARTIAL_STATES_KERNEL(
+                kv=kv,
+                score=score,
+                ape=self.ape,
+                positions=positions,
+                state_cache=state_cache,
+                slot_mapping=slot_mapping,
+                block_size=block_size,
+                state_width=state_width,
+                compress_ratio=self.compress_ratio,
+                pdl_kwargs=pdl_kwargs,
+            )
 
         # full graph cannot branch on per-step CPU metadata after capture
         if (
@@ -416,6 +637,18 @@ class DeepseekCompressor(nn.Module):
             and forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
             and state_metadata.c128_boundary is False
         ):
+            _SAVE_PARTIAL_STATES_KERNEL(
+                kv=kv,
+                score=score,
+                ape=self.ape,
+                positions=positions,
+                state_cache=state_cache,
+                slot_mapping=tail_slot_mapping,
+                block_size=block_size,
+                state_width=state_width,
+                compress_ratio=self.compress_ratio,
+                pdl_kwargs=pdl_kwargs,
+            )
             return
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
@@ -473,12 +706,17 @@ class DeepseekCompressor(nn.Module):
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,
+            kv=kv,
+            score=score,
+            ape=self.ape,
             num_actual=num_actual,
             token_to_req_indices=token_to_req_indices,
             positions=positions,
             slot_mapping=slot_mapping,
             block_table=block_table,
             block_size=block_size,
+            query_start_loc=query_start_loc,
+            is_circular=state_metadata.is_circular,
             state_width=state_width,
             cos_sin_cache=cos_sin_cache,
             kv_cache=kv_cache,
@@ -496,3 +734,16 @@ class DeepseekCompressor(nn.Module):
             scale_dim=self._scale_dim,
             **extra_kwargs,
         )
+        if state_metadata.is_circular:
+            _SAVE_PARTIAL_STATES_KERNEL(
+                kv=kv,
+                score=score,
+                ape=self.ape,
+                positions=positions,
+                state_cache=state_cache,
+                slot_mapping=tail_slot_mapping,
+                block_size=block_size,
+                state_width=state_width,
+                compress_ratio=self.compress_ratio,
+                pdl_kwargs=pdl_kwargs,
+            )

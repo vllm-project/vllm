@@ -23,6 +23,7 @@ from vllm.models.deepseek_v4.common.ops import (
     quantize_and_insert_k_cache,
 )
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
+    _compress_gather_split_sparse_attn,
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
     _launch_two_stage_sparse_attn_compressor,
@@ -39,6 +40,149 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+
+
+def _make_c128_raw_or_ring_case(device: str = "cuda"):
+    head_dim = 512
+    capacity = 256
+    chunks = [torch.arange(120, 400), torch.arange(300, 390)]
+    block_ids = [2, 0]
+    positions = torch.cat(chunks).to(device=device, dtype=torch.int64)
+    query_start_loc = torch.tensor(
+        [0, chunks[0].numel(), positions.numel()],
+        device=device,
+        dtype=torch.int32,
+    )
+    token_to_req = torch.cat(
+        [
+            torch.full((chunk.numel(),), req, dtype=torch.int32)
+            for req, chunk in enumerate(chunks)
+        ]
+    ).to(device)
+    block_table = torch.tensor(block_ids, dtype=torch.int32, device=device).view(-1, 1)
+    slot_mapping = torch.cat(
+        [
+            block * capacity + chunk.remainder(capacity)
+            for block, chunk in zip(block_ids, chunks)
+        ]
+    ).to(device=device, dtype=torch.int64)
+    cols = torch.arange(head_dim, device=device, dtype=torch.float32)
+    ape = torch.sin(
+        torch.arange(128, device=device, dtype=torch.float32)[:, None] * 0.017
+        + cols[None, :] * 0.003
+    )
+
+    def rows(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        pos = pos.to(device=device, dtype=torch.float32)[:, None]
+        kv = torch.sin(pos * 0.013 + cols[None, :] * 0.007)
+        score = torch.cos(pos * 0.011 + cols[None, :] * 0.005) * 0.2
+        return kv, score
+
+    raw_kv, raw_score = rows(positions)
+    state_cache = torch.zeros(
+        3, capacity, 2 * head_dim, device=device, dtype=torch.float32
+    )
+    for req, (chunk, block) in enumerate(zip(chunks, block_ids)):
+        group_start = int(chunk[0]) // 128 * 128
+        history = torch.arange(group_start, int(chunk[0]), device=device)
+        history_kv, history_score = rows(history)
+        offsets = history.remainder(capacity).long()
+        state_cache[block, offsets, :head_dim] = history_kv
+        state_cache[block, offsets, head_dim:] = history_score + ape.index_select(
+            0, history.remainder(128).long()
+        )
+
+    expected: dict[int, torch.Tensor] = {}
+    for token_idx, position in enumerate(positions.tolist()):
+        if (position + 1) % 128 != 0:
+            continue
+        group = torch.arange(position - 127, position + 1, device=device)
+        group_kv, group_score = rows(group)
+        group_score = group_score + ape.index_select(0, group.remainder(128).long())
+        expected[token_idx] = torch.sum(
+            group_kv * torch.softmax(group_score, dim=0), dim=0
+        )
+    return SimpleNamespace(
+        head_dim=head_dim,
+        capacity=capacity,
+        kv=raw_kv,
+        score=raw_score,
+        ape=ape,
+        positions=positions,
+        query_start_loc=query_start_loc,
+        token_to_req=token_to_req,
+        block_table=block_table,
+        slot_mapping=slot_mapping,
+        state_cache=state_cache,
+        expected=expected,
+    )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="Triton C128 gather requires a GPU",
+)
+def test_c128_triton_gather_reads_raw_chunk_before_ring_tail_write() -> None:
+    case = _make_c128_raw_or_ring_case()
+    num_splits = case.head_dim // 64
+    output = torch.full_like(case.kv, float("nan"))
+    _compress_gather_split_sparse_attn[(case.positions.numel() * num_splits,)](
+        case.state_cache,
+        case.state_cache.stride(0),
+        case.state_cache.stride(1),
+        case.kv,
+        case.kv.stride(0),
+        case.score,
+        case.score.stride(0),
+        case.ape,
+        case.ape.stride(0),
+        case.positions,
+        case.slot_mapping,
+        case.token_to_req,
+        case.block_table,
+        case.block_table.stride(0),
+        case.capacity,
+        case.query_start_loc,
+        0,
+        output,
+        output.stride(0),
+        HEAD_SIZE=case.head_dim,
+        STATE_WIDTH=case.head_dim,
+        COMPRESS_RATIO=128,
+        NUM_SPLITS=num_splits,
+        HEAD_TILE=64,
+    )
+    for token_idx, expected in case.expected.items():
+        torch.testing.assert_close(output[token_idx], expected, rtol=3e-4, atol=3e-4)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="CuTe DSL C128 gather requires CUDA"
+)
+def test_c128_cutedsl_gather_reads_raw_chunk_before_ring_tail_write() -> None:
+    from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (
+        _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+    )
+
+    case = _make_c128_raw_or_ring_case()
+    output = torch.full_like(case.kv, float("nan"))
+    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL(
+        state_cache=case.state_cache,
+        kv=case.kv,
+        score=case.score,
+        ape=case.ape,
+        num_actual=case.positions.numel(),
+        token_to_req_indices=case.token_to_req,
+        positions=case.positions,
+        slot_mapping=case.slot_mapping,
+        block_table=case.block_table,
+        query_start_loc=case.query_start_loc,
+        block_size=case.capacity,
+        head_dim=case.head_dim,
+        compressed_kv=output,
+    )
+    for token_idx, expected in case.expected.items():
+        torch.testing.assert_close(output[token_idx], expected, rtol=3e-4, atol=3e-4)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
@@ -1053,16 +1197,25 @@ def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
     state_cache[..., :head_dim] = 1.0
     token_to_req = torch.zeros(1, dtype=torch.int32, device=device)
     block_table = torch.zeros(1, 1, dtype=torch.int32, device=device)
+    raw_kv = torch.ones(1, head_dim, dtype=torch.float32, device=device)
+    raw_score = torch.zeros_like(raw_kv)
+    ape = torch.zeros(1, head_dim, dtype=torch.float32, device=device)
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
 
     if writer == "single_pass":
         compress_norm_rope_store_triton(
             state_cache=state_cache,
+            kv=raw_kv,
+            score=raw_score,
+            ape=ape,
             num_actual=1,
             token_to_req_indices=token_to_req,
             positions=positions,
             slot_mapping=slot_mapping,
             block_table=block_table,
             block_size=1,
+            query_start_loc=query_start_loc,
+            is_circular=True,
             state_width=head_dim,
             cos_sin_cache=cos_sin_cache,
             kv_cache=cache,
@@ -1082,11 +1235,15 @@ def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
     else:
         _launch_two_stage_sparse_attn_compressor(
             state_cache,
+            raw_kv,
+            raw_score,
+            ape,
             token_to_req,
             positions,
             slot_mapping,
             block_table,
             1,
+            query_start_loc,
             head_dim,
             1,
             cos_sin_cache,
@@ -1733,12 +1890,19 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         state_cache,
         state_cache.stride(0),
         state_cache.stride(1),
+        state_cache,
+        state_cache.stride(0),
+        state_cache,
+        state_cache.stride(0),
+        state_cache,
+        state_cache.stride(0),
         token_to_req,
         positions,
         slot_mapping,
         block_table,
         block_table.stride(0),
         BLOCK_SIZE,
+        torch.zeros(2, dtype=torch.int32, device=device),
         rms_weight,
         RMS_EPS,
         cos_sin_cache,
@@ -1757,6 +1921,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         TOKEN_STRIDE=TOKEN_STRIDE,
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
+        CIRCULAR=False,
         num_warps=1,
     )
 
@@ -1813,8 +1978,8 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
 def test_cutedsl_full_cache_store(compress_ratio: int, store_fp8: bool):
     """CuTeDSL compressor full-cache (FlashInfer) store parity for head=512.
 
-    Exercises the contiguous bf16 / per-tensor fp8 store branch of both the C4
-    fused kernel and the C128 split kernel against the PyTorch reference.
+    Exercises the contiguous bf16 / per-tensor fp8 C4 and C128 store branches
+    against the PyTorch reference.
     """
     cutedsl = pytest.importorskip("cutlass")  # noqa: F841
     from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (
@@ -1826,31 +1991,48 @@ def test_cutedsl_full_cache_store(compress_ratio: int, store_fp8: bool):
     ROPE_DIM = 64
     RMS_EPS = 1e-6
     FP8_MAX = 448.0
-    # C128 compress (Block8 kernel) requires state-cache block_size=8; C4 uses 16.
-    BLOCK_SIZE = 8 if compress_ratio == 128 else 16
+    BLOCK_SIZE = 128 if compress_ratio == 128 else 16
     KV_BLOCK_SIZE = 64
     device = "cuda"
     torch.manual_seed(7)
 
     overlap = 1 if compress_ratio == 4 else 0
     coff = 1 + overlap
-    num_tokens = 8
+    num_tokens = 128 if compress_ratio == 128 else 8
 
-    num_pages = (compress_ratio * num_tokens - 1) // BLOCK_SIZE + 2
-    # The production CompressorStateCache is fp32.
-    state_cache = torch.randn(
-        num_pages, BLOCK_SIZE, 2 * coff * HEAD_DIM, dtype=torch.float32, device=device
-    )
-    block_table = torch.arange(num_pages, dtype=torch.int32, device=device).unsqueeze(0)
+    if compress_ratio == 128:
+        state_cache = torch.randn(
+            1, BLOCK_SIZE, 2 * HEAD_DIM, dtype=torch.float32, device=device
+        )
+        block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
+        positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+        raw_kv = state_cache[0, :, :HEAD_DIM].clone()
+        raw_score = state_cache[0, :, HEAD_DIM:].clone()
+        ape = torch.zeros(compress_ratio, HEAD_DIM, device=device)
+        query_start_loc = torch.tensor(
+            [0, num_tokens], dtype=torch.int32, device=device
+        )
+    else:
+        num_pages = (compress_ratio * num_tokens - 1) // BLOCK_SIZE + 2
+        state_cache = torch.randn(
+            num_pages,
+            BLOCK_SIZE,
+            2 * coff * HEAD_DIM,
+            dtype=torch.float32,
+            device=device,
+        )
+        block_table = torch.arange(
+            num_pages, dtype=torch.int32, device=device
+        ).unsqueeze(0)
+        positions = torch.arange(
+            compress_ratio - 1,
+            compress_ratio * num_tokens,
+            compress_ratio,
+            dtype=torch.int64,
+            device=device,
+        )
     token_to_req = torch.zeros(num_tokens, dtype=torch.int32, device=device)
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
-    positions = torch.arange(
-        compress_ratio - 1,
-        compress_ratio * num_tokens,
-        compress_ratio,
-        dtype=torch.int64,
-        device=device,
-    )
     rms_weight = torch.randn(HEAD_DIM, dtype=torch.bfloat16, device=device)
     cos_sin_cache = torch.randn(
         compress_ratio * num_tokens, ROPE_DIM, dtype=torch.float32, device=device
@@ -1899,11 +2081,15 @@ def test_cutedsl_full_cache_store(compress_ratio: int, store_fp8: bool):
         )
         split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
             state_cache,
+            raw_kv,
+            raw_score,
+            ape,
             token_to_req,
             positions,
             slot_mapping,
             block_table,
             BLOCK_SIZE,
+            query_start_loc,
             compressed_kv,
             rms_weight,
             RMS_EPS,
@@ -1941,6 +2127,10 @@ def test_cutedsl_full_cache_store(compress_ratio: int, store_fp8: bool):
     actual = torch.stack(
         [k_cache[i // KV_BLOCK_SIZE, i % KV_BLOCK_SIZE] for i in range(num_tokens)]
     )
+    if compress_ratio == 128:
+        boundary = (positions + 1).remainder(compress_ratio) == 0
+        actual = actual[boundary]
+        ref = ref[boundary]
     if store_fp8:
         ref_fp8 = torch.clamp(ref.float() / fp8_scale, -FP8_MAX, FP8_MAX).to(
             torch.float8_e4m3fn
@@ -1974,7 +2164,7 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
     QUANT_BLOCK = 64
     TOKEN_STRIDE = 576
     SCALE_DIM = 8
-    STATE_BLOCK_SIZE = 8  # CompressorStateCache block_size for cr=128
+    STATE_BLOCK_SIZE = 128
 
     device = "cuda"
     torch.manual_seed(42)
@@ -1982,7 +2172,7 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
     overlap = 0  # no overlap for cr=128
     coff = 1 + overlap
 
-    num_pages = (compress_ratio * num_tokens - 1) // STATE_BLOCK_SIZE + 2
+    num_pages = num_tokens
     state_cache = torch.randn(
         num_pages,
         STATE_BLOCK_SIZE,
@@ -1990,16 +2180,16 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
         dtype=torch.float32,
         device=device,
     )
-    block_table = torch.arange(num_pages, dtype=torch.int32, device=device).unsqueeze(0)
-    token_to_req = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+    block_table = torch.arange(num_pages, dtype=torch.int32, device=device).unsqueeze(1)
+    token_to_req = torch.arange(num_tokens, dtype=torch.int32, device=device)
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
-    positions = torch.arange(
-        compress_ratio - 1,
-        compress_ratio * num_tokens,
-        compress_ratio,
-        dtype=torch.int64,
-        device=device,
+    positions = torch.full(
+        (num_tokens,), compress_ratio - 1, dtype=torch.int64, device=device
     )
+    query_start_loc = torch.arange(num_tokens + 1, dtype=torch.int32, device=device)
+    raw_kv = state_cache[:, -1, :HEAD_DIM]
+    raw_score = state_cache[:, -1, HEAD_DIM:]
+    ape = torch.zeros(compress_ratio, HEAD_DIM, dtype=torch.float32, device=device)
     rms_weight = torch.randn(HEAD_DIM, dtype=torch.bfloat16, device=device)
     cos_sin_cache = torch.randn(
         compress_ratio * num_tokens, ROPE_DIM, dtype=torch.float32, device=device
@@ -2015,11 +2205,15 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
 
     _launch_two_stage_sparse_attn_compressor(
         state_cache,
+        raw_kv,
+        raw_score,
+        ape,
         token_to_req,
         positions,
         slot_mapping,
         block_table,
         STATE_BLOCK_SIZE,
+        query_start_loc,
         coff * HEAD_DIM,
         compress_ratio,
         cos_sin_cache,
@@ -2037,18 +2231,23 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
     )
 
     # PyTorch reference: compress -> RMSNorm -> GPT-J RoPE (pre-quant bf16 row).
-    ref = _reference_kv_compress_norm_rope(
-        state_cache,
-        block_table,
-        positions,
-        rms_weight,
-        cos_sin_cache,
-        compress_ratio,
-        overlap,
-        rms_eps=RMS_EPS,
-        fp8_max=FP8_MAX,
-        return_full_cache=True,
-    )  # [num_tokens, HEAD_DIM] bf16
+    ref = torch.cat(
+        [
+            _reference_kv_compress_norm_rope(
+                state_cache,
+                block_table[req : req + 1],
+                positions[req : req + 1],
+                rms_weight,
+                cos_sin_cache,
+                compress_ratio,
+                overlap,
+                rms_eps=RMS_EPS,
+                fp8_max=FP8_MAX,
+                return_full_cache=True,
+            )
+            for req in range(num_tokens)
+        ]
+    )
 
     # Dequant + gather the fp8_ds_mla cache back to bf16 (Test B op).
     out = torch.zeros(1, num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device)

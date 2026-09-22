@@ -1094,7 +1094,6 @@ class SparseAttnCompressC128Block8Kernel(
     final_reduce_initial_offset = 4
     tb_size = num_warps * 32
     compress_ratio = 128
-    state_block_size = 8
     rcp_ln2 = 1.4426950408889634
 
     @dataclass(frozen=True)
@@ -1116,7 +1115,6 @@ class SparseAttnCompressC128Block8Kernel(
         )
         tb_size = SparseAttnCompressC128Block8Kernel.tb_size
         compress_ratio = SparseAttnCompressC128Block8Kernel.compress_ratio
-        state_block_size = SparseAttnCompressC128Block8Kernel.state_block_size
         rcp_ln2 = SparseAttnCompressC128Block8Kernel.rcp_ln2
         head_dim = compile_key.head_size
         num_splits = head_dim // head_tile
@@ -1125,10 +1123,15 @@ class SparseAttnCompressC128Block8Kernel(
         @cute.kernel
         def device_kernel(
             state_cache: cute.Tensor,
+            kv: cute.Tensor,
+            score: cute.Tensor,
+            ape: cute.Tensor,
             token_to_req_indices: cute.Tensor,
             positions: cute.Tensor,
             slot_mapping: cute.Tensor,
             block_table: cute.Tensor,
+            query_start_loc: cute.Tensor,
+            state_block_size: Int64,
             compressed_kv: cute.Tensor,
         ):
             block_id, _, _ = cute.arch.block_idx()
@@ -1155,6 +1158,13 @@ class SparseAttnCompressC128Block8Kernel(
             slot_id = cute.arch.shuffle_sync(slot_id, offset=0)
             position = cute.arch.shuffle_sync(position, offset=0)
             req_idx = cute.arch.shuffle_sync(req_idx, offset=0)
+            query_start = Int32(0)
+            chunk_start = Int64(0)
+            if lane_id == 0 and has_req_idx:
+                query_start = query_start_loc[req_idx]
+                chunk_start = positions[query_start]
+            query_start = cute.arch.shuffle_sync(query_start, offset=0)
+            chunk_start = cute.arch.shuffle_sync(chunk_start, offset=0)
             boundary = has_position and (
                 (position + Int64(1)) % Int64(compress_ratio) == Int64(0)
             )
@@ -1218,6 +1228,7 @@ class SparseAttnCompressC128Block8Kernel(
                 )
                 kv_vals = cute.make_rmem_tensor(row_layout, Float32)
                 score_vals = cute.make_rmem_tensor(row_layout, Float32)
+                ape_vals = cute.make_rmem_tensor(row_layout, Float32)
                 local_max = cute.make_rmem_tensor((elems_per_lane,), Float32)
                 local_sum = cute.make_rmem_tensor((elems_per_lane,), Float32)
                 local_product = cute.make_rmem_tensor((elems_per_lane,), Float32)
@@ -1227,18 +1238,13 @@ class SparseAttnCompressC128Block8Kernel(
                     local_sum[e] = Float32(0.0)
                     local_product[e] = Float32(0.0)
 
-                first_block_index = start // Int64(state_block_size)
-                warp_block_index = first_block_index + (warp_id * 2).to(Int64)
-                block0_i32 = Int32(0)
-                block1_i32 = Int32(0)
+                block_number_i32 = Int32(0)
                 if lane_id == 0:
-                    block0_i32 = block_table[req_idx, warp_block_index]
-                    block1_i32 = block_table[req_idx, warp_block_index + Int64(1)]
-                block0_i32 = cute.arch.shuffle_sync(block0_i32, offset=0)
-                block1_i32 = cute.arch.shuffle_sync(block1_i32, offset=0)
+                    block_number_i32 = block_table[req_idx, Int64(0)]
+                block_number_i32 = cute.arch.shuffle_sync(block_number_i32, offset=0)
 
-                cp_f32x2 = cute.make_copy_atom(
-                    cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=64
+                cp_f32 = cute.make_copy_atom(
+                    cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=32
                 )
                 final_mask_and_clamp = const_expr(
                     (cute.arch.WARP_SIZE - num_warps) << 8 | (cute.arch.WARP_SIZE - 1)
@@ -1247,26 +1253,46 @@ class SparseAttnCompressC128Block8Kernel(
                 score_col_tile = col_tile + Int64(state_width // elems_per_lane)
 
                 for i in cutlass.range_constexpr(rows_per_warp):
-                    block_number_i32 = block0_i32
-                    block_offset = Int64(i)
-                    if const_expr(i >= state_block_size):
-                        block_number_i32 = block1_i32
-                        block_offset = Int64(i - state_block_size)
-                    row_tensor = state_cache[
-                        block_number_i32.to(Int64), block_offset, None
-                    ]
-                    kv_src = cute.local_tile(
-                        row_tensor,
-                        tiler=(elems_per_lane,),
-                        coord=(col_tile,),
-                    )
-                    score_src = cute.local_tile(
-                        row_tensor,
-                        tiler=(elems_per_lane,),
-                        coord=(score_col_tile,),
-                    )
-                    cute.copy(cp_f32x2, kv_src, kv_vals[i, None])
-                    cute.copy(cp_f32x2, score_src, score_vals[i, None])
+                    pos = start + (warp_id * rows_per_warp + i).to(Int64)
+                    if pos >= chunk_start:
+                        current_idx = query_start.to(Int64) + pos - chunk_start
+                        kv_src = cute.local_tile(
+                            kv[current_idx, None],
+                            tiler=(elems_per_lane,),
+                            coord=(col_tile,),
+                        )
+                        score_src = cute.local_tile(
+                            score[current_idx, None],
+                            tiler=(elems_per_lane,),
+                            coord=(col_tile,),
+                        )
+                        ape_src = cute.local_tile(
+                            ape[pos % Int64(compress_ratio), None],
+                            tiler=(elems_per_lane,),
+                            coord=(col_tile,),
+                        )
+                        cute.copy(cp_f32, kv_src, kv_vals[i, None])
+                        cute.copy(cp_f32, score_src, score_vals[i, None])
+                        cute.copy(cp_f32, ape_src, ape_vals[i, None])
+                        for e in cutlass.range_constexpr(elems_per_lane):
+                            score_vals[i, e] += ape_vals[i, e]
+                    else:
+                        block_offset = pos % state_block_size
+                        row_tensor = state_cache[
+                            block_number_i32.to(Int64), block_offset, None
+                        ]
+                        kv_src = cute.local_tile(
+                            row_tensor,
+                            tiler=(elems_per_lane,),
+                            coord=(col_tile,),
+                        )
+                        score_src = cute.local_tile(
+                            row_tensor,
+                            tiler=(elems_per_lane,),
+                            coord=(score_col_tile,),
+                        )
+                        cute.copy(cp_f32, kv_src, kv_vals[i, None])
+                        cute.copy(cp_f32, score_src, score_vals[i, None])
 
                     for e in cutlass.range_constexpr(elems_per_lane):
                         local_max[e] = cute.arch.fmax(local_max[e], score_vals[i, e])
@@ -1337,20 +1363,30 @@ class SparseAttnCompressC128Block8Kernel(
         @cute.jit
         def host_entrypoint(
             state_cache: cute.Tensor,
+            kv: cute.Tensor,
+            score: cute.Tensor,
+            ape: cute.Tensor,
             token_to_req_indices: cute.Tensor,
             positions: cute.Tensor,
             slot_mapping: cute.Tensor,
             block_table: cute.Tensor,
+            query_start_loc: cute.Tensor,
+            state_block_size: Int64,
             compressed_kv: cute.Tensor,
             stream: CUstream,
         ):
             grid = (slot_mapping.shape[0] * num_splits, 1, 1)
             device_kernel(
                 state_cache,
+                kv,
+                score,
+                ape,
                 token_to_req_indices,
                 positions,
                 slot_mapping,
                 block_table,
+                query_start_loc,
+                state_block_size,
                 compressed_kv,
             ).launch(grid=grid, block=(tb_size, 1, 1), stream=stream)
 
@@ -1392,6 +1428,18 @@ class SparseAttnCompressC128Block8Kernel(
             ),
             assumed_align=16,
         )
+        raw_state = cute.runtime.make_fake_tensor(
+            Float32,
+            (num_slots, head_size),
+            stride=(cute.sym_int64(divisibility=1), 1),
+            assumed_align=4,
+        )
+        ape = cute.runtime.make_fake_tensor(
+            Float32,
+            (128, head_size),
+            stride=(head_size, 1),
+            assumed_align=4,
+        )
         token_to_req_indices = make_fake_tensor(
             Int32,
             (num_req_indices,),
@@ -1404,6 +1452,7 @@ class SparseAttnCompressC128Block8Kernel(
             (cute.sym_int(), block_table_width),
             divisibility=1,
         )
+        query_start_loc = make_fake_tensor(Int32, (cute.sym_int(),), divisibility=4)
         compressed_kv = cute.runtime.make_fake_tensor(
             Float32,
             (num_slots, head_size),
@@ -1412,10 +1461,15 @@ class SparseAttnCompressC128Block8Kernel(
         )
         return (
             state_cache,
+            raw_state,
+            raw_state,
+            ape,
             token_to_req_indices,
             positions,
             slot_mapping,
             block_table,
+            query_start_loc,
+            Int64(128),
             compressed_kv,
         )
 
@@ -1424,11 +1478,16 @@ class SparseAttnCompressC128Block8Kernel(
         self,
         *,
         state_cache: torch.Tensor,
+        kv: torch.Tensor,
+        score: torch.Tensor,
+        ape: torch.Tensor,
         num_actual: int,
         token_to_req_indices: torch.Tensor,
         positions: torch.Tensor,
         slot_mapping: torch.Tensor,
         block_table: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        block_size: int,
         head_dim: int,
         compressed_kv: torch.Tensor | None = None,
     ) -> CuTeDSLLaunchSpec[SparseAttnCompressC128Block8Kernel.CompileKey]:
@@ -1441,10 +1500,15 @@ class SparseAttnCompressC128Block8Kernel(
             )
         launch_args = (
             state_cache,
+            kv,
+            score,
+            ape,
             token_to_req_indices,
             positions,
             slot_mapping,
             block_table,
+            query_start_loc,
+            block_size,
             compressed_kv,
         )
         return compile_key, launch_args, compressed_kv
@@ -2243,11 +2307,15 @@ def fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
 
 def split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
     state_cache: torch.Tensor,
+    kv: torch.Tensor,
+    score: torch.Tensor,
+    ape: torch.Tensor,
     token_to_req_indices: torch.Tensor,
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
     block_table: torch.Tensor,
     block_size: int,
+    query_start_loc: torch.Tensor,
     compressed_kv: torch.Tensor,
     rms_norm_weight: torch.Tensor,
     rms_norm_eps: float,
@@ -2275,12 +2343,13 @@ def split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
         and state_width == head_size
         and compress_ratio == 128
         and not overlap
-        and block_size == 8
+        and block_size >= 128
+        and block_size % 128 == 0
     ):
         raise ValueError(
             "CuTe DSL split sparse-attn wrapper only supports the real "
             "DeepSeek V4 C128 layout: head_size=512, state_width=512, "
-            "compress_ratio=128, overlap=False, block_size=8."
+            "compress_ratio=128, overlap=False, and a 128-aligned ring."
         )
     if k_cache.ndim != 3:
         raise ValueError(
@@ -2300,11 +2369,16 @@ def split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
 
     _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL(
         state_cache=state_cache,
+        kv=kv,
+        score=score,
+        ape=ape,
         num_actual=compressed_kv.shape[0],
         token_to_req_indices=token_to_req_indices,
         positions=positions,
         slot_mapping=slot_mapping,
         block_table=block_table,
+        query_start_loc=query_start_loc,
+        block_size=block_size,
         head_dim=head_size,
         compressed_kv=compressed_kv,
     )
@@ -2359,12 +2433,17 @@ class SparseAttnCompressorCuteDSL:
     def __call__(
         self,
         state_cache: torch.Tensor,
+        kv: torch.Tensor,
+        score: torch.Tensor,
+        ape: torch.Tensor,
         num_actual: int,
         token_to_req_indices: torch.Tensor,
         positions: torch.Tensor,
         slot_mapping: torch.Tensor,
         block_table: torch.Tensor,
         block_size: int,
+        query_start_loc: torch.Tensor,
+        is_circular: bool,
         state_width: int,
         cos_sin_cache: torch.Tensor,
         kv_cache: torch.Tensor,
@@ -2438,19 +2517,23 @@ class SparseAttnCompressorCuteDSL:
                 "CuTe DSL sparse-attn compressor supports compress_ratio 4 or "
                 f"128, got {compress_ratio}.",
             )
-        if block_size != self.c128_compress.state_block_size:
+        if not is_circular or block_size < 128 or block_size % 128 != 0:
             raise ValueError(
-                "CuTe DSL C128 sparse-attn compressor requires state-cache "
-                f"block_size={self.c128_compress.state_block_size}, got "
-                f"{block_size}."
+                "CuTe DSL C128 sparse-attn compressor requires a circular "
+                f"128-aligned state-cache block, got {block_size}."
             )
         compressed_kv = self.c128_compress(
             state_cache=state_cache,
+            kv=kv,
+            score=score,
+            ape=ape,
             num_actual=num_actual,
             token_to_req_indices=token_to_req_indices,
             positions=positions,
             slot_mapping=slot_mapping,
             block_table=block_table,
+            query_start_loc=query_start_loc,
+            block_size=block_size,
             head_dim=head_dim,
         )
         if store_full_kv:
