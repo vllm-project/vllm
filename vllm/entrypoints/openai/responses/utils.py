@@ -67,8 +67,6 @@ def _custom_tool_payload(parsed: Any) -> str | None:
     if not isinstance(parsed, dict):
         return None
     value = parsed.get(CUSTOM_TOOL_INPUT_KEY)
-    if not isinstance(value, str) and len(parsed) == 1:
-        value = next(iter(parsed.values()))
     return value if isinstance(value, str) else None
 
 

@@ -4,6 +4,7 @@ import pytest
 from openai_harmony import (
     Message,
 )
+from pydantic import ValidationError
 
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
@@ -55,3 +56,19 @@ def test_custom_tool_grammar_format_rejected() -> None:
         tools=[{"type": "custom", "name": "emit", "format": {"type": "text"}}],
     )
     assert request.tools is not None and request.tools[0].type == "custom"
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        "abc",
+        {"type": "custom"},
+        [None],
+        [{"type": "custom", "name": "x", "format": "text"}],
+    ],
+)
+def test_malformed_tools_rejected_by_field_validation(tools) -> None:
+    """Malformed tools bodies fail pydantic field validation (4xx), not an
+    AttributeError inside the custom-format validator (500)."""
+    with pytest.raises(ValidationError):
+        ResponsesRequest(input="hi", tools=tools)

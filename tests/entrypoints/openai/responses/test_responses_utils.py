@@ -320,7 +320,9 @@ class TestCustomTools:
 
     def test_decode_custom_tool_input(self):
         assert decode_custom_tool_input('{"input": "pwd"}') == "pwd"
-        assert decode_custom_tool_input('{"cmd": "pwd"}') == "pwd"
+        assert decode_custom_tool_input('{"cmd": "pwd"}') == '{"cmd": "pwd"}'
+        assert decode_custom_tool_input('{"file": "a.py"}') == '{"file": "a.py"}'
+        assert decode_custom_tool_input('{"input": 7}') == '{"input": 7}'
         assert decode_custom_tool_input("pwd") == "pwd"
 
     def test_decode_custom_tool_input_prefix(self):

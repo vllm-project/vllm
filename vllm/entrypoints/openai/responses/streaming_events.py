@@ -1074,16 +1074,19 @@ def _emit_custom_tool_input_delta(
     payload: str,
 ) -> list[StreamingResponsesResponse]:
     streamed = state.tool_call_payload
-    if not payload.startswith(streamed) or len(payload) == len(streamed):
+    if payload == streamed:
         return []
     state.tool_call_payload = payload
+    # A payload that is not an extension of what was streamed cannot be
+    # retracted, so the authoritative value is resent in full.
+    delta = payload[len(streamed) :] if payload.startswith(streamed) else payload
     return [
         ResponseCustomToolCallInputDeltaEvent(
             type="response.custom_tool_call_input.delta",
             sequence_number=-1,
             output_index=state.output_index,
             item_id=state.current_item_id,
-            delta=payload[len(streamed) :],
+            delta=delta,
         )
     ]
 
@@ -1115,8 +1118,6 @@ def emit_simple_tool_call_done(
     item: ResponseOutputItem
     if state.tool_call_is_custom:
         payload = decode_custom_tool_input(state.accumulated_text)
-        if not payload.startswith(state.tool_call_payload):
-            payload = state.tool_call_payload or payload
         events = _emit_custom_tool_input_delta(state, payload)
         events.append(
             ResponseCustomToolCallInputDoneEvent(
