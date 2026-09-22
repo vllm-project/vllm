@@ -30,16 +30,17 @@ pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
-pub use parser::{ParserSelection, validate_parser_overrides};
+pub use parser::{ParserSelection, ToolStrictLevel, validate_parser_overrides};
+pub use reasoning::EffortValue;
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
-    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
-    RendererSelection,
+    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, MediaPartSource,
+    RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, GenerationPromptMode, ReasoningEffort, ResolvedToolContext, SamplingParams,
+    ChatToolChoice, GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
@@ -52,6 +53,7 @@ mod event;
 pub mod multimodal;
 mod output;
 mod parser;
+mod reasoning;
 mod renderer;
 mod request;
 mod stream;
@@ -72,6 +74,8 @@ pub struct ChatRequestProcessor {
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used when preparing generation requests.
     reasoning_parser: ParserSelection,
+    /// Server-side floor for tool-call structural tags.
+    tool_strict_level: ToolStrictLevel,
 }
 
 impl ChatRequestProcessor {
@@ -83,6 +87,7 @@ impl ChatRequestProcessor {
             model_dtype: Some(model_dtype),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            tool_strict_level: ToolStrictLevel::Auto,
         }
     }
 
@@ -93,6 +98,7 @@ impl ChatRequestProcessor {
             model_dtype: None,
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            tool_strict_level: ToolStrictLevel::Auto,
         }
     }
 
@@ -107,11 +113,21 @@ impl ChatRequestProcessor {
         self
     }
 
+    /// Configure the server-side floor for tool-call structural tags.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
+        self.tool_strict_level = tool_strict_level;
+        self
+    }
+
     async fn finalize_rendered_prompt(
         &self,
         request: &ChatRequest,
         rendered: RenderedPrompt,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
+        let media_is_empty = match &rendered.media_order {
+            Some(media_order) => media_order.is_empty(),
+            None => !request.has_multimodal(),
+        };
         match self.model_dtype {
             Some(model_dtype) => {
                 multimodal::finalize_rendered_prompt(
@@ -122,7 +138,7 @@ impl ChatRequestProcessor {
                 )
                 .await
             }
-            None if !request.has_multimodal() => Ok((rendered.prompt, None)),
+            None if media_is_empty => Ok((rendered.prompt, None)),
             None => Err(Error::UnsupportedMultimodalRenderer),
         }
     }
@@ -130,7 +146,7 @@ impl ChatRequestProcessor {
     /// Prepare media for an already-tokenized request.
     async fn prepare_media(
         &self,
-        media: Vec<MediaContentPart>,
+        media: multimodal::MultimodalInput,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
         if media.is_empty() {
@@ -140,8 +156,15 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = info.prepare_multimodal(media, token_ids, model_dtype).await?;
+        let features = match media {
+            multimodal::MultimodalInput::Raw(parts) => {
+                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+                info.prepare_multimodal(parts, token_ids, model_dtype).await?
+            }
+            multimodal::MultimodalInput::Preprocessed(features) => {
+                info.prepare_preprocessed(features, token_ids.len())?
+            }
+        };
         Ok(Some(features))
     }
 
@@ -171,6 +194,7 @@ impl ChatRequestProcessor {
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
             session_id: request.session_id,
+            kv_hints: None,
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),
@@ -194,6 +218,7 @@ impl ChatRequestProcessor {
             NewChatOutputProcessorOptions {
                 tool_call_parser: &self.tool_call_parser,
                 reasoning_parser: &self.reasoning_parser,
+                tool_strict_level: self.tool_strict_level,
             },
         )?;
         let text_request = self.prepare_text_request(request).await?;
@@ -242,6 +267,12 @@ impl ChatLlm {
         self
     }
 
+    /// Set the server-side floor for tool-call structural tags.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
+        self.processor.tool_strict_level = tool_strict_level;
+        self
+    }
+
     /// Override the effective model dtype used for multimodal tensor encoding.
     pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
         self.processor.model_dtype = Some(model_dtype);
@@ -286,12 +317,14 @@ impl ChatLlm {
     }
 
     /// Prepare media for an already-tokenized request.
+    /// Raw content is preprocessed; inline features are checked against model
+    /// capabilities, modality limits, and the final prompt positions.
     pub async fn prepare_media(
         &self,
-        media: Vec<MediaContentPart>,
+        media: impl Into<multimodal::MultimodalInput>,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
-        self.processor.prepare_media(media, token_ids).await
+        self.processor.prepare_media(media.into(), token_ids).await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.

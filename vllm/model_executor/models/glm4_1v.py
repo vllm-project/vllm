@@ -36,9 +36,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 from einops import rearrange
-from packaging.version import Version
 from transformers import BatchFeature, Glm4vProcessor
 from transformers.image_processing_base import ImageProcessingMixin
 from transformers.models.glm4v.configuration_glm4v import (
@@ -54,7 +52,7 @@ from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -83,6 +81,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -131,8 +130,6 @@ logger = init_logger(__name__)
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 600
 
-TRANSFORMERS_WITH_GA = Version(transformers.__version__) >= Version("5.10.0.dev0")
-
 
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
     return VideoMetadata(
@@ -144,12 +141,11 @@ def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
 
 
 class Glm4vImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - cpp: Number of channels * patch_size * patch_size
-        - ni: Number of images
-        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
+    """Dimensions:
+    - np: Number of patches
+    - cpp: Number of channels * patch_size * patch_size
+    - ni: Number of images
+    - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -159,12 +155,11 @@ class Glm4vImagePixelInputs(TensorSchema):
 
 
 class Glm4vImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - f: Number of image features (varies based on image resolution)
-        - h: Hidden size (must match language model backbone)
-        - n: Number of images
-        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
+    """Dimensions:
+    - f: Number of image features (varies based on image resolution)
+    - h: Hidden size (must match language model backbone)
+    - n: Number of images
+    - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -177,14 +172,13 @@ Glm4vImageInputs: TypeAlias = Glm4vImagePixelInputs | Glm4vImageEmbeddingInputs
 
 
 class Glm4vVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - ctpp: Number of channels * temporal_patch_size *
-            patch_size * patch_size
-        - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
-          video, grid_h, grid_w)
+    """Dimensions:
+    - np: Number of patches
+    - ctpp: Number of channels * temporal_patch_size *
+        patch_size * patch_size
+    - f: Number of frames
+    - g: Grid dimensions (3 for grid_t which is usually 1 for processed
+      video, grid_h, grid_w)
     """
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -194,13 +188,12 @@ class Glm4vVideoPixelInputs(TensorSchema):
 
 
 class Glm4vVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - p: Number of video patches across all frames
-        - h: Hidden size (must match language model backbone)
-        - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
-          video, grid_h, grid_w)
+    """Dimensions:
+    - p: Number of video patches across all frames
+    - h: Hidden size (must match language model backbone)
+    - f: Number of frames
+    - g: Grid dimensions (3 for grid_t which is usually 1 for processed
+      video, grid_h, grid_w)
     """
 
     type: Literal["video_embeds"] = "video_embeds"
@@ -770,7 +763,6 @@ class Glm4vVisionTransformer(nn.Module):
         forward graph compatible with CUDA graph replay. Coordinate generation matches
         `rot_pos_emb` exactly to guarantee spatial alignment.
         """
-
         device = self.embeddings.position_embedding.weight.device
         dtype = self.dtype
         all_embeds = []
@@ -849,6 +841,7 @@ class Glm4vVisionTransformer(nn.Module):
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
+
         """
         if device is None:
             device = self.device
@@ -1392,17 +1385,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         timestamps_list = full_second_idxs[::2]
         return list(timestamps_list)
 
-    def _get_video_frame_embed_token_id(self, hf_processor: object) -> int:
-        attr = (
-            "image_token_id"
-            if isinstance(hf_processor, Glm4vProcessor) or TRANSFORMERS_WITH_GA
-            else "video_token_id"
-        )
-        token_id = getattr(hf_processor, attr, None)
-        if not isinstance(token_id, int):
-            raise ValueError(f"Processor has no valid {attr}")
-        return token_id
-
     def _construct_video_placeholder(
         self,
         video_array: np.ndarray,
@@ -1440,7 +1422,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         num_tokens_per_frame = int(H * W) // merge_length
         placeholder = []
         placeholder.append(bov_token_id)
-        frame_embed_token_id = self._get_video_frame_embed_token_id(hf_processor)
+        frame_embed_token_id = hf_processor.image_token_id
         for frame_idx in frames_idx_token:
             placeholder.append(boi_token_id)
             placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
@@ -1473,33 +1455,26 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1584,52 +1559,54 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         return prepared_data, prepared_kwargs
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
-        mm_data = dict(mm_data)
+        processor = self.info.get_hf_processor(**hf_kwargs)
 
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        use_direct_path = (
-            not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
-        )
-        if use_direct_path:
+        if not isinstance(processor, Glm4vProcessor):
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
-                mm_data, hf_processor_mm_kwargs
+                hf_data, hf_kwargs
             )
             processed_data = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**prepared_kwargs),
                 dict(text=prompt_text, **prepared_data),
                 prepared_kwargs,
             )
-            processed_data.update(passthrough_data)
-            return processed_data
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, processed_data
+            )
 
-        videos = mm_data.get("videos")
-        if isinstance(videos, list) and videos:
+        if (
+            "videos" in hf_data
+            and isinstance(videos := hf_data["videos"], list)
+            and len(videos) > 0
+        ):
+            # Videos are processed item-wise below; remove them from hf_data so
+            # the combined call at the end does not re-sample the raw frames.
+            del hf_data["videos"]
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
-            frame_embed_token_id = self.info._get_video_frame_embed_token_id(processor)
-            swap_video_frame_tokens = frame_embed_token_id == processor.image_token_id
-            mm_data.pop("videos")
             for item in videos:
                 video_array, metadata = item
 
                 # don't update mm_kwargs inplace
-                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
+                video_mm_kwargs = dict(**hf_kwargs)
                 video_mm_kwargs["do_sample_frames"] = metadata.get(
                     "do_sample_frames", True
                 )
@@ -1647,10 +1624,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     video_mm_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")
-                if swap_video_frame_tokens:
-                    input_ids[input_ids == processor.image_token_id] = (
-                        processor.video_token_id
-                    )
+
+                input_ids[input_ids == processor.image_token_id] = (
+                    processor.video_token_id
+                )
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt_text = prompt_text.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
@@ -1666,22 +1643,20 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
         else:
             video_outputs = dict()
-            swap_video_frame_tokens = False
 
         processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            self.info.get_hf_processor(**hf_kwargs),
+            dict(text=prompt_text, **hf_data),
+            hf_kwargs,
         )
-        if swap_video_frame_tokens:
-            input_ids = processed_data["input_ids"]
-            input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-            processed_data["input_ids"] = input_ids
+        input_ids = processed_data["input_ids"]
+        input_ids[input_ids == processor.video_token_id] = processor.image_token_id
+        processed_data["input_ids"] = input_ids
 
         processed_data.update(video_outputs)
-        processed_data.update(passthrough_data)
-
-        return processed_data
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -1724,7 +1699,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
             return PromptUpdateDetails.select_token_id(
                 placeholder,
-                embed_token_id=self.info._get_video_frame_embed_token_id(hf_processor),
+                embed_token_id=hf_processor.image_token_id,
             )
 
         return [
@@ -2346,6 +2321,7 @@ class Glm4vForConditionalGeneration(
                 parallelism.
             inputs_embeds: Optional pre-computed input embeddings.
             **kwargs: Additional keyword arguments.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -2369,28 +2345,23 @@ class Glm4vForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model.model",
             connector="visual.merger.",
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         merge_size = self.config.vision_config.spatial_merge_size
-        return num_image_tokens * (merge_size**2)
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        merge_size = self.config.vision_config.spatial_merge_size
-        return num_vision_tokens // (merge_size**2)
+        return num_mm_embeds * (merge_size**2), num_mm_embeds
 
 
 @MULTIMODAL_REGISTRY.register_processor(
