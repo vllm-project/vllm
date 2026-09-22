@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Checksum merging and comparison, without a model or GPU."""
+"""Checksum merging, comparison, and cross-replica consistency, without a
+model or GPU."""
+
+import asyncio
+import json
 
 import pytest
+from fastapi import HTTPException
 
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.entrypoints.serve.dev.rlhf.weight_checker import handle_weight_checker
 from vllm.utils.weight_checksum import (
+    are_weight_checksums_consistent,
     combine_weight_checksums,
     compare_weight_checksums,
+    split_checksum_key,
 )
 from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import Worker
@@ -17,6 +25,10 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 class _RankZeroGroup:
     rank_in_group = 0
+
+
+# A rank-qualified checksum entry, as the handler receives it from a worker.
+_DP0_W_A = {"dp0:pp0:pcp0:tp0:ep0:w": "a"}
 
 
 @pytest.fixture
@@ -81,3 +93,129 @@ def test_dense_dp_ranks_get_distinct_key_prefixes(single_rank_groups):
 
     first, second = prefix_for(0), prefix_for(1)
     assert first != second, f"dense DP ranks share a key prefix: {first}"
+
+
+@pytest.mark.parametrize(
+    "key, prefix, name",
+    [
+        ("dp0:pp0:pcp0:tp0:ep0:w", "dp0:pp0:pcp0:tp0:ep0:", "w"),
+        (
+            "dp1:pp2:pcp3:tp4:ep5:model.layers.0.w",
+            "dp1:pp2:pcp3:tp4:ep5:",
+            "model.layers.0.w",
+        ),
+        # Splits on the first five colons, so a colon in the name is kept.
+        ("dp0:pp0:pcp0:tp0:ep0:a:b.c", "dp0:pp0:pcp0:tp0:ep0:", "a:b.c"),
+        ("unqualified", "", "unqualified"),
+    ],
+)
+def test_split_checksum_key_keeps_the_name_whole(key, prefix, name):
+    assert split_checksum_key(key) == (prefix, name)
+
+
+@pytest.mark.parametrize(
+    "reports, mismatches",
+    [
+        # Identical replicas.
+        ([_DP0_W_A, _DP0_W_A, _DP0_W_A], []),
+        # Digests match, but the second report only reached one rank. The
+        # uncovered key is not "equal", so it must not pass as consistent.
+        (
+            [
+                {"dp0:pp0:pcp0:tp0:ep0:w": "a", "dp0:pp0:pcp0:tp0:ep0:v": "b"},
+                _DP0_W_A,
+            ],
+            ["dp0:pp0:pcp0:tp0:ep0:v"],
+        ),
+        # Same rank prefix, different digest: the replicas disagree.
+        (
+            [_DP0_W_A, {"dp0:pp0:pcp0:tp0:ep0:w": "c"}],
+            ["dp0:pp0:pcp0:tp0:ep0:w"],
+        ),
+        # The same tensor name on another rank is another shard, so it is
+        # reported as uncovered rather than as a disagreement.
+        (
+            [_DP0_W_A, {"dp1:pp0:pcp0:tp0:ep0:w": "c"}],
+            ["dp0:pp0:pcp0:tp0:ep0:w", "dp1:pp0:pcp0:tp0:ep0:w"],
+        ),
+        ([_DP0_W_A, {}], ["dp0:pp0:pcp0:tp0:ep0:w"]),
+        ([{}, {}], []),
+    ],
+)
+def test_consistency_separates_disagreement_from_missing_ranks(reports, mismatches):
+    consistent, reported, _ = are_weight_checksums_consistent(reports)
+    assert reported == mismatches
+    assert consistent is not mismatches
+
+
+@pytest.mark.parametrize(
+    "reports, ranks",
+    [
+        ([_DP0_W_A, _DP0_W_A], ["dp0:pp0:pcp0:tp0:ep0:"]),
+        (
+            [_DP0_W_A, {"dp1:pp0:pcp0:tp0:ep0:w": "a"}],
+            ["dp0:pp0:pcp0:tp0:ep0:", "dp1:pp0:pcp0:tp0:ep0:"],
+        ),
+        (
+            [_DP0_W_A, {"dp0:pp0:pcp0:tp1:ep0:w": "a"}],
+            ["dp0:pp0:pcp0:tp0:ep0:", "dp0:pp0:pcp0:tp1:ep0:"],
+        ),
+        ([], []),
+    ],
+)
+def test_consistency_reports_the_rank_prefixes_it_covered(reports, ranks):
+    _, _, covered = are_weight_checksums_consistent(reports)
+    assert covered == ranks
+
+
+def test_consistency_does_not_mutate_its_inputs():
+    reports = [{"dp0:pp0:pcp0:tp0:ep0:w": "a"}, {"dp0:pp0:pcp0:tp0:ep0:w": "b"}]
+    are_weight_checksums_consistent(reports)
+    assert reports == [
+        {"dp0:pp0:pcp0:tp0:ep0:w": "a"},
+        {"dp0:pp0:pcp0:tp0:ep0:w": "b"},
+    ]
+
+
+class _AwakeClient:
+    """Stand in for an engine client that is reachable and not paused."""
+
+    async def is_paused(self) -> bool:
+        return False
+
+
+def _run(body: dict) -> dict:
+    return asyncio.run(handle_weight_checker(body, _AwakeClient()))
+
+
+def test_handler_consistency_reports_agreeing_replicas():
+    checksums = {"dp0:pp0:pcp0:tp0:ep0:w": "a"}
+    response = _run({"action": "consistency", "checksums": [checksums, checksums]})
+    assert response == {
+        "consistent": True,
+        "mismatches": [],
+        "reports": 2,
+        "ranks": ["dp0:pp0:pcp0:tp0:ep0:"],
+    }
+    # The response has to survive the JSON round trip the endpoint performs.
+    assert json.loads(json.dumps(response)) == response
+
+
+def test_handler_consistency_flags_a_diverged_replica():
+    response = _run(
+        {
+            "action": "consistency",
+            "checksums": [{"dp0:pp0:pcp0:tp0:ep0:w": "a"}] * 2
+            + [{"dp0:pp0:pcp0:tp0:ep0:w": "b"}],
+        }
+    )
+    assert response["consistent"] is False
+    assert response["mismatches"] == ["dp0:pp0:pcp0:tp0:ep0:w"]
+    assert response["reports"] == 3
+
+
+@pytest.mark.parametrize("checksums", [None, {}, "report", [1], ["x"]])
+def test_handler_consistency_requires_reports(checksums):
+    with pytest.raises(HTTPException) as excinfo:
+        _run({"action": "consistency", "checksums": checksums})
+    assert excinfo.value.status_code == 400

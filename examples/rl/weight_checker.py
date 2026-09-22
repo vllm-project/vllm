@@ -23,6 +23,11 @@ are load-balanced over several API server processes.
 weights, and the prefix cache would keep those blocks. See
 docs/features/weight_checker.md for the full rationale.
 
+Pass ``--extra-url`` one or more times to also check that the replicas agree
+with each other, which is a different question from whether they match a
+baseline: it compares their checksums against each other and reports the ranks
+whose digests differ.
+
 For a standalone demonstration, the existing ``collective_rpc`` development
 endpoint reloads the inference weights from the configured checkpoint. In a
 real RLHF system, replace ``reload_inference_weights`` with the trainer's
@@ -111,9 +116,49 @@ def parse_args() -> argparse.Namespace:
         default="http://localhost:8000",
         help="Base URL of a vLLM server running in development mode.",
     )
+    parser.add_argument(
+        "--extra-url",
+        action="append",
+        default=[],
+        metavar="URL",
+        help="Another API server to include in a replica consistency check.",
+    )
     return parser.parse_args()
+
+
+def check_replicas(base_url: str, extra_urls: list[str]) -> None:
+    """Ask one server whether the replicas reached so far agree.
+
+    Each URL is queried for its own checksums, and the answers are sent back to
+    the first server, which is the one that owns the comparison. A single
+    report agrees with itself, so the returned ``ranks`` is what tells you the
+    check covered the ranks you expected.
+    """
+    reports = [check_weights(base_url, "checksum")["checksums"]]
+    reports += [
+        check_weights(url, "checksum")["checksums"] for url in extra_urls
+    ]
+
+    result = post(
+        base_url,
+        "/weight_checker",
+        json={"action": "consistency", "checksums": reports},
+    )
+    print(
+        f"compared {result['reports']} reports covering {len(result['ranks'])} "
+        f"rank prefixes"
+    )
+    if not result["consistent"]:
+        preview = "\n".join(f"  - {name}" for name in result["mismatches"][:10])
+        raise RuntimeError(
+            f"Replicas disagree on {len(result['mismatches'])} tensors:\n{preview}"
+        )
+    print("Replica consistency passed: every report agrees.")
 
 
 if __name__ == "__main__":
     args = parse_args()
-    verify_weight_update(args.base_url.rstrip("/"))
+    base_url = args.base_url.rstrip("/")
+    verify_weight_update(base_url)
+    if args.extra_url:
+        check_replicas(base_url, [url.rstrip("/") for url in args.extra_url])

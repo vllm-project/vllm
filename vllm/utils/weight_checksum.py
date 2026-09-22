@@ -4,7 +4,30 @@
 
 Pure mapping utilities: no torch, no config, no distributed state, so the
 engine, the executor and the API process can all import them cheaply.
+
+The keys produced by the workers are ``{rank prefix}{tensor name}``, where the
+prefix is ``dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:ep{ep}:``. The prefix is the only
+record of which ranks a digest came from, so the functions here that need to
+regroup digests parse it back out rather than take a second structure.
 """
+
+
+def split_checksum_key(key: str) -> tuple[str, str]:
+    """Split a checksum key into its rank prefix and tensor name.
+
+    Splits on the first five colons, so a tensor name containing a colon still
+    lands entirely in the name.
+
+    Args:
+        key: A rank-qualified checksum key from a worker or a baseline.
+
+    Returns:
+        The ``dp:pp:pcp:tp:ep:`` prefix and the tensor name.
+    """
+    parts = key.split(":", 5)
+    if len(parts) != 6:
+        return "", key
+    return ":".join(parts[:5]) + ":", parts[5]
 
 
 def combine_weight_checksums(per_worker: list[dict[str, str]]) -> dict[str, str]:
@@ -42,3 +65,39 @@ def compare_weight_checksums(
         if baseline.get(key) != current.get(key)
     )
     return not mismatches, mismatches
+
+
+def are_weight_checksums_consistent(
+    reports: list[dict[str, str]],
+) -> tuple[bool, list[str], list[str]]:
+    """Return whether several reports agree on every checksum they contain.
+
+    Each report is one full ``checksum`` response, so an entry is a digest of
+    one shard of one rank. Only the same rank-qualified key is compared: the
+    same tensor name on a different rank holds a different shard, and its
+    digest is expected to differ.
+
+    A key that only some reports carry separates "the replicas disagree" from
+    "these reports do not cover the same ranks", which is why the covered
+    prefixes are returned alongside the verdict: a single report is consistent
+    with itself, and only the caller knows which ranks it expected to reach.
+
+    Args:
+        reports: One checksum mapping per sampled API server or process.
+
+    Returns:
+        Whether every entry is identical in each report, the keys that are not,
+        and the distinct rank prefixes the reports covered.
+    """
+    observed: dict[str, dict[int, str]] = {}
+    for index, report in enumerate(reports):
+        for key, digest in report.items():
+            observed.setdefault(key, {})[index] = digest
+
+    mismatches = sorted(
+        key
+        for key, digests in observed.items()
+        if len(digests) != len(reports) or len(set(digests.values())) > 1
+    )
+    covered = sorted({split_checksum_key(key)[0] for key in observed})
+    return not mismatches, mismatches, covered

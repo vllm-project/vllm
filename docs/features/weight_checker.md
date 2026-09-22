@@ -13,6 +13,8 @@ Key capabilities:
 - **Stateless comparison**: Detects changed, added, or missing tensors; the
   caller supplies the baseline, so the check survives load balancing across API
   server processes.
+- **Replica consistency**: Diffs several checksums against each other to find
+  ranks that disagree, or that were never reached.
 - **Weight reset**: Randomizes covered tensors before a weight transfer.
 
 ## Usage
@@ -89,6 +91,37 @@ A successful restoration returns:
 Changed, added, or missing tensors produce `match: false`, with their fully
 qualified rank and tensor names in `mismatches`. `compare` without a `baseline`
 object returns HTTP 400.
+
+### Check that replicas agree
+
+`compare` answers "does this engine still hold the weights the caller expects".
+Checking that several API servers or replicas agree with *each other* takes the
+other direction: send every report back and let the endpoint diff them.
+
+```bash
+curl -X POST 'http://localhost:8000/weight_checker' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"consistency","checksums":[{"dp0:...":"abc..."},{"dp0:...":"abc..."}]}'
+```
+
+```json
+{
+  "consistent": true,
+  "mismatches": [],
+  "reports": 2,
+  "ranks": ["dp0:pp0:pcp0:tp0:ep0:"]
+}
+```
+
+Only the same rank-qualified key is compared. The same tensor name on a
+different rank holds a different shard of a TP or EP split, so its digest is
+*expected* to differ and cross-rank comparison would report false mismatches.
+Entries that not every report carries are listed in `mismatches` too, so a
+rank that no report reached cannot pass as consistent.
+
+`ranks` is the part the verdict cannot carry on its own: a single report is
+consistent with itself, so `consistent: true` only means something once you can
+see that the reports actually covered the ranks you expected.
 
 ### RLHF weight-update workflow
 
@@ -173,11 +206,12 @@ manages.
 | `checksum` | Return per-tensor SHA-256 digests | No |
 | `reset` | Replace covered tensors with random values | Yes |
 | `compare` | Diff current weights against the supplied `baseline` | No |
+| `consistency` | Diff several `checksums` reports against each other | No |
 
 Invalid or missing actions return HTTP 400, and so does `compare` without a
-`baseline` object. A paused engine returns HTTP 409 for every action, checked
-before the per-action arguments: call `/resume` first, which is what a
-weight-update cycle does anyway.
+`baseline` object or `consistency` without a `checksums` list. A paused engine
+returns HTTP 409 for every action, checked before the per-action arguments:
+call `/resume` first, which is what a weight-update cycle does anyway.
 
 ## Limitations
 
