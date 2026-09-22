@@ -17,7 +17,7 @@ where::
     bias = -image_mean / image_std
 """
 
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 from torch import nn
@@ -26,7 +26,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.transformers_utils.processor import get_processor, get_processor_config
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
@@ -181,6 +181,16 @@ def fused_mm_input_norm_triton(
     return outputs
 
 
+class NormParams(NamedTuple):
+    """Resolved image-processing parameters."""
+
+    do_rescale: bool
+    do_normalize: bool
+    image_mean: list[float]
+    image_std: list[float]
+    rescale_factor: float
+
+
 @CustomOp.register("fused_mm_input_norm")
 class FusedMMInputNorm(CustomOp):
     """Module that applies rescaling and normalisation to input images.
@@ -251,6 +261,7 @@ class FusedMMInputNorm(CustomOp):
         else:
             self.register_buffer("weight", None)
             self.register_buffer("bias", None)
+            self.forward = self._identity_forward
 
         if not self.is_identity and self.compute_dtype != torch.float32:
             logger.warning_once(
@@ -283,7 +294,7 @@ class FusedMMInputNorm(CustomOp):
     @staticmethod
     def _load_norm_params(
         model_config: "ModelConfig",
-    ) -> tuple[bool, bool, list[float], list[float], float]:
+    ) -> "NormParams":
         """Load ``(do_rescale, do_normalize, image_mean, image_std,
         rescale_factor)`` from the processor config, falling back to the image
         processor object."""
@@ -330,24 +341,18 @@ class FusedMMInputNorm(CustomOp):
             image_mean = [0.0] * num_channels
             image_std = [1.0] * num_channels
 
-        # Explicit per-variable narrowing: mypy cannot narrow ``Any | None``
-        # via ``assert None not in [...]``, but it *can* narrow each variable
-        # through a direct ``is not None`` assertion.
         assert rescale_factor is not None, (
             "rescale_factor is still None after resolution."
         )
         assert image_mean is not None, "image_mean is still None after resolution."
         assert image_std is not None, "image_std is still None after resolution."
 
-        # Normalize to concrete types so the return type is exactly as
-        # declared (``Any`` is not assignable to ``list[float]`` / ``float``
-        # without a cast or a value-level construction).
-        return (
-            bool(do_rescale),
-            bool(do_normalize),
-            [float(v) for v in image_mean],
-            [float(v) for v in image_std],
-            float(rescale_factor),
+        return NormParams(
+            do_rescale=bool(do_rescale),
+            do_normalize=bool(do_normalize),
+            image_mean=[float(v) for v in image_mean],
+            image_std=[float(v) for v in image_std],
+            rescale_factor=float(rescale_factor),
         )
 
     @classmethod
@@ -356,24 +361,22 @@ class FusedMMInputNorm(CustomOp):
         if not getattr(mm_config, "mm_device_do_normalize", False):
             return cls.identity()
 
-        do_rescale, do_normalize, image_mean, image_std, rescale_factor = (
-            cls._load_norm_params(model_config)
-        )
+        params = cls._load_norm_params(model_config)
 
         # If no processing is needed, return an identity module.
-        if not do_rescale and not do_normalize:
+        if not params.do_rescale and not params.do_normalize:
             return cls.identity()
 
-        channel = len(image_mean)
-        assert len(image_std) == channel, (
+        channel = len(params.image_mean)
+        assert len(params.image_std) == channel, (
             f"image_mean and image_std have different lengths: "
-            f"{len(image_mean)} vs {len(image_std)}"
+            f"{channel} vs {len(params.image_std)}"
         )
 
         return cls(
-            image_mean=image_mean,
-            image_std=image_std,
-            rescale_factor=rescale_factor,
+            image_mean=params.image_mean,
+            image_std=params.image_std,
+            rescale_factor=params.rescale_factor,
             channel=channel,
             dtype=torch.float32,
         )
@@ -422,8 +425,9 @@ class FusedMMInputNorm(CustomOp):
         self,
         grid_thw: torch.Tensor,
         visual_dtype: torch.dtype,
-        out_view: torch.Tensor | None,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
         if out_view is not None:
             out_view.copy_(grid_thw)
             return out_view
@@ -445,9 +449,6 @@ class FusedMMInputNorm(CustomOp):
         on any platform without a specialised kernel.
         """
         patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
-
-        if self.is_identity:
-            return self._identity_forward(grid_thw, visual_dtype, out_view)
 
         assert size % self.channel == 0, (
             f"size={size} is not divisible by channel={self.channel}"
@@ -474,20 +475,6 @@ class FusedMMInputNorm(CustomOp):
     ) -> torch.Tensor:
         """Triton kernel path for CUDA devices."""
         patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
-
-        if self.is_identity:
-            return self._identity_forward(grid_thw, visual_dtype, out_view)
-
-        # Fall back to native if the Triton kernel cannot service this call.
-        if (
-            not HAS_TRITON
-            or grid_thw.dtype not in _SUPPORTED_INPUTS
-            or visual_dtype not in _SUPPORTED_OUTPUTS
-            or self.weight.dtype != torch.float32
-            or not self.weight.is_contiguous()
-            or not self.bias.is_contiguous()
-        ):
-            return self.forward_native(grid_thw, visual_dtype, out)
 
         assert size % self.channel == 0, (
             f"size={size} is not divisible by channel={self.channel}"
@@ -525,27 +512,17 @@ class FusedMMInputNorm(CustomOp):
         """XPU fused custom kernel path.
 
         On XPU, fuse the whole rescale + normalise into a single custom
-        kernel. The eager path materializes an fp32 intermediate and then
-        casts back, which adds device-side compute that cancels the
-        bandwidth saving of transferring uint8 pixel_values. The fused
-        kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
-        """
+        kernel."""
+
         patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
 
-        if self.is_identity:
-            return self._identity_forward(grid_thw, visual_dtype, out_view)
-
-        if grid_thw.dtype == torch.uint8 and self.weight.dtype == torch.float32:
-            y = torch.ops.vllm.xpu_fused_input_norm(
-                grid_thw, self.weight, self.bias, visual_dtype
-            )
-            if out_view is None:
-                return y
-            out_view.copy_(y)
-            return out_view
-
-        # Fall back to native for unsupported dtypes on XPU.
-        return self.forward_native(grid_thw, visual_dtype, out)
+        y = torch.ops.vllm.xpu_fused_input_norm(
+            grid_thw, self.weight, self.bias, visual_dtype
+        )
+        if out_view is None:
+            return y
+        out_view.copy_(y)
+        return out_view
 
     def forward_oot(
         self,
