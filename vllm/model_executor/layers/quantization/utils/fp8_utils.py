@@ -1127,6 +1127,21 @@ def deepgemm_post_process_fp8_weight_block(
             f"torch.float8_e8m0fnu or torch.uint8, got {ws.dtype} instead"
         )
         if use_e8m0:
+            # This is a re-quantization, not a format conversion: the weights were
+            # already rounded to FP8 once against their float32 block scales, and
+            # are dequantized and rounded a second time here against a coarser
+            # power-of-two scale. Checkpoints that ship E8M0 scales take the branch
+            # above and are unaffected.
+            logger.warning_once(
+                "DeepGEMM: requantizing blockwise-FP8 weights from float32 block "
+                "scales to UE8M0. This is a double quantization and has caused "
+                "measurable accuracy loss on some models -- see "
+                "https://github.com/vllm-project/vllm/issues/37804 (-12pp GSM8K on "
+                "Qwen3.5-FP8), which is why those model types are listed in "
+                "_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES. If you observe degraded "
+                "quality on a model that is not listed there, set "
+                "VLLM_USE_DEEP_GEMM=0 to fall back to CUTLASS."
+            )
             requant_weight_ue8m0_inplace(wq, ws, block_size=quant_block_shape)
 
     if is_bmm:
