@@ -110,8 +110,6 @@ class Executor(ABC):
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
-        if envs.VLLM_SLEEP_RECLAIM_GRAPH_MEMORY and not envs.VLLM_SLEEP_DISCARD_GRAPHS:
-            raise ValueError("Graph memory reclaim requires graph-discard sleep")
         if envs.VLLM_SLEEP_DISCARD_GRAPHS:
             from vllm.v1.worker.gpu.sleep_graphs import validate_graph_sleep
 

@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     VLLM_SLEEP_DISCARD_GRAPHS: bool = False
-    VLLM_SLEEP_RECLAIM_GRAPH_MEMORY: bool = False
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
@@ -612,10 +611,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Experimental single-model graph lifecycle for level-1 sleep.
     "VLLM_SLEEP_DISCARD_GRAPHS": lambda: bool(
         int(os.getenv("VLLM_SLEEP_DISCARD_GRAPHS", "0"))
-    ),
-    # Driver-dependent failed-allocation cache reclamation, not a CUDA contract.
-    "VLLM_SLEEP_RECLAIM_GRAPH_MEMORY": lambda: bool(
-        int(os.getenv("VLLM_SLEEP_RECLAIM_GRAPH_MEMORY", "0"))
     ),
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),

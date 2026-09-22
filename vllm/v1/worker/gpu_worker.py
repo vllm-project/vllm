@@ -254,17 +254,13 @@ class Worker(WorkerBase):
             assert runner.cudagraph_manager is not None
             runner.cudagraph_manager.discard_full_graphs()
             gc.collect()
-            torch._C._cuda_clearCublasWorkspaces()
             torch.accelerator.empty_cache()
             after_graphs = torch.accelerator.get_memory_info()[0]
             logger.info(
-                "Sleep graph destruction freed %d bytes before allocator sleep",
+                "Free-memory change after graph destruction and allocator "
+                "cache cleanup, before allocator sleep: %d bytes",
                 after_graphs - free_bytes_before_sleep,
             )
-            if envs.VLLM_SLEEP_RECLAIM_GRAPH_MEMORY:
-                from vllm.v1.worker.gpu.sleep_graphs import reclaim_graph_memory
-
-                reclaim_graph_memory()
 
         # Save the buffers before level 2 sleep
         if level == 2:

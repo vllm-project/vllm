@@ -166,21 +166,17 @@ selective KV discard and another sleep after a partial wake are rejected.
 Partial wake does not permit inference or recapture until all memory is awake.
 
 Graph destruction does not guarantee that the CUDA driver returns its cached
-physical memory. The separate, default-off option
-`VLLM_SLEEP_RECLAIM_GRAPH_MEMORY=1` attempts driver cache reclamation through a
-single device-capacity allocation request. An out-of-memory return is expected;
-it is **not** proof of physical release. Logs record the driver result and the
-observed free-memory difference separately. This is driver-dependent behavior,
-not a CUDA API guarantee, and has no guaranteed time bound. It requires graph
-discard and cannot be combined with CUDA process checkpointing. This option
-does not release the entire CUDA context or vLLM's persistent workspace.
-The physical-release regression samples before allocator suspension, while
-weights and KV remain mapped. That interval includes graph outputs, allocator
-cache cleanup and cuBLAS workspaces; its entire decrease must not be attributed
-to GraphExec alone. The complete wake footprint is not guaranteed to decrease:
-the first tested 30B wake increased total residency despite release during
-graph cleanup. Snapshots after wake are retained separately from the
-before-suspension release check.
+physical memory. vLLM does not request driver cache reclamation or explicitly
+clear global cuBLAS workspaces. PyTorch may clean up capture-stream workspaces
+when destroying a graph. This option does not release the entire CUDA context or vLLM's
+persistent workspace.
+The regression records free memory before allocator suspension, while weights
+and KV remain mapped. This interval includes graph outputs and allocator cache
+cleanup, so its entire change must not be attributed to graph executables
+(GraphExec). Physical release must be measured on the target device and driver;
+neither full GraphExec memory release nor a smaller complete-wake footprint is
+guaranteed. Snapshots after wake are retained separately from the
+before-suspension measurement.
 
 Recapture never overlaps an inference step, but a request or sleep arriving
 during capture waits for the current descriptor to finish. Continuous traffic
@@ -191,6 +187,11 @@ sleep or wake refuses further resume operations and requires restarting the
 engine. The main loop reports these failures through the EngineDead path,
 including failures delivered by deferred sleep callbacks, so queued requests
 do not remain waiting. Repeated completed sleep/wake calls remain supported.
+
+Recapture can also increase the cost of subsequent sleeps: PyTorch graph
+capture may clear cached pinned host allocations, requiring weight backup
+buffers to be allocated again. Measure repeated sleep latency as well as
+wake and inference latency for the installed PyTorch version.
 
 Eager and graph execution can have different floating-point results even
 without sleep. This option does not promise cross-mode or batch-invariant
