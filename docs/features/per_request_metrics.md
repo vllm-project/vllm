@@ -199,12 +199,16 @@ boundary, those tokens share a timestamp; vLLM does not infer per-token timing
 within the batch. Consequently, category mean ITL and throughput are `null` if
 a category receives a multi-token batch. Multiple segments of the same category
 are aggregated, so their generation interval includes time between segments.
-`reasoning.token_count` represents parser-classified reasoning payload tokens,
-while `content.token_count` represents final-answer payload tokens. Tool-call
-payload and framing tokens, reasoning boundaries, and other parser-control
-tokens are reported by `unclassified_token_count` rather than silently counted
-as final content. For every classified response, the category counts reconcile
-to the existing total output-token count:
+`reasoning.token_count` uses the same parser count as the endpoint's existing
+reasoning-token usage field. It therefore equals
+`usage.output_tokens_details.reasoning_tokens` for Responses and
+`usage.completion_tokens_details.reasoning_tokens` for Chat Completions. For
+Harmony, this follows the existing usage convention in which analysis and
+addressed commentary or tool-call tokens count as reasoning. `content.token_count`
+represents final-answer payload tokens. Remaining boundary, framing, and other
+parser-control tokens are reported by `unclassified_token_count`. For every
+classified response, the category counts reconcile to the existing total
+output-token count:
 
 ```text
 reasoning.token_count + content.token_count + unclassified_token_count
@@ -213,15 +217,6 @@ reasoning.token_count + content.token_count + unclassified_token_count
 
 The total is `usage.output_tokens` for Responses and
 `usage.completion_tokens` for Chat Completions.
-
-The existing reasoning-token usage remains available in
-`usage.output_tokens_details.reasoning_tokens` for Responses and
-`usage.completion_tokens_details.reasoning_tokens` for Chat Completions. It
-follows each endpoint's established usage-accounting semantics and is not
-guaranteed to equal `output_token_metrics.reasoning.token_count`. For example,
-Harmony usage accounting can treat addressed commentary associated with a tool
-call as reasoning, while output-token metrics classify the tool-call tokens as
-unclassified.
 
 ## Relationship to Prometheus Metrics
 

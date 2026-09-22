@@ -1560,6 +1560,10 @@ async def test_responses_output_token_metrics_follow_parser_classification():
     assert output_metrics.reasoning.token_count == 2
     assert output_metrics.content.token_count == 1
     assert output_metrics.unclassified_token_count == 1
+    assert (
+        output_metrics.reasoning.token_count
+        == response.usage.output_tokens_details.reasoning_tokens
+    )
     parser.classify_token_phases.assert_called_once_with([10, 11, 12, 13])
 
 

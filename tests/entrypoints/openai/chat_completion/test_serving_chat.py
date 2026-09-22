@@ -792,6 +792,7 @@ async def test_chat_output_token_metrics_use_engine_delta_timestamps():
         enable_per_request_metrics=False,
         enable_per_request_output_token_metrics=True,
     )
+    serving._include_reasoning_tokens_details = True
     parser = MagicMock()
     parser.parse_delta.return_value = DeltaMessage()
     parser.parse.return_value = ("reasoning", "answer", None)
@@ -851,6 +852,11 @@ async def test_chat_output_token_metrics_use_engine_delta_timestamps():
     assert response.metrics.speculative_decoding is not None
     assert response.metrics.speculative_decoding.num_accepted_draft_tokens == 1
     assert response.usage.completion_tokens == 4
+    assert response.usage.completion_tokens_details is not None
+    assert (
+        output_metrics.reasoning.token_count
+        == response.usage.completion_tokens_details.reasoning_tokens
+    )
 
 
 @pytest.mark.asyncio

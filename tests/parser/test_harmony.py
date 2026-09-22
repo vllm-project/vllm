@@ -825,9 +825,9 @@ class TestProcessChunk:
         assert phase_counts.reasoning_token_count > 0
         expected_classification = harmony_parser.classify_token_phases(token_ids)
         assert expected_classification == TokenPhaseCounts(
-            reasoning=1,
+            reasoning=phase_counts.reasoning_token_count,
             content=1,
-            unclassified=len(token_ids) - 2,
+            unclassified=len(token_ids) - phase_counts.reasoning_token_count - 1,
         )
         assert (
             harmony_parser.count_reasoning_tokens(token_ids)
@@ -849,7 +849,7 @@ class TestProcessChunk:
             harmony_parser.classify_token_phases(token_ids) == expected_classification
         )
 
-    def test_tool_call_tokens_are_unclassified_for_output_metrics(
+    def test_tool_call_tokens_follow_usage_reasoning_accounting(
         self, harmony_parser, chat_request
     ):
         token_ids = get_model_output_tokens(
@@ -857,15 +857,17 @@ class TestProcessChunk:
         )
 
         harmony_parser.process_chunk(token_ids)
+        usage_reasoning_tokens = harmony_parser.count_reasoning_tokens(token_ids)
+        assert usage_reasoning_tokens > 0
         expected = TokenPhaseCounts(
-            reasoning=0,
+            reasoning=usage_reasoning_tokens,
             content=0,
-            unclassified=len(token_ids),
+            unclassified=len(token_ids) - usage_reasoning_tokens,
         )
         assert harmony_parser.classify_token_phases(token_ids) == expected
 
-        # A subsequent full parse must retain the same classification instead
-        # of treating the addressed commentary as reasoning output.
+        # A subsequent full parse must retain the same usage-aligned
+        # classification without double-counting the tokens.
         harmony_parser.flush()
         harmony_parser.parse(
             get_encoding().decode_utf8(token_ids),
@@ -875,7 +877,7 @@ class TestProcessChunk:
         assert harmony_parser.classify_token_phases(token_ids) == expected
 
     @pytest.mark.parametrize(
-        ("channel", "reasoning_tokens", "content_tokens"),
+        ("channel", "reasoning_payload_tokens", "content_tokens"),
         [("analysis", 5, 0), ("final", 0, 5)],
     )
     def test_multibyte_payload_tokens_are_classified_before_utf8_decode(
@@ -883,17 +885,20 @@ class TestProcessChunk:
         harmony_parser,
         chat_request,
         channel,
-        reasoning_tokens,
+        reasoning_payload_tokens,
         content_tokens,
     ):
         token_ids = get_model_output_tokens([assistant("😀😃😄", channel)])
-        expected = TokenPhaseCounts(
-            reasoning=reasoning_tokens,
-            content=content_tokens,
-            unclassified=len(token_ids) - reasoning_tokens - content_tokens,
-        )
 
         harmony_parser.process_chunk(token_ids)
+        usage_reasoning_tokens = harmony_parser.count_reasoning_tokens(token_ids)
+        assert usage_reasoning_tokens >= reasoning_payload_tokens
+        expected = TokenPhaseCounts(
+            reasoning=usage_reasoning_tokens,
+            content=content_tokens,
+            unclassified=len(token_ids) - usage_reasoning_tokens - content_tokens,
+        )
+
         assert harmony_parser.classify_token_phases(token_ids) == expected
 
         harmony_parser.flush()
