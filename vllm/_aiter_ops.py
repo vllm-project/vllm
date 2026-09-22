@@ -2486,6 +2486,63 @@ class rocm_aiter_ops:
         )
 
     @classmethod
+    def gdn_flydsl_prefill(
+        cls,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None,
+        aiter_prefill_metadata: object | None,
+        use_qk_l2norm_in_kernel: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run GDN prefill through AITER's VK path with the FlyDSL kernels.
+
+        Every argument AITER takes is named here rather than forwarded as
+        ``**kwargs``, so a rename or reordering on the AITER side fails at this
+        call instead of silently binding to the wrong parameter.
+        """
+        from aiter.ops.flydsl.linear_attention_prefill_kernels import (
+            gdn_prepare_flydsl_supported,
+        )
+        from aiter.ops.triton.gated_delta_net import chunk_gated_delta_rule_opt_vk
+
+        if cu_seqlens is not None and aiter_prefill_metadata is None:
+            raise RuntimeError(
+                "AITER FlyDSL GDN prefill requires reusable varlen prefill metadata."
+            )
+        if not gdn_prepare_flydsl_supported(k, v):
+            raise RuntimeError(
+                "AITER FlyDSL GDN prepare does not support the runtime input shape, "
+                "dtype, or device."
+            )
+        logger.info_once(
+            "Dispatching AITER FlyDSL GDN prefill (prepare=flydsl, chunk=flydsl)."
+        )
+        return chunk_gated_delta_rule_opt_vk(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            use_chunk_flydsl=True,
+            use_prepare_flydsl=True,
+            state_dtype=initial_state.dtype,
+            prefill_metadata=aiter_prefill_metadata,
+            # The caller stages the state densely and writes it back, so the
+            # kernel gets a plain [N, H, V, K] buffer and never an index into
+            # the pool; there is correspondingly nothing to update in place.
+            inplace_final_state=False,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
+    @classmethod
     def is_rdna_gdn_triton_kernels_available(cls) -> bool:
         """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()

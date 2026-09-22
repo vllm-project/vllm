@@ -282,27 +282,6 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
-def _aiter_flydsl_chunk_gated_delta_rule(**kwargs):
-    from aiter.ops.flydsl.linear_attention_prefill_kernels import (
-        gdn_prepare_flydsl_supported,
-    )
-    from aiter.ops.triton.gated_delta_net import chunk_gated_delta_rule_opt_vk
-
-    if kwargs["cu_seqlens"] is not None and kwargs["prefill_metadata"] is None:
-        raise RuntimeError(
-            "AITER FlyDSL GDN prefill requires reusable varlen prefill metadata."
-        )
-    if not gdn_prepare_flydsl_supported(kwargs["k"], kwargs["v"]):
-        raise RuntimeError(
-            "AITER FlyDSL GDN prepare does not support the runtime input shape, "
-            "dtype, or device."
-        )
-    logger.info_once(
-        "Dispatching AITER FlyDSL GDN prefill (prepare=flydsl, chunk=flydsl)."
-    )
-    return chunk_gated_delta_rule_opt_vk(**kwargs)
-
-
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -342,7 +321,7 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
-        prefill_metadata: object | None = None,
+        aiter_prefill_metadata: object | None = None,
     ):
         o, final_state = fi_chunk_gated_delta_rule(
             q=q,
@@ -375,7 +354,7 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
-        prefill_metadata: object | None = None,
+        aiter_prefill_metadata: object | None = None,
     ):
         return fla_chunk_gated_delta_rule(
             q=q,
@@ -406,7 +385,7 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
-        prefill_metadata: object | None = None,
+        aiter_prefill_metadata: object | None = None,
     ):
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             chunk_gated_delta_rule_cutedsl,
@@ -450,9 +429,9 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
-        prefill_metadata: object | None = None,
+        aiter_prefill_metadata: object | None = None,
     ):
-        o, final_state = _aiter_flydsl_chunk_gated_delta_rule(
+        o, final_state = rocm_aiter_ops.gdn_flydsl_prefill(
             q=q,
             k=k,
             v=v,
@@ -461,14 +440,7 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            use_chunk_flydsl=True,
-            use_prepare_flydsl=True,
-            state_dtype=initial_state.dtype,
-            prefill_metadata=prefill_metadata,
-            # The caller stages the state densely and writes it back, so the
-            # kernel gets a plain [N, H, V, K] buffer and never an index into
-            # the pool; there is correspondingly nothing to update in place.
-            inplace_final_state=False,
+            aiter_prefill_metadata=aiter_prefill_metadata,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
         if core_attn_out is not None:
@@ -1256,7 +1228,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # CuteDSL kernels require metadata
         chunk_indices = None
         chunk_offsets = None
-        prefill_metadata = None
+        aiter_prefill_metadata = None
         if self.gdn_prefill_backend == "cutedsl":
             from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
                 prepare_metadata_cutedsl,
@@ -1264,7 +1236,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, T)
         elif self.gdn_prefill_backend == "aiter_flydsl":
-            prefill_metadata = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
+            aiter_prefill_metadata = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
                 [T],
                 cu_seqlens=cu_seqlens,
             )
@@ -1282,7 +1254,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=chunk_indices,
                 chunk_offsets=chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
-                prefill_metadata=prefill_metadata,
+                aiter_prefill_metadata=aiter_prefill_metadata,
             )
         except Exception:
             logger.warning(
@@ -1313,7 +1285,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens,
                 chunk_indices,
                 chunk_offsets,
-                prefill_metadata,
+                aiter_prefill_metadata,
             )
 
         torch.accelerator.empty_cache()
@@ -1658,7 +1630,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
-                prefill_metadata=attn_metadata.aiter_prefill_metadata,
+                aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
             )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
