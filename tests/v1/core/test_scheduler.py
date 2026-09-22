@@ -44,7 +44,13 @@ from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import (
+    PREEMPTION_REASON_KV_FULL,
+    PREEMPTION_REASON_PREFIX_CACHE_RESET,
+    PREEMPTION_REASON_PRIORITY,
+    EngineCoreEventType,
+    FinishReason,
+)
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -3431,6 +3437,50 @@ def test_priority_scheduling_preemption():
     assert any(req.request_id == "hi1" for req in scheduler.running), (
         "High-priority 'hi1' should still be running"
     )
+    assert _preemption_reasons(lo1_req) == [PREEMPTION_REASON_PRIORITY]
+
+
+def _preemption_reasons(request: Request) -> list[str | None]:
+    return [
+        event.reason
+        for event in request.events
+        if event.type == EngineCoreEventType.PREEMPTED
+    ]
+
+
+def test_preemption_events_carry_their_reason():
+    """FCFS preemption under KV pressure records kv_full; reset_prefix_cache
+    records prefix_cache_reset."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        block_size=16,
+        num_blocks=11,  # 1 null block -> 10 usable
+    )
+    # Two 80-token requests take all 10 blocks.
+    requests = create_requests(num_requests=2, num_tokens=80, block_size=16)
+    scheduler.add_request(requests[0])
+    output0 = scheduler.schedule()
+    scheduler.add_request(requests[1])
+    scheduler.schedule()
+    # Decoding requests[0] past its 5th block needs an 11th block.
+    scheduler.update_from_output(
+        output0,
+        ModelRunnerOutput(
+            req_ids=[requests[0].request_id],
+            req_id_to_index={requests[0].request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    scheduler.schedule()
+    assert requests[1].status == RequestStatus.PREEMPTED
+    assert _preemption_reasons(requests[1]) == [PREEMPTION_REASON_KV_FULL]
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert requests[0].status == RequestStatus.PREEMPTED
+    assert _preemption_reasons(requests[0]) == [PREEMPTION_REASON_PREFIX_CACHE_RESET]
 
 
 def test_priority_scheduling_no_preemption_when_space_available():

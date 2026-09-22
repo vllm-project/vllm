@@ -21,7 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import PREEMPTION_REASONS, FinishReason
 from vllm.v1.metrics.buckets import histogram_buckets
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
@@ -682,6 +682,28 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_num_preempted_reqs, per_engine_labelvalues
         )
 
+        counter_num_preempted_reqs_by_reason = self._counter_cls(
+            name="vllm:num_preemptions_by_reason",
+            documentation=(
+                "Cumulative number of preemptions from the engine by reason. "
+                "Reason labels: 'kv_full' = no free KV cache blocks for a running "
+                "request; 'priority' = a higher-priority request needed the "
+                "blocks; 'prefix_cache_reset' = the prefix cache was reset with "
+                "requests running. Sum of all reasons equals vllm:num_preemptions."
+            ),
+            labelnames=labelnames + ["reason"],
+        )
+        self.counter_num_preempted_reqs_by_reason: dict[str, dict[int, Counter]] = {
+            reason: create_metric_per_engine(
+                counter_num_preempted_reqs_by_reason,
+                {
+                    idx: labelvalues + [reason]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                },
+            )
+            for reason in PREEMPTION_REASONS
+        }
+
         counter_prompt_tokens = self._counter_cls(
             name="vllm:prompt_tokens",
             documentation="Number of prefill tokens processed.",
@@ -1123,6 +1145,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
         )
+        for reason, count in iteration_stats.num_preempted_reqs_by_reason.items():
+            if counters := self.counter_num_preempted_reqs_by_reason.get(reason):
+                counters[engine_idx].inc(count)
         self.counter_prompt_tokens[engine_idx].inc(iteration_stats.num_prompt_tokens)
         # Labeled prompt token counters by source
         pts = iteration_stats.prompt_token_stats

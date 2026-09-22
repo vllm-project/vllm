@@ -53,7 +53,14 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    PREEMPTION_REASON_KV_FULL,
+    PREEMPTION_REASON_PREFIX_CACHE_RESET,
+    PREEMPTION_REASON_PRIORITY,
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -780,6 +787,9 @@ class Scheduler(SchedulerInterface):
                         preempted_req,
                         scheduled_timestamp,
                         drop_stale_output=self.requires_kv_delivery,
+                        reason=PREEMPTION_REASON_PRIORITY
+                        if self.policy == SchedulingPolicy.PRIORITY
+                        else PREEMPTION_REASON_KV_FULL,
                     )
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -1516,7 +1526,11 @@ class Scheduler(SchedulerInterface):
         return new_block_ids_to_zero or None
 
     def _preempt_request(
-        self, request: Request, timestamp: float, drop_stale_output: bool = False
+        self,
+        request: Request,
+        timestamp: float,
+        drop_stale_output: bool = False,
+        reason: str = PREEMPTION_REASON_KV_FULL,
     ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
@@ -1527,6 +1541,8 @@ class Scheduler(SchedulerInterface):
         by reset_prefix_cache, whose same-step resume would otherwise deliver
         tokens out of order, and for connectors with a pending KV hand-off,
         which the preemption's block free would leave without valid KV.
+
+        reason: one of PREEMPTION_REASONS, recorded on the PREEMPTED event.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
@@ -1554,7 +1570,7 @@ class Scheduler(SchedulerInterface):
         request.num_output_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
-            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+            request.record_event(EngineCoreEventType.PREEMPTED, timestamp, reason)
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
@@ -2713,7 +2729,12 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
-                self._preempt_request(request, timestamp, drop_stale_output=True)
+                self._preempt_request(
+                    request,
+                    timestamp,
+                    drop_stale_output=True,
+                    reason=PREEMPTION_REASON_PREFIX_CACHE_RESET,
+                )
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were
