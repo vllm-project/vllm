@@ -82,13 +82,23 @@ class XgrammarBackend(StructuredOutputBackend):
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
+        # xgrammar's `any_whitespace=False` means "emit a fixed format", not "emit
+        # no whitespace". With `separators` left unset it falls back to the
+        # json.dumps() defaults of `(", ", ": ")`, which *require* a space after
+        # every comma and colon - the opposite of what this flag's name promises.
+        # Pass compact separators so it actually disables whitespace.
+        separators = (",", ":") if self.disable_any_whitespace else None
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
-                grammar_spec, any_whitespace=not self.disable_any_whitespace
+                grammar_spec,
+                any_whitespace=not self.disable_any_whitespace,
+                separators=separators,
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
-                '{"type": "object"}', any_whitespace=not self.disable_any_whitespace
+                '{"type": "object"}',
+                any_whitespace=not self.disable_any_whitespace,
+                separators=separators,
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
