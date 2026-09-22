@@ -687,11 +687,7 @@ steps:
       commands:
       - pytest -v -s kernels/moe/test_moe_layer.py
       # The broad layer matrix leaves MoRI opt-in. Exercise one healthy EP2 contract.
-      - >-
-        VLLM_TEST_ENABLE_MORI_MOE_LAYER=1 VLLM_WORKER_MULTIPROC_METHOD=spawn
-        pytest -v -s -rs
-        'kernels/moe/test_moe_layer.py::test_moe_layer[False-mori_high_throughput-2-1-True]'
-        --subtests='[32-512-512-8-2-bfloat16-None-False-False-False-False-mori_high_throughput-2-2-1]'
+      - VLLM_TEST_ENABLE_MORI_MOE_LAYER=1 VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs 'kernels/moe/test_moe_layer.py::test_moe_layer[False-mori_high_throughput-2-1-True]' --subtests='[32-512-512-8-2-bfloat16-None-False-False-False-False-mori_high_throughput-2-2-1]'
 
 - label: ":nvidia: (B200) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-b200s
