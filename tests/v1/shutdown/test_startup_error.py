@@ -30,7 +30,7 @@ def evil_method(self, *args, **kwargs):
 
 
 @pytest.fixture
-def rocm_evil_method(rocm_sitecustomize_factory, request):
+def rocm_evil_method(spawn_sitecustomize_factory, request):
     failing_method = request.getfixturevalue("failing_method")
     lines = [
         "from vllm.distributed import get_tensor_model_parallel_rank",
@@ -38,7 +38,7 @@ def rocm_evil_method(rocm_sitecustomize_factory, request):
         inspect.getsource(evil_method),
         f"LlamaForCausalLM.{failing_method} = {evil_method.__name__}",
     ]
-    rocm_sitecustomize_factory(lines)
+    spawn_sitecustomize_factory(lines)
 
 
 @pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
