@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
+    VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
@@ -156,7 +157,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
-    VLLM_PLE_CPU_OFFLOAD: bool = True
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
@@ -1230,6 +1230,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
+    # Set to 1 to dequantize MXFP4 weights to BF16 once at load time and run as
+    # a BF16 checkpoint (no per-step weight dequant). This improves emulation
+    # latency at the cost of additional device memory. Default off.
+    "VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD": lambda: (
+        os.getenv("VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD", "False").lower()
+        in ("true", "1")
+    ),
     # On hardware without a native MXFP8 kernel (e.g. ROCm gfx942 / MI300), the
     # MXFP8 emulation path dequantizes weights MXFP8->BF16 once at load time and
     # runs as a BF16 checkpoint (no per-step dequant). Set to 0 to fall back to
@@ -2066,8 +2073,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
-    # Store n-gram embedding tables in pinned CPU memory for UVA lookup.
-    "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "1"))),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
