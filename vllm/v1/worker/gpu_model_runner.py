@@ -222,10 +222,15 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    build_minimal_kv_cache_config,
+    clear_layer_kv_caches,
     is_residual_scattered_for_sp,
     raise_if_nan_logits,
+    reserve_attention_workspace,
 )
-from vllm.v1.worker.workspace import lock_workspace
+from vllm.v1.worker.workspace import (
+    lock_workspace,
+)
 
 from .utils import (
     AttentionGroup,
@@ -6479,28 +6484,9 @@ class GPUModelRunner(
         gc.collect()
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
-        from vllm.v1.core.kv_cache_utils import (
-            get_kv_cache_config_from_groups,
-            get_kv_cache_groups,
-        )
-
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
-        # the minimum number of blocks required is 1 block *per sequence*
-        min_blocks = (
-            min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
-            or 1
-        )
-
-        # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
-        saved_override = self.cache_config.num_gpu_blocks_override
-        self.cache_config.num_gpu_blocks_override = min_blocks
-        minimal_config = get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=0
-        )
-        self.cache_config.num_gpu_blocks_override = saved_override
-
+        minimal_config = build_minimal_kv_cache_config(self, kv_cache_spec)
         self.initialize_kv_cache(minimal_config, is_profiling=True)
         self.cache_config.num_gpu_blocks = minimal_config.num_blocks
 
@@ -6544,19 +6530,7 @@ class GPUModelRunner(
             delattr(self, "kv_cache_config")
         self.cache_config.num_gpu_blocks = None
 
-        for layer in self.compilation_config.static_forward_context.values():
-            if hasattr(layer, "kv_cache"):
-                kv_cache = layer.kv_cache
-                layer.kv_cache = (
-                    torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
-                )
-            # Clean up quantized KV cache scale views
-            # (int8_per_token_head, fp8_per_token_head)
-            if hasattr(layer, "impl"):
-                if hasattr(layer.impl, "_k_scale_cache"):
-                    layer.impl._k_scale_cache = None
-                if hasattr(layer.impl, "_v_scale_cache"):
-                    layer.impl._v_scale_cache = None
+        clear_layer_kv_caches(self.compilation_config.static_forward_context.values())
 
         gc.collect()
         torch.accelerator.empty_cache()
@@ -6807,6 +6781,7 @@ class GPUModelRunner(
             )
 
         with self._freeze_gc(), graph_capture(device=self.device):
+            reserve_attention_workspace(self)
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
             start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -6864,8 +6839,6 @@ class GPUModelRunner(
         num_warmups: int | None = None,
         profiler: AbstractContextManager[Any] | None = None,
     ):
-        if profiler is None:
-            profiler = nullcontext()
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -6885,6 +6858,8 @@ class GPUModelRunner(
             # Warmups may use auxiliary streams. Ensure all of their work has
             # completed before beginning CUDA graph capture.
             torch.accelerator.synchronize()
+        if profiler is None:
+            profiler = nullcontext()
         with (
             profiler,
             torch.profiler.record_function(

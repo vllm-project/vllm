@@ -614,6 +614,25 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
 
+    @classmethod
+    def persistent_workspace_profiling_support(
+        cls, vllm_config: "VllmConfig", kv_cache_spec: Any
+    ) -> bool | None:
+        """``True`` requires reservation, ``False`` is neutral, ``None`` opts out.
+
+        The fail-closed default keeps an unknown builder from being treated as
+        neutral in a mixed-backend model.
+        """
+        return None
+
+    def prepare_workspace_for_profiling(self, materialize: bool) -> None:
+        """Reserve persistent workspace before the shared arena is locked.
+
+        Called twice over every builder: ``materialize=False`` may only grow
+        shared arenas, ``materialize=True`` builds the wrappers that use them.
+        Backends on the global WorkspaceManager override this.
+        """
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,

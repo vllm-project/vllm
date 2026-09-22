@@ -176,8 +176,12 @@ from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
+    reserve_attention_workspace,
 )
-from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
+from vllm.v1.worker.workspace import (
+    lock_workspace,
+    use_workspace_lane,
+)
 
 logger = init_logger(__name__)
 
@@ -714,6 +718,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         check_attention_cp_compatibility(self.vllm_config, target_attn_layer_names)
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
+            # Runs on the profiling path too: init_cudagraph_manager below
+            # sizes a speculator's cudagraph mode from what set_attn records
+            # (DFlash reads self.attn_cg_support), so skipping it here would
+            # leave that attribute unset.
             self.speculator.set_attn(
                 self.model_state,
                 self.kv_cache_config,
@@ -974,7 +982,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
-        """Estimate the GPU memory required to capture CUDA graphs."""
         return _profile_cudagraph_memory(self)
 
     def needs_cudagraph_capture(self) -> bool:
@@ -1007,6 +1014,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         start_time = time.perf_counter()
         with freeze_gc_for_cudagraph_capture():
+            # Reserve before the baseline is read, so the capture size measured
+            # below excludes the workspace. The reservation drains the stream
+            # itself, so no extra barrier is needed here.
+            reserve_attention_workspace(self)
             torch.accelerator.empty_cache()
             start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 

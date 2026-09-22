@@ -187,3 +187,39 @@ def test_persistent_tensor_preserves_contents_and_rejects_changes() -> None:
     assert manager.get_persistent("locks", (8,), torch.int32) is first
     with pytest.raises(AssertionError, match="was not allocated during warmup"):
         manager.get_persistent("new", (8,), torch.int32)
+
+
+def test_persistent_resources_follow_the_ubatch_override():
+    """The scratch and the persistent cache have to land in the same slot.
+
+    Reservation runs under ``use_workspace_ubatch_id`` rather than inside a real
+    ubatch, so a persistent resource created there must be cached where the run
+    will look for it. Resolving the ubatch from ``dbo_current_ubatch_id()``
+    alone puts it in slot 0, and the lookup then misses once the manager is
+    locked.
+    """
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+
+    for ubatch in range(2):
+        for lane in range(2):
+            with (
+                workspace.use_workspace_ubatch_id(ubatch),
+                workspace.use_workspace_lane(lane),
+            ):
+                assert manager._get_workspace_id() == manager._resolve_workspace_id()
+
+    with workspace.use_workspace_ubatch_id(1):
+        manager.get_persistent_resource("k", lambda: "made-for-ubatch-1")
+    manager.lock()
+
+    # The run reaches the same slot through the override the reservation used.
+    with workspace.use_workspace_ubatch_id(1):
+        assert manager.get_persistent_resource("k", lambda: "rebuilt") == (
+            "made-for-ubatch-1"
+        )
+
+    # And ubatch 0 never saw it, so a locked lookup there still fails.
+    with workspace.use_workspace_ubatch_id(0), pytest.raises(AssertionError):
+        manager.get_persistent_resource("k", lambda: "rebuilt")

@@ -4,15 +4,18 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import product as iprod
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config.vllm import set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
@@ -42,6 +45,38 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
+
+
+def requires_persistent_attention_workspace_profiling(
+    vllm_config: VllmConfig,
+) -> bool:
+    """Whether every relevant builder supports the reservation lifecycle.
+
+    A builder answering ``None`` vetoes the lifecycle for the whole model, so
+    a mixed-backend model stays on the legacy path. Elastic EP regrows the
+    shared arena during reconfiguration and draft-model builders own a
+    separate lifecycle, so both opt out up front.
+    """
+    if vllm_config.parallel_config.enable_elastic_ep:
+        return False
+    if vllm_config.speculative_config is not None:
+        return False
+    layer_type = cast(type[Any], AttentionLayerBase)
+    found_required = False
+    for attn_module in get_layers_from_vllm_config(vllm_config, layer_type).values():
+        kv_cache_spec = attn_module.get_kv_cache_spec(vllm_config)
+        if kv_cache_spec is None:
+            continue
+        builder_cls = attn_module.get_attn_backend().get_builder_cls()
+        support = builder_cls.persistent_workspace_profiling_support(
+            vllm_config, kv_cache_spec
+        )
+        if not isinstance(support, bool):
+            # ``None`` opts out; anything else is an unknown contract that a
+            # mixed-backend model must not be allowed to silently join.
+            return False
+        found_required = found_required or support
+    return found_required
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
@@ -275,6 +310,8 @@ class AttentionGroup:
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
+        from vllm.v1.worker.workspace import use_workspace_ubatch_id
+
         if kernel_block_size is None:
             kv_cache_spec_builder = self.kv_cache_spec
         elif (
@@ -297,16 +334,17 @@ class AttentionGroup:
             builder_kwargs["block_table_width"] = get_block_table_width(
                 max_num_blocks, self.kv_cache_spec.block_size, kernel_block_size
             )
-        self.metadata_builders = [
-            builder_cls(
-                kv_cache_spec_builder,
-                self.layer_names,
-                vllm_config,
-                device,
-                **builder_kwargs,
-            )
-            for _ in range(num_metadata_builders)
-        ]
+        self.metadata_builders = []
+        for ubatch_id in range(num_metadata_builders):
+            with use_workspace_ubatch_id(ubatch_id):
+                builder = builder_cls(
+                    kv_cache_spec_builder,
+                    self.layer_names,
+                    vllm_config,
+                    device,
+                    **builder_kwargs,
+                )
+            self.metadata_builders.append(builder)
         if kernel_block_size is not None:
             for builder in self.metadata_builders:
                 builder.set_kernel_block_size(kernel_block_size)
@@ -669,17 +707,20 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
     alone does not release the KV cache memory on teardown paths.
     """
     for layer in layers:
-        if not hasattr(layer, "kv_cache"):
-            continue
-        kv_cache = layer.kv_cache
-        layer.kv_cache = torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+        if hasattr(layer, "kv_cache"):
+            kv_cache = layer.kv_cache
+            layer.kv_cache = (
+                torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+            )
         # Clean up quantized KV cache scale views
-        # (int8_per_token_head, fp8_per_token_head)
-        if hasattr(layer, "impl"):
-            if hasattr(layer.impl, "_k_scale_cache"):
-                layer.impl._k_scale_cache = None
-            if hasattr(layer.impl, "_v_scale_cache"):
-                layer.impl._v_scale_cache = None
+        # (int8_per_token_head, fp8_per_token_head). A layer can hold these
+        # without a kv_cache attribute, so they are cleared independently.
+        impl = getattr(layer, "impl", None)
+        if impl is not None:
+            if hasattr(impl, "_k_scale_cache"):
+                impl._k_scale_cache = None
+            if hasattr(impl, "_v_scale_cache"):
+                impl._v_scale_cache = None
 
 
 def copy_kv_cache_blocks_inplace(
@@ -793,3 +834,124 @@ class EncoderTimingStats:
             "encoder_forward_secs": self.encoder_forward_secs,
             "num_encoder_calls": self.num_encoder_calls,
         }
+
+
+from vllm.v1.worker.workspace import (  # noqa: E402
+    current_workspace_manager,
+    use_workspace_ubatch_id,
+)
+
+
+def _iter_attn_groups(runner) -> Iterable[Any]:
+    """Yield every attention group of either runner generation."""
+    group_iterator = getattr(runner, "_attn_group_iterator", None)
+    if group_iterator is not None:
+        yield from group_iterator()
+        return
+    for groups in runner.attn_groups:
+        yield from groups
+
+
+def build_minimal_kv_cache_config(runner, kv_cache_spec) -> KVCacheConfig:
+    """The smallest KV cache config that still lets every graph be captured.
+
+    ``num_gpu_blocks_override`` is restored even when config computation
+    raises, so a failure here cannot leak the profiling override into the
+    real KV cache sizing that follows.
+    """
+    from vllm.v1.core.kv_cache_utils import (
+        get_kv_cache_config_from_groups,
+        get_kv_cache_groups,
+    )
+
+    kv_cache_groups = get_kv_cache_groups(runner.vllm_config, kv_cache_spec)
+    # At least one block per sequence is required to capture the graphs.
+    min_blocks = (
+        min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
+        or 1
+    )
+    cache_config = runner.cache_config
+    saved_override = cache_config.num_gpu_blocks_override
+    cache_config.num_gpu_blocks_override = min_blocks
+    try:
+        return get_kv_cache_config_from_groups(
+            runner.vllm_config, kv_cache_groups, available_memory=0
+        )
+    finally:
+        cache_config.num_gpu_blocks_override = saved_override
+
+
+def reserve_attention_workspace(runner) -> list[Any]:
+    """Materialize every builder's persistent workspace; return their owners.
+
+    The returned list keeps the wrapper-owned int workspaces alive past the
+    profiling teardown; runtime callers discard it.
+    """
+    if not getattr(runner, "attn_groups", None):
+        return []
+
+    builders = [
+        (ubatch_id, builder)
+        for attn_group in _iter_attn_groups(runner)
+        for ubatch_id, builder in enumerate(attn_group.metadata_builders)
+    ]
+    # Arenas first, wrappers second: a wrapper caches its arena's size at
+    # construction, so none may exist while a later builder can still grow it.
+    for materialize in (False, True):
+        for ubatch_id, builder in builders:
+            with use_workspace_ubatch_id(ubatch_id):
+                builder.prepare_workspace_for_profiling(materialize)
+    # The closing memory_profiling snapshot reads free memory, so the
+    # allocations above have to be settled and freed segments returned first.
+    torch.accelerator.synchronize()
+    torch.accelerator.empty_cache()
+    return [builder for _, builder in builders]
+
+
+def reserve_persistent_attention_workspace(runner) -> None:
+    manager = current_workspace_manager()
+    profiled_sizes = getattr(runner, "_profiled_persistent_workspace_sizes", None)
+    if profiled_sizes is not None:
+        manager.assert_within(profiled_sizes, "before persistent finalization")
+    reserve_attention_workspace(runner)
+    if profiled_sizes is not None:
+        manager.assert_within(profiled_sizes, "during persistent finalization")
+    else:
+        runner._profiled_persistent_workspace_sizes = manager.workspace_sizes_bytes()
+
+
+def prepare_profiling_workspace(runner) -> list[Any]:
+    """Reserve persistent workspace inside the memory-profiling window."""
+    init_kv = getattr(runner, "_init_minimal_kv_cache_for_profiling", None)
+    if init_kv is not None:
+        cleanup_kv = runner._cleanup_profiling_kv_cache
+    else:
+        # V2 keeps the minimal-KV bootstrap and teardown as module helpers
+        # shared with graph profiling, imported at call time as it does.
+        from vllm.v1.worker.gpu import cudagraph_utils
+
+        init_kv = partial(cudagraph_utils._init_minimal_kv_cache_for_profiling, runner)
+        cleanup_kv = partial(cudagraph_utils._teardown_profiling_state, runner)
+    lease: list[Any] | None = None
+    try:
+        with set_current_vllm_config(runner.vllm_config):
+            init_kv()
+        lease = reserve_attention_workspace(runner)
+        cleanup_kv()
+    except Exception:
+        if lease is not None:
+            lease.clear()
+        try:
+            cleanup_kv()
+        except Exception:
+            logger.exception(
+                "Failed to clean up profiling KV cache after persistent "
+                "workspace preparation failed"
+            )
+        raise
+
+    # The reservation above is part of the activation peak the profiler is
+    # about to measure, not of it.
+    torch.accelerator.reset_peak_memory_stats(runner.device)
+    assert lease is not None
+    return lease

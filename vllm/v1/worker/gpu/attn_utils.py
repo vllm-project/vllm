@@ -40,6 +40,7 @@ from vllm.v1.worker.utils import (
     bind_kv_cache_to_layers,
     prepare_kernel_block_sizes,
 )
+from vllm.v1.worker.workspace import is_workspace_manager_initialized
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
@@ -251,6 +252,9 @@ def init_attn_backend(
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
     # Phase 3: create metadata builders and determine cudagraph support.
+    # Each (ubatch, lane) draws its own arena from the WorkspaceManager, so
+    # the builders only share one buffer on the private fallback path.
+    share_workspace = not is_workspace_manager_initialized()
     attn_backend_workspace: torch.Tensor | None = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
         kernel_block_size = None
@@ -266,6 +270,8 @@ def init_attn_backend(
                 # it on the prefill backend), so each ubatch needs its own.
                 num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
+            if not share_workspace:
+                continue
             # The microbatches' builders share the workspace: they all issue
             # attention on the one compute stream the threads hand off, so the
             # buffer is written serially, as it already is across steps.

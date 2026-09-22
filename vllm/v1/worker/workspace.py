@@ -31,6 +31,9 @@ _GiB = 1024**3
 
 # Global workspace manager instance
 _manager: "WorkspaceManager | None" = None
+_workspace_ubatch_id: ContextVar[int | None] = ContextVar(
+    "workspace_ubatch_id", default=None
+)
 _workspace_lane: ContextVar[int] = ContextVar("vllm_workspace_lane", default=0)
 
 
@@ -61,7 +64,7 @@ class WorkspaceManager:
     ):
         self._device = device
         # Cache num ubatches at init based on configuration (default to 1)
-        self._num_ubatches = num_ubatches if num_ubatches is not None else 1
+        self._num_ubatches = max(1, num_ubatches if num_ubatches is not None else 1)
         if num_lanes < 1:
             raise ValueError(f"num_lanes must be at least one, got {num_lanes}.")
         self._num_lanes = num_lanes
@@ -119,13 +122,12 @@ class WorkspaceManager:
         return self._locked
 
     def _get_workspace_id(self) -> int:
-        lane = _workspace_lane.get()
-        if lane >= self._num_lanes:
-            raise RuntimeError(
-                f"Workspace lane {lane} is not configured; manager has "
-                f"{self._num_lanes} lane(s)."
-            )
-        return dbo_current_ubatch_id() * self._num_lanes + lane
+        # Same slot the scratch allocation resolves to. Reading the ubatch off
+        # dbo_current_ubatch_id() directly would ignore the override that
+        # use_workspace_ubatch_id sets, so a persistent resource created while
+        # reserving for one ubatch would be cached under another and go missing
+        # once the manager is locked.
+        return self._resolve_workspace_id()
 
     def get_persistent_resource(self, key: Hashable, factory: Callable[[], T]) -> T:
         """Return the resource cached for ``key`` in the current ubatch and lane.
@@ -203,6 +205,46 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
+    def _resolve_workspace_id(self) -> int:
+        """The slot for the active ubatch and lane.
+
+        ``use_workspace_ubatch_id`` overrides the DBO ubatch so a resource
+        created while reserving for one ubatch is cached under that ubatch.
+        """
+        ubatch_id = _workspace_ubatch_id.get()
+        if ubatch_id is None:
+            ubatch_id = dbo_current_ubatch_id()
+        if not 0 <= ubatch_id < self._num_ubatches:
+            raise IndexError(
+                f"Workspace ubatch id {ubatch_id} is outside the configured "
+                f"range [0, {self._num_ubatches})."
+            )
+        lane = _workspace_lane.get()
+        if lane >= self._num_lanes:
+            raise RuntimeError(
+                f"Workspace lane {lane} is not configured; manager has "
+                f"{self._num_lanes} lane(s)."
+            )
+        return ubatch_id * self._num_lanes + lane
+
+    def assert_within(self, limits: tuple[int, ...], phase: str) -> None:
+        """Fail when any ubatch arena grew past what ``limits`` recorded."""
+        current = self.workspace_sizes_bytes()
+        if len(current) != len(limits) or any(
+            c > lim for c, lim in zip(current, limits)
+        ):
+            raise AssertionError(
+                f"Attention workspace arena exceeded its profiled size {phase}: "
+                f"profiled={limits}, current={current}."
+            )
+
+    def workspace_sizes_bytes(self) -> tuple[int, ...]:
+        """Return the allocated size of every ubatch workspace."""
+        return tuple(
+            self._workspace_size_bytes(workspace)
+            for workspace in self._current_workspaces
+        )
+
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
@@ -213,7 +255,7 @@ class WorkspaceManager:
             The current workspace tensor.
 
         """
-        workspace_id = self._get_workspace_id()
+        workspace_id = self._resolve_workspace_id()
         current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
 
@@ -302,6 +344,16 @@ def current_workspace_manager() -> "WorkspaceManager":
         "with a device before using workspace functions."
     )
     return _manager
+
+
+@contextmanager
+def use_workspace_ubatch_id(ubatch_id: int) -> Iterator[None]:
+    """Route workspace requests to an explicit ubatch during initialization."""
+    token = _workspace_ubatch_id.set(ubatch_id)
+    try:
+        yield
+    finally:
+        _workspace_ubatch_id.reset(token)
 
 
 def init_workspace_manager(

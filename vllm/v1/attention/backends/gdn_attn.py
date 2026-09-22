@@ -85,6 +85,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
     reorder_batch_threshold: int = 1
 
+    @classmethod
+    def persistent_workspace_profiling_support(
+        cls, vllm_config: VllmConfig, kv_cache_spec: MambaSpec
+    ) -> bool | None:
+        return False
+
     def __init__(
         self,
         kv_cache_spec: MambaSpec,
