@@ -109,7 +109,10 @@ class MooncakeOutputPublisher:
                 )
         if end > stored_end:
             chunks.append(output.rows[: end - stored_end].tobytes())
-        if not request.is_finished():
+        # String stops are detected in the API process, which needs these keys
+        # before it can finish the request and abort the EngineCore request.
+        assert request.sampling_params is not None
+        if not request.is_finished() and not request.sampling_params.stop:
             return None
         del self._chunks[request.request_id]
         result: list[str] = []
@@ -152,12 +155,10 @@ def create_mooncake_block_store(
 
     # Pool capacity is user-sized, not derived from the GPU KV cache. Each
     # embedded client contributes its configured segment, including the
-    # EngineCore publisher. See docs/features/aux_output_mooncake.md.
+    # EngineCore publisher.
     config = MooncakeStoreConfig.load_from_config(
         "VLLM_AUX_OUTPUT_MOONCAKE_CONFIG_PATH"
     )
-    if config.enable_offload:
-        raise ValueError("AuxOutput does not support the KV enable_offload policy")
     store = MooncakeDistributedStore()
     try:
         setup_mooncake_store(
