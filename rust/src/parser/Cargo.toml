@@ -11,6 +11,7 @@ test-util = []
 easy-ext.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_with.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
 vllm-tokenizer.workspace = true
