@@ -13,7 +13,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_type,
 )
@@ -39,8 +38,7 @@ logger = init_logger(__name__)
 def is_valid_flashinfer_cutlass_fused_moe(
     hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
 ) -> bool:
-    """
-    Check if the given problem size is supported by the FlashInfer CUTLASS MoE
+    """Check if the given problem size is supported by the FlashInfer CUTLASS MoE
     kernel.
     """
     if not has_flashinfer_cutlass_fused_moe():
@@ -220,8 +218,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
-        """
-        Compute the shapes for the temporary and final outputs of the two gemms
+        """Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
         independent, the workspace for the first gemm can be shared with the
         workspace for the last gemm.
@@ -389,7 +386,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
-            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:

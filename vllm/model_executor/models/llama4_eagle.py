@@ -17,6 +17,7 @@
 # limitations under the License.
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -46,6 +47,19 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+if TYPE_CHECKING:
+
+    class _EagleLlama4ForCausalLMBase(nn.Module):
+        def set_moe_parameters(self) -> None: ...
+
+        def permute_qk_weight_for_rotary(
+            self, name: str, loaded_weight: torch.Tensor
+        ) -> tuple[str, torch.Tensor]: ...
+
+else:
+    _EagleLlama4ForCausalLMBase = Llama4ForCausalLM
+
+
 @support_torch_compile
 class LlamaModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
@@ -68,7 +82,9 @@ class LlamaModel(nn.Module):
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.validate_and_update_config(start_layer_id, quant_config)
         self.vocab_size = self.config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
@@ -152,16 +168,18 @@ class LlamaModel(nn.Module):
             }
 
 
-class EagleLlama4ForCausalLM(Llama4ForCausalLM, SupportsMultiModalEmbeddings):
+class EagleLlama4ForCausalLM(_EagleLlama4ForCausalLMBase, SupportsMultiModalEmbeddings):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
         # draft model quantization config may differ from target model
         quant_config = VllmConfig.get_quantization_config(
-            vllm_config.speculative_config.draft_model_config, vllm_config.load_config
+            speculative_config.draft_model_config, vllm_config.load_config
         )
         self.model = LlamaModel(
             vllm_config=vllm_config,

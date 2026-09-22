@@ -85,57 +85,22 @@ def _bgmv_expand_slice_impl(
     )
 
 
-def _bgmv_shrink_fake(
-    inputs: torch.Tensor,
-    lora_a_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    scaling: float,
-) -> None:
-    return None
-
-
-def _bgmv_expand_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    add_inputs: bool,
-) -> None:
-    return None
-
-
-def _bgmv_expand_slice_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    slice_offset: int,
-    slice_size: int,
-    add_inputs: bool,
-) -> None:
-    return None
-
-
 direct_register_custom_op(
     op_name="xpu_bgmv_shrink",
     op_func=_bgmv_shrink_impl,
     mutates_args=["output_tensor"],
-    fake_impl=_bgmv_shrink_fake,
 )
 
 direct_register_custom_op(
     op_name="xpu_bgmv_expand",
     op_func=_bgmv_expand_impl,
     mutates_args=["output_tensor"],
-    fake_impl=_bgmv_expand_fake,
 )
 
 direct_register_custom_op(
     op_name="xpu_bgmv_expand_slice",
     op_func=_bgmv_expand_slice_impl,
     mutates_args=["output_tensor"],
-    fake_impl=_bgmv_expand_slice_fake,
 )
 
 
