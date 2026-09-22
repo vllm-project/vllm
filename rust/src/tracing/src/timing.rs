@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Span};
-use tracing::{Id, Subscriber, info_span};
+use tracing::span::Attributes;
+use tracing::{Id, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -60,6 +60,26 @@ impl Visit for SpanFields {
 
 /// `tracing` layer that aggregates stage-span timings per request, keyed by
 /// the nearest ancestor span with a `request_id` field.
+///
+/// # Span contract
+///
+/// Timed spans must have the configured target and a `stage` field. The
+/// `request_id` is taken from the timed span itself or its nearest ancestor
+/// carrying that field, regardless of the ancestor's target. Spans without
+/// a request ID are ignored. Span names are unrestricted.
+///
+/// Both fields are read at span creation; subsequent [`tracing::Span::record`]
+/// calls are ignored. String values are used verbatim; other values use their
+/// debug representation. Prefer string fields for stable keys.
+///
+/// # Timing semantics
+///
+/// Each sample measures wall-clock time from span creation to final close,
+/// including async waits and any time the span remains alive through cloned
+/// handles. Nested and concurrent spans are measured independently, so their
+/// durations can overlap. Repeated stages accumulate under `"{stage}_secs"`
+/// for each request. Closing spans are recorded regardless of the operation's
+/// success, failure, or cancellation; callers select the samples to report.
 pub struct RequestTimingLayer {
     target: &'static str,
     stats: Arc<Mutex<HashMap<String, StageStats>>>,
@@ -87,6 +107,10 @@ impl RequestTimingLayer {
 
 impl RequestTimingStats {
     /// Drain and return `{request_id: {stage_secs}}` records.
+    ///
+    /// Returns accumulated timings since the previous drain. Spans still open
+    /// contribute to a later drain; finish the measured work before calling
+    /// this method to collect complete request timings.
     pub fn stat(&self) -> HashMap<String, StageStats> {
         std::mem::take(&mut *self.stats.lock().unwrap())
     }
@@ -137,27 +161,6 @@ where
         *stats.entry(request_id).or_default().entry(format!("{stage}_secs")).or_default() +=
             start.elapsed().as_secs_f64();
     }
-}
-
-/// Target of the multimodal preprocessing stage spans.
-const MM_STAGE_TARGET: &str = "mm_processor_timing";
-
-/// Create the timing layer and its stats handle for multimodal preprocessing
-/// stage spans (`vllm-bench mm-processor`), mirroring the Python
-/// `TimingContext` / `MultiModalTimingRegistry`.
-pub fn mm_timing_layer() -> (RequestTimingLayer, RequestTimingStats) {
-    RequestTimingLayer::new(MM_STAGE_TARGET)
-}
-
-/// Span carrying the `request_id` used to attribute multimodal stage timings.
-pub fn mm_request_span(request_id: &str) -> Span {
-    info_span!("mm_request", request_id)
-}
-
-/// Span for one multimodal preprocessing stage; the elapsed time is recorded
-/// on close.
-pub fn mm_stage_span(stage: &'static str) -> Span {
-    info_span!(target: MM_STAGE_TARGET, "mm_stage", stage)
 }
 
 #[cfg(test)]
