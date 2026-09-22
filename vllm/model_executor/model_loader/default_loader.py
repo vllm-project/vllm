@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     fastsafetensors_weights_iterator,
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
+    filter_mm_encoder_only_safetensors_files,
     get_quant_config,
     instanttensor_weights_iterator,
     maybe_download_from_modelscope,
@@ -74,6 +75,8 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         self.local_expert_ids: set[int] | None = None
+        # Set in load_weights when --mm-encoder-only; used to drop LM-only shards.
+        self._encoder_only_lm_prefixes: tuple[str, ...] | None = None
 
         extra_config = load_config.model_loader_extra_config
         if not isinstance(extra_config, dict):
@@ -239,20 +242,39 @@ class DefaultModelLoader(BaseModelLoader):
                 f"Cannot find any model weights with `{model_name_or_path}`"
             )
 
-        return hf_folder, hf_weights_files, use_safetensors
+        return hf_folder, hf_weights_files, use_safetensors, index_file
 
     def _get_weights_iterator(
         self, source: "Source"
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         extra_config = self.load_config.model_loader_extra_config
-        hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
-            source.model_or_path,
-            source.subfolder,
-            source.revision,
-            source.fall_back_to_pt,
-            source.allow_patterns_overrides,
+        hf_folder, hf_weights_files, use_safetensors, index_file = (
+            self._prepare_weights(
+                source.model_or_path,
+                source.subfolder,
+                source.revision,
+                source.fall_back_to_pt,
+                source.allow_patterns_overrides,
+            )
         )
+        if (
+            self._encoder_only_lm_prefixes is not None
+            and use_safetensors
+            and hf_weights_files
+        ):
+            hf_weights_files = filter_mm_encoder_only_safetensors_files(
+                hf_weights_files,
+                hf_folder,
+                index_file,
+                self._encoder_only_lm_prefixes,
+            )
+            if not hf_weights_files:
+                raise RuntimeError(
+                    "mm-encoder-only shard filter removed all weight files for "
+                    f"`{source.model_or_path}`; check language_model prefixes "
+                    f"{self._encoder_only_lm_prefixes}"
+                )
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
@@ -348,6 +370,23 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns_overrides=None,
         )
 
+    def _init_mm_encoder_only_weight_filter(
+        self, model: nn.Module, model_config: ModelConfig
+    ) -> None:
+        """Skip pure language-model safetensors shards under --mm-encoder-only."""
+        mm_config = model_config.multimodal_config
+        if mm_config is None or not mm_config.mm_encoder_only:
+            self._encoder_only_lm_prefixes = None
+            return
+
+        lm_names = getattr(model, "_language_model_names", None) or ()
+        prefixes = tuple(
+            name if name.endswith(".") else f"{name}." for name in lm_names
+        )
+        # Fallback covers HF VLMs that nest LM weights under language_model.*
+        # when _mark_language_model did not record names.
+        self._encoder_only_lm_prefixes = prefixes or ("language_model.",)
+
     def _init_ep_weight_filter(self, model_config: ModelConfig) -> None:
         """Compute local expert ids for EP weight filtering.
 
@@ -423,6 +462,7 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.safetensors_load_strategy = "torchao"
 
         self._init_ep_weight_filter(model_config)
+        self._init_mm_encoder_only_weight_filter(model, model_config)
 
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 

@@ -656,6 +656,69 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
     return hf_weights_files
 
 
+def filter_mm_encoder_only_safetensors_files(
+    hf_weights_files: list[str],
+    hf_folder: str,
+    index_file: str,
+    language_model_prefixes: Iterable[str],
+) -> list[str]:
+    """Drop safetensors shards that only contain language-model weights.
+
+    Used with ``--mm-encoder-only`` so Encoder-only EPD instances avoid reading
+    pure LM shards from disk/DRAM.  A shard is kept if it contains any key that
+    does not start with one of ``language_model_prefixes``.
+
+    Without an index file, returns ``hf_weights_files`` unchanged (cannot safely
+    decide which shards are LM-only).
+    """
+    prefixes = tuple(language_model_prefixes)
+    if not prefixes:
+        return hf_weights_files
+
+    index_path = os.path.join(hf_folder, index_file)
+    if not os.path.isfile(index_path):
+        logger.warning_once(
+            "mm-encoder-only shard filter skipped: index file %s not found",
+            index_path,
+        )
+        return hf_weights_files
+
+    with open(index_path) as f:
+        weight_map: dict[str, str] = json.load(f)["weight_map"]
+
+    keys_by_file: dict[str, list[str]] = defaultdict(list)
+    for weight_name, weight_file in weight_map.items():
+        keys_by_file[weight_file].append(weight_name)
+
+    def _is_lm_only(weight_file: str) -> bool:
+        keys = keys_by_file.get(weight_file)
+        if not keys:
+            # Not listed in the index (e.g. extra matched glob) — keep.
+            return False
+        return all(any(key.startswith(p) for p in prefixes) for key in keys)
+
+    kept: list[str] = []
+    skipped = 0
+    for path in hf_weights_files:
+        rel = os.path.relpath(path, hf_folder)
+        # Index weight_map values are usually basenames; tolerate either form.
+        basename = os.path.basename(path)
+        if _is_lm_only(rel) or _is_lm_only(basename):
+            skipped += 1
+            continue
+        kept.append(path)
+
+    if skipped:
+        logger.info_once(
+            "mm-encoder-only: skipped %d/%d safetensors shard(s) that only "
+            "contain language-model weights (prefixes=%s)",
+            skipped,
+            skipped + len(kept),
+            prefixes,
+        )
+    return kept
+
+
 # explicitly use pure text format, with a newline at the end
 # this makes it impossible to see the animation in the progress bar
 # but will avoid messing up with ray or multiprocessing, which wraps
