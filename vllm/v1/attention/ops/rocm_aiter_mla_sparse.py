@@ -3429,13 +3429,14 @@ def _rocm_sparse_attn_decode_ragged_triton(
         and extra_compress_ratio > 0
     )
     direct_extra = (
-        _ON_GFX950
-        and extra_cache is not None
+        extra_cache is not None
         and extra_indices is not None
         and extra_token_to_req is not None
         and (extra_lengths is not None or derive_extra_lengths)
         and extra_block_table is not None
     )
+    if direct_extra and not _ON_GFX950:
+        raise ValueError("Direct top-k metadata requires gfx950")
     has_extra = direct_extra or (
         extra_cache is not None
         and extra_indices is not None
@@ -3743,6 +3744,8 @@ def _rocm_sparse_attn_decode_triton(
         )
         and extra_block_table is not None
     )
+    if direct_extra and not _ON_GFX950:
+        raise ValueError("Direct top-k metadata requires gfx950")
     if (
         not direct_extra
         and (extra_ragged_indices is None or extra_ragged_indptr is None)
@@ -3784,6 +3787,7 @@ def _rocm_sparse_attn_decode_triton(
             and extra_ragged_indices is not None
             and extra_ragged_indptr is not None
         ),
+        adaptive_splits=adaptive_splits,
     )
 
 

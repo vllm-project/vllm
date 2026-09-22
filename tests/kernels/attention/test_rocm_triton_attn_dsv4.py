@@ -895,6 +895,85 @@ def test_sparse_attn_decode_trusted_flag_without_extra_metadata() -> None:
     assert torch.equal(actual, torch.zeros_like(actual))
 
 
+@pytest.mark.parametrize("adaptive_splits", [False, True])
+def test_sparse_decode_wrapper_preserves_adaptive_splits(
+    monkeypatch, adaptive_splits: bool
+) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    query = torch.empty(1, 1, HEAD_DIM, dtype=torch.bfloat16)
+    indices = torch.empty(0, dtype=torch.int32)
+    indptr = torch.zeros(2, dtype=torch.int32)
+
+    def record_decode(**kwargs):
+        assert kwargs["adaptive_splits"] is adaptive_splits
+        return kwargs["q"]
+
+    monkeypatch.setattr(mod, "_rocm_sparse_attn_decode_ragged_triton", record_decode)
+    actual = mod._rocm_sparse_attn_decode_triton(
+        q=query,
+        main_cache=torch.empty(1, 4, 584, dtype=torch.uint8),
+        main_indices=indices.reshape(1, 0),
+        main_ragged_indices=indices,
+        main_ragged_indptr=indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        adaptive_splits=adaptive_splits,
+    )
+    assert actual is query
+
+
+@pytest.mark.parametrize("ragged_entry", [False, True])
+@pytest.mark.parametrize("derived_lengths", [False, True])
+def test_sparse_decode_rejects_direct_metadata_without_gfx950(
+    monkeypatch, ragged_entry: bool, derived_lengths: bool
+) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    monkeypatch.setattr(mod, "_ON_GFX950", False)
+    device = torch.device("meta")
+    indices = torch.empty(0, dtype=torch.int32, device=device)
+    indptr = torch.empty(2, dtype=torch.int32, device=device)
+    lengths = torch.empty(1, dtype=torch.int32, device=device)
+    cache = torch.empty(1, 4, 584, dtype=torch.uint8, device=device)
+    metadata = (
+        dict(
+            extra_seq_lens=lengths,
+            extra_query_start_loc=indptr,
+            extra_is_valid_token=torch.empty(1, dtype=torch.bool, device=device),
+            extra_compress_ratio=2,
+        )
+        if derived_lengths
+        else dict(extra_lengths=lengths)
+    )
+    if ragged_entry:
+        decode = mod._rocm_sparse_attn_decode_ragged_triton
+        metadata.update(main_indices=indices, main_indptr=indptr)
+    else:
+        decode = mod._rocm_sparse_attn_decode_triton
+        metadata.update(
+            main_indices=indices.reshape(1, 0),
+            main_ragged_indices=indices,
+            main_ragged_indptr=indptr,
+        )
+    with pytest.raises(ValueError, match="Direct top-k metadata requires gfx950"):
+        decode(
+            q=torch.empty(1, 1, HEAD_DIM, dtype=torch.bfloat16, device=device),
+            main_cache=cache,
+            scale=HEAD_DIM**-0.5,
+            attn_sink=None,
+            nope_head_dim=NOPE_HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            extra_cache=cache,
+            extra_indices=torch.empty(1, 1, dtype=torch.int32, device=device),
+            extra_token_to_req=lengths,
+            extra_block_table=torch.empty(1, 1, dtype=torch.int32, device=device),
+            **metadata,
+        )
+
+
 @pytest.mark.parametrize("on_gfx950", [False, True])
 @torch.inference_mode()
 def test_rocm_ragged_graph_buffer_view_tracks_source_width(
