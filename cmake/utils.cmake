@@ -525,6 +525,22 @@ function(cuda_archs_sm90plus OUT_CUDA_ARCHS TGT_CUDA_ARCHS)
   set(${OUT_CUDA_ARCHS} ${_archs} PARENT_SCOPE)
 endfunction()
 
+# Expanding ldmatrix requires CUDA 13.4 and a feature-specific compilation target.
+function(cuda_archs_ldmatrix_s4 OUT_CUDA_ARCHS TGT_CUDA_ARCHS)
+  set(_archs)
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.4)
+    # Intersect separately so a family match cannot consume another requested
+    # target (e.g. 10.0a and 10.3a must both get native kernels).
+    foreach(_target IN LISTS TGT_CUDA_ARCHS)
+      cuda_archs_sm90plus(_target_archs "${_target}")
+      list(APPEND _archs ${_target_archs})
+    endforeach()
+    list(FILTER _archs INCLUDE REGEX "[af]$")
+    list(REMOVE_DUPLICATES _archs)
+  endif()
+  set(${OUT_CUDA_ARCHS} ${_archs} PARENT_SCOPE)
+endfunction()
+
 #
 # Override the GPU architectures detected by cmake/torch and filter them by
 # `GPU_SUPPORTED_ARCHES`. Sets the final set of architectures in

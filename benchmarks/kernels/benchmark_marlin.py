@@ -167,6 +167,7 @@ def bench_run(
         "marlin_workspace": marlin_workspace,
         # GPTQ params
         "q_w_gptq": q_w_gptq,
+        "is_w4a8_int8": False,
         # AllSpark W8A16 params
         "qw_reorder": qw_reorder,
         "s_reorder": s_reorder,
@@ -219,7 +220,7 @@ def bench_run(
     if repack_supported:
         results.append(
             benchmark.Timer(
-                stmt="q_res = gptq_marlin_repack(q_w_gptq, size_k, size_n, quant_type.size_bits)",  # noqa: E501
+                stmt="q_res = gptq_marlin_repack(q_w_gptq, size_k, size_n, quant_type.size_bits, False, is_w4a8_int8)",  # noqa: E501
                 globals=globals,
                 label=label,
                 sub_label=sub_label,
