@@ -496,15 +496,22 @@ steps:
   - vllm/assets/
   - vllm/config/
   - vllm/device_allocator/
+  - vllm/connections.py
   - vllm/engine/arg_utils.py
   - vllm/entrypoints/chat_utils.py
   - vllm/entrypoints/mcp/
   - vllm/entrypoints/openai/chat_completion/protocol.py
+  - vllm/entrypoints/openai/completion/protocol.py
+  - vllm/entrypoints/openai/responses/protocol.py
   - vllm/entrypoints/generate/base/protocol.py
+  - vllm/env_override.py
   - vllm/envs.py
   - vllm/exceptions.py
   - vllm/inputs/
+  - vllm/logging_utils/
+  - vllm/logprobs.py
   - vllm/model_executor/layers/quantization/quark/
+  - vllm/model_executor/model_loader/tensorizer.py
   - vllm/multimodal/
   - vllm/outputs.py
   - vllm/parser/
@@ -514,17 +521,38 @@ steps:
   - vllm/reasoning/
   - vllm/renderers/
   - vllm/sampling_params.py
+  - vllm/scalar_type.py
   - vllm/tokenizers/
   - vllm/tool_parsers/
   - vllm/transformers_utils/
+  - vllm/triton_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
+  - cmake/utils.cmake
+  - tests/test_access_log_filter.py
+  - tests/test_attention_backend_registry.py
+  - tests/test_audio_media_size_precheck.py
+  - tests/test_cmake_utils.py
+  - tests/test_connections.py
+  - tests/test_embedded_commit.py
   - tests/test_envs.py
+  - tests/test_force_first_config.py
+  - tests/test_fxgraphcache_pickle_patch.py
+  - tests/test_logprobs.py
   - tests/test_outputs.py
   - tests/test_pcp_dp.py
   - tests/test_pooling_params.py
+  - tests/test_quantization_revision_pin.py
   - tests/test_ray_env.py
+  - tests/test_ray_env_utils.py
+  - tests/test_request_input_bounds.py
   - tests/test_sampling_params.py
+  - tests/test_scalartype.py
+  - tests/test_tensorizer_revision_pin.py
+  - tests/test_triton_utils.py
+  - tests/test_version.py
+  - tests/test_zen_cpu_platform_detection.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -542,12 +570,29 @@ steps:
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s device_allocator
+  - pytest -v -s test_access_log_filter.py
+  - pytest -v -s test_attention_backend_registry.py
+  - pytest -v -s test_audio_media_size_precheck.py
+  - pytest -v -s test_cmake_utils.py
+  - pytest -v -s test_connections.py
+  - pytest -v -s test_embedded_commit.py
   - pytest -v -s test_envs.py
+  - pytest -v -s test_force_first_config.py
+  - pytest -v -s test_fxgraphcache_pickle_patch.py
+  - pytest -v -s test_logprobs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pcp_dp.py
   - pytest -v -s test_pooling_params.py
+  - pytest -v -s test_quantization_revision_pin.py
   - pytest -v -s test_ray_env.py
+  - pytest -v -s test_ray_env_utils.py
+  - pytest -v -s test_request_input_bounds.py
   - pytest -v -s test_sampling_params.py
+  - pytest -v -s test_scalartype.py
+  - pytest -v -s test_tensorizer_revision_pin.py
+  - pytest -v -s test_triton_utils.py
+  - pytest -v -s test_version.py
+  - pytest -v -s test_zen_cpu_platform_detection.py
   - pytest -v -s tokenizers_
   - pytest -v -s parser
   - pytest -v -s transformers_utils
