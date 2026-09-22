@@ -2,17 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MSA (gfx950/CDNA4) indexer impl for MiniMax M3.
 
-Scores index blocks and selects the top-k. Only the scorer differs between the
-two sides of the batch: prefill's rows are ragged, each with its own causal
-reach, and decode's are uniform per request and shardable across ranks. Both
-then hand a ``[heads, rows, blocks]`` fp32 score to the same selection pair --
-``_local_topk`` packs a row's winners into int64 sort keys, ``_merge_topk``
-picks the global top-k and emits the attend's page table.
+Scores index blocks and selects the top-k with AITER's fp8 MFMA kernels. Only
+the scorer differs between the two sides of the batch: prefill's rows are
+ragged, each with its own causal reach, so they take
+``pa_sparse_block_score_prefill``, while decode's are uniform per request and
+take ``pa_sparse_block_score_decode``. The two share one tile body in AITER, so
+they agree block for block, and both hand a ``[heads, rows, blocks]`` fp32
+score to the same ``pa_sparse_block_topk``.
+
+That top-k also emits the attend's page table. The winners are already in its
+workgroup's LDS, so resolving them through the block table there costs one wave
+and saves the attend a second pass over the selection.
+
+Indexer CP is the one case AITER cannot serve, because its decode pair reads
+the whole index cache on the rank that owns the row. That path keeps Triton
+kernels of its own -- score a stride of the blocks, exchange candidates, merge
+-- and they emit the same page table in the same numbering, so the two phases
+of a batch can share one buffer whichever pair wrote which rows.
 """
 
 import math
 from dataclasses import dataclass
-from functools import cache
 from typing import ClassVar
 
 import torch
@@ -48,7 +58,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -63,36 +73,51 @@ MSA_INDEX_HEAD_DIM = 128
 # The fp8 MFMA the score kernels are built on exists on these targets only.
 SUPPORTED_ARCHS = ("gfx950",)
 
+# Wave width the top-k is written against: it gives one lane per output slot
+# and reads the score row in wave-wide strips.
+WAVE_SIZE = 64
+# Per-lane register slots the top-k can hold, which is what caps the context:
+# a row may span at most SLOTS_MAX * WAVE_SIZE blocks.
+SLOTS_MAX = 128
+MAX_SUPPORTED_BLOCKS = SLOTS_MAX * WAVE_SIZE
+# MFMA columns the score pass has, one per (query token, index head) pair.
+MFMA_COLS = 16
 
-def _pow2_ceil(n: int) -> int:
-    return 1 << (n - 1).bit_length() if n >= 1 else 1
-
-
-# Workgroups the decode score grid aims for, and the floor on how few blocks
-# one chunk may walk. The query tile is loaded once outside the block loop, so
-# a chunk down to a single block pays that fixed cost for nothing.
+# Workgroups the CP score grid aims for, and the floor on how few blocks one
+# chunk may walk. The query tile is loaded once outside the block loop, so a
+# chunk down to a single block pays that fixed cost for nothing.
 DECODE_SCORE_TARGET_GRID = 1 << 14
 DECODE_SCORE_MIN_BLOCKS = 3
 DECODE_TOPK_NUM_WARPS = 8
 DECODE_TOPK_TILE = 512
 
 
-# Query rows one prefill score program owns, and the workgroups per compute
-# unit its block-axis split aims for. The query tile decides how many rows
-# share a loaded page; the split decides how many programs there are. Keeping
-# them separate is the point -- without it the only way to raise the grid is to
-# shrink the tile, which is the same thing as reading every page more times.
-SCORE_BLOCK_SIZE_Q = 128
-SCORE_CHUNK_CTAS_PER_CU = 8
+def _score_buffer(
+    heads: int, rows: int, max_seq_len: int, block_size: int, device: torch.device
+) -> torch.Tensor:
+    """Score buffer for ``rows`` query rows, padded as the top-k requires.
+
+    Lanes read whole wave-wide strips with no tail guard and each holds a
+    power-of-two count of them, so the block axis is padded past the block
+    count the context actually needs.
+
+    Left uninitialized on purpose: the score pass writes every block up to the
+    longest row it covers and the top-k reads only the blocks its own row can
+    see, so nothing downstream observes the padded tail. Filling it would cost
+    a write over what is, at long context, the largest tensor in the indexer.
+    """
+    blocks = cdiv(max(max_seq_len, 1), block_size)
+    width = next_power_of_2(cdiv(blocks, WAVE_SIZE)) * WAVE_SIZE
+    return torch.empty((heads, rows, width), dtype=torch.float32, device=device)
 
 
-@cache
-def _compute_units(device_index: int) -> int:
-    return torch.cuda.get_device_properties(device_index).multi_processor_count
+# ---------------------------------------------------------------------------
+# The indexer-CP decode scoring & top-k kernels
+# ---------------------------------------------------------------------------
 
 
 def _decode_score_chunks(batch: int, max_block: int) -> int:
-    """Chunks one decode score row is split across.
+    """Chunks one score row is split across.
 
     A count, not a size: the grid is (request, chunk), so this IS the second
     grid dim and must stay shape-constant for a cudagraph to replay it. The
@@ -106,24 +131,6 @@ def _decode_score_chunks(batch: int, max_block: int) -> int:
     chunks = min(1 << (target.bit_length() - 1), max_block)
     chunks = min(chunks, max(1, cdiv(max_block, DECODE_SCORE_MIN_BLOCKS)))
     return cdiv(max_block, cdiv(max_block, chunks))
-
-
-def _score_chunk_blocks(max_block: int, q_tiles: int, batch: int, heads: int, device):
-    """128-blocks one prefill score program owns.
-
-    Derived from max_block, a launch-time bound, so a cudagraph replays the
-    grid it captured. Chunks are sized rather than counted so that chunk z is
-    the same pages for every query tile that reaches it.
-    """
-    index = (
-        device.index
-        if device.index is not None
-        else torch.accelerator.current_device_index()
-    )
-    want = _compute_units(index) * SCORE_CHUNK_CTAS_PER_CU
-    chunks = max(1, want // max(1, q_tiles * batch * heads))
-    chunks = min(1 << (chunks.bit_length() - 1), max(1, max_block))
-    return cdiv(max_block, chunks)
 
 
 def _require_packable(max_block: int) -> None:
@@ -175,7 +182,7 @@ def _force(score, block, valid, local_start, INIT_BLOCKS: tl.constexpr):
     """Lift the always-selected blocks above every scored one.
 
     Two tiers so the sink blocks outrank the sliding window, matching the
-    order the fused selector used; both sit above any real score.
+    order the AITER score pass encodes them in; both sit above any real score.
     """
     score = tl.where(valid & (block < INIT_BLOCKS), 1e30, score)
     return tl.where(valid & (block >= local_start), 1e29, score)
@@ -195,7 +202,12 @@ def _emit_sparse_block_table_row(
     NUM_KV_HEADS: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
 ):
-    """Resolve the winners through the block table into the attend's page table."""
+    """Resolve the winners through the block table into the attend's page table.
+
+    The same table ``pa_sparse_block_topk`` emits on the AITER path, in the
+    same page-16 numbering with the pages of one block folded head-minor, so
+    the two phases can write disjoint row ranges of one shared buffer.
+    """
     off_t = tl.arange(0, BLOCK_SIZE_T)
     # Tail block: the 128-block holding this token's last causal key. It is the
     # only selected block that can be partial, so it has to land last -- ctx
@@ -265,18 +277,29 @@ def _context_score(
 ):
     """Per-block max score over this rank's stride of the 128-blocks.
 
-    ``WORLD == 1`` is the unsharded case and scores every block. The causal
-    bound is taken against the true length and the GLOBAL block id, so a shard
-    never shifts it.
+    The causal bound is taken against the true length and the GLOBAL block id,
+    so a shard never shifts it.
 
     The dot takes the query's dtype and casts the cache to it, so an fp8 query
     keeps the whole thing on v_mfma_f32_16x16x32_fp8_fp8 -- the instruction the
-    AITER pass this replaces was built on -- and a bf16 one widens the cache
-    instead. Same answer either way to within fp32 accumulation order; fp8 is
-    the faster of the two and the only one that needs no conversion pass.
+    AITER pass is built on -- and a bf16 one widens the cache instead. Same
+    answer either way to within fp32 accumulation order.
     """
     request = tl.program_id(0)
     chunk = tl.program_id(1)
+    length = tl.load(Lengths + request)
+    # This chunk's slice of this rank's stride of the blocks the request
+    # reaches, all resolved before the loop so that the body needs no
+    # predicate. A load under an `if` is control dependent, which stops the
+    # pipeliner from issuing the next iteration's key tile early, and on a loop
+    # this far into bandwidth that exposed latency is most of the runtime.
+    end = tl.minimum(tl.cdiv(length, 128), GLOBAL_BLOCKS)
+    scan = tl.minimum(LOCAL_BLOCKS, tl.cdiv(tl.maximum(end - RANK, 0), WORLD))
+    lo = chunk * CHUNK
+    hi = tl.minimum(lo + CHUNK, scan)
+    if lo >= hi:
+        return
+
     n = tl.arange(0, N)
     token, head = n // HEADS, n % HEADS
     row = request * QUERY_LEN + token
@@ -288,132 +311,19 @@ def _context_score(
         mask=n[None, :] < HEADS * QUERY_LEN,
         other=0.0,
     )
-    length = tl.load(Lengths + request)
     cutoff = length - QUERY_LEN + token + 1
     pos = tl.arange(0, 128)
-    for local in range(chunk * CHUNK, tl.minimum((chunk + 1) * CHUNK, LOCAL_BLOCKS)):
+    for local in tl.range(lo, hi):
         block = local * WORLD + RANK
-        valid = (block < GLOBAL_BLOCKS) & (block * 128 < length)
-        # Every output slot is overwritten, including empty shards and padding.
-        score = tl.full((N,), float("-inf"), tl.float32)
-        if valid:
-            page = tl.load(Table + request * TABLE_STRIDE + block).to(tl.int64)
-            k = tl.load(Cache + page * 128 * 128 + pos[:, None] * 128 + d[None, :])
-            dot = tl.dot(k.to(q.dtype), q, out_dtype=tl.float32) * SCALE
-            dot = tl.where(
-                block * 128 + pos[:, None] < cutoff[None, :], dot, float("-inf")
-            )
-            score = tl.max(dot, 0)
+        page = tl.load(Table + request * TABLE_STRIDE + block).to(tl.int64)
+        k = tl.load(Cache + page * 128 * 128 + pos[:, None] * 128 + d[None, :])
+        dot = tl.dot(k.to(q.dtype), q, out_dtype=tl.float32) * SCALE
+        dot = tl.where(block * 128 + pos[:, None] < cutoff[None, :], dot, float("-inf"))
         tl.store(
             Scores + (head * TOKENS + row) * LOCAL_BLOCKS + local,
-            score,
+            tl.max(dot, 0),
             mask=n < HEADS * QUERY_LEN,
         )
-
-
-@triton.jit
-def _prefill_score(
-    q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
-    ik_cache_ptr,  # index-K cache: [num_pages, 128, head_dim]
-    score_ptr,  # [num_idx_heads, total_q, max_block]
-    block_table_ptr,  # [num_reqs, max_blocks]
-    cu_seqlens,  # [batch+1] query start offsets
-    seq_lens,  # [batch] total K length
-    prefix_lens,  # [batch] context length before this chunk's queries
-    num_idx_heads,
-    head_dim: tl.constexpr,
-    sm_scale,
-    chunk_blocks,  # 128-blocks one chunk owns
-    stride_q_n,
-    stride_q_h,
-    stride_q_d,
-    stride_ik_blk,
-    stride_ik_pos,
-    stride_ik_d,
-    stride_s_h,
-    stride_s_n,
-    stride_s_k,
-    stride_bt_b,
-    BLOCK_SIZE_Q: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,  # == 128
-):
-    """Per-block max score for ragged prefill rows.
-
-    Query lengths come from ``cu_seqlens`` rather than being uniform, so a
-    request's rows are spread over several programs and each row carries its
-    own causal reach -- which is why decode's uniform-shaped scorer cannot
-    serve this phase. The head axis is a grid dimension and the head stride is
-    explicit, so a rank under CP can score its own head straight out of the
-    replicated projection without compacting it first.
-    """
-    sm_scale_log2e = sm_scale * 1.4426950409
-    pid_q = tl.program_id(0)
-    pid_bh = tl.program_id(1)
-    pid_chunk = tl.program_id(2)
-    pid_b = pid_bh // num_idx_heads
-    pid_h = pid_bh % num_idx_heads
-
-    seq_start = tl.load(cu_seqlens + pid_b)
-    q_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
-    seq_len = tl.load(seq_lens + pid_b)
-    prefix_len = tl.load(prefix_lens + pid_b)
-    if BLOCK_SIZE_Q * pid_q >= q_len:
-        return
-
-    rows = (pid_q * BLOCK_SIZE_Q) + tl.arange(0, BLOCK_SIZE_Q)
-    cols = tl.arange(0, head_dim)
-    q = tl.load(
-        q_ptr
-        + seq_start * stride_q_n
-        + pid_h * stride_q_h
-        + rows[:, None] * stride_q_n
-        + cols[None, :] * stride_q_d,
-        mask=rows[:, None] < q_len,
-        other=0.0,
-    )
-    q_start = prefix_len + pid_q * BLOCK_SIZE_Q
-
-    off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
-    off_k = tl.arange(0, BLOCK_SIZE_K)
-    off_d = tl.arange(0, head_dim)
-    bt_row = block_table_ptr + pid_b * stride_bt_b
-    # Causal window: blocks up to the last query token of this tile, then this
-    # chunk's slice of it. Early tiles see fewer blocks than late ones, so their
-    # later chunks are empty and exit here.
-    hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
-    blk_end = tl.cdiv(hi, BLOCK_SIZE_K)
-    blk_lo = pid_chunk * chunk_blocks
-    if blk_lo >= blk_end:
-        return
-    blk_hi = min(blk_lo + chunk_blocks, blk_end)
-    for blk in tl.range(blk_lo, blk_hi):
-        i = blk * BLOCK_SIZE_K
-        page = tl.load(bt_row + blk).to(tl.int64)
-        pos = i + off_k
-        # The cache allocation is a whole number of blocks, so the load needs no
-        # mask; tokens past the sequence are masked in the qk below.
-        k = tl.load(
-            ik_cache_ptr
-            + page * stride_ik_blk
-            + off_k[None, :] * stride_ik_pos
-            + off_d[:, None] * stride_ik_d,
-        )
-        if k.dtype.is_fp8():
-            qk = tl.dot(q.to(k.dtype), k, out_dtype=tl.float32) * sm_scale_log2e
-        else:
-            qk = tl.dot(q, k, out_dtype=tl.float32) * sm_scale_log2e
-        if q_start < i + BLOCK_SIZE_K:
-            qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
-        # One sparse block per K-tile: max over its 128 positions.
-        score = tl.max(qk, axis=1)
-        s_ptrs = (
-            score_ptr
-            + pid_h * stride_s_h
-            + (seq_start + pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q))
-            * stride_s_n
-            + blk * stride_s_k
-        )
-        tl.store(s_ptrs, score, mask=rows < q_len)
 
 
 @triton.jit
@@ -421,11 +331,6 @@ def _local_topk(
     Scores,
     Keys,
     Lengths,
-    Indices,
-    Table,
-    SparseBt,
-    SparseCtx,
-    RowReq,
     TOKENS: tl.constexpr,
     HEADS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
@@ -438,12 +343,6 @@ def _local_topk(
     LOCAL_KEEP: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
-    EMIT: tl.constexpr,
-    RAGGED: tl.constexpr,
-    TABLE_STRIDE: tl.constexpr,
-    SBT_STRIDE: tl.constexpr,
-    NUM_KV_HEADS: tl.constexpr,
-    PAGES_PER_BLOCK: tl.constexpr,
 ):
     """Pack this shard's [heads, tokens, local] scores to its own top-k keys.
 
@@ -456,13 +355,6 @@ def _local_topk(
     evicts could not have placed globally anyway -- that block lost to k-1
     other candidates on this rank plus the forced one, and the global top-k is
     k wide.
-
-    ``EMIT`` finishes the selection here instead of packing keys for a merge.
-    One shard IS the global top-k, so with CP off the merge has nothing to
-    combine -- it would read back the k keys this kernel just wrote and rank
-    them against nothing. The pin does not have to be repeated either: what
-    makes the merge re-pin is the score round trip, which is exactly what this
-    skips. Prefill always takes this path, having no shards to begin with.
     """
     row = tl.program_id(0)
     head = tl.program_id(1)
@@ -492,32 +384,7 @@ def _local_topk(
         tile = tl.topk(_pack_score_key(score, block + 1, valid), BLOCK_SIZE_T)
         winners = tl.topk(tl.cat(winners, tile, can_reorder=True), BLOCK_SIZE_T)
     off_t = tl.arange(0, BLOCK_SIZE_T)
-    if EMIT:
-        # Ragged rows name their request explicitly; the block table is still
-        # per request, so it is the only thing the row index cannot supply.
-        table_req = tl.load(RowReq + row) if RAGGED else request
-        topk_idx = (winners & 0xFFFF).to(tl.int32) - 1
-        topk_idx = tl.where(off_t < tl.minimum(TOPK, causal_blocks), topk_idx, -1)
-        tl.store(
-            Indices + (head * TOKENS + row) * TOPK + off_t, topk_idx, mask=off_t < TOPK
-        )
-        _emit_sparse_block_table_row(
-            topk_idx,
-            Table + table_req * TABLE_STRIDE,
-            SparseBt + (row * NUM_KV_HEADS + head) * SBT_STRIDE,
-            SparseCtx + row * NUM_KV_HEADS + head,
-            causal_len,
-            TOPK,
-            head,
-            128,
-            PAGES_PER_BLOCK,
-            NUM_KV_HEADS,
-            BLOCK_SIZE_T,
-        )
-    else:
-        tl.store(
-            Keys + (head * TOKENS + row) * TOPK + off_t, winners, mask=off_t < TOPK
-        )
+    tl.store(Keys + (head * TOKENS + row) * TOPK + off_t, winners, mask=off_t < TOPK)
 
 
 @triton.jit
@@ -528,8 +395,6 @@ def _merge_topk(
     Table,
     SparseBt,
     SparseCtx,
-    RowReq,
-    RAGGED: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
     SBT_STRIDE: tl.constexpr,
     TOKENS: tl.constexpr,
@@ -549,10 +414,8 @@ def _merge_topk(
 ):
     """Merge gathered candidates into the global top-k, and emit the page table.
 
-    One program per (query row, owned head). Under CP the shard axis is the
-    exchange's and there is a single owned head; unsharded it is one shard and
-    the axis carries this rank's kv heads instead, which is what keeps a TP
-    size below the kv-head count on the same kernel.
+    One program per (query row, owned head): the shard axis is the exchange's,
+    and this rank keeps only the run of heads it owns.
 
     Forced blocks are re-pinned here even though the shard pass already pinned
     them, because the pin has to survive the score round trip: this is what
@@ -561,15 +424,9 @@ def _merge_topk(
     """
     row = tl.program_id(0)
     head = tl.program_id(1)
-    if RAGGED:
-        # Prefill: rows are ragged, so a row carries its own causal length and
-        # names its request explicitly -- the block table is still per request.
-        request = tl.load(RowReq + row)
-        causal_len = tl.load(Lengths + row)
-    else:
-        request = row // QUERY_LEN
-        token = row % QUERY_LEN
-        causal_len = tl.load(Lengths + request) - QUERY_LEN + token + 1
+    request = row // QUERY_LEN
+    token = row % QUERY_LEN
+    causal_len = tl.load(Lengths + request) - QUERY_LEN + token + 1
     valid_blocks = (causal_len + 127) // 128
     local_start = tl.maximum(0, valid_blocks - LOCAL_KEEP)
 
@@ -617,58 +474,7 @@ def _merge_topk(
     )
 
 
-def prefill_scores(
-    index_query: torch.Tensor,  # [total_q, heads, 128], any head stride
-    index_cache: torch.Tensor,  # [pages, 128, 128]
-    block_table: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    seq_lens: torch.Tensor,
-    context_lens: torch.Tensor,
-    *,
-    max_query_len: int,
-    max_seq_len: int,
-    scale: float,
-) -> torch.Tensor:
-    """[heads, total_q, blocks] scores for the ragged prefill rows."""
-    total_q, heads, head_dim = index_query.shape
-    batch = cu_seqlens_q.numel() - 1
-    blocks = cdiv(max_seq_len, MSA_SPARSE_BLOCK_SIZE)
-    scores = torch.empty(
-        (heads, total_q, blocks), dtype=torch.float32, device=index_query.device
-    )
-    if total_q == 0:
-        return scores
-    q_tiles = cdiv(max_query_len, SCORE_BLOCK_SIZE_Q)
-    chunk = _score_chunk_blocks(blocks, q_tiles, batch, heads, index_query.device)
-    _prefill_score[(q_tiles, batch * heads, cdiv(blocks, chunk))](
-        index_query,
-        index_cache,
-        scores,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
-        context_lens,
-        heads,
-        head_dim,
-        scale,
-        chunk,
-        index_query.stride(0),
-        index_query.stride(1),
-        index_query.stride(2),
-        index_cache.stride(0),
-        index_cache.stride(1),
-        index_cache.stride(2),
-        scores.stride(0),
-        scores.stride(1),
-        scores.stride(2),
-        block_table.stride(0),
-        BLOCK_SIZE_Q=SCORE_BLOCK_SIZE_Q,
-        BLOCK_SIZE_K=MSA_SPARSE_BLOCK_SIZE,
-    )
-    return scores
-
-
-def decode_scores(
+def shard_scores(
     index_query: torch.Tensor,  # [tokens, heads, 128]
     index_cache: torch.Tensor,  # [pages, 128, 128]
     block_table: torch.Tensor,
@@ -684,7 +490,8 @@ def decode_scores(
     tokens, heads, _ = index_query.shape
     # Handed straight to the dot in whatever dtype the fused QK-norm emitted,
     # which is fp8 whenever the index cache is e4m3. The kernel indexes the
-    # head dim directly, so only that stride has to be unit.
+    # head dim directly, so only that stride has to be unit -- which is what
+    # lets a CP rank score the replicated projection without compacting it.
     assert index_query.stride(2) == 1, "the index query's head dim must be contiguous"
     blocks = cdiv(max_seq_len, MSA_SPARSE_BLOCK_SIZE)
     local = cdiv(blocks, world)
@@ -712,7 +519,7 @@ def decode_scores(
         RANK=rank,
         WORLD=world,
         CHUNK=cdiv(local, chunks),
-        N=max(16, _pow2_ceil(heads * query_len)),
+        N=max(16, next_power_of_2(heads * query_len)),
         SCALE=scale * 1.4426950409,
         num_stages=3,
     )
@@ -721,7 +528,7 @@ def decode_scores(
 
 def candidate_keys(
     scores: torch.Tensor,  # [heads, tokens, local]
-    lengths: torch.Tensor,
+    seq_lens: torch.Tensor,
     *,
     topk: int,
     rank: int,
@@ -735,127 +542,19 @@ def candidate_keys(
 
     The full k and never k/world: the global winners may lie entirely inside
     one shard, so a rank that kept fewer could drop one.
-
-    Prefill uses this too, as ``query_len=1`` with ``lengths`` holding a causal
-    length per row rather than per request -- which is what the uniform
-    ``length - query_len + token + 1`` collapses to when the query is one token.
     """
     heads, tokens, local = scores.shape
     _require_packable(global_blocks)
     keys = torch.empty((heads, tokens, topk), dtype=torch.int64, device=scores.device)
     if tokens == 0:
         return keys
-    _launch_local_topk(
-        scores,
-        keys,
-        lengths,
-        topk=topk,
-        rank=rank,
-        world=world,
-        query_len=query_len,
-        global_blocks=global_blocks,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
-    )
-    return keys
-
-
-def select_and_emit(
-    scores: torch.Tensor,  # [heads, tokens, blocks]
-    topk_idx: torch.Tensor,  # [heads, tokens, topk] int32, written in place
-    lengths: torch.Tensor,
-    block_table: torch.Tensor,  # page-16 rebase of the ATTEND's table
-    sparse_bt: torch.Tensor,
-    sparse_ctx: torch.Tensor,
-    *,
-    topk: int,
-    query_len: int,
-    global_blocks: int,
-    num_kv_heads: int,
-    pages_per_block: int,
-    init_blocks: int,
-    local_blocks: int,
-    row_req_id: torch.Tensor | None = None,
-) -> None:
-    """Top-k and the attend's page table in one launch, for the unsharded case.
-
-    The same selection ``candidate_keys`` does, finished rather than packed for
-    a merge. Every caller that is not CP wants this one: prefill, which has no
-    shards, and decode with the indexer's context parallelism off, where the
-    single shard already IS the global top-k.
-
-    ``row_req_id`` switches prefill's ragged reading, exactly as it does in
-    ``merge_and_emit``: with it, ``lengths`` is a causal length per row and the
-    map names each row's request.
-    """
-    heads, tokens, blocks = scores.shape
-    _require_packable(global_blocks)
-    assert topk_idx.shape == (heads, tokens, topk)
-    if tokens == 0:
-        return
-    _launch_local_topk(
-        scores,
-        None,
-        lengths,
-        topk=topk,
-        rank=0,
-        world=1,
-        query_len=query_len,
-        global_blocks=global_blocks,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
-        indices=topk_idx,
-        block_table=block_table,
-        sparse_bt=sparse_bt,
-        sparse_ctx=sparse_ctx,
-        row_req_id=row_req_id,
-        num_kv_heads=num_kv_heads,
-        pages_per_block=pages_per_block,
-    )
-
-
-def _launch_local_topk(
-    scores,
-    keys,
-    lengths,
-    *,
-    topk,
-    rank,
-    world,
-    query_len,
-    global_blocks,
-    init_blocks,
-    local_blocks,
-    indices=None,
-    block_table=None,
-    sparse_bt=None,
-    sparse_ctx=None,
-    row_req_id=None,
-    num_kv_heads=1,
-    pages_per_block=1,
-):
-    """The one selection launch, packing keys for a merge or emitting outright.
-
-    Which of the two it does follows from what the caller has to write to:
-    ``keys`` for a merge, ``indices`` and the page table for an emit. The
-    outputs of the other are left None, which Triton binds as a constexpr and
-    the dead ``EMIT`` branch never dereferences.
-    """
-    emit = indices is not None
-    assert (keys is None) == emit, "the selection writes keys or it emits, not both"
-    heads, tokens, local = scores.shape
     # The tile has to be at least as wide as the top-k it selects, since the
     # first one runs before any cat, and no wider than the row it walks.
-    width = min(DECODE_TOPK_TILE, max(_pow2_ceil(local), _pow2_ceil(topk)))
+    width = min(DECODE_TOPK_TILE, max(next_power_of_2(local), next_power_of_2(topk)))
     _local_topk[(tokens, heads)](
         scores,
         keys,
-        lengths,
-        indices,
-        block_table,
-        sparse_bt,
-        sparse_ctx,
-        row_req_id,
+        seq_lens,
         TOKENS=tokens,
         HEADS=heads,
         QUERY_LEN=query_len,
@@ -867,21 +566,16 @@ def _launch_local_topk(
         INIT_BLOCKS=init_blocks,
         LOCAL_KEEP=local_blocks,
         BLOCK_SIZE_K=width,
-        BLOCK_SIZE_T=_pow2_ceil(topk),
-        EMIT=emit,
-        RAGGED=row_req_id is not None,
-        TABLE_STRIDE=block_table.stride(0) if emit else 0,
-        SBT_STRIDE=sparse_bt.stride(0) if emit else 0,
-        NUM_KV_HEADS=num_kv_heads,
-        PAGES_PER_BLOCK=pages_per_block,
+        BLOCK_SIZE_T=next_power_of_2(topk),
         num_warps=DECODE_TOPK_NUM_WARPS,
     )
+    return keys
 
 
 def merge_and_emit(
     keys: torch.Tensor,  # [shards, heads, tokens, topk] packed keys
     topk_idx: torch.Tensor,  # [heads, tokens, topk] int32, written in place
-    lengths: torch.Tensor,
+    seq_lens: torch.Tensor,
     block_table: torch.Tensor,  # page-16 rebase of the ATTEND's table
     sparse_bt: torch.Tensor,
     sparse_ctx: torch.Tensor,
@@ -891,14 +585,8 @@ def merge_and_emit(
     pages_per_block: int,
     init_blocks: int,
     local_blocks: int,
-    row_req_id: torch.Tensor | None = None,
 ) -> None:
-    """Global top-k of the gathered candidates, plus the attend's page table.
-
-    ``row_req_id`` switches the ragged reading prefill needs: with it,
-    ``lengths`` is a causal length per row and the map names each row's
-    request; without it, rows are ``query_len`` to a request.
-    """
+    """Global top-k of the gathered candidates, plus the attend's page table."""
     shards, heads, tokens, per_shard = keys.shape
     topk = topk_idx.shape[2]
     candidates = shards * per_shard
@@ -909,12 +597,10 @@ def merge_and_emit(
     _merge_topk[(tokens, heads)](
         keys,
         topk_idx,
-        lengths,
+        seq_lens,
         block_table,
         sparse_bt,
         sparse_ctx,
-        row_req_id if row_req_id is not None else lengths,
-        RAGGED=row_req_id is not None,
         TABLE_STRIDE=block_table.stride(0),
         SBT_STRIDE=sparse_bt.stride(0),
         TOKENS=tokens,
@@ -929,82 +615,14 @@ def merge_and_emit(
         HEAD_STRIDE=keys.stride(1),
         ROW_STRIDE=keys.stride(2),
         REAL_CANDIDATES=candidates,
-        CANDIDATES=_pow2_ceil(candidates),
+        CANDIDATES=next_power_of_2(candidates),
         # Exactly next_pow2(topk): the emit's zero-fill spans
         # BLOCK_SIZE_T * pages_per_block unmasked and the sparse_bt row is only
         # topk * pages_per_block wide, so a padded BLOCK_SIZE_T writes past the
         # row into the next allocation.
-        BLOCK_SIZE_T=_pow2_ceil(topk),
+        BLOCK_SIZE_T=next_power_of_2(topk),
         num_warps=DECODE_TOPK_NUM_WARPS,
     )
-
-
-def msa_indexer_unsupported_reason(
-    *,
-    topk_blocks: int,
-    sparse_block_size: int,
-    num_index_heads: int,
-    index_head_dim: int,
-    indexer_kv_dtype: IndexerKVDType,
-    max_model_len: int,
-    score_type: str = "max",
-) -> str | None:
-    """Return why this config cannot use this indexer, or None if it can.
-
-    Checks platform (ROCm/gfx950), the AITER sparse PA attend, index-cache
-    dtype, the kernels' shape contract and the max context in blocks.
-    ``select_msa_indexer_impl_cls`` logs the string and falls back when it is
-    not None.
-
-    No AITER kernel runs in here -- the score and top-k are Triton. The attend
-    still appears among the limits because the page table this indexer emits is
-    in the numbering only that attend reads, so the two are selected together.
-    """
-    if not current_platform.is_rocm():
-        return (
-            "needs ROCm for the fp8 MFMA score/top-k, "
-            f"got platform={current_platform.device_type!r}"
-        )
-    if not _minimax_m3_aiter_sparse_pa_requested():
-        # The top-k emits the attend's page table in page-16 numbering, which
-        # only addresses the interleaved cache the AITER attend reads. Paired
-        # with any other attend there is nowhere valid to write it, so this
-        # indexer is not usable on its own.
-        return (
-            "needs the AITER sparse PA attend, whose page table its top-k "
-            "emits (rocm_aiter_ops + shuffle KV cache layout)"
-        )
-    if indexer_kv_dtype not in ("fp8", "fp8_e4m3"):
-        # The score kernels are fp8 MFMA; there is no bf16 instantiation.
-        return (
-            f"needs an fp8 e4m3 index cache, got indexer_kv_dtype={indexer_kv_dtype!r}"
-        )
-    from vllm.platforms.rocm import on_gfx950
-
-    if not on_gfx950():
-        return f"needs {' or '.join(SUPPORTED_ARCHS)} for the fp8 MFMA"
-    if score_type != MSA_SCORE_TYPE:
-        return f"needs score_type={MSA_SCORE_TYPE!r}, got score_type={score_type!r}"
-    if topk_blocks != MSA_TOPK_BLOCKS:
-        return f"needs topk_blocks={MSA_TOPK_BLOCKS}, got topk_blocks={topk_blocks}"
-    if sparse_block_size != MSA_SPARSE_BLOCK_SIZE:
-        return (
-            f"needs sparse_block_size={MSA_SPARSE_BLOCK_SIZE}, "
-            f"got sparse_block_size={sparse_block_size}"
-        )
-    if index_head_dim != MSA_INDEX_HEAD_DIM:
-        return (
-            f"needs index_head_dim={MSA_INDEX_HEAD_DIM}, "
-            f"got index_head_dim={index_head_dim}"
-        )
-    # The selection packs a 1-based block id into the low 16 bits of its key.
-    max_blocks = math.ceil(max_model_len / sparse_block_size)
-    if max_blocks >= 0xFFFF:
-        return (
-            f"max_model_len={max_model_len} needs {max_blocks} blocks per row, "
-            f"more than the packed key's {0xFFFF - 1}"
-        )
-    return None
 
 
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
@@ -1027,6 +645,8 @@ class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     the last block holds.
     """
 
+    # [num_prefill_tokens] int32, causal block count per row.
+    prefill_num_valid_pages: torch.Tensor | None = None
     # [num_prefill_tokens] int32, the request each prefill row belongs to.
     prefill_row_req_id: torch.Tensor | None = None
     # [num_prefill_tokens] int32, causal token count (position + 1) per row.
@@ -1096,6 +716,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         )
 
         prefill_metadata: MiniMaxM3IndexerPrefillMetadata | None = None
+        prefill_num_valid_pages: torch.Tensor | None = None
         prefill_row_req_id: torch.Tensor | None = None
         prefill_kv_lens: torch.Tensor | None = None
         if num_prefills > 0:
@@ -1117,6 +738,12 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             positions = common_attn_metadata.positions
             assert positions is not None
             row_positions = positions[num_decode_tokens:num_tokens]
+            prefill_num_valid_pages = self.num_valid_pages_buffer[
+                num_decode_tokens:num_tokens
+            ]
+            prefill_num_valid_pages.copy_(
+                row_positions // self.sparse_block_size + 1, non_blocking=True
+            )
             prefill_kv_lens = self.kv_lens_buffer[num_decode_tokens:num_tokens]
             prefill_kv_lens.copy_(row_positions + 1, non_blocking=True)
             prefill_row_req_id = self.row_req_id_buffer[num_decode_tokens:num_tokens]
@@ -1165,13 +792,14 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            prefill_num_valid_pages=prefill_num_valid_pages,
             prefill_row_req_id=prefill_row_req_id,
             prefill_kv_lens=prefill_kv_lens,
         )
 
 
 class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
-    """Triton fp8 score + top-k for both prefill and decode."""
+    """Fp8 score + top-k for both prefill and decode."""
 
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerMSABackend
 
@@ -1254,71 +882,146 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
     ) -> None:
         """Score the blocks, take the top-k, emit the attend's page table.
 
-        One chain for both topologies, because context parallelism is the
-        ``world > 1`` case of it rather than a separate path. Every rank scores
-        all of its index heads over its own stride of the blocks, cuts that
-        shard to its own full top-k, and merges. Unsharded that is one shard of
-        everything and the exchange is skipped; sharded it is ``1/P`` of the
-        index-cache read plus one exchange whose payload does not grow with the
-        context, and the merge keeps only the head this rank owns.
+        AITER's pair does both in one rank's worth of work, which is what CP
+        exists not to do, so the sharded case takes the Triton chain instead:
+        score this rank's stride of the blocks, cut that to this rank's own
+        full top-k, exchange the keys, merge them into the global selection.
         """
-        scores = decode_scores(
-            index_query,
-            kv,
-            d.block_table,
-            d.seq_lens,
-            max_seq_len=d.max_seq_len,
-            rank=self.cp_rank,
-            world=self.cp_world,
-            query_len=d.decode_query_len,
-            scale=self.scale,
-        )
-        if not self.indexer_cp:
-            # One shard is the global top-k already, so this finishes in the
-            # selection kernel rather than packing keys for a merge that would
-            # rank them against nothing.
-            select_and_emit(
+        if self.indexer_cp:
+            scores = shard_scores(
+                index_query,
+                kv,
+                d.block_table,
+                d.seq_lens,
+                max_seq_len=d.max_seq_len,
+                rank=self.cp_rank,
+                world=self.cp_world,
+                query_len=d.decode_query_len,
+                scale=self.scale,
+            )
+            keys = candidate_keys(
                 scores,
+                d.seq_lens,
+                topk=self.topk_blocks,
+                rank=self.cp_rank,
+                world=self.cp_world,
+                query_len=d.decode_query_len,
+                global_blocks=cdiv(d.max_seq_len, self.block_size),
+                init_blocks=self.init_blocks,
+                local_blocks=self.local_blocks,
+            )
+            merge_and_emit(
+                exchange_candidates(keys),
                 decode_topk,
                 d.seq_lens,
                 decode_page16_block_table,
                 sparse_bt,
                 sparse_ctx,
-                topk=self.topk_blocks,
                 query_len=d.decode_query_len,
-                global_blocks=cdiv(d.max_seq_len, self.block_size),
                 num_kv_heads=self.num_kv_heads,
                 pages_per_block=self.pages_per_block,
                 init_blocks=self.init_blocks,
                 local_blocks=self.local_blocks,
             )
             return
-        keys = candidate_keys(
-            scores,
+
+        from aiter.ops.msa_attention import (
+            pa_sparse_block_score_decode,
+            pa_sparse_block_topk,
+        )
+
+        heads, tokens = decode_topk.shape[:2]
+        score = _score_buffer(
+            heads, tokens, d.max_seq_len, self.block_size, index_query.device
+        )
+        pa_sparse_block_score_decode(
+            index_query,
+            kv,
+            score,
+            d.block_table,
             d.seq_lens,
-            topk=self.topk_blocks,
-            rank=self.cp_rank,
-            world=self.cp_world,
-            query_len=d.decode_query_len,
-            global_blocks=cdiv(d.max_seq_len, self.block_size),
             init_blocks=self.init_blocks,
             local_blocks=self.local_blocks,
+            query_len=d.decode_query_len,
+            max_seq_len=d.max_seq_len,
         )
-        # The exchange returns [world, owned heads, tokens, topk] -- this rank
-        # scored every head over its shard and keeps back only the heads it
-        # owns, so the merge runs on the shard axis and emits one head's rows.
-        merge_and_emit(
-            exchange_candidates(keys),
+        pa_sparse_block_topk(
+            score,
             decode_topk,
-            d.seq_lens,
             decode_page16_block_table,
-            sparse_bt,
-            sparse_ctx,
+            d.seq_lens,
+            sparse_bt=sparse_bt,
+            sparse_ctx=sparse_ctx,
+            max_seq_len=d.max_seq_len,
+            block_size=self.block_size,
             query_len=d.decode_query_len,
             num_kv_heads=self.num_kv_heads,
             pages_per_block=self.pages_per_block,
+        )
+
+    def _prefill(
+        self,
+        index_query: torch.Tensor,  # [num_prefill_tokens, num_index_heads, D]
+        kv: torch.Tensor,
+        p: MiniMaxM3IndexerPrefillMetadata,
+        prefill_topk: torch.Tensor,
+        prefill_page16_block_table: torch.Tensor,
+        sparse_bt: torch.Tensor,
+        sparse_ctx: torch.Tensor,
+        num_valid_pages: torch.Tensor,
+        row_req_id: torch.Tensor,
+        kv_lens: torch.Tensor,
+    ) -> None:
+        """Score the blocks, take the top-k, emit the attend's page table.
+
+        AITER both sides, CP or not: prefill has a whole chunk of query rows to
+        spread over the machine and nothing to gain from sharding the block
+        axis on top of that, so the sharded chain the decode path takes buys it
+        only an exchange it would otherwise not pay for.
+        """
+        from aiter.ops.msa_attention import (
+            pa_sparse_block_score_prefill,
+            pa_sparse_block_topk,
+        )
+
+        if self.indexer_cp:
+            # The scorer indexes the head axis directly rather than taking its
+            # stride, so this rank's run of the replicated projection has to be
+            # compacted. Tensor-parallel rows arrive contiguous already.
+            owned = self.num_owned_index_heads
+            lo = self.cp_rank * owned
+            index_query = index_query[:, lo : lo + owned, :].contiguous()
+
+        heads, total_q = prefill_topk.shape[:2]
+        score = _score_buffer(
+            heads, total_q, p.max_seq_len, self.block_size, index_query.device
+        )
+        pa_sparse_block_score_prefill(
+            index_query,
+            kv,
+            score,
+            p.block_table,
+            p.cu_seqlens_q,
+            p.seq_lens,
             init_blocks=self.init_blocks,
             local_blocks=self.local_blocks,
+            max_query_len=p.max_query_len,
+            max_seq_len=p.max_seq_len,
+        )
+        pa_sparse_block_topk(
+            score,
+            prefill_topk,
+            prefill_page16_block_table,
+            p.seq_lens,
+            sparse_bt=sparse_bt,
+            sparse_ctx=sparse_ctx,
+            max_seq_len=p.max_seq_len,
+            block_size=self.block_size,
+            num_valid_pages=num_valid_pages,
+            row_req_id=row_req_id,
+            kv_lens=kv_lens,
+            num_kv_heads=self.num_kv_heads,
+            pages_per_block=self.pages_per_block,
         )
 
     def forward(
@@ -1390,98 +1093,30 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 "the MSA indexer's top-k emits the attend's page table and "
                 "needs the page-16 rebase of the attend's prefill block table"
             )
+            assert md.prefill_num_valid_pages is not None
             assert md.prefill_row_req_id is not None
             assert md.prefill_kv_lens is not None
-            # Prefill stays tensor-parallel even under CP: it amortizes the
-            # index-cache read over many query rows, so there is no bandwidth
-            # win to shard for. CP only widened index_q, so taking this rank's
-            # own head back out is an identity -- and a strided view, not a
-            # copy, because the scorer takes the head stride.
-            iq_prefill = iq[nd:]
-            if self.indexer_cp:
-                owned = self.num_owned_index_heads
-                lo = self.cp_rank * owned
-                iq_prefill = iq_prefill[:, lo : lo + owned, :]
-            scores = prefill_scores(
-                iq_prefill,
-                kv,
-                p.block_table,
-                p.cu_seqlens_q,
-                p.seq_lens,
-                p.context_lens,
-                max_query_len=p.max_query_len,
-                max_seq_len=p.max_seq_len,
-                scale=self.scale,
-            )
             prefill_topk = buf[:, nd:num_tokens, :]
             sparse_bt, sparse_ctx = self._table_rows(nd, num_tokens)
-            # Prefill has no shards, so the selection emits outright. Ragged
-            # rows carry their causal length and request explicitly: the block
-            # count alone cannot place the tail block the table ends on.
-            select_and_emit(
-                scores,
+            self._prefill(
+                iq[nd:],
+                kv,
+                p,
                 prefill_topk,
-                md.prefill_kv_lens,
                 prefill_page16_block_table,
                 sparse_bt,
                 sparse_ctx,
-                topk=self.topk_blocks,
-                query_len=1,
-                global_blocks=cdiv(p.max_seq_len, self.block_size),
-                num_kv_heads=self.num_kv_heads,
-                pages_per_block=self.pages_per_block,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
-                row_req_id=md.prefill_row_req_id,
+                md.prefill_num_valid_pages,
+                md.prefill_row_req_id,
+                md.prefill_kv_lens,
             )
 
         return decode_topk, prefill_topk
 
 
-def select_msa_indexer_impl_cls(
-    *,
-    topk_blocks: int,
-    sparse_block_size: int,
-    num_index_heads: int,
-    index_head_dim: int,
-    indexer_kv_dtype: IndexerKVDType,
-    score_type: str = "max",
-) -> type[MiniMaxM3IndexerMSAImpl] | None:
-    """The MSA indexer impl if this config can use it, else None.
-
-    ``None`` sends the caller to the platform-neutral ``MiniMaxM3Indexer``,
-    which on ROCm means the Triton indexer -- and a bf16-only one, so an fp8
-    index cache that lands here has nowhere to go.
-    """
-    reason = msa_indexer_unsupported_reason(
-        topk_blocks=topk_blocks,
-        sparse_block_size=sparse_block_size,
-        num_index_heads=num_index_heads,
-        index_head_dim=index_head_dim,
-        indexer_kv_dtype=indexer_kv_dtype,
-        max_model_len=get_current_vllm_config().model_config.max_model_len,
-        score_type=score_type,
-    )
-    if reason is not None:
-        logger.info_once("MiniMax M3 indexer: MSA unavailable (%s)", reason)
-        return None
-    logger.info_once(
-        "MiniMax M3 indexer: selected MSA (Triton fp8 MFMA score + top-k) "
-        "[topk_blocks=%d, indexer_kv_dtype=%s]",
-        topk_blocks,
-        indexer_kv_dtype,
-    )
-    return MiniMaxM3IndexerMSAImpl
-
-
 class MiniMaxM3MSAIndexer(nn.Module):
     """``MiniMaxM3Indexer``'s surface over the MSA impl.
-
-    The platform-neutral wrapper picks its impl through ``common``'s selector
-    and forwards a Triton-only set of fused-table arguments, neither of which
-    can reach this impl without editing ``common``. This holds the same three
-    members the attention layer uses -- ``impl``, ``index_cache``,
-    ``num_index_heads`` -- and forwards the one argument this impl needs instead.
+    Fp8 score + top-k for both prefill and decode.
     """
 
     def __init__(
@@ -1524,3 +1159,103 @@ class MiniMaxM3MSAIndexer(nn.Module):
             decode_page16_block_table=decode_page16_block_table,
             prefill_page16_block_table=prefill_page16_block_table,
         )
+
+
+def msa_indexer_unsupported_reason(
+    *,
+    topk_blocks: int,
+    sparse_block_size: int,
+    num_index_heads: int,
+    index_head_dim: int,
+    indexer_kv_dtype: IndexerKVDType,
+    max_model_len: int,
+    score_type: str = "max",
+) -> str | None:
+    """Return why this config cannot use this indexer, or None if it can.
+
+    Checks platform (ROCm/gfx950), the AITER sparse PA attend, index-cache
+    dtype, the kernels' shape contract and the max context in blocks.
+    ``select_msa_indexer_impl_cls`` logs the string and falls back when it is
+    not None.
+    """
+    if not current_platform.is_rocm():
+        return (
+            "needs ROCm for the fp8 MFMA score/top-k, "
+            f"got platform={current_platform.device_type!r}"
+        )
+    if not _minimax_m3_aiter_sparse_pa_requested():
+        # The top-k emits the attend's page table in page-16 numbering, which
+        # only addresses the interleaved cache the AITER attend reads. Paired
+        # with any other attend there is nowhere valid to write it, so this
+        # indexer is not usable on its own.
+        return (
+            "needs the AITER sparse PA attend, whose page table its top-k "
+            "emits (rocm_aiter_ops + shuffle KV cache layout)"
+        )
+    if indexer_kv_dtype not in ("fp8", "fp8_e4m3"):
+        # The score kernels are fp8 MFMA; there is no bf16 instantiation.
+        return (
+            f"needs an fp8 e4m3 index cache, got indexer_kv_dtype={indexer_kv_dtype!r}"
+        )
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        return f"needs {' or '.join(SUPPORTED_ARCHS)} for the fp8 MFMA"
+    if score_type != MSA_SCORE_TYPE:
+        return f"needs score_type={MSA_SCORE_TYPE!r}, got score_type={score_type!r}"
+    if topk_blocks != MSA_TOPK_BLOCKS:
+        return f"needs topk_blocks={MSA_TOPK_BLOCKS}, got topk_blocks={topk_blocks}"
+    if sparse_block_size != MSA_SPARSE_BLOCK_SIZE:
+        return (
+            f"needs sparse_block_size={MSA_SPARSE_BLOCK_SIZE}, "
+            f"got sparse_block_size={sparse_block_size}"
+        )
+    if index_head_dim != MSA_INDEX_HEAD_DIM:
+        return (
+            f"needs index_head_dim={MSA_INDEX_HEAD_DIM}, "
+            f"got index_head_dim={index_head_dim}"
+        )
+    # The selection packs a 1-based block id into the low 16 bits of its key.
+    max_blocks = math.ceil(max_model_len / sparse_block_size)
+    if max_blocks >= 0xFFFF:
+        return (
+            f"max_model_len={max_model_len} needs {max_blocks} blocks per row, "
+            f"more than the packed key's {0xFFFF - 1}"
+        )
+    return None
+
+
+def select_msa_indexer_impl_cls(
+    *,
+    topk_blocks: int,
+    sparse_block_size: int,
+    num_index_heads: int,
+    index_head_dim: int,
+    indexer_kv_dtype: IndexerKVDType,
+    score_type: str = "max",
+) -> type[MiniMaxM3IndexerMSAImpl] | None:
+    """The MSA indexer impl if this config can use it, else None.
+
+    ``None`` sends the caller to the platform-neutral ``MiniMaxM3Indexer``,
+    which on ROCm means the Triton indexer -- and a bf16-only one, so an fp8
+    index cache that lands here has nowhere to go.
+    """
+    reason = msa_indexer_unsupported_reason(
+        topk_blocks=topk_blocks,
+        sparse_block_size=sparse_block_size,
+        num_index_heads=num_index_heads,
+        index_head_dim=index_head_dim,
+        indexer_kv_dtype=indexer_kv_dtype,
+        max_model_len=get_current_vllm_config().model_config.max_model_len,
+        score_type=score_type,
+    )
+    if reason is not None:
+        logger.info_once("MiniMax M3 indexer: MSA unavailable (%s)", reason)
+        return None
+    logger.info_once(
+        "MiniMax M3 indexer: selected MSA (Triton fp8 MFMA score + top-k) "
+        "[topk_blocks=%d, indexer_kv_dtype=%s]",
+        topk_blocks,
+        indexer_kv_dtype,
+    )
+    return MiniMaxM3IndexerMSAImpl
