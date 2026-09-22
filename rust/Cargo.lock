@@ -5735,6 +5735,11 @@ dependencies = [
  "url",
  "uuid",
  "vllm-build-info",
+ "vllm-chat",
+ "vllm-engine-core-client",
+ "vllm-llm",
+ "vllm-managed-engine",
+ "vllm-text",
  "vllm-tracing",
 ]
 
@@ -5784,6 +5789,7 @@ dependencies = [
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
+ "vllm-tracing",
  "xgrammar-structural-tag",
  "zeromq",
 ]
@@ -5941,7 +5947,7 @@ dependencies = [
 
 [[package]]
 name = "vllm-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -6596,9 +6602,9 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "xgrammar-structural-tag"
-version = "0.2.0+xgrammar.0.2.4.dd729e7"
+version = "0.3.0+xgrammar.0.2.7.82505d0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4d24c842efc3c24e9756aa426d530cbdac0980e49af223cb384e276e981ca0a"
+checksum = "3864005575c2ab76057f789898f59fb9fa1378d07c5ceabc24764e012d0e90bb"
 dependencies = [
  "auto_impl",
  "serde",

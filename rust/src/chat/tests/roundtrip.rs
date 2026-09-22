@@ -141,6 +141,19 @@ impl RoundtripCase {
         }
     }
 
+    /// MiMo V2.6 uses bare reasoning and Qwen Coder tool tags.
+    fn mimo_v26() -> Self {
+        Self {
+            model_id: "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+            assistant_stop_suffix: "<|im_end|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// MiniMax M2.5 XML invoke format with `<think>` reasoning tags.
     fn minimax_m25() -> Self {
         Self {
@@ -395,6 +408,7 @@ macro_rules! roundtrip_tests {
 roundtrip_tests! {
     qwen3 => [reasoning_and_content, tool_call_mix],
     qwen35 => [reasoning_and_content, tool_call_mix],
+    mimo_v26 => [reasoning_and_content, tool_call_mix],
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     minimax_m3 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
@@ -717,6 +731,7 @@ async fn parse_completion(
     let processor = backends.chat_backend.new_chat_output_processor(
         &mut request,
         NewChatOutputProcessorOptions {
+            tool_strict_level: vllm_chat::ToolStrictLevel::Auto,
             tool_call_parser: &case.tool_call_parser,
             reasoning_parser: &case.reasoning_parser,
         },
@@ -805,6 +820,7 @@ fn decoded_completion_stream(
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 })),
             }
         });
@@ -816,6 +832,7 @@ fn decoded_completion_stream(
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                sampling_mask: None,
             });
             events.push(DecodedTextEvent::TextDelta {
                 decoded: vllm_text::DecodedText::unattributed(chunk.delta),
