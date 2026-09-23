@@ -1318,16 +1318,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         block_table_tensor: torch.Tensor,
         num_reqs: int,
         page_size: int,
-        device_seq_lens: torch.Tensor | None = None,
+        device_seq_lens: torch.Tensor,
     ) -> torch.Tensor:
         """Compute paged_kv_indptr, paged_kv_indices and paged_kv_last_page_len.
 
         Results are stored in self.paged_kv_indptr,
         self.paged_kv_indices, self.paged_kv_last_page_len buffers.
 
-        With ``device_seq_lens``, ``seq_lens_np`` is the CPU upper bound and
-        the exact last-page lengths for this page table are written to
-        self.paged_kv_last_page_len_exact.
+        ``seq_lens_np`` are the CPU lengths to plan from, exact or the upper
+        bound. ``device_seq_lens`` are the exact lengths on the device; the
+        last-page lengths they imply for this page table are written to
+        self.paged_kv_last_page_len_exact. That buffer is read only when
+        ``seq_lens_np`` is the upper bound, never with DCP or cascade
+        attention, where ``seq_lens_np`` counts other tokens.
 
         Returns paged_kv_indices, a GPU tensor with shape [num_actual_pages].
         """
@@ -1340,16 +1343,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # write self.paged_kv_indices inplace
         num_actual_pages = self.paged_kv_indptr.np[num_reqs]
         paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
-        write_exact_last_page_len = device_seq_lens is not None
         _copy_page_indices_kernel[(num_reqs,)](
             paged_kv_indices,
             block_table_tensor,
             block_table_tensor.stride(0),
             paged_kv_indptr,
-            device_seq_lens if write_exact_last_page_len else paged_kv_indptr,
+            device_seq_lens,
             self.paged_kv_last_page_len_exact,
             page_size,
-            WRITE_LAST_PAGE_LEN=write_exact_last_page_len,
             BLOCK_SIZE=1024,
         )
 
@@ -1424,8 +1425,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return
         buf, event = self._plan_workspaces.acquire(wrapper, pinned)
         wrapper._pin_memory_int_workspace_buffer = buf
-        plan(**kwargs)
-        event.record()
+        try:
+            plan(**kwargs)
+        finally:
+            event.record()
 
     def _write_exact_last_page_len(self, wrapper, start: int, num: int) -> None:
         """Hand a wrapper planned from the CPU upper bound the exact lengths:
@@ -1645,7 +1648,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 block_table_tensor,
                 num_reqs,
                 page_size,
-                device_seq_lens=None if seq_lens_exact else seq_lens,
+                device_seq_lens=seq_lens,
             )
         else:
             paged_kv_indices = None
@@ -2927,7 +2930,6 @@ def _copy_page_indices_kernel(
     seq_lens,
     last_page_len,
     page_size,
-    WRITE_LAST_PAGE_LEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -2945,7 +2947,6 @@ def _copy_page_indices_kernel(
             mask=i + offset < num_blocks,
         )
 
-    if WRITE_LAST_PAGE_LEN:
-        # Zero or negative when num_blocks counts a page past the exact length.
-        seq_len = tl.load(seq_lens + req_idx)
-        tl.store(last_page_len + req_idx, seq_len - (num_blocks - 1) * page_size)
+    # Zero or negative when num_blocks counts a page past the exact length.
+    seq_len = tl.load(seq_lens + req_idx)
+    tl.store(last_page_len + req_idx, seq_len - (num_blocks - 1) * page_size)
