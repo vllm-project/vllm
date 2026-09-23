@@ -180,8 +180,8 @@ class _StatsKey:
     TYPES = "types"
     # Maps metric name -> {label values tuple -> observed value (number or list)}
     DATA = "data"
-    # Maps info metric label name -> label value. Absent until a manager
-    # reports it, and an empty dict once a manager reports no facts.
+    # Maps info metric label name -> label value. None until a manager reports
+    # it, and an empty dict when a manager reports no fact.
     INFO = "info"
 
 
@@ -208,7 +208,8 @@ class OffloadingConnectorStats(KVConnectorStats):
 
     ``INFO`` holds static config facts, which the scheduler sends once per
     process. It stays out of ``DATA``, because its label names are known only
-    when the payload arrives.
+    when the payload arrives. It holds label names, not metric names, so a tier
+    that accesses its own metrics walks ``metric_sections()``.
     """
 
     def __post_init__(self):
@@ -229,6 +230,14 @@ class OffloadingConnectorStats(KVConnectorStats):
     @property
     def _values(self) -> dict[str, Any]:
         return self.data[_StatsKey.DATA]
+
+    def metric_sections(self) -> tuple[dict[str, Any], ...]:
+        """Return the type section and the value section, in that order.
+
+        A tier that accesses its own metrics walks these sections. Each one is a
+        mutable reference.
+        """
+        return (self._types, self._values)
 
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         if other.is_empty():

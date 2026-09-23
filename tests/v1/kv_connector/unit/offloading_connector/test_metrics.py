@@ -1016,6 +1016,21 @@ def test_aggregate_keeps_the_config_info_of_a_later_payload():
     assert stats.data[_StatsKey.INFO] == {"cpu_num_chunks": 512}
 
 
+def test_metric_sections_leave_out_the_config_info():
+    """A tier accesses its own metrics by a walk over the metric sections, as the
+    kvcr tier does in v1/kv_offload/tiering/kvcr/manager.py. The info section
+    holds label names, not metric names, so it stays out of that walk."""
+    stats = OffloadingConnectorStats()
+    stats.increase_counter(MY_COUNTER, 2, ("remote_deliver",))
+    stats.set_info({"info_label": "local"})
+
+    info = stats.data[_StatsKey.INFO]
+    sections = stats.metric_sections()
+
+    assert not any(section is info for section in sections)
+    assert sections == (stats.data[_StatsKey.TYPES], stats.data[_StatsKey.DATA])
+
+
 def test_scheduler_sends_the_config_info_once(request_runner):
     """MockOffloadingSpec publishes no fact, so the payload holds an empty
     mapping, which still yields the metric."""
