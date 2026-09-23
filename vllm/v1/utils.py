@@ -4,6 +4,8 @@ import argparse
 import contextlib
 import json
 import multiprocessing
+import socket
+import sys
 import threading
 import time
 import weakref
@@ -240,13 +242,36 @@ class APIServerProcessManager:
             self._address_pipes.append(parent_recv)
             client_config["actual_address_pipe"] = child_send
 
+            worker_sock = sock
+            if (
+                num_servers > 1
+                and sys.platform == "linux"
+                and sock.family in (socket.AF_INET, socket.AF_INET6)
+                and sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT)
+                and not sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+            ):
+                from vllm.entrypoints.launchers.launcher import create_server_socket
+
+                # REUSEPORT balances distinct listeners, not copies of one fd.
+                try:
+                    worker_sock = create_server_socket(
+                        sock.getsockname(), reuse_port=True
+                    )
+                except OSError:
+                    shutdown(self.processes)
+                    raise
+
             proc = spawn_context.Process(
                 target=target_server_fn or run_api_server_worker_proc,
                 name=f"ApiServer_{i}",
-                args=(listen_address, sock, args, client_config),
+                args=(listen_address, worker_sock, args, client_config),
             )
             self.processes.append(proc)
-            proc.start()
+            try:
+                proc.start()
+            finally:
+                if worker_sock is not sock:
+                    worker_sock.close()
 
             # Drop parent's write end so reader sees EOF on child death.
             child_send.close()

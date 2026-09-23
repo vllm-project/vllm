@@ -12,3 +12,14 @@ second ``import vllm`` before the child can run.
 def exit_before_report_worker(listen_address, sock, args, client_config=None):
     """Exit immediately without touching ``actual_address_pipe``."""
     return
+
+
+def report_listener_worker(listen_address, sock, args, client_config=None):
+    """Report the kernel listener identity without starting an engine."""
+    import os
+
+    sock.listen()
+    pipe = client_config["actual_address_pipe"]
+    pipe.send((sock.getsockname(), os.fstat(sock.fileno()).st_ino))
+    pipe.close()
+    sock.close()
