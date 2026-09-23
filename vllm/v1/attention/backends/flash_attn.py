@@ -21,6 +21,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
+    AttentionLayer,
     AttentionType,
     MultipleOf,
 )
@@ -54,6 +55,7 @@ if is_flash_attn_varlen_func_available():
         reshape_and_cache_flash,
     )
 import vllm.envs as envs
+from vllm._custom_ops import fused_qk_norm_rope_kvcache
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config_or_none,
@@ -1084,11 +1086,16 @@ class FlashAttentionImpl(AttentionImpl):
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.dcp_world_size = 1
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.attn_type = attn_type
         vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            self.dcp_world_size = (
+                vllm_config.parallel_config.decode_context_parallel_size
+            )
         uses_kv_cache = attn_type not in (
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
@@ -1476,6 +1483,56 @@ class FlashAttentionImpl(AttentionImpl):
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
+        )
+
+    def fused_qk_norm_rope_kvcache_supported(self) -> bool:
+        # The CUDA fused_qk_norm_rope_kvcache kernel writes K/V straight into
+        # the flash-layout cache. It supports the unquantized cache only, one
+        # head_dim for Q/K/V, decoder layers that own their cache, and no
+        # decode context parallelism (each rank writes only its own K/V).
+        return (
+            current_platform.is_cuda()
+            and self.kv_cache_dtype == "auto"
+            and self.attn_type == AttentionType.DECODER
+            and self.kv_sharing_target_layer_name is None
+            and self.head_size in (64, 128, 256)
+            and self.dcp_world_size == 1
+        )
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ) -> None:
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D)), as in do_kv_cache_update.
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        fused_qk_norm_rope_kvcache(
+            qkv,
+            q_out,
+            k_out,
+            self.num_heads,
+            self.num_kv_heads,
+            self.num_kv_heads,
+            self.head_size,
+            rms_norm_eps,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+            is_neox,
+            positions,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
         )
 
     def _forward_with_dcp(

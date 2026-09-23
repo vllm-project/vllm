@@ -154,10 +154,12 @@ class PassConfig:
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
     fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
-    """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
-    kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
-    for layers that support it. Auto-enabled at O1+ on ROCm for models
-    with QK-norm (e.g. Qwen3-MoE)."""
+    """Fuse QK RMSNorm + RoPE + KV cache update into a single kernel (AITER
+    HIP kernel on ROCm, fused_qk_norm_rope_kvcache on CUDA with the
+    FlashAttention backend and an unquantized KV cache). Supersedes both
+    enable_qk_norm_rope_fusion and fuse_rope_kvcache for layers that support
+    it. Auto-enabled at O1+ on ROCm for models with QK-norm (e.g. Qwen3-MoE);
+    opt-in on CUDA."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
@@ -299,9 +301,9 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
-        if self.fuse_qk_norm_rope_kvcache and not current_platform.is_rocm():
+        if self.fuse_qk_norm_rope_kvcache and not current_platform.is_cuda_alike():
             logger.warning_once(
-                "QK-Norm+RoPE+KVCache fusion requires ROCm with AITER. "
+                "QK-Norm+RoPE+KVCache fusion requires CUDA or ROCm with AITER. "
                 "The fusion will be disabled."
             )
             self.fuse_qk_norm_rope_kvcache = False
