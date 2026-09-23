@@ -364,7 +364,7 @@ def test_end_to_end(model: str):
 
 
 @create_new_process_for_each_test()
-def test_deep_sleep():
+def test_deep_sleep(gpu_memory_cleared):
     model = "hmellor/tiny-random-LlamaForCausalLM"
     free, total = torch.accelerator.get_memory_info()
     used_bytes_baseline = total - free  # in case other process is running
@@ -395,7 +395,7 @@ def test_deep_sleep():
 
 
 @create_new_process_for_each_test()
-def test_deep_sleep_lora():
+def test_deep_sleep_lora(gpu_memory_cleared):
     """Level-2 sleep/wake/reload with enable_lora=True.
 
     LoRA wrapping moves parameters under base_layer and adds LoRA
@@ -488,7 +488,7 @@ def test_deep_sleep_lora_tp2(num_gpus_available, monkeypatch):
 
 
 @create_new_process_for_each_test()
-def test_deep_sleep_async():
+def test_deep_sleep_async(gpu_memory_cleared):
     async def test():
         model = "hmellor/tiny-random-LlamaForCausalLM"
         free, total = torch.accelerator.get_memory_info()
@@ -527,7 +527,7 @@ def test_deep_sleep_async():
 
 
 @requires_fp8
-def test_deep_sleep_fp8_kvcache_mrv1(monkeypatch: pytest.MonkeyPatch):
+def test_deep_sleep_fp8_kvcache_mrv1(monkeypatch: pytest.MonkeyPatch, gpu_memory_cleared):
     # Regression test for https://github.com/vllm-project/vllm/pull/28783.
     # In particular, verify that MRV1 does not rely on post_kv_cache_wake_up()
     # to restore correct output after level-2 sleep.

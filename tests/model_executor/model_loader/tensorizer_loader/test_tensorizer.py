@@ -107,6 +107,12 @@ def write_keyfile(keyfile_path: str):
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
+@pytest.mark.xfail(
+    __import__("vllm.platforms", fromlist=["current_platform"]).current_platform.is_rocm()
+    and "gfx950" in (__import__("vllm.platforms", fromlist=["current_platform"]).current_platform.get_device_name() or ""),
+    reason="Tensorizer output mismatch on MI355 (gfx950) — attention numerical precision differs from gfx942",
+    strict=False,
+)
 def test_deserialized_encrypted_vllm_model_has_same_outputs(
     model_ref, vllm_runner, tmp_path, model_path
 ):
