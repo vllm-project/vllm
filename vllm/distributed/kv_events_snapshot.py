@@ -5,7 +5,9 @@
 Snapshots are replay programs for a fresh, private consumer index: source
 BlockStored events in their original order, then BlockRemoved events to leave
 exactly the live residency and reference counts. Source events are never split:
-their token/hash alignment and extra keys retain their original meaning.
+their token/hash alignment and extra keys retain their original meaning. They
+are retained and exported as their msgpack encoding, which holds token IDs at
+wire size.
 
 The recorder must observe the stream from its beginning. Missing metadata or
 resource exhaustion disables snapshots rather than returning partial state.
@@ -28,7 +30,6 @@ from vllm.distributed.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
-    KVCacheEvent,
     KVEventBatch,
     ZmqEventPublisher,
 )
@@ -47,7 +48,10 @@ _BlockKey = tuple[str | None, int | None, str | None, str | None, ExternalBlockH
 
 @dataclass(eq=False)
 class _Source:
-    event: BlockStored
+    encoded: msgspec.Raw
+    scope: _Scope
+    block_hashes: list[ExternalBlockHash]
+    has_tokens: bool
     dependencies: tuple[int, ...]
     cost: int
     references: int = 0
@@ -81,11 +85,10 @@ class KVCacheSnapshot:
         return len(self._live)
 
     @staticmethod
-    def _keys(event: BlockStored) -> Iterator[_BlockKey]:
-        return (
-            (event.medium, event.group_idx, event.locality, event.ownership, h)
-            for h in event.block_hashes
-        )
+    def _keys(
+        scope: _Scope, block_hashes: list[ExternalBlockHash]
+    ) -> Iterator[_BlockKey]:
+        return ((*scope, h) for h in block_hashes)
 
     @staticmethod
     def _metadata_hash(h: ExternalBlockHash) -> ExternalBlockHash:
@@ -156,9 +159,9 @@ class KVCacheSnapshot:
                 )
         elif not event.token_ids:
             dependencies.update(self._dependency(h) for h in event.block_hashes)
-        # Account conservatively for decoded integers, containers and wire data.
-        cost = 512 + 64 * (len(event.block_hashes) + len(event.token_ids))
-        cost += len(msgspec.msgpack.encode(event))
+        encoded = msgspec.Raw(msgspec.msgpack.encode(event))
+        # Account conservatively for decoded hashes, containers and wire data.
+        cost = 512 + 64 * len(event.block_hashes) + len(encoded)
         dependencies_tuple = tuple(sorted(dependencies))
         for dep in dependencies_tuple:
             self._acquire(dep)
@@ -174,12 +177,20 @@ class KVCacheSnapshot:
             raise
         source_id = self._next_id
         self._next_id += 1
-        self._sources[source_id] = _Source(event, dependencies_tuple, cost)
+        scope = (event.medium, event.group_idx, event.locality, event.ownership)
+        self._sources[source_id] = _Source(
+            encoded,
+            scope,
+            event.block_hashes,
+            bool(event.token_ids),
+            dependencies_tuple,
+            cost,
+        )
         self._metadata_bytes += cost
         if event.token_ids:
             for h in event.block_hashes:
                 self._known.setdefault(self._metadata_hash(h), {})[source_id] = None
-        for key in self._keys(event):
+        for key in self._keys(scope, event.block_hashes):
             count = 0
             if key in self._live:
                 count, old = self._live[key]
@@ -214,8 +225,8 @@ class KVCacheSnapshot:
             del self._sources[source_id]
             self._metadata_bytes -= source.cost
             self._orphan_metadata_bytes -= source.cost
-            if source.event.token_ids:
-                for h in {self._metadata_hash(h) for h in source.event.block_hashes}:
+            if source.has_tokens:
+                for h in {self._metadata_hash(h) for h in source.block_hashes}:
                     known = self._known[h]
                     known.pop(source_id, None)
                     if not known:
@@ -223,21 +234,23 @@ class KVCacheSnapshot:
             for dep in source.dependencies:
                 self._release(dep)
 
-    def export(self, max_blocks_per_event: int = 1024) -> Iterator[KVCacheEvent]:
+    def export(
+        self, max_blocks_per_event: int = 1024
+    ) -> Iterator[msgspec.Raw | BlockRemoved]:
         """Replay intact source events, then correct excess residency.
 
-        Only removals may be chunked. Splitting stores changes sparse or
-        canonical-block mappings in consumers.
+        Stores are yielded encoded. Only removals may be chunked. Splitting
+        stores changes sparse or canonical-block mappings in consumers.
         """
         emitted: Counter[_BlockKey] = Counter()
         for source in self._sources.values():
-            yield source.event
-            emitted.update(self._keys(source.event))
+            yield source.encoded
+            emitted.update(self._keys(source.scope, source.block_hashes))
         for key, (count, source_id) in self._live.items():
             source = self._sources[source_id]
             while emitted[key] < count:
-                yield source.event
-                emitted.update(self._keys(source.event))
+                yield source.encoded
+                emitted.update(self._keys(source.scope, source.block_hashes))
         removals: dict[_Scope, list[ExternalBlockHash]] = {}
         for key, count in emitted.items():
             excess = count - self._live.get(key, (0, 0))[0]
@@ -396,7 +409,7 @@ class KVEventSnapshotRecorder:
 
     def _encode_chunks(self, encoder: msgspec.msgpack.Encoder) -> Iterator[bytes]:
         ts = time.time()
-        events: list[KVCacheEvent] = []
+        events: list[msgspec.Raw | BlockRemoved] = []
         for event in self._snapshot.export(self.BLOCKS_PER_EVENT):
             events.append(event)
             if len(events) == self.EVENTS_PER_CHUNK:
@@ -406,7 +419,9 @@ class KVEventSnapshotRecorder:
         if events:
             yield encoder.encode(self._chunk(ts, events))
 
-    def _chunk(self, ts: float, events: list[KVCacheEvent]) -> KVEventBatch:
+    def _chunk(
+        self, ts: float, events: list[msgspec.Raw | BlockRemoved]
+    ) -> KVEventBatch:
         return KVEventBatch(
             ts=ts,
             events=events,  # type: ignore[arg-type]

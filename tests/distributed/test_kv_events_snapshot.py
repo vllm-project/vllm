@@ -61,6 +61,12 @@ def counts(events, live: Counter | None = None):
     return live
 
 
+def wire(events):
+    """Decode exported events as a snapshot consumer receives them."""
+    batch = msgspec.msgpack.encode(KVEventBatch(ts=0, events=list(events)))
+    return msgspec.msgpack.decode(batch, type=KVEventBatch).events
+
+
 def random_batches(seed, n=400):
     rng = random.Random(seed)
     live: Counter = Counter()
@@ -91,8 +97,8 @@ def test_snapshot_references_match_full_history(seed):
         counts(events, expected)
         snap.apply(events)
         if i % 31 == 0:
-            assert counts(snap.export()) == expected
-    assert counts(snap.export()) == expected
+            assert counts(wire(snap.export())) == expected
+    assert counts(wire(snap.export())) == expected
 
 
 def test_orphan_metadata_is_retained_within_budget(monkeypatch):
@@ -125,7 +131,7 @@ def test_delayed_transfer_preserves_metadata():
     snap.apply([stored([1, 2])])
     snap.apply([BlockRemoved(block_hashes=[1, 2], medium="GPU")])
     snap.apply([stored([2], parent=1, medium="CPU")])
-    exported = list(snap.export())
+    exported = wire(snap.export())
     assert isinstance(exported[0], BlockStored) and exported[0].token_ids
     assert counts(exported) == Counter({("CPU", None, 2): 1})
 
@@ -145,14 +151,49 @@ def test_budget_collection_preserves_selected_dependency(monkeypatch):
     snap.apply([unrelated])
     snap.apply([BlockRemoved(block_hashes=[9], medium="GPU")])
     parent_cost = snap._sources[0].cost
-    child_cost = 512 + 64 * (len(child.block_hashes) + len(child.token_ids))
+    child_cost = 512 + 64 * len(child.block_hashes)
     child_cost += len(msgspec.msgpack.encode(child))
     monkeypatch.setattr(snap, "MAX_METADATA_BYTES", parent_cost + child_cost)
     snap.apply([child])
     assert 1 in snap._known
     assert 2 in snap._known
     assert 9 not in snap._known
-    assert counts(snap.export()) == Counter({("GPU", None, 2): 1})
+    assert counts(wire(snap.export())) == Counter({("GPU", None, 2): 1})
+
+
+def test_offloaded_history_fits_metadata_budget(monkeypatch):
+    """A full CPU tier pins the evicted GPU stores that carry its tokens.
+
+    A GLM-5.3 prefill rank holds 29,093 CPU blocks of 64 tokens and retains
+    3.6M tokens of source metadata for them. This replays twice that CPU tier
+    at 1.8 retained tokens per CPU-tier token, scaled by 1/64 with the budget.
+    """
+    scale = 64
+    budget = KVCacheSnapshot.MAX_METADATA_BYTES // scale
+    monkeypatch.setattr(KVCacheSnapshot, "MAX_METADATA_BYTES", budget)
+    rng = random.Random(0)
+    snap = KVCacheSnapshot()
+    expected: Counter = Counter()
+    for prompt in range(2 * 29_093 // scale // 20 + 1):
+        hashes = list(range(1 + 36 * prompt, 1 + 36 * (prompt + 1)))
+        tokens = [rng.randrange(151_552) for _ in range(64 * len(hashes))]
+        offloaded = [stored([h], medium="CPU") for h in hashes[-20:]]
+        history = [
+            BlockStored(
+                block_hashes=hashes,
+                parent_block_hash=None,
+                token_ids=tokens,
+                block_size=64,
+                lora_id=None,
+                lora_name=None,
+                medium="GPU",
+            ),
+            *offloaded,
+            BlockRemoved(block_hashes=hashes, medium="GPU"),
+        ]
+        snap.apply(history)
+        counts(history, expected)
+    assert counts(wire(snap.export())) == expected
 
 
 @pytest.fixture
