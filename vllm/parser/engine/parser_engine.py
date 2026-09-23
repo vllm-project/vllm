@@ -1082,6 +1082,7 @@ class ParserEngine(Parser):
         return None
 
     def _flush_arg_converter(self, idx: int) -> str | None:
+        """Return the argument text still owed to the client when tool ``idx`` ends."""
         converter = self._arg_converter
         if converter is None:
             return None
