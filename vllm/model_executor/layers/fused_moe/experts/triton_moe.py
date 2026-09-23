@@ -130,10 +130,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # INT8 requires at least 7.5 (Turing) on CUDA. ROCm CDNA GPUs
         # (e.g. MI2xx/MI3xx/gfx950) provide native INT8 matrix-core support and
         # the Triton int8_w8a8 fused MoE kernel handles them.
+        # XPU reaches the same Triton kernel through the same launcher, and both
+        # int8 activation-quant paths work there: per-token uses the Triton
+        # `per_token_quant_int8`, per-tensor resolves to the XPU branch of
+        # `scaled_int8_quant`, which is plain elementwise arithmetic.
         device_supports_int8 = (
-            current_platform.is_cuda()
-            and current_platform.has_device_capability((7, 5))
-        ) or current_platform.is_rocm()
+            (
+                current_platform.is_cuda()
+                and current_platform.has_device_capability((7, 5))
+            )
+            or current_platform.is_rocm()
+            or current_platform.is_xpu()
+        )
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
@@ -329,6 +337,25 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
+        # Under EP, drop the top-k slots routed to remote experts at alignment
+        # time instead of launching `off_experts == -1` GEMM blocks that only
+        # write zeros; the pad-aware `moe_sum` below skips the same slots.
+        # Their rows in the workspace caches are then never written, so every
+        # consumer of those caches must be row-local: a dynamic per-tensor
+        # scale for the second GEMM's activation would take its amax over the
+        # untouched rows, and LoRA aligns the full `topk_ids` itself.
+        a2_scale_is_global = (
+            self.quant_dtype is not None
+            and a2_scale is None
+            and self.block_shape is None
+            and (not self.per_act_token_quant or self.quantization_emulation)
+        )
+        skip_invalid = (
+            expert_map is not None
+            and self._lora_context is None
+            and not a2_scale_is_global
+        )
+
         # Include fused shared-expert rows while preserving EP remapping.
         num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
@@ -342,6 +369,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 block_shape=self.block_shape,
+                ignore_invalid_experts=skip_invalid,
             )
         )
 
@@ -471,8 +499,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # Fuse SiLU+Mul + FP8 block quantize into a single kernel
         # when conditions permit (gated SiLU, fp8 block quant with
         # group_size=128, no LoRA requiring the BF16 intermediate).
+        # The fused kernel has no clamp parameter, so a configured
+        # SwiGLU clamp limit falls through to the unfused path.
         if (
             activation == MoEActivation.SILU
+            and self.activation_config.clamp_limit is None
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
@@ -574,10 +605,21 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 )
 
         # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
 
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
+    def moe_sum(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
+        if expert_map is not None:
+            # Skip the slots whose expert is not on this rank: the rows the
+            # alignment dropped, or the zeros the `-1` blocks wrote.
+            ops.moe_sum(input, output, topk_ids, expert_map)
+        else:
+            ops.moe_sum(input, output)
 
 
 class TritonWNA16Experts(TritonExperts):
@@ -596,9 +638,9 @@ class TritonWNA16Experts(TritonExperts):
     ) -> bool:
         SUPPORTED_W = [
             kInt4Static,
+            kInt4StaticAsym,
             kInt8Static,
             kInt4Static32,
-            kInt4StaticAsym,
             kInt4Static32Asym,
             # other group sizes?
         ]
