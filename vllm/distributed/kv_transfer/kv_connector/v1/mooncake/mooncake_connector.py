@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import itertools
 import logging
 import queue
 import threading
@@ -90,6 +91,12 @@ if TYPE_CHECKING:
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
 
+# Follow NIXL (`nixl/base_worker.py`): HMA packed pages can put more than one
+# KV group on a single allocation. group_index=-1 flattens every group's block
+# ids onto that region. Hybrid KV manager assigns distinct ids per group, so
+# flatten does not copy the same block twice.
+_SHARED_REGION_GROUP_ID = -1
+
 
 @dataclass(frozen=True)
 class TransferRegion:
@@ -99,6 +106,19 @@ class TransferRegion:
     block_len: int
     kv_block_len: int
     group_index: int = 0
+
+
+def _block_ids_for_region(
+    block_ids_by_group: list[list[int]],
+    group_index: int,
+) -> list[int]:
+    """Follow NIXL `_block_ids_by_region`: -1 concatenates all groups."""
+    if group_index == _SHARED_REGION_GROUP_ID:
+        return list(itertools.chain.from_iterable(block_ids_by_group))
+    assert 0 <= group_index < len(block_ids_by_group), (
+        "Transfer region references a missing KV group."
+    )
+    return list(block_ids_by_group[group_index])
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -1586,12 +1606,12 @@ class MooncakeConnectorWorker:
                     "Aligned Mooncake transfer regions must belong to the same "
                     "KV group."
                 )
-                group_index = local_region.group_index
-                assert group_index < len(local_block_ids_by_group), (
-                    "Transfer region references a missing KV group."
+                local_block_ids = _block_ids_for_region(
+                    local_block_ids_by_group, local_region.group_index
                 )
-                local_block_ids = local_block_ids_by_group[group_index]
-                remote_block_ids = remote_block_ids_by_group[group_index]
+                remote_block_ids = _block_ids_for_region(
+                    remote_block_ids_by_group, remote_region.group_index
+                )
                 if not local_block_ids:
                     continue
 
@@ -1782,6 +1802,12 @@ class MooncakeConnectorWorker:
                 region_idx = packed_storage_to_region.get(storage_addr)
                 if region_idx is not None:
                     collapsed_views += 1
+                    # Follow NIXL: a later group on the same packed tensor
+                    # marks this region as shared (-1).
+                    if self.registered_group_indices[region_idx] != group_index:
+                        self.registered_group_indices[region_idx] = (
+                            _SHARED_REGION_GROUP_ID
+                        )
                     continue
                 packed_storage_to_region[storage_addr] = len(region_base_addresses)
                 region_base_addresses.append(storage_addr)

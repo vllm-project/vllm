@@ -15,6 +15,7 @@ from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
+    _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorMetadata,
@@ -26,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _block_ids_for_region,
     _compute_sender_transfer_plan,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
@@ -157,22 +159,31 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _make_packed_mla_kv_cache_config(num_blocks: int) -> KVCacheConfig:
+def _make_packed_mla_kv_cache_config(
+    num_blocks: int, *, num_groups: int = 1
+) -> KVCacheConfig:
     spec = MLAAttentionSpec(
         block_size=16,
         num_kv_heads=1,
         head_size=64,
         dtype=torch.uint8,
     )
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
+    if num_groups == 1:
+        groups = [
             KVCacheGroupSpec(
                 ["model.layers.0.mla_attn", "model.layers.1.indexer"],
                 spec,
-            ),
-        ],
+            )
+        ]
+    else:
+        groups = [
+            KVCacheGroupSpec(["model.layers.0.mla_attn"], spec),
+            KVCacheGroupSpec(["model.layers.1.indexer"], spec),
+        ]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
     )
 
 
@@ -1461,8 +1472,14 @@ def test_packed_and_unpacked_region_lengths_fail_homogeneous_tp_handshake():
     assert "region counts" in count_err
 
 
-def test_register_kv_caches_collapses_shared_mla_storage():
-    """HMA/MLA views that share backing storage register one packed region."""
+@pytest.mark.parametrize(
+    ("num_groups", "expected_group_index"),
+    [(1, 0), (2, _SHARED_REGION_GROUP_ID)],
+)
+def test_register_kv_caches_collapses_shared_mla_storage(
+    num_groups, expected_group_index
+):
+    """Shared backing collapses to one packed region; two groups mark it -1."""
     num_blocks = 4
     packed_row = 256
     vllm_config = create_vllm_config(
@@ -1482,7 +1499,7 @@ def test_register_kv_caches_collapses_shared_mla_storage():
         connector = MooncakeConnector(
             vllm_config,
             KVConnectorRole.WORKER,
-            _make_packed_mla_kv_cache_config(num_blocks),
+            _make_packed_mla_kv_cache_config(num_blocks, num_groups=num_groups),
         )
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
@@ -1505,12 +1522,28 @@ def test_register_kv_caches_collapses_shared_mla_storage():
         assert worker.block_len_per_layer == [packed_row]
         assert worker.kv_block_len_per_layer == [packed_row]
         assert worker.registered_layer_names == ["model.layers.0.mla_attn"]
-        assert worker.registered_group_indices == [0]
+        assert worker.registered_group_indices == [expected_group_index]
+
+
+def test_block_ids_for_region_flattens_shared_groups():
+    ids = [[10, 11], [12]]
+    assert _block_ids_for_region(ids, 0) == [10, 11]
+    assert _block_ids_for_region(ids, 1) == [12]
+    assert _block_ids_for_region(ids, _SHARED_REGION_GROUP_ID) == [10, 11, 12]
 
 
 @pytest.mark.asyncio
-async def test_build_transfer_params_sends_packed_region_once():
-    """A packed MLA region emits one coalesced copy for contiguous blocks."""
+@pytest.mark.parametrize(
+    ("group_index", "local_ids", "remote_ids", "n_blocks"),
+    [
+        (0, [[10, 11]], [[20, 21]], 2),
+        (_SHARED_REGION_GROUP_ID, [[10, 11], [12]], [[20, 21], [22]], 3),
+    ],
+)
+async def test_build_transfer_params_sends_packed_region_once(
+    group_index, local_ids, remote_ids, n_blocks
+):
+    """Packed region coalesces contiguous blocks, including shared-group flatten."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
@@ -1518,7 +1551,9 @@ async def test_build_transfer_params_sends_packed_region_once():
     worker.tp_rank = 0
     worker.tp_size = 1
     worker.use_mla = True
-    worker.kv_cache_config = _make_packed_mla_kv_cache_config(num_blocks=4)
+    worker.kv_cache_config = _make_packed_mla_kv_cache_config(
+        num_blocks=4, num_groups=len(local_ids)
+    )
     worker._physical_blocks_per_logical_kv_block = 1
     worker.transfer_topo = SimpleNamespace(
         local_replicates_kv_cache=False,
@@ -1526,31 +1561,18 @@ async def test_build_transfer_params_sends_packed_region_once():
     )
 
     block_len = 256
-    local_regions = [
-        TransferRegion(
-            layer_name="model.layers.0.mla_attn",
-            layer_index=0,
-            base_addr=0x1000,
-            block_len=block_len,
-            kv_block_len=block_len,
-            group_index=0,
-        )
-    ]
-    remote_regions = [
-        TransferRegion(
-            layer_name="model.layers.0.mla_attn",
-            layer_index=0,
-            base_addr=0xA000,
-            block_len=block_len,
-            kv_block_len=block_len,
-            group_index=0,
-        )
-    ]
+    region_kw = dict(
+        layer_name="model.layers.0.mla_attn",
+        layer_index=0,
+        block_len=block_len,
+        kv_block_len=block_len,
+        group_index=group_index,
+    )
     transfer_id = "xfer-packed"
     send_meta = SendBlockMeta(
         p_req_id="p-packed",
         transfer_id=transfer_id,
-        local_block_ids=[[10, 11]],
+        local_block_ids=local_ids,
         ready=asyncio.Event(),
     )
     xfer_meta = MooncakeXferMetadata(
@@ -1558,13 +1580,13 @@ async def test_build_transfer_params_sends_packed_region_once():
         remote_port=54321,
         remote_tp_size=1,
         remote_tp_rank=0,
-        req_blocks={"d-packed": (transfer_id, [[20, 21]])},
+        req_blocks={"d-packed": (transfer_id, remote_ids)},
         kv_caches_base_addr=[0xA000],
         block_lens=[block_len],
         kv_block_lens=[block_len],
         registered_layer_names=["model.layers.0.mla_attn"],
         registered_layer_indices=[0],
-        registered_group_indices=[0],
+        registered_group_indices=[group_index],
     )
 
     (
@@ -1576,15 +1598,15 @@ async def test_build_transfer_params_sends_packed_region_once():
     ) = await worker._build_transfer_params(
         ready_reqs=[("d-packed", send_meta)],
         agent_meta=xfer_meta,
-        local_regions=local_regions,
-        remote_regions=remote_regions,
+        local_regions=[TransferRegion(base_addr=0x1000, **region_kw)],
+        remote_regions=[TransferRegion(base_addr=0xA000, **region_kw)],
     )
 
     assert err_reqs == []
     assert err_msg is None
     assert src_ptrs == [0x1000 + 10 * block_len]
     assert dst_ptrs == [0xA000 + 20 * block_len]
-    assert lengths == [2 * block_len]
+    assert lengths == [n_blocks * block_len]
 
 
 @pytest.mark.asyncio
