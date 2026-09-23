@@ -92,8 +92,12 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
-@pytest.mark.parametrize("target_layers, expected_groups", [(8, 8), (16, 15)])
-def test_hybrid_draft_full_attention_shapes(target_layers, expected_groups):
+@pytest.mark.parametrize(
+    "target_layers, expected_groups, expected_group_size", [(8, 5, 9), (16, 12, 6)]
+)
+def test_hybrid_draft_full_attention_shapes(
+    target_layers, expected_groups, expected_group_size
+):
     full = FullAttentionSpec(
         block_size=16, num_kv_heads=4, head_size=256, dtype=torch.bfloat16
     )
@@ -114,7 +118,9 @@ def test_hybrid_draft_full_attention_shapes(target_layers, expected_groups):
     specs.update({f"target.{i}": full for i in range(target_layers)})
     specs.update({f"sliding.{i}": sliding for i in range(5)})
     specs["draft"] = draft
-    groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(specs)
+    groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
+        specs, _grouping_config()
+    )
     assert len(groups) == expected_groups
     assert sorted(name for group in groups for name in group.layer_names) == sorted(
         specs
@@ -126,7 +132,8 @@ def test_hybrid_draft_full_attention_shapes(target_layers, expected_groups):
     assert isinstance(draft_group.kv_cache_spec, UniformTypeKVCacheSpecs)
     assert any(name.startswith("target.") for name in draft_group.layer_names)
     assert (
-        kv_cache_utils._get_kv_cache_bytes_per_block(groups) == 5 * full.page_size_bytes
+        kv_cache_utils._get_kv_cache_bytes_per_block(groups)
+        == expected_group_size * full.page_size_bytes
     )
 
 
