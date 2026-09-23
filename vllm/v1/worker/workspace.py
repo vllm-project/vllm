@@ -118,6 +118,13 @@ class WorkspaceManager:
         """Check if workspace is locked."""
         return self._locked
 
+    def workspace_sizes(self) -> list[int]:
+        """Byte size of each current workspace (0 for unallocated slots)."""
+        return [
+            self._workspace_size_bytes(ws) if ws is not None else 0
+            for ws in self._current_workspaces
+        ]
+
     def _get_workspace_id(self) -> int:
         lane = _workspace_lane.get()
         if lane >= self._num_lanes:

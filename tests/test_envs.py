@@ -277,6 +277,15 @@ def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
             env_func()
 
 
+def test_debug_startup_memory_env(monkeypatch: pytest.MonkeyPatch):
+    env_func = environment_variables["VLLM_DEBUG_STARTUP_MEMORY"]
+    monkeypatch.delenv("VLLM_DEBUG_STARTUP_MEMORY", raising=False)
+    assert env_func() is False
+
+    monkeypatch.setenv("VLLM_DEBUG_STARTUP_MEMORY", "1")
+    assert env_func() is True
+
+
 class TestEnvListWithChoices:
     """Test cases for env_list_with_choices function."""
 
