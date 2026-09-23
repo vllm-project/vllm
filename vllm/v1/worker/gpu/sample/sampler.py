@@ -136,6 +136,7 @@ class Sampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
     ) -> SamplerOutput:
+        """Sample one token per request from ``logits``."""
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
