@@ -81,7 +81,7 @@ class InputBatch:
     is_prefilling_np: np.ndarray
     # == np.any(is_prefilling_np)
     has_prefill: bool
-    # No prefills, or only one-token prompt tails that can run as decodes.
+    # No prefills, or a uniform batch with only one-token prompt tail prefills.
     decode_graph_eligible: bool
 
     # [num_tokens_after_padding]

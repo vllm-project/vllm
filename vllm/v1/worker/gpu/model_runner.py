@@ -174,6 +174,7 @@ from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
+    is_uniform_query_len,
 )
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
@@ -1250,8 +1251,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         has_prefill = bool(is_prefilling_np.any())
+        is_uniform = is_uniform_query_len(num_reqs, num_toks, max_query_len)
         decode_graph_eligible = not has_prefill
-        if has_prefill and self.pcp_manager is None:
+        if has_prefill and is_uniform and self.pcp_manager is None:
             # One-token prompt tails over existing context (possibly padded with
             # placeholder drafts) run as decodes. PCP partitions prefill rows.
             num_new_tokens = num_scheduled_tokens
@@ -1259,6 +1261,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_new_tokens = num_new_tokens - num_draft_tokens_np
             is_tail = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
             decode_graph_eligible = bool((is_tail | ~is_prefilling_np).all())
+
+        uniform_tok_count = None
+        if is_uniform and decode_graph_eligible:
+            uniform_tok_count = max_query_len
 
         batch_state = BatchReqState(
             req_ids=req_ids,
@@ -1272,9 +1278,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_prefill=has_prefill,
             decode_graph_eligible=decode_graph_eligible,
         )
-        return batch_state, get_uniform_decode_token_count(
-            num_reqs, num_toks, max_query_len, decode_graph_eligible
-        )
+        return batch_state, uniform_tok_count
 
     def prepare_inputs(
         self,
