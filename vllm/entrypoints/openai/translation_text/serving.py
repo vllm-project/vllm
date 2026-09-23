@@ -2,22 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Serving handler for the text-to-text ``/v1/translations`` endpoint.
 
-Two generation strategies live behind the same endpoint, chosen per model:
+The endpoint picks one of two strategies per model:
 
-* **Decoder-only / instruct models (chat-delegation).** Translation is modelled
-  as a single-turn chat: the request is wrapped in an instruction prompt and
-  handed to the existing :class:`OpenAIServingChat` handler, so the full
-  generation pipeline (sampling, batching, streaming, LoRA, chat templating) is
-  reused rather than reimplemented. The chat response is reshaped into the
-  translation response schema.
-* **Encoder-decoder MT models (direct-generate).** Real MT models (MarianMT,
-  NLLB) are not instruction-following chat models; the source text is fed to the
-  encoder as its single "text" modality and generation runs directly through the
-  engine via an :class:`ExplicitEncoderDecoderPrompt`. This path is selected when
-  ``model_config.is_encoder_decoder`` is true. Target-language conditioning
-  (e.g. NLLB ``forced_bos_token_id``) and streaming for this path are wired in
-  later PRs; this PR leaves the decoder prompt empty (correct for Marian, whose
-  target language is implied by the model).
+* **Encoder-decoder MT models (direct-generate).** MarianMT / NLLB take the
+  source text as the encoder's single "text" modality and generate directly
+  through the engine. Selected when ``model_config.is_encoder_decoder`` is true.
+  The decoder prompt is left empty here (correct for bilingual Marian, whose
+  target language is implied); many-to-many conditioning is layered on top.
+* **Decoder-only / instruct models (chat-delegation).** The request is wrapped
+  in an instruction prompt and handed to :class:`OpenAIServingChat`, reusing the
+  full generation pipeline; the chat response is reshaped into the translation
+  schema.
 """
 
 import json
@@ -114,9 +109,8 @@ class OpenAIServingTextTranslation(BaseServing):
         if error is not None:
             return error
 
-        # Encoder-decoder MT models (MarianMT, NLLB) are not chat models: feed
-        # the source straight to the encoder and generate directly. Decoder-only
-        # / instruct models keep the chat-delegation path below.
+        # Encoder-decoder MT models generate directly; decoder-only / instruct
+        # models fall through to chat delegation.
         if self.model_config.is_encoder_decoder:
             return await self._create_translation_direct(request, raw_request)
 
@@ -147,12 +141,10 @@ class OpenAIServingTextTranslation(BaseServing):
         request: TranslationRequest,
         raw_request: Request | None = None,
     ) -> TranslationResponse | ErrorResponse:
-        """Direct-generate path for encoder-decoder MT models.
-
-        The source text becomes the encoder's single "text" modality; generation
-        runs straight through the engine. Streaming for this path lands in a
-        later PR, so a streaming request is rejected cleanly here rather than
-        silently returning a non-streamed body.
+        """Direct-generate path for encoder-decoder MT models: the source text
+        becomes the encoder's single "text" modality and generation runs straight
+        through the engine. Streaming is not supported here and is rejected
+        cleanly rather than silently returning a non-streamed body.
         """
         if self.engine_client is None:
             return self.create_error_response(
@@ -170,8 +162,7 @@ class OpenAIServingTextTranslation(BaseServing):
             )
 
         request_id = self._base_request_id(raw_request) or f"transl-{time.time()}"
-        # Deterministic by default -- translation quality is best greedy, and the
-        # parity tests assume greedy decoding.
+        # Greedy by default: best translation quality, and matches the parity tests.
         sampling_params = SamplingParams(
             temperature=request.temperature if request.temperature is not None else 0.0,
             top_p=request.top_p if request.top_p is not None else 1.0,
@@ -179,9 +170,8 @@ class OpenAIServingTextTranslation(BaseServing):
             seed=request.seed,
         )
 
-        # Source as the encoder's single "text" modality; empty decoder prompt
-        # (runtime prepends decoder_start_token_id). Target-language conditioning
-        # is added in a later PR.
+        # Source is the encoder's single "text" modality; empty decoder prompt
+        # (the runtime prepends decoder_start_token_id).
         prompt = {
             "encoder_prompt": {
                 "prompt": "",

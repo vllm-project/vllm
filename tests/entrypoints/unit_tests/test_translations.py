@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the text-to-text ``/v1/translations`` endpoint.
 
-These tests are GPU-free: the underlying chat handler is stubbed, so they
-exercise the translation request/response schemas, prompt templating, response
-mapping, the SSE stream transform, and the HTTP route wiring in isolation.
+These tests are GPU-free: the underlying chat handler and engine are stubbed, so
+they exercise the request/response schemas, prompt templating, response mapping,
+the SSE stream transform, the encoder-decoder dispatch, and the HTTP route.
 """
 
 import json
@@ -39,44 +39,35 @@ def _make_handler() -> OpenAIServingTextTranslation:
 # --------------------------------------------------------------------------- #
 # Prompt templating
 # --------------------------------------------------------------------------- #
-def test_prompt_with_source_language():
-    h = _make_handler()
-    prompt = h._build_prompt(
-        TranslationRequest(
-            model="m", text="Hello", source_language="en", target_language="de"
-        )
+@pytest.mark.parametrize(
+    ("kwargs", "substrings", "exact"),
+    [
+        # Source given -> translate-from template.
+        (dict(text="Hello", source_language="en"), ["from en to de", "Hello"], None),
+        # Source omitted -> auto-detect template.
+        (dict(text="Bonjour"), ["Detect the source language", "to de"], None),
+        # Custom template overrides both defaults.
+        (
+            dict(text="Ciao", prompt_template="TL {target_language}: {text}"),
+            None,
+            "TL de: Ciao",
+        ),
+    ],
+)
+def test_build_prompt(kwargs, substrings, exact):
+    prompt = _make_handler()._build_prompt(
+        TranslationRequest(model="m", target_language="de", **kwargs)
     )
-    assert "from en to de" in prompt
-    assert prompt.endswith("Hello")
-
-
-def test_prompt_auto_detect_when_source_omitted():
-    h = _make_handler()
-    prompt = h._build_prompt(
-        TranslationRequest(model="m", text="Bonjour", target_language="en")
-    )
-    assert "Detect the source language" in prompt
-    assert "to en" in prompt
-
-
-def test_prompt_custom_template_override():
-    h = _make_handler()
-    prompt = h._build_prompt(
-        TranslationRequest(
-            model="m",
-            text="Ciao",
-            target_language="en",
-            prompt_template="TL {target_language}: {text}",
-        )
-    )
-    assert prompt == "TL en: Ciao"
+    if exact is not None:
+        assert prompt == exact
+    else:
+        assert all(s in prompt for s in substrings)
 
 
 # --------------------------------------------------------------------------- #
-# Response mapping
+# Response mapping (chat-delegation path)
 # --------------------------------------------------------------------------- #
 def test_response_mapping_strips_and_carries_usage():
-    h = _make_handler()
     chat_response = ChatCompletionResponse(
         id="chatcmpl-xyz",
         model="m",
@@ -90,17 +81,16 @@ def test_response_mapping_strips_and_carries_usage():
     req = TranslationRequest(
         model="m", text="Hello world", source_language="en", target_language="de"
     )
-    resp = h._to_translation_response(req, chat_response)
-    assert isinstance(resp, TranslationResponse)
+    resp = _make_handler()._to_translation_response(req, chat_response)
     assert resp.translated_text == "Hallo Welt"  # stripped
-    assert resp.id.startswith("transl-")
+    assert resp.id.startswith("transl-")  # chatcmpl- -> transl-
     assert resp.source_language == "en"
     assert resp.target_language == "de"
     assert resp.usage.total_tokens == 7
 
 
 # --------------------------------------------------------------------------- #
-# Streaming transform
+# Streaming transform (chat SSE -> translation.chunk SSE)
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_stream_transform_remaps_chat_chunks():
@@ -118,15 +108,11 @@ async def test_stream_transform_remaps_chat_chunks():
         )
         yield "data: [DONE]\n\n"
 
-    lines = [
-        c.strip()
-        async for c in h._translation_stream_generator(req, fake_chat_stream())
-    ]
+    gen = h._translation_stream_generator(req, fake_chat_stream())
+    lines = [c.strip() async for c in gen]
     assert lines[-1] == "data: [DONE]"
 
-    parsed = [
-        json.loads(line[len("data:") :]) for line in lines if "[DONE]" not in line
-    ]
+    parsed = [json.loads(ln[len("data:") :]) for ln in lines if "[DONE]" not in ln]
     assert parsed[0]["object"] == "translation.chunk"
     assert parsed[0]["id"].startswith("transl-")
     assert parsed[0]["choices"][0]["delta"]["translated_text"] == "Hallo"
@@ -135,7 +121,7 @@ async def test_stream_transform_remaps_chat_chunks():
 
 
 # --------------------------------------------------------------------------- #
-# Direct-generate path (encoder-decoder MT models) — PR 3.1
+# Direct-generate path (encoder-decoder MT models)
 # --------------------------------------------------------------------------- #
 class _FakeOutput:
     def __init__(self, text, token_ids, finish_reason="stop"):
@@ -160,9 +146,9 @@ class _FakeEngine:
         self.captured = {}
 
     async def generate(self, prompt, sampling_params, request_id, **kwargs):
-        self.captured["prompt"] = prompt
-        self.captured["sampling_params"] = sampling_params
-        self.captured["request_id"] = request_id
+        self.captured.update(
+            prompt=prompt, sampling_params=sampling_params, request_id=request_id
+        )
         yield self._request_output
 
 
@@ -172,7 +158,13 @@ def _make_direct_handler(engine, is_encoder_decoder=True):
         model_config=SimpleNamespace(is_encoder_decoder=is_encoder_decoder),
         engine_client=engine,
     )
-    return OpenAIServingTextTranslation(stub_chat)
+    h = OpenAIServingTextTranslation(stub_chat)
+
+    async def _ok(_request):  # bypass model-registry validation
+        return None
+
+    h._check_model = _ok
+    return h
 
 
 def _default_engine():
@@ -186,27 +178,25 @@ def _default_engine():
 
 
 @pytest.mark.asyncio
-async def test_direct_generate_builds_enc_dec_prompt_and_response():
+async def test_direct_generate_dispatch_prompt_and_response():
+    """An encoder-decoder model dispatches to the direct path (not chat), builds
+    the enc-dec prompt, decodes greedily, and reshapes the output."""
     engine = _default_engine()
     h = _make_direct_handler(engine)
     req = TranslationRequest(model="opus-mt", text="Hello world", target_language="de")
-    resp = await h._create_translation_direct(req, None)
+    resp = await h.create_translation(req, None)
 
     assert isinstance(resp, TranslationResponse)
-    # Text stripped; response id carries the translation prefix.
-    assert resp.translated_text == "Hallo Welt"
+    assert resp.translated_text == "Hallo Welt"  # stripped
     assert resp.id.startswith("transl-")
     assert resp.target_language == "de"
-    # Source text is fed to the encoder's single "text" modality; empty decoder
-    # prompt (target-language conditioning is PR 3.2).
+    # Source -> encoder "text" modality; empty decoder prompt (bilingual Marian).
     prompt = engine.captured["prompt"]
     assert prompt["encoder_prompt"]["multi_modal_data"]["text"] == "Hello world"
     assert prompt["decoder_prompt"] == ""
-    # Deterministic (greedy) by default.
-    assert engine.captured["sampling_params"].temperature == 0.0
-    # Usage counts encoder prompt + completion tokens.
-    assert resp.usage.completion_tokens == 3
-    assert resp.usage.prompt_tokens == 4
+    assert engine.captured["sampling_params"].temperature == 0.0  # greedy
+    # Usage counts encoder-prompt + completion tokens.
+    assert (resp.usage.prompt_tokens, resp.usage.completion_tokens) == (4, 3)
     assert resp.usage.total_tokens == 7
 
 
@@ -223,12 +213,7 @@ async def test_direct_generate_rejects_streaming():
 
 @pytest.mark.asyncio
 async def test_direct_generate_errors_without_engine():
-    stub_chat = SimpleNamespace(
-        models="MODELS",
-        model_config=SimpleNamespace(is_encoder_decoder=True),
-        # no engine_client attribute -> getattr default None
-    )
-    h = OpenAIServingTextTranslation(stub_chat)
+    h = _make_direct_handler(engine=None)  # no engine_client -> 500
     req = TranslationRequest(model="opus-mt", text="Hello", target_language="de")
     resp = await h._create_translation_direct(req, None)
     assert isinstance(resp, ErrorResponse)
@@ -236,24 +221,7 @@ async def test_direct_generate_errors_without_engine():
 
 
 @pytest.mark.asyncio
-async def test_create_translation_dispatches_to_direct_for_enc_dec():
-    engine = _default_engine()
-    h = _make_direct_handler(engine, is_encoder_decoder=True)
-
-    async def _ok(_request):
-        return None
-
-    h._check_model = _ok  # bypass model-registry validation
-    req = TranslationRequest(model="opus-mt", text="Hello", target_language="de")
-    resp = await h.create_translation(req, None)
-    assert isinstance(resp, TranslationResponse)
-    assert resp.translated_text == "Hallo Welt"
-    # The chat handler was NOT used for an encoder-decoder model.
-    assert "prompt" in engine.captured
-
-
-@pytest.mark.asyncio
-async def test_create_translation_uses_chat_for_decoder_only():
+async def test_decoder_only_uses_chat_delegation():
     called = {}
 
     async def fake_create_chat_completion(chat_request, raw_request):
@@ -263,8 +231,7 @@ async def test_create_translation_uses_chat_for_decoder_only():
             model="instruct",
             choices=[
                 ChatCompletionResponseChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content="Hallo Welt"),
+                    index=0, message=ChatMessage(role="assistant", content="Hallo Welt")
                 )
             ],
             usage=UsageInfo(prompt_tokens=3, completion_tokens=2, total_tokens=5),
@@ -285,8 +252,7 @@ async def test_create_translation_uses_chat_for_decoder_only():
     req = TranslationRequest(model="instruct", text="Hello", target_language="de")
     resp = await h.create_translation(req, None)
     assert isinstance(resp, TranslationResponse)
-    # Decoder-only models go through chat delegation, not direct generate.
-    assert "chat" in called
+    assert "chat" in called  # went through chat delegation, not direct generate
     assert resp.translated_text == "Hallo Welt"
 
 
@@ -305,11 +271,9 @@ class _FakeHandler:
                 source_language=request.source_language,
                 target_language=request.target_language,
             )
-        if self.mode == "err":
-            return ErrorResponse(
-                error=ErrorInfo(message="no model", type="NotFoundError", code=404)
-            )
-        raise AssertionError("unexpected mode")
+        return ErrorResponse(
+            error=ErrorInfo(message="no model", type="NotFoundError", code=404)
+        )
 
 
 def _client(handler):
@@ -320,29 +284,30 @@ def _client(handler):
     return TestClient(app)
 
 
-def test_route_success():
-    client = _client(_FakeHandler("ok"))
-    resp = client.post(
-        "/v1/translations",
-        json={"model": "m", "text": "Hello world", "target_language": "de"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["object"] == "translation"
-    assert body["translated_text"] == "Hallo Welt"
-
-
-def test_route_error_passthrough():
-    client = _client(_FakeHandler("err"))
-    resp = client.post(
-        "/v1/translations",
-        json={"model": "m", "text": "Hello", "target_language": "de"},
-    )
-    assert resp.status_code == 404
-    assert resp.json()["error"]["type"] == "NotFoundError"
-
-
-def test_route_missing_target_language_is_422():
-    client = _client(_FakeHandler("ok"))
-    resp = client.post("/v1/translations", json={"model": "m", "text": "Hello"})
-    assert resp.status_code == 422
+@pytest.mark.parametrize(
+    ("mode", "payload", "status", "check"),
+    [
+        # Success -> TranslationResponse body.
+        (
+            "ok",
+            {"model": "m", "text": "Hello world", "target_language": "de"},
+            200,
+            lambda b: (
+                b["object"] == "translation" and b["translated_text"] == "Hallo Welt"
+            ),
+        ),
+        # Handler ErrorResponse is passed through with its status code.
+        (
+            "err",
+            {"model": "m", "text": "Hello", "target_language": "de"},
+            404,
+            lambda b: b["error"]["type"] == "NotFoundError",
+        ),
+        # Missing required target_language -> 422 from request validation.
+        ("ok", {"model": "m", "text": "Hello"}, 422, lambda b: True),
+    ],
+)
+def test_route(mode, payload, status, check):
+    resp = _client(_FakeHandler(mode)).post("/v1/translations", json=payload)
+    assert resp.status_code == status
+    assert check(resp.json())
