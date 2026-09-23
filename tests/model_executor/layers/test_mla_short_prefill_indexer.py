@@ -679,7 +679,8 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_sparse_topk_remap_bounds_nan_rows():
-    """DeepSelect's out-of-range sentinel for NaN rows remaps to -1."""
+    """DeepSelect writes an out-of-range sentinel to slot 0 of NaN rows (the
+    rest is left untouched); the remap turns it into -1."""
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         has_deep_select,
         sparse_topk_remap,
@@ -694,7 +695,7 @@ def test_sparse_topk_remap_bounds_nan_rows():
     sparse_indices = torch.arange(num_sparse, dtype=torch.int32, device="cuda")
     end = torch.full((rows,), width, dtype=torch.int32, device="cuda")
     out = torch.empty(rows, topk, dtype=torch.int32, device="cuda")
-    cols = torch.empty_like(out)
+    cols = torch.zeros_like(out)
 
     sparse_topk_remap(
         logits,
@@ -706,10 +707,8 @@ def test_sparse_topk_remap_bounds_nan_rows():
         out,
         col_indices=cols,
     )
-    sentinel = cols >= width
-    assert sentinel[1:].any() and not sentinel[0].any()
-    assert (out[sentinel] == -1).all()
-    assert (out[~sentinel] >= 0).all()
+    assert (cols[1:, 0] >= width).all() and (out[1:, 0] == -1).all()
+    assert (out[0] >= 0).all()
 
 
 def _skip_unless_sm100_sparse_kernels():
