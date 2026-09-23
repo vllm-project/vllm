@@ -36,16 +36,6 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 MAX_UNIFORM_DECODE_QUERY_LEN = 5
 
 
-def _supports_uniform_decode(query_len: int, num_seqs: int, num_tokens: int) -> bool:
-    return query_len <= MAX_UNIFORM_DECODE_QUERY_LEN or (
-        query_len == 6
-        and num_seqs == 1
-        and num_tokens == 6
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability((12, 0))
-    )
-
-
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
@@ -874,6 +864,7 @@ def unified_attention(
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
+    # Caller-verified: each nonempty sequence is a decode of max_seqlen_q queries.
     is_uniform_decode: bool = False,
 ):
     # Resolve causal: bool or per-seq tensor.
@@ -1061,8 +1052,11 @@ def unified_attention(
             f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
         )
 
-    # Preserve single-query dispatch; multi-query split-K requires proven decode
-    # metadata and the bounded causal verification shape.
+    # Launch the 2D kernel if
+    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
+    # 2. A multi-query batch is not a supported uniform causal decode, or
+    # 3. The number of sequences exceeds the configured threshold, or
+    # 4. Batch invariance is enabled
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
@@ -1074,10 +1068,11 @@ def unified_attention(
             max_seqlen_q > 1
             and (
                 not is_uniform_decode
-                or not _supports_uniform_decode(max_seqlen_q, num_seqs, q.shape[0])
+                or max_seqlen_q > MAX_UNIFORM_DECODE_QUERY_LEN
                 or not use_causal
                 or use_per_seq_causal
                 or use_mm_prefix
+                or tuned_large_head
             )
         )
         or num_seqs > seq_threshold_3D
@@ -1089,7 +1084,8 @@ def unified_attention(
         use_3d = all(
             buffer.ndim == len(shape) + 1
             and buffer.shape[0] >= q.shape[0]
-            and buffer.shape[1:] == shape
+            and buffer.shape[1:-1] == shape[:-1]
+            and buffer.shape[-1] >= shape[-1]
             and buffer.dtype == torch.float32
             and buffer.device == q.device
             and buffer.is_contiguous()
