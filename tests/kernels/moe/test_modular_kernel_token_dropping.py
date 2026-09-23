@@ -53,7 +53,7 @@ def make_kernel(monkeypatch, capacity, prepare_finalize=None):
 
 @pytest.mark.parametrize("capacity", [None, 0, 1, 2, 8])
 @pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
-def test_dropping_keeps_best_routes_and_restores_token_order(
+def test_dropping_keeps_best_routes_without_compacting_states(
     monkeypatch, capacity, ids_dtype
 ):
     kernel, observed = make_kernel(monkeypatch, capacity)
@@ -76,13 +76,15 @@ def test_dropping_keeps_best_routes_and_restores_token_order(
     torch.testing.assert_close(output, states * torch.tensor(factors).unsqueeze(1))
     for tensor, original in zip((states, ids, weights), originals):
         torch.testing.assert_close(tensor, original)
-    retained = torch.tensor(factors).nonzero(as_tuple=True)[0]
-    torch.testing.assert_close(observed["states"], states[retained])
+    assert observed["states"] is states
     if capacity == 1:
         # The equal-weight route on row 1 wins over row 2; neither is renormalized.
-        torch.testing.assert_close(observed["ids"], ids.new_tensor([[0, -1], [-1, 1]]))
         torch.testing.assert_close(
-            observed["weights"], weights.new_tensor([[0.9, 0.0], [0.0, 0.8]])
+            observed["ids"], ids.new_tensor([[-1, -1], [0, -1], [-1, 1], [-1, -1]])
+        )
+        torch.testing.assert_close(
+            observed["weights"],
+            weights.new_tensor([[0.0, 0.0], [0.9, 0.0], [0.0, 0.8], [0.0, 0.0]]),
         )
 
 
@@ -109,7 +111,7 @@ def test_dropping_top1_preserves_weight_application(
     torch.testing.assert_close(output, expected)
 
 
-def test_dropping_restores_after_async_finalize_and_preserves_shared_input(monkeypatch):
+def test_dropping_preserves_rows_after_async_finalize_and_shared_input(monkeypatch):
     class AsyncPrepareFinalize(MoEPrepareAndFinalizeNoDPEPModular):
         def supports_async(self):
             return True
@@ -118,7 +120,12 @@ def test_dropping_restores_after_async_finalize_and_preserves_shared_input(monke
             return lambda: self.prepare(*args, **kwargs)
 
         def finalize_async(self, *args, **kwargs):
-            return lambda: self.finalize(*args, **kwargs)
+            def receiver():
+                self.finalize(*args, **kwargs)
+                # A combine backend may leave fully dropped rows unwritten.
+                args[0][[0, 2]] = float("nan")
+
+            return receiver
 
     kernel, _ = make_kernel(monkeypatch, 1, AsyncPrepareFinalize())
     states = torch.ones(3, 2)
@@ -154,7 +161,7 @@ def test_unsupported_dispatch_leaves_routing_unchanged(monkeypatch):
     assert observed["weights"] is weights
 
 
-def test_dropping_rejects_compilation_before_compacting(monkeypatch):
+def test_dropping_rejects_compilation(monkeypatch):
     kernel, _ = make_kernel(monkeypatch, 1)
     monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
     with pytest.raises(RuntimeError, match="eager execution"):
@@ -244,14 +251,24 @@ def test_dropping_triton_matches_retained_expert_contributions(
     if batched:
         assert prepare_finalize.max_num_tokens_per_rank() == 4
         shapes = experts.workspace_shapes(
-            max(1, capacity), 256, 128, 2, 2, 2, None, config.activation
+            max(1, capacity),
+            256,
+            128,
+            2,
+            2,
+            2,
+            None,
+            config.activation,
         )
-        assert shapes[2][1] == max(1, capacity)
+        assert shapes[2][1] == 4
 
 
 @pytest.mark.parametrize("expert_name", ["naive", "triton", "deep_gemm", "marlin"])
-@pytest.mark.parametrize("dispatched_tokens", [1, 32, 64, 512])
-def test_batched_workspaces_follow_dispatch_layout(expert_name, dispatched_tokens):
+@pytest.mark.parametrize("capacity", [None, 7])
+@pytest.mark.parametrize("dispatched_tokens", [1, 32, 64, 513])
+def test_batched_workspaces_follow_dispatch_layout(
+    expert_name, capacity, dispatched_tokens
+):
     """Capacity may shrink dispatch, but padding must still fit every workspace."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
@@ -274,17 +291,50 @@ def test_batched_workspaces_follow_dispatch_layout(expert_name, dispatched_token
     experts = object.__new__(cls)
     experts.max_num_tokens = 128
     experts.num_dispatchers = 4
+    experts.expert_capacity = capacity
     workspace13, workspace2, output = experts.workspace_shapes(
-        dispatched_tokens, 64, 32, 2, 4, 4, None, MoEActivation.SILU
+        dispatched_tokens,
+        64,
+        32,
+        2,
+        4,
+        4,
+        None,
+        MoEActivation.SILU,
     )
-    rows = dispatched_tokens
+    rows = max(512, dispatched_tokens)
     assert output == (4, rows, 32)
     if expert_name == "naive":
         assert workspace13 == (4, rows, 32)
-        assert workspace2 == (rows, 64)
+        scratch_rows = rows if capacity is None else min(rows, capacity * 4)
+        assert workspace2 == (scratch_rows, 64)
     elif expert_name == "marlin":
         assert workspace13 == (4 * rows, 128)
         assert workspace2 == (4 * rows, 64)
     else:
         assert workspace13 == (4, rows, 64)
         assert workspace2 == (4, rows, 32)
+
+
+@pytest.mark.parametrize("capacity", [None, 7])
+def test_workspace_allocation_preserves_full_output_shape(monkeypatch, capacity):
+    kernel, _ = make_kernel(monkeypatch, capacity)
+    shapes = Mock(side_effect=lambda M, *args, **kwargs: ((0,), (0,), (M, 4)))
+    kernel.fused_experts.workspace_shapes = shapes
+    kernel.fused_experts.workspace_dtype = lambda dtype: dtype
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    _, _, output = kernel._allocate_buffers(
+        torch.float32,
+        torch.device("cpu"),
+        16,
+        32,
+        8,
+        4,
+        2,
+        4,
+        4,
+        None,
+        mk.MoEActivation.SILU,
+    )
+    assert output.shape == (32, 4)
+    assert [call.args[0] for call in shapes.call_args_list] == [16, 32]

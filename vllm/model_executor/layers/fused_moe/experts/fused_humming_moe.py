@@ -480,9 +480,12 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         output_shape: tuple[int, ...]
         if self.is_batched():
-            real_shape_m = num_experts * M
+            assert self.max_num_tokens is not None
+            assert self.num_dispatchers is not None
+            batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
+            real_shape_m = num_experts * batch_tokens
             input_shape_m = real_shape_m
-            output_shape = (num_experts, M, K)
+            output_shape = (num_experts, batch_tokens, K)
         else:
             input_shape_m = M
             if self.humming_gemm_type() != HummingGemmType.INDEXED:

@@ -814,10 +814,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace for the last gemm.
 
         Inputs:
-        - M: dispatched token dimension, after any capacity reduction. For
-          batched activations this is the physical per-expert batch size,
-          including padding and all dispatchers. Do not multiply it by the
-          dispatcher count or clamp it to expert_capacity.
+        - M: dispatched token dimension. For batched activations this is the
+          physical per-expert batch size, including dispatch padding.
         - N: Row (or column) dimension of expert weights.
         - K: hidden dimension
         - topk: The number of top-k experts to select.
@@ -825,6 +823,11 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         - local_num_experts: local number of experts due to DP/EP.
         - expert_tokens_meta: number of tokens per expert metadata for batched
                               format.
+
+        Scratch shapes may use self.expert_capacity as a bound on valid
+        assignments per expert per dispatcher, preserving required padding.
+        The output shape must cover the full dispatched layout regardless of
+        capacity.
 
         Returns a tuple of:
         - workspace13 shape tuple: must be large enough to hold the
@@ -1116,8 +1119,6 @@ class FusedMoEKernelModularImpl:
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
-        # M comes from the prepared activations, so capacity reduction and
-        # dispatch padding are already reflected in both workspace dimensions.
         # Get intermediate workspace shapes based off the chunked M size.
         workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
             M_chunk,
@@ -1130,7 +1131,8 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        # Get final output shape based on the full M size.
+        # Expert output must cover the full dispatched layout, independently of
+        # the scratch capacity.
         _, _, fused_out_shape = self.fused_experts.workspace_shapes(
             M_full,
             N,
@@ -1434,31 +1436,28 @@ class FusedMoEKernelModularImpl:
 
     def _drop_tokens(
         self,
-        hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Cap expert assignments and compact rows with surviving routes.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Cap expert assignments without changing token positions.
 
         Returns:
-            Compacted states, IDs, weights, and original row indices. The row
-            indices are None when dropping is disabled. Equal weights retain
-            their original token/slot order.
+            IDs and weights with dropped assignments set to -1 and 0.
+            Equal weights retain their original token/slot order.
 
         """
         capacity = self.expert_capacity
         if capacity is None:
-            return hidden_states, topk_ids, topk_weights, None
+            return topk_ids, topk_weights, None
         if torch.compiler.is_compiling() or (
-            hidden_states.is_cuda and torch.cuda.is_current_stream_capturing()
+            topk_ids.is_cuda and torch.cuda.is_current_stream_capturing()
         ):
             raise RuntimeError("Token dropping requires eager execution")
 
-        if topk_ids.numel() == 0 or capacity == 0:
-            retained_rows = torch.empty(
-                0, dtype=torch.long, device=hidden_states.device
-            )
-            return hidden_states[:0], topk_ids[:0], topk_weights[:0], retained_rows
+        if topk_ids.numel() == 0:
+            return topk_ids, topk_weights, None
+        if capacity == 0:
+            return torch.full_like(topk_ids, -1), torch.zeros_like(topk_weights), None
 
         ids = topk_ids.reshape(-1)
         weights = topk_weights.reshape(-1)
@@ -1479,13 +1478,12 @@ class FusedMoEKernelModularImpl:
         keep = torch.empty_like(keep_sorted)
         keep.scatter_(0, order, keep_sorted)
         keep = keep.reshape_as(topk_ids)
-        retained_rows = keep.any(dim=1).nonzero(as_tuple=True)[0]
+        dropped_rows = (topk_ids < 0).all(dim=1)
 
         return (
-            hidden_states.index_select(0, retained_rows),
-            topk_ids.masked_fill(~keep, -1).index_select(0, retained_rows),
-            topk_weights.masked_fill(~keep, 0).index_select(0, retained_rows),
-            retained_rows,
+            topk_ids.masked_fill(~keep, -1),
+            topk_weights.masked_fill(~keep, 0),
+            dropped_rows,
         )
 
     def apply(
@@ -1531,16 +1529,13 @@ class FusedMoEKernelModularImpl:
             torch.Tensor: The output tensor after applying the MoE layer.
 
         """
-        original_shape = hidden_states.shape
+        output = torch.empty_like(hidden_states)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        hidden_states, topk_ids, topk_weights, retained_rows = self._drop_tokens(
-            hidden_states, topk_ids, topk_weights
-        )
-        output = torch.empty_like(hidden_states)
+        topk_ids, topk_weights, dropped_rows = self._drop_tokens(topk_ids, topk_weights)
 
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
@@ -1578,7 +1573,7 @@ class FusedMoEKernelModularImpl:
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
 
-        output = self._finalize(
+        final_output = self._finalize(
             output,
             fused_out,
             hidden_states,
@@ -1588,11 +1583,9 @@ class FusedMoEKernelModularImpl:
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
-        if retained_rows is not None:
-            restored_output = output.new_zeros(original_shape)
-            restored_output.index_copy_(0, retained_rows, output)
-            return restored_output
-        return output
+        if dropped_rows is not None:
+            final_output.masked_fill_(dropped_rows.unsqueeze(1), 0)
+        return final_output
 
 
 @final

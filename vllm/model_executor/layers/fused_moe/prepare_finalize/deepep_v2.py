@@ -94,6 +94,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     combine a2a; the returned receiver joins via a device-side event wait.
     """
 
+    supports_token_dropping = True
+
     @staticmethod
     def maybe_roundup_layer_hidden_size(hidden_size: int, dtype: torch.dtype) -> int:
         hidden_size_bytes = hidden_size * dtype.itemsize

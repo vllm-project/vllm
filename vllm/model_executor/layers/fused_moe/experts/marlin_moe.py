@@ -932,10 +932,13 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        assert self.max_num_tokens is not None
+        assert self.num_dispatchers is not None
+        batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
         num_experts = local_num_experts
-        workspace13 = (num_experts * M, max(K, N * 2))
-        workspace2 = (num_experts * M, N)
-        output = (num_experts, M, K)
+        workspace13 = (num_experts * batch_tokens, max(K, N * 2))
+        workspace2 = (num_experts * batch_tokens, N)
+        output = (num_experts, batch_tokens, K)
         return (workspace13, workspace2, output)
 
     def apply(
