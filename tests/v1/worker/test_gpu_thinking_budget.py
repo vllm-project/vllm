@@ -819,3 +819,100 @@ def test_v2_thinking_budget_transition_phrase_end_closes_the_section():
     _append_committed(req_states, len(tokens) + 1, [END])
     out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [END], [0])
     assert torch.all(out == 0)
+
+
+# --- Ramped release ---------------------------------------------------------
+
+
+class MockRampDistinctEndConfig(MockLoopBreakDistinctEndConfig):
+    loop_break_release = "ramp"
+    loop_break_ramp_increment = 2.0
+    loop_break_ramp_max_tokens = 3
+
+
+class MockRampMultiTokenEndConfig(MockLoopBreakMultiTokenEndConfig):
+    loop_break_release = "ramp"
+    loop_break_ramp_increment = 2.0
+    loop_break_ramp_max_tokens = 3
+
+
+_LOOPING = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+
+
+def test_v2_ramp_biases_the_parsers_marker_instead_of_forcing():
+    """The ramp nudges the model's own end marker and leaves the transition
+    phrase unforced, so the model picks where to close."""
+    _, state = _loop_break_state(_LOOPING, config=MockRampDistinctEndConfig())
+
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [8], [0])
+
+    assert out[0, END] == pytest.approx(2.0)
+    assert out[0, END_A] == 0
+
+
+def test_v2_ramp_grows_per_token_across_steps_and_draft_positions():
+    req_states, state = _loop_break_state(_LOOPING, config=MockRampDistinctEndConfig())
+
+    out = _apply(state, torch.zeros((2, VOCAB_SIZE), device=DEVICE), [8, 9], [0, 1])
+    assert out[:, END].tolist() == pytest.approx([2.0, 4.0])
+
+    _append_committed(req_states, len(_LOOPING), [9])
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [9], [0])
+    assert out[0, END] == pytest.approx(4.0)
+
+
+def test_v2_ramp_falls_back_to_the_forced_sequence():
+    _, state = _loop_break_state(_LOOPING, config=MockRampDistinctEndConfig())
+
+    out = _apply(
+        state,
+        torch.zeros((4, VOCAB_SIZE), device=DEVICE),
+        [8, 9, 9, 9],
+        [0, 1, 2, 3],
+    )
+
+    assert out[:3, END].tolist() == pytest.approx([2.0, 4.0, 6.0])
+    assert out[3, END] == 0
+    assert out[3, END_A] == pytest.approx(1.0e9)
+
+
+def test_v2_ramp_ends_on_a_natural_close():
+    req_states, state = _loop_break_state(_LOOPING, config=MockRampDistinctEndConfig())
+
+    # A drafted marker closes the section for the positions after it.
+    out = _apply(state, torch.zeros((2, VOCAB_SIZE), device=DEVICE), [8, END], [0, 1])
+    assert out[0, END] == pytest.approx(2.0)
+    assert torch.all(out[1] == 0)
+
+    _append_committed(req_states, len(_LOOPING), [END])
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [END], [0])
+    assert torch.all(out == 0)
+    assert state.loop_break_fired[3].item() == 0
+
+
+def test_v2_ramp_finishes_a_multi_token_marker_the_model_started():
+    _, state = _loop_break_state(_LOOPING, config=MockRampMultiTokenEndConfig())
+
+    out = _apply(state, torch.zeros((2, VOCAB_SIZE), device=DEVICE), [8, END_A], [0, 1])
+
+    assert out[0, END_A] == pytest.approx(2.0)
+    assert out[1, END_B] == pytest.approx(1.0e9)
+
+
+def test_v2_request_picks_the_release():
+    _, state = _loop_break_state(
+        _LOOPING,
+        config=MockRampDistinctEndConfig(),
+        params=SamplingParams(thinking_loop_break="force"),
+    )
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [8], [0])
+    assert out[0, END_A] == pytest.approx(1.0e9)
+
+    _, state = _loop_break_state(
+        _LOOPING,
+        config=MockLoopBreakDistinctEndConfig(),
+        params=SamplingParams(thinking_loop_break="ramp"),
+    )
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [8], [0])
+    assert out[0, END] == pytest.approx(2.0)
+    assert out[0, END_A] == 0
