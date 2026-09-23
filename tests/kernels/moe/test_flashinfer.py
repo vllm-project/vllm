@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -537,10 +538,11 @@ def _make_unquantized_flashinfer_test_layer(
     method.moe = moe_config
     method.unquantized_backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
     method.moe_kernel = None
+    mock_kernel = MagicMock()
     monkeypatch.setattr(
         method,
         "_init_moe_kernel",
-        lambda _: setattr(method, "moe_kernel", object()),
+        lambda _: setattr(method, "moe_kernel", mock_kernel),
     )
 
     layer = torch.nn.Module()
@@ -621,6 +623,9 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
 
 def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
     from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheState,
+    )
     from vllm.model_executor.utils import weights_already_processed
 
     torch.accelerator.set_device_index(device_index)
@@ -630,7 +635,7 @@ def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
         )
         loader = object.__new__(IpcModelLoader)
         loader.mode = mode
-        loader._apply_entries(layer, entries, {}, device_index)
+        loader._apply_entries(layer, WeightCacheState(entries, {}, {}), device_index)
         pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
 
         # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.

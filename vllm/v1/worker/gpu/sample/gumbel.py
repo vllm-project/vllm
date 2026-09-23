@@ -2,22 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used by the
 # retained Philox helper for rejection sampling.
 #
 # Triton requires globals accessed from `@triton.jit` functions to be wrapped
-# in `tl.constexpr(...)`. We can only do that when Triton is actually
-# available — on the CPU worker path `tl` is a placeholder whose `constexpr`
-# attribute is `None`, and `tl.constexpr(...)` would crash at import time.
-_TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
+# in `tl.constexpr(...)`.
+_TL_RAND_MIN = tl.constexpr(4.6566127342e-10)
 
 # Offset salt keeping the draft's Gumbel noise disjoint from the target's.
 # Verification is a probability-ratio test, not a Gumbel coupling, so a proposal
 # and the residual it is resampled from must not share a noise vector.
 # Positions are int64 and never approach 2**30, so the streams cannot collide.
-_DRAFT_NOISE_SALT = tl.constexpr(1 << 30) if HAS_TRITON else (1 << 30)
+_DRAFT_NOISE_SALT = tl.constexpr(1 << 30)
 
 
 @triton.jit
@@ -62,21 +60,6 @@ def apply_temperature(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
-
-
-@triton.jit
-def tl_rand64(seed, offset, includes_zero: tl.constexpr):
-    lo, hi, _, _ = tl.randint4x(seed, offset)
-    lo = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
-    hi = hi.to(tl.uint32, bitcast=True).to(tl.uint64)
-    r = (hi << 32) | lo
-
-    # 1 / 2**64
-    scale = 5.421010862427522170037e-20
-    u = r.to(tl.float64) * scale
-    if not includes_zero:
-        u = tl.maximum(u, 2.2250738585072014e-308)  # float64 tiny
-    return u
 
 
 @triton.jit
