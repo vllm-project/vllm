@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 
 from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.serve.middleware.authenticate import (
-    GUARDED_PREFIX,
+    UNGUARDED_PATHS,
     AuthenticationMiddleware,
 )
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -97,14 +97,14 @@ def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]
 
 
 def test_auto_discovered_protected_routes_require_auth(task_routes):
-    """For every auto-discovered route that starts with a guarded prefix,
+    """For every auto-discovered route that is not in the liveness allowlist,
     verify that authentication is enforced."""
     task, routes = task_routes
     app = _create_app_with_mock_routes(routes)
     client = TestClient(app)
 
     for path_template, methods in routes:
-        if not path_template.startswith(GUARDED_PREFIX):
+        if path_template in UNGUARDED_PATHS:
             continue
 
         test_path = generate_test_path(path_template)
@@ -131,14 +131,14 @@ def test_auto_discovered_protected_routes_require_auth(task_routes):
 
 
 def test_auto_discovered_unprotected_routes_no_auth(task_routes):
-    """For every auto-discovered route that does NOT start with a guarded
-    prefix, verify that no authentication is required."""
+    """For every auto-discovered route in the liveness allowlist, verify that
+    no authentication is required."""
     task, routes = task_routes
     app = _create_app_with_mock_routes(routes)
     client = TestClient(app)
 
     for path_template, methods in routes:
-        if path_template.startswith(GUARDED_PREFIX):
+        if path_template not in UNGUARDED_PATHS:
             continue
 
         test_path = generate_test_path(path_template)

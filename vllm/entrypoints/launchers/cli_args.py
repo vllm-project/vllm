@@ -318,13 +318,13 @@ class FrontendArgs(BaseFrontendArgs):
     """If provided, the server will require one of these keys to be presented in
     the header.
 
-    Warning: this only authenticates endpoints under the `/v1`, `/v2`, and
-    `/inference` path prefixes. Other endpoints on the same server, including
-    `/invocations` (which exposes the same inference capabilities as `/v1`),
-    remain unauthenticated. Do not rely on `--api-key` alone to secure vLLM;
-    see
+    This authenticates every endpoint on the server, except a small liveness
+    allowlist (`/health`, `/ping`, `/load`, `/version`). All other endpoints
+    need the key. This includes `/invocations`, `/tokenize` and `/metrics`.
+    A scraper that must read `/metrics` without a key needs a separate
+    listener. See
     https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations
-    for what it does and does not protect."""
+    for what `--api-key` does and does not protect."""
     ssl_keyfile: str | None = None
     """The file path to the SSL key file."""
     ssl_certfile: str | None = None
