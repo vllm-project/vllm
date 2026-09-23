@@ -166,9 +166,7 @@ def test_build_draft_attn_metadata_recomputes_dcp_local_seq_lens():
         out[num_reqs:].zero_()
         return out
 
-    with patch.object(
-        base_speculator, "maybe_prepare_dcp_local_seq_lens", fake_prepare
-    ):
+    with patch.object(base_speculator, "prepare_dcp_local_seq_lens", fake_prepare):
         captured = _run_build(
             fake,
             num_reqs=3,
