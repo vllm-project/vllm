@@ -605,6 +605,7 @@ def make_nvfp4_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        input_dtype=moe_config.in_dtype if per_token_activation else None,
     )
     assert prepare_finalize is not None
 
