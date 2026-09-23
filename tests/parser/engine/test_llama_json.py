@@ -3,12 +3,10 @@
 """Tests for the engine-based Llama 3.x/4 JSON parser (llama3_json /
 llama4_json).
 
-The format is a bare JSON envelope — ``{"name": ..., "parameters": {...}}``
-optionally prefixed with ``<|python_tag|>``, parallel calls separated by
-``;``/newlines/nothing, and no end marker (calls close on JSON balance) —
-so this file carries the replay coverage that the generic harness in
-test_replay.py provides for marker-based formats (llama_json is skipped
-there: it has no TOOL_END terminal).
+Format: a bare JSON envelope (``{"name": ..., "parameters": {...}}``,
+optionally ``<|python_tag|>``-prefixed, no end marker). Carries the replay
+coverage test_replay.py's generic harness provides for marker-based
+formats -- llama_json is skipped there (no TOOL_END terminal).
 """
 
 import json
@@ -223,9 +221,8 @@ def _delegating_parser_cls():
 def lenient_parser_cls(monkeypatch):
     """The parser class a server with strict tool calling *off* gets.
 
-    Named choice then installs the parameters schema and arms bare-argument
-    mode, so the env var is pinned rather than inherited -- leaving it
-    implicit makes these classes order-dependent.
+    Named choice arms bare-argument mode, so the env var is pinned rather
+    than inherited -- implicit would make these classes order-dependent.
     """
     monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
     return _delegating_parser_cls()
@@ -1054,9 +1051,8 @@ class TestStreaming:
 class TestLegacyParityContracts:
     """Deliberate, documented behavior changes vs. the legacy parser.
 
-    Both are forced by the streaming contract — output is append-only and
-    must match the non-streaming result exactly; see the module docstring
-    of vllm/parser/llama_json.py.
+    Both forced by the streaming contract (append-only, must match
+    non-streaming exactly); see llama_json.py's module docstring.
     """
 
     @pytest.mark.parametrize("chunk_size", [1, 3, 7, 64])
@@ -1065,10 +1061,10 @@ class TestLegacyParityContracts:
     ):
         """Prose before the envelope is content in BOTH modes.
 
-        Legacy dropped it non-streaming (content=None) and, streaming,
-        returned the whole output as content with no tool call at all.
-        Streaming cannot retract prose already emitted before the "{"
-        arrives, so reporting it is the only parity-preserving option.
+        Legacy dropped it non-streaming (content=None) and returned the
+        whole output as content with no call at all when streaming.
+        Reporting it is the only parity-preserving option: streaming can't
+        retract prose already emitted before the "{" arrives.
         """
         text = 'Let me check. {"name": "get_weather", "parameters": {"city": "SF"}}'
         reference = LlamaJsonParser(mock_tokenizer).extract_tool_calls_from_content(
@@ -1108,12 +1104,10 @@ class TestLegacyParityContracts:
     ):
         """With both aliases present, the first one in the text wins.
 
-        Legacy preferred "arguments" non-streaming, but its streaming path
-        asserted on the duplicate and emitted no arguments at all.  The
-        value streams as soon as its key is seen, so preferring a later
-        "arguments" would have to retract already-streamed "parameters"
-        text; first-in-text-wins is identical at every chunk size and in
-        both modes.
+        Legacy preferred "arguments" non-streaming but asserted on the
+        duplicate while streaming. A value streams as soon as its key is
+        seen, so preferring a later key would mean retracting already-
+        streamed text -- first-in-text-wins is identical everywhere.
         """
         reference = LlamaJsonParser(mock_tokenizer).extract_tool_calls_from_content(
             text, mock_request
@@ -1127,12 +1121,11 @@ class TestLegacyParityContracts:
 
 
 class TestToolChoiceNone:
-    """tool_choice="none" (including tool-less requests, where "none" is
-    the default) must return tool-call-shaped JSON as content.
-
-    Deviation from the engine convention of dropping tool markup: a bare
-    JSON envelope is indistinguishable from ordinary JSON content, so
-    dropping it would eat legitimate output (legacy passed it through).
+    """tool_choice="none" (incl. tool-less requests, its default) must
+    return tool-call-shaped JSON as content, not drop it like the engine
+    convention: a bare JSON envelope is indistinguishable from ordinary
+    JSON content, and dropping it would eat legitimate output (legacy
+    passed it through).
     """
 
     @pytest.fixture
@@ -1198,10 +1191,10 @@ class TestTraceBuilderSamples:
     def test_samples_self_validate(self):
         """The mitigation for opting out of the shared replay grid.
 
-        ``build_samples`` replays every scenario through the real parser at
-        chunk_size=1 and asserts the result (trace_builder._validate_sample),
-        so the work is in the call. The assertion guards the degenerate case
-        that makes that vacuous: a builder returning no samples at all.
+        ``build_samples`` replays every scenario through the real parser
+        (chunk_size=1) and asserts the result -- the work is in the call.
+        This assertion only guards the degenerate case: a builder
+        returning no samples at all.
         """
         samples = build_samples("llama_json")
         assert samples
@@ -1214,11 +1207,10 @@ _INT = {"type": "integer"}
 class TestSchemaCoercionStreamingParity:
     """Schema coercion must not truncate streamed arguments.
 
-    The engine streams the model's verbatim argument text and only coerces
-    at flush, re-serialising the whole object; the corrected value then
-    stopped being an extension of what had already been streamed, the
-    append-only guard dropped it, and the client was left with invalid JSON
-    such as ``{"a":"foo","x":``.
+    The engine streams verbatim and only coerces at flush, re-serialising
+    the whole object; the corrected value then wasn't an extension of what
+    had streamed, the append-only guard dropped it, and the client got
+    invalid JSON like ``{"a":"foo","x":``.
     """
 
     @staticmethod
@@ -1253,9 +1245,8 @@ class TestSchemaCoercionStreamingParity:
             ({"a": _STR, "x": _INT}, '{"a":"foo","x":2}'),
             ({"a": _STR}, '{"a":"foo","zz":"1"}'),
             ({"a": _STR}, "{}"),
-            # An empty schema is still a schema: it types every value as
-            # a string, so streaming must splice it like any other one
-            # (a truthiness test made it a no-op mid-stream only).
+            # An empty schema is still a schema (types every value as a
+            # string), so streaming must splice it like any other one.
             ({"x": {}}, '{"x":1.5}'),
             ({"x": {}}, '{"x":true}'),
             ({"x": {}}, '{"x":null}'),
@@ -1310,11 +1301,10 @@ class TestSchemaCoercionStreamingParity:
 class TestIncrementalArgScanning:
     """Argument scanning carries state across feeds instead of restarting.
 
-    Re-reading the whole accumulated envelope on every streamed chunk made
-    a single tool call quadratic in its argument length.  These are shape
-    assertions rather than timings: the resumed scan must answer exactly
-    what a full rescan answers, and the schema lookup must not repeat per
-    chunk.
+    Re-reading the whole accumulated envelope per chunk made a call
+    quadratic in argument length. Shape assertions, not timings: the
+    resumed scan must answer what a full rescan answers, and schema
+    lookup must not repeat per chunk.
     """
 
     @pytest.mark.parametrize(
@@ -1709,11 +1699,10 @@ class TestSchemaCoercionPreservesValidValues:
     def test_allof_is_a_conjunction_not_a_union(self, mock_tokenizer, mock_request):
         """``allOf`` narrows the permitted types; it does not widen them.
 
-        Both halves live in one test on purpose.  The first fails against a
-        parser with no validity check at all, the second against one that
-        unions the ``allOf`` branches -- a value permitted by some branch
-        but not by every branch is not already valid, and skipping coercion
-        for it reports a type the schema forbids.
+        Both halves in one test on purpose: the first fails a parser with
+        no validity check, the second one that unions the ``allOf``
+        branches -- a value valid under some branch but not every branch
+        isn't already valid, so skipping coercion reports a forbidden type.
         """
         keep = {
             "allOf": [
@@ -1751,11 +1740,10 @@ class TestSchemaCoercionPreservesValidValues:
     def test_valid_values_survive_inside_containers(
         self, mock_tokenizer, mock_request, property_schema, literal
     ):
-        """Coercion recurses through ``properties`` and ``items``.
-
-        The scalar cases above only prove the top level is left alone; a
-        validity check placed at the wrong depth still rewrites a large
-        integer nested one level down.
+        """Coercion recurses through ``properties`` and ``items``: the
+        scalar cases above only prove the top level is left alone; a
+        check at the wrong depth still rewrites a large integer nested
+        one level down.
         """
         assert (
             self._arguments(mock_tokenizer, mock_request, property_schema, literal)
@@ -1768,10 +1756,10 @@ class TestSchemaCoercionPreservesValidValues:
     ):
         """The streaming path must preserve them too, and agree exactly.
 
-        Coercion is applied twice by different machinery -- spliced into
-        the settled prefix while streaming, and over the whole object at
-        flush -- so a fix applied to only one path yields a client that
-        sees a different number depending on whether it asked for a stream.
+        Coercion runs through two different code paths -- spliced into the
+        settled prefix while streaming, and over the whole object at flush
+        -- so a fix to only one yields a different number depending on
+        whether the client asked for a stream.
         """
         literal = "9007199254740993"
         property_schema = {"type": "number"}
@@ -1795,11 +1783,10 @@ class TestSchemaCoercionPreservesValidValues:
 class TestPhantomRetractionIsLinear:
     """Prose JSON must not cost time quadratic in how much of it there is.
 
-    A ``{...}`` with no top-level ``"name"`` is not a tool call, so its
-    events are retracted and the text restored as content.  Rebuilding the
-    whole output list on each retraction made a document of N such objects
-    cost O(N^2): a model asked for JSON lines while ``tools`` was set could
-    burn seconds of CPU in one parse, with no tool call anywhere in it.
+    A ``{...}`` with no top-level ``"name"`` isn't a call, so its events
+    are retracted and the text restored as content. Rebuilding the whole
+    output list per retraction made N such objects cost O(N^2) -- a model
+    asked for JSON lines with ``tools`` set could burn seconds of CPU.
     """
 
     @staticmethod
@@ -1815,11 +1802,10 @@ class TestPhantomRetractionIsLinear:
     def test_retraction_examines_only_its_own_call(self, mock_tokenizer, monkeypatch):
         """Retraction work must grow with the document, not with its square.
 
-        The offset handed to _retract_call is not evidence on its own: a body
-        that ignores it and rebuilds the whole list receives the same offset
-        and restores the same events, so measuring the argument proves
-        nothing.  Count what the body actually reads instead, by handing it a
-        list that records every element each read touches.
+        The offset handed to _retract_call proves nothing on its own: a
+        body that ignores it and rebuilds the whole list gets the same
+        offset and restores the same events. Count what it actually reads
+        instead, via a list that records every touched element.
         """
 
         class _CountingList(list):
@@ -1846,9 +1832,8 @@ class TestPhantomRetractionIsLinear:
             nonlocal touched, retractions
             probe = _CountingList(out)
             real(probe, start, dense_idx)
-            # Read the count before the write-back: assigning out[:] = probe
-            # iterates the probe and would charge the harness's own copy to
-            # the callee.
+            # Read the count before write-back: out[:] = probe iterates the
+            # probe and would charge the harness's own copy to the callee.
             touched += probe.touched
             out[:] = list(list.__iter__(probe))
             retractions += 1
@@ -1957,13 +1942,10 @@ class TestLlama4PythonMarkers:
 
     @pytest.fixture
     def tokenizer(self):
-        # Deliberately no <|python_tag|>: Llama 4 tokenizers lack it, which
-        # is the case the parser must not depend on.  The markers are in the
-        # vocab but NOT in all_special_tokens, which is how a real Llama
-        # tokenizer reports them -- on Llama-3.1-8B-Instruct
-        # all_special_tokens is exactly [begin_of_text, eot_id] while
-        # <|python_tag|> is in the vocab.  Marking them special instead would
-        # let the engine drop them for free and make these tests vacuous.
+        # No <|python_tag|>: Llama 4 lacks it. Markers are in the vocab but
+        # NOT in all_special_tokens, matching a real Llama tokenizer
+        # (Llama-3.1-8B: only [begin_of_text, eot_id] are special). Marking
+        # them special would let the engine drop them for free, making this vacuous.
         return make_mock_tokenizer(self.VOCAB, special_tokens=["<|eot_id|>"])
 
     @classmethod
@@ -2076,9 +2058,8 @@ class TestServingPathMarkerParity:
     @pytest.fixture
     def make_parser(self):
         cls = _delegating_parser_cls()
-        # <|python_tag|> is in the vocab but NOT in all_special_tokens, which
-        # is how Llama-3.1 reports it.  Marking it special would let the
-        # engine's drop machinery consume it for free, making these vacuous.
+        # <|python_tag|> is in the vocab but NOT in all_special_tokens (how
+        # Llama-3.1 reports it); marking it special would make this vacuous.
         return lambda: cls(
             make_mock_tokenizer(_LLAMA_VOCAB, special_tokens=["<|eot_id|>"])
         )
@@ -2135,17 +2116,14 @@ class TestServingPathMarkerParity:
 class TestArgumentsStreamIncrementally:
     """Arguments must reach the client as they are produced, not at the end.
 
-    The whole point of the splice machinery (_compute_arg_delta,
-    _stable_arg_prefix, _ArgScan) is that a client rendering a tool call
-    sees its arguments grow.  Every other streaming test folds the deltas
-    together before asserting, so a change that buffered the whole call
-    until it closed -- turning streaming into non-streaming -- would leave
-    the suite green.
+    The point of the splice machinery (_compute_arg_delta,
+    _stable_arg_prefix, _ArgScan) is that arguments grow as rendered.
+    Every other streaming test folds deltas before asserting, so a change
+    that buffered the whole call until close would leave the suite green.
 
-    The request carries a tool schema deliberately.  Without one,
+    The request carries a tool schema deliberately: without one,
     _compute_arg_delta takes the schema-less ``_safe_arg_prefix`` branch,
-    which production tool calling never reaches, and the splice machinery
-    this class names is not exercised at all.
+    which production never reaches, and this class's machinery goes untested.
     """
 
     TOOLS = [
@@ -2190,10 +2168,9 @@ class TestArgumentsStreamIncrementally:
     def test_arguments_arrive_in_bounded_pieces(self, mock_tokenizer, mock_request):
         """No delta may carry much more than one feed's worth of text.
 
-        Counting deltas is not enough on its own: an implementation that
-        withholds a string value until it closes still emits a couple of
-        deltas, so only a bound on their size separates streaming from a
-        blob at the end.
+        Counting deltas alone isn't enough: withholding a string value
+        until it closes still emits a couple of deltas, so only a size
+        bound separates streaming from one blob at the end.
         """
         chunk_size = 8
         value_length = 200
@@ -2319,13 +2296,11 @@ class TestBareArgumentsRepair:
 class TestBareArgsArmingRespectsTheSchema:
     """Bare-arguments mode may only arm when the schema forbids an envelope.
 
-    A named tool choice installs the selected function's ``parameters`` as
-    the guided-decoding schema.  When that schema declares no properties --
-    ``{"type": "object"}`` or ``{}`` -- it does not forbid
-    ``{"name": ..., "parameters": ...}``, so an effectively unconstrained
-    model writes the envelope the chat template asks for.  Reading the whole
-    object as the arguments then hands the tool executor the envelope, which
-    is what upstream does today for these schemas.
+    A named choice installs the selected function's ``parameters`` as the
+    guided-decoding schema. When that schema declares no properties
+    (``{"type": "object"}`` or ``{}``), it doesn't forbid the envelope, so
+    an unconstrained model writes it -- and reading the whole object as
+    arguments would hand the executor the envelope.
     """
 
     NAMED = {"type": "function", "function": {"name": "run_python"}}
@@ -2456,15 +2431,12 @@ class TestBareArgsArmingRespectsTheSchema:
 class TestForcedChoiceKeepsUnpromotedText:
     """A forced tool choice must not turn a truncated call into an empty reply.
 
-    Required and named choice suppress content, because the model is
-    constrained to emit only tool calls and the wire format's scaffolding --
-    the ``[`` of the required-mode array -- must not reach the client.  That
-    reasoning fails when generation stops before any call is promoted: the
-    text is then the whole response, and suppressing it hands the caller a
-    message with neither content nor tool calls.
-
-    ``auto`` returns the text in exactly this case, so forced choice losing
-    it is also a divergence between two paths that should agree.
+    Required and named choice suppress content, since the wire format's
+    scaffolding (the ``[`` of the required-mode array) must not reach the
+    client. That reasoning fails when generation stops before any call is
+    promoted: the text is the whole response, and suppressing it leaves
+    neither content nor tool calls -- also a divergence from ``auto``,
+    which returns the text in exactly this case.
     """
 
     # Plain dicts: vLLM's named-tool-choice validator indexes tools as
@@ -2553,11 +2525,10 @@ class TestForcedChoiceKeepsUnpromotedText:
         """Restoring prose JSON must not reorder the response.
 
         Text under a forced choice is held until finish, but the phantom
-        restore used to append straight to the output, so the retracted
-        object overtook everything generated before it -- ``[ Let me think
-        {"x": 1}`` came back as ``{"x": 1}[ Let me think``.  Content-order
-        corruption that streaming and non-streaming agree on, so the parity
-        assertions elsewhere cannot see it.
+        restore used to append straight to output, so the retracted object
+        overtook everything before it -- ``[ Let me think {"x": 1}`` came
+        back as ``{"x": 1}[ Let me think``. Both modes agree on this
+        corruption, so the parity assertions elsewhere can't see it.
         """
         parser = parser_cls(mock_tokenizer)
         request = self._adjusted(parser, tool_choice)
@@ -2577,8 +2548,7 @@ class TestForcedChoiceKeepsUnpromotedText:
         """The other half: holding must not turn into leaking.
 
         Once a call is promoted the held text is dropped, so the
-        required-mode ``[`` and any retracted phantom before the call stay
-        off the wire.
+        required-mode ``[`` and any retracted phantom stay off the wire.
         """
         parser = parser_cls(mock_tokenizer)
         request = self._adjusted(parser, tool_choice)
@@ -2629,11 +2599,10 @@ class TestPathologicalArgumentsDoNotEscape:
     ):
         """``_coerce_value`` re-enters ``json.loads`` on the decoded string.
 
-        The guard around this function's own ``json.loads`` does not cover
-        that second parse, and RecursionError is a RuntimeError -- so it
-        escaped both ``except`` clauses and failed the request with a 500
-        non-streaming, or an error event mid-stream.  The shallow case is the
-        control: coercion must still happen for ordinary values.
+        The guard around this function's own ``json.loads`` doesn't cover
+        that second parse, and RecursionError escaped both ``except``
+        clauses, failing the request (500 non-streaming, error event mid-
+        stream). Shallow is the control: coercion must still happen normally.
         """
         cls = _delegating_parser_cls()
         nest = "[" * depth + "]" * depth
@@ -2654,10 +2623,9 @@ class TestPathologicalArgumentsDoNotEscape:
     def test_array_scan_terminates_on_a_mismatched_closer(self):
         """``_scan_json_value`` counts ``{[`` and ``}]`` alike.
 
-        A closer at an element position (``[1}``) therefore scans as a
-        complete value of length zero, and ``_array_items`` advanced to the
-        same index forever while appending, so the request hung and leaked
-        memory rather than returning.
+        A closer at an element position (``[1}``) scans as a complete
+        value of length zero, so ``_array_items`` advanced to the same
+        index forever while appending -- the request hung, leaking memory.
         """
         from vllm.parser.llama_json import _array_items, _splice_types
 
