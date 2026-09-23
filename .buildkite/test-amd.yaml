@@ -5069,3 +5069,33 @@ steps:
   commands:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
+
+- label: ':amd: (MI355) Fusion E2E TP2 AsyncTP BF16 Config Sweep'
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/utils.py
+  - vllm/distributed/
+  - vllm/v1/attention/backends/triton_attn.py
+  - tests/compile/fusions_e2e/
+  - tests/compile/passes/distributed/test_async_tp.py
+  - tests/compile/rocm/test_async_tp.py
+  - tests/compile/correctness_e2e/test_async_tp.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/models/qwen3.py
+  commands:
+  - rocm-smi
+  - pytest -v -s tests/compile/rocm/test_async_tp.py
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_rocm_async_tp.py
+  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py::test_rocm_async_tp_bf16_output_correctness
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  mirror_hardwares:
+  - amdexperimental
+  - amdproduction
+  - amdgfx950nightly
+  - amdmi355
+  optional: true
