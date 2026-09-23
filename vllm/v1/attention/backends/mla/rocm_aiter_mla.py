@@ -710,6 +710,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             attn_out_dtype: Dtype of the attention output buffer, used to size
                 the padded-head output scratch (small head counts only).
             device: Target device for the buffers.
+
         """
         from aiter import get_ps_metadata_info_v1
 
@@ -1006,6 +1007,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> AiterMLADecodeMetadata:
         causal = self._decode_causal
@@ -1328,8 +1330,7 @@ def _expand_page_indices_kernel(
 
 
 class AiterMLAHelper:
-    """
-    AITER MLA persistent (asm) decode requires a multiple of 16 heads. Unaligned
+    """AITER MLA persistent (asm) decode requires a multiple of 16 heads. Unaligned
     head counts through 128 are padded to the next multiple of 16 by tiling the
     query heads and slicing to the padded size. Native H24 AITER builds bypass
     that padding. Small divisors of 16 retain the existing repeat_interleave and

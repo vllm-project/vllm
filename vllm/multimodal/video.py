@@ -288,6 +288,7 @@ class VideoBackend(VideoLoader):
         Returns:
             Tuple of ``(frames, metadata_dict)``, where ``frames`` is a
             CPU ``np.ndarray`` unless TorchCodec decodes on ``device="cuda"``.
+
         """
         target = VideoTargetMetadata(
             num_frames=num_frames, fps=fps, max_duration=max_duration
@@ -915,8 +916,7 @@ class Molmo2VideoBackend(VideoLoader):
         sampling_fps: float,
         max_fps: float = 8.0,
     ) -> list[float]:
-        """
-        Return the subset of `video_fps` factors that remain multiples
+        """Return the subset of `video_fps` factors that remain multiples
         of `sampling_fps`.
 
         Examples:
@@ -931,6 +931,7 @@ class Molmo2VideoBackend(VideoLoader):
                 ...
             ValueError: sampling_fps=2 must divide video_fps=5 to produce
                 consistent frame steps.
+
         """
         if sampling_fps is None:
             raise ValueError("sampling_fps must be provided")
@@ -967,8 +968,8 @@ class Molmo2VideoBackend(VideoLoader):
         frame_sample_mode: str,
         candidate_target_fps: list[float],
     ) -> float | None:
-        """
-        Get the target fps that best spans the videoand has the most frames sampled
+        """Get the target fps that best spans the video and samples the most
+        frames.
         """
         num_frames_sampled = 0
         selected_target_fps = None
@@ -1272,8 +1273,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
         frame_recovery: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """
-        Load video frames with dynamic sampling based on duration.
+        """Load video frames with dynamic sampling based on duration.
 
         Args:
             data: Raw video bytes
@@ -1284,6 +1284,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
 
         Returns:
             Tuple of (frames_array, metadata_dict)
+
         """
         # recompute source metadata with adjusted duration to ensure correct
         # sampling indices computation

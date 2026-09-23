@@ -175,9 +175,6 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 // DSV3 fused A GEMM: conditionally compiled so declaration and impl
 // registration are in the source file (dsv3_fused_a_gemm.cu)
 
-// AllSpark ops: declarations are in the source files
-// (allspark_repack.cu and allspark_qgemm_w8a16.cu)
-
 #endif
 
 // CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
@@ -271,7 +268,8 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
     torch::stable::Tensor const& position_ids,
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size, bool apply_q_norm, bool kv_mxfp8);
+    double eps, int64_t cache_block_size, bool apply_q_norm, bool kv_mxfp8,
+    bool apply_q_rope, bool is_q_interleaved);
 
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& kv,

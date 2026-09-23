@@ -14,17 +14,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Processor class for MiniCPMO.
-"""
+"""Processor class for MiniCPMO."""
 
 import math
-from typing import Literal, TypeAlias
+from typing import TypeAlias
 
 import numpy as np
 import regex
 import torch
-import torchaudio
 from transformers.image_processing_utils import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessorMixin
@@ -35,8 +32,7 @@ MiniCPMOBatchFeature: TypeAlias = BatchFeature
 
 
 class MiniCPMOProcessor(ProcessorMixin):
-    r"""
-    Constructs a MiniCPMV processor which wraps a MiniCPMV image
+    r"""Constructs a MiniCPMV processor which wraps a MiniCPMV image
     processor and a MiniCPMV tokenizer into a single processor.
 
     [`MiniCPMVProcessor`] offers all the functionalities of
@@ -49,6 +45,7 @@ class MiniCPMOProcessor(ProcessorMixin):
             The image processor is a required input.
         tokenizer ([`LlamaTokenizerWrapper`], *optional*):
             The tokenizer is a required input.
+
     """
 
     attributes = ["image_processor", "feature_extractor", "tokenizer"]
@@ -253,8 +250,7 @@ class MiniCPMOProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode
     # with CLIP->Llama
     def batch_decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to LlamaTokenizerFast's
+        """This method forwards all its arguments to LlamaTokenizerFast's
         [`~PythonBackend.batch_decode`]. Please refer to the
         docstring of this method for more information.
         """
@@ -274,8 +270,7 @@ class MiniCPMOProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.decode
     # with CLIP->Llama
     def decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to LlamaTokenizerFast's
+        """This method forwards all its arguments to LlamaTokenizerFast's
         [`~PythonBackend.decode`]. Please refer to the docstring
         of this method for more information.
         """
@@ -526,70 +521,3 @@ class MiniCPMOProcessor(ProcessorMixin):
             padding_length.append(tensor.shape[-1] - len(item))
 
         return tensor, padding_length
-
-
-class MelSpectrogramFeatures(torch.nn.Module):
-    def __init__(
-        self,
-        sample_rate=24000,
-        n_fft=1024,
-        hop_length=256,
-        n_mels=100,
-        padding: Literal["center", "same"] = "center",
-    ):
-        super().__init__()
-        if padding not in ["center", "same"]:
-            raise ValueError("Padding must be 'center' or 'same'.")
-        self.padding = padding
-        self.mel_spec = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            n_mels=n_mels,
-            center=padding == "center",
-            power=1,
-        )
-
-    def __call__(self, audio: torch.Tensor) -> torch.Tensor:
-        """
-        audio: Tensor([num_channels, num_samples])
-        """
-        return super().__call__(audio)
-
-    def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """
-        audio: Tensor([num_channels, num_samples])
-        """
-        mel: torch.Tensor = self.mel_spec(audio)
-        features = torch.log(torch.clip(mel, min=1e-5))
-        return features
-
-
-class ChatTTSProcessor:
-    def __init__(self, text_tokenizer):
-        self.audio_processor = MelSpectrogramFeatures()
-        self.text_tokenizer = text_tokenizer
-
-    def __call__(self, text_list, audio_list):
-        assert len(text_list) == len(audio_list)
-        input_ids_varlen = []
-        for text in text_list:
-            input_ids_ = self.text_tokenizer.encode(
-                text, return_tensors="pt", add_special_tokens=False
-            )  # [1, seq_len]
-            input_ids_ = input_ids_.squeeze(0)  # [seq_len]
-            input_ids_varlen.append(input_ids_)
-
-        audio_features_varlen = []
-        for audio in audio_list:
-            assert audio.shape.__len__() == 1  # [seq_len]
-            try:
-                mel = self.audio_processor(audio)  # [100(num_mel_bins), seq_len_mel]
-            except Exception as e:
-                raise e
-            audio_features_varlen.append(mel)
-
-        return {
-            "tts_input_ids_varlen": input_ids_varlen,  # return List[Tensor]
-            "tts_input_features_varlen": audio_features_varlen,  # return List[Tensor]
-        }
