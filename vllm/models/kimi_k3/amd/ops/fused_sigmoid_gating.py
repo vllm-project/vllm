@@ -174,7 +174,7 @@ def fused_sigmoid_gating_delta_rule_update(
     o: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
-    scale: float = None,
+    scale: float | None = None,
     initial_state: torch.Tensor = None,
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
@@ -183,7 +183,8 @@ def fused_sigmoid_gating_delta_rule_update(
     use_qk_l2norm_in_kernel: bool = False,
     lower_bound: float | None = None,
 ):
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K = k.shape
+    V = v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
@@ -203,10 +204,7 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         assert scale > 0, "scale must be positive"
 
-    if o is None:
-        o = q.new_empty(NK, *v.shape)
-    else:
-        o = o.unsqueeze(0)
+    o = q.new_empty(NK, *v.shape) if o is None else o.unsqueeze(0)
     if inplace_final_state:
         final_state = initial_state
     else:

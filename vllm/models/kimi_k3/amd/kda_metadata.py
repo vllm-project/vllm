@@ -307,9 +307,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         if md.num_spec_decodes == 0:
             # A plain decode still appends one record per row, so its cursor
             # must advance too, otherwise the next step overwrites the token.
-            accepted = torch.ones(
-                num_reqs, dtype=torch.int32, device=write_pos.device
-            )
+            accepted = torch.ones(num_reqs, dtype=torch.int32, device=write_pos.device)
         elif md.num_accepted_tokens is not None:
             accepted = md.num_accepted_tokens[:num_reqs].to(torch.int32)
         else:

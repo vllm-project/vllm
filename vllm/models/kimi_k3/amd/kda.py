@@ -583,15 +583,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 beta=beta_spec,
                 metadata=m,
                 cu_seqlens=spec_cu_seqlens,
-                ssm_state_indices=(
-                    None if m.replayssm else spec_state_indices_tensor
-                ),
-                num_accepted_tokens=(
-                    None if m.replayssm else num_accepted_tokens
-                ),
-                replayssm_slot_idx=(
-                    m.replayssm_spec_slot_idx if m.replayssm else None
-                ),
+                ssm_state_indices=(None if m.replayssm else spec_state_indices_tensor),
+                num_accepted_tokens=(None if m.replayssm else num_accepted_tokens),
+                replayssm_slot_idx=(m.replayssm_spec_slot_idx if m.replayssm else None),
                 out=spec_out,
             )
 
