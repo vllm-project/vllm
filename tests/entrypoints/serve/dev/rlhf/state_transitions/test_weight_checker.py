@@ -21,7 +21,7 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     reusable_server,
     weight_checker,
 )
-from vllm.utils.weight_checksum import split_checksum_key
+from vllm.utils.weight_checksum_utils import split_checksum_key
 
 pytestmark = pytest.mark.skip_global_cleanup
 

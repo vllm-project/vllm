@@ -12,16 +12,17 @@ Then run:
 
 The example follows the Weight Checker lifecycle:
 
-    checksum -> pause -> reset -> reload/transfer -> compare -> resume
+    checksum -> reset -> pause -> reload/transfer -> resume -> compare
 
 The server keeps no baseline state, so the caller holds the first checksum
 and sends it back when comparing. That keeps the check valid when requests
 are load-balanced over several API server processes.
 
-``reset`` overwrites the weights in place, so it is bracketed by ``/pause`` and
-``/resume``: serving between the reset and the reload would generate from random
-weights, and the prefix cache would keep those blocks. See
-docs/features/weight_checker.md for the full rationale.
+``reset`` runs before the pause and ``compare`` after the resume because the
+Weight Checker refuses every action while the engine is paused. ``reset`` still
+overwrites the weights in place, so nothing may serve between it and the resume:
+serving in that window would generate from random weights, and the prefix cache
+would keep those blocks. See docs/features/weight_checker.md for the rationale.
 
 Pass ``--extra-url`` one or more times to also check that other replicas hold
 the same weights. Each one is checked against the same reference baseline
@@ -87,19 +88,23 @@ def reload_inference_weights(base_url: str) -> None:
 def verify_weight_update(base_url: str) -> dict[str, str]:
     """Run a complete reset, reload, and byte-for-byte verification cycle.
 
+    `reset` runs before the pause because the Weight Checker rejects every
+    action while the engine is paused, and `compare` has to run after the
+    resume for the same reason.
+
     Returns:
         The baseline checksums, which a later replica check can reuse.
     """
-    print("[1/5] Computing the original checksums and saving the baseline...")
+    print("[1/6] Computing the original checksums and saving the baseline...")
     original = check_weights(base_url, "checksum")["checksums"]
     print(f"      hashed {len(original)} tensors")
 
-    print("[2/5] Pausing generation so no request reads random weights...")
-    post(base_url, "/pause", params={"mode": "abort"})
-
-    print("[3/5] Resetting inference weights...")
+    print("[2/6] Resetting inference weights...")
     reset = check_weights(base_url, "reset")
     assert reset["status"] == "reset"
+
+    print("[3/6] Pausing generation before the transfer...")
+    post(base_url, "/pause", params={"mode": "abort"})
 
     print("      Reloading inference weights from the original checkpoint...")
     reload_inference_weights(base_url)
@@ -111,9 +116,12 @@ def verify_weight_update(base_url: str) -> dict[str, str]:
     if not reset_cache["success"]:
         raise RuntimeError("Could not clear the blocks cached from random weights")
 
+    print("[4/6] Resuming generation...")
+    post(base_url, "/resume")
+
     # No checksum first: compare hashes the current weights itself, so asking
     # for them here would repeat the work and discard the result.
-    print("[4/5] Comparing the current weights with the original baseline...")
+    print("[5/6] Comparing the current weights with the original baseline...")
     comparison = check_weights(base_url, "compare", original)
     if not comparison["match"]:
         mismatches = comparison["mismatches"]
@@ -122,10 +130,7 @@ def verify_weight_update(base_url: str) -> dict[str, str]:
             f"Weight verification failed with {len(mismatches)} mismatches:\n{preview}"
         )
 
-    print("[5/5] Resuming generation...")
-    post(base_url, "/resume")
-
-    print("Weight verification passed: all inference weights match.")
+    print("[6/6] Weight verification passed: all inference weights match.")
     return original
 
 

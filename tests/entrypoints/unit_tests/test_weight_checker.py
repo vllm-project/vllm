@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.entrypoints.serve.dev.rlhf.weight_checker import handle_weight_checker
-from vllm.utils.weight_checksum import (
+from vllm.utils.weight_checksum_utils import (
     combine_weight_checksums,
     compare_weight_checksum_reports,
     merge_finish_checksums,

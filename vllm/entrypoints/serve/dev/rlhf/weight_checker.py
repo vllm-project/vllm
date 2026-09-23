@@ -11,7 +11,7 @@ from http import HTTPStatus
 from fastapi import HTTPException
 
 from vllm.engine.protocol import EngineClient
-from vllm.utils.weight_checksum import (
+from vllm.utils.weight_checksum_utils import (
     combine_weight_checksums,
     compare_weight_checksum_reports,
 )
