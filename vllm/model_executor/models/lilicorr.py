@@ -102,7 +102,6 @@ class LiLiCorrLayer(nn.Module):
         )
         self.mlp_norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
         mlp_hidden_size = int(hidden_size * mlp_ratio)
-        # The checkpoint uses a biased, nongated MLP, unlike Qwen's SwiGLU.
         self.mlp = NemotronHMLP(
             config=None,
             hidden_size=hidden_size,
