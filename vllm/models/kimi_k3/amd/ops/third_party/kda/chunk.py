@@ -125,7 +125,7 @@ def recompute_w_u_fwd_kernel(
         b_v = p_v.load([i_t * BT, i_v * BV])
         b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
         b_u = tl.dot(b_A, b_vb, input_precision=DOT_PRECISION)
-        p_u.store(offsets=[i_t * BT, i_v * BV], value=b_u.to(p_u.dtype.element_ty))
+        p_u.store(offsets=[i_t * BT, i_v * BV], value=b_u.to(p_u.dtype))
 
     for i_k in range(tl.cdiv(K, BK)):
         p_w = tl.make_tensor_descriptor(
@@ -169,7 +169,7 @@ def recompute_w_u_fwd_kernel(
             )
             b_q = p_q.load([i_t * BT, i_k * BK])
             b_qg = b_q * exp2(b_gk)
-            p_qg.store(offsets=[i_t * BT, i_k * BK], value=b_qg.to(p_qg.dtype.element_ty))
+            p_qg.store(offsets=[i_t * BT, i_k * BK], value=b_qg.to(p_qg.dtype))
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
 
@@ -186,10 +186,10 @@ def recompute_w_u_fwd_kernel(
                 strides=[H * K, 1],
                 block_shape=[BT, BK],
             )
-            p_kg.store(offsets=[i_t * BT, i_k * BK], value=b_kg.to(p_kg.dtype.element_ty))
+            p_kg.store(offsets=[i_t * BT, i_k * BK], value=b_kg.to(p_kg.dtype))
 
         b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
-        p_w.store(offsets=[i_t * BT, i_k * BK], value=b_w.to(p_w.dtype.element_ty))
+        p_w.store(offsets=[i_t * BT, i_k * BK], value=b_w.to(p_w.dtype))
 
 
 def recompute_w_u_fwd(
@@ -353,7 +353,7 @@ def chunk_gla_fwd_kernel_o(
     b_A = p_A.load([i_t * BT, 0])
     b_A = tl.where(m_s, b_A, 0.0).to(b_v.dtype)
     b_o += tl.dot(b_A, b_v, allow_tf32=False)
-    p_o.store(offsets=[i_t * BT, i_v * BV], value=b_o.to(p_o.dtype.element_ty))
+    p_o.store(offsets=[i_t * BT, i_v * BV], value=b_o.to(p_o.dtype))
 
 
 def chunk_gla_fwd_o_gk(
@@ -516,7 +516,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
     # Boundary loads return zero, but bias and gate activation can make padded
     # rows nonzero. Padding trails valid rows, so it only affects masked stores.
     b_o = tl.cumsum(b_gate, axis=0) * cumsum_scale
-    p_o.store(offsets=[i_t * BT, i_s * BS], value=b_o.to(p_o.dtype.element_ty))
+    p_o.store(offsets=[i_t * BT, i_s * BS], value=b_o.to(p_o.dtype))
 
 
 def fused_kda_gate_chunk_cumsum(
