@@ -446,7 +446,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         boundary_state_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_boundary_states(req)
+    send._offload_handoff(req)
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -594,7 +594,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         boundary_state_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_boundary_states(req)
+    send._offload_handoff(req)
 
     # FA (block 4): full blocks ending at 4, 8 and 12, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under
@@ -612,7 +612,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
     """worker.lookup must query sub-block keys when partial hash hits are on.
 
     Regression test: ``lookup`` hard-coded ``fine_grained = False``, so the
-    sub-block keys persisted by ``_sub_block_tail_puts`` were never probed and
+    sub-block keys persisted by ``_sub_block_tail_blocks`` were never probed and
     partial prefix hits silently returned 0 while the store side kept writing
     them. Here the mamba block (16) exceeds the hash unit (4), so
     ``enable_partial_hash_hits`` is on and the lookup must find the stored
@@ -684,7 +684,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         num_prompt_tokens=20,
         boundary_state_offloads=[(1, 7, 12)],
     )
-    send_thread._maybe_offload_boundary_states(req)
+    send_thread._offload_handoff(req)
 
     worker.store = store
 
@@ -790,7 +790,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         num_prompt_tokens=20,
         boundary_state_offloads=[(1, 7, 12)],
     )
-    send_thread._maybe_offload_boundary_states(req)
+    send_thread._offload_handoff(req)
 
     worker.store = store
 

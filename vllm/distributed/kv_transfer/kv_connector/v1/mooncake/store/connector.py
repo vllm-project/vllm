@@ -47,7 +47,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .data import MooncakeStoreConnectorMetadata
+from .data import BoundaryStoreStats, MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
@@ -317,6 +317,12 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if not self._kv_cache_events.has_events():
                 self._kv_cache_events = None
             yield from events
+
+    def get_boundary_store_stats(self) -> BoundaryStoreStats | None:
+        """Return a snapshot of the mamba boundary hand-off counters."""
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_boundary_store_stats()
+        return None
 
     # ============================================================
     # Worker-side methods
