@@ -178,6 +178,7 @@ class ThinkingBudgetState:
         return self.lb_ramp_max_tokens if release == "ramp" else 0
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
+        """Stage budget and loop-break settings; True if logits need processing."""
         if not self.enabled:
             return False
         budget = sampling_params.thinking_token_budget
@@ -206,6 +207,7 @@ class ThinkingBudgetState:
         return use_thinking_budget or loop_break
 
     def apply_staged_writes(self) -> None:
+        """Copy the staged per-request state to the device."""
         if not self.enabled:
             return
         if self._reset_reqs:
@@ -238,6 +240,7 @@ class ThinkingBudgetState:
             self._budget_dirty = False
 
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> None:
+        """Apply thinking budgets and reasoning loop breaking to this batch's logits."""
         if not self.enabled:
             return
         idx_mapping_np = ctx.idx_mapping_np
@@ -312,6 +315,7 @@ class ThinkingBudgetState:
 
 @triton.jit
 def _take_loop_breaks_kernel(idx_mapping_ptr, loop_break_report_ptr, out_ptr):
+    """Hand each request's pending loop-break report to the host and clear it."""
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
     tl.store(out_ptr + batch_idx, tl.load(loop_break_report_ptr + req_state_idx))
@@ -612,6 +616,7 @@ def _thinking_budget_kernel(
     TRACK_FORCED_END: tl.constexpr,
     HAS_LOOP_BREAK: tl.constexpr,
 ):
+    """Force the reasoning end, or ramp toward it, for each logits row."""
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     budget = tl.load(thinking_token_budget_ptr + req_state_idx)
@@ -813,6 +818,7 @@ def apply_thinking_budget(
     loop_break_min_reasoning_tokens: int = 0,
     loop_break_check_interval: int = 1,
 ) -> None:
+    """Apply thinking budgets and reasoning loop breaking to ``logits`` in place."""
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
     natural_end_len = natural_reasoning_end_token_ids.shape[0]
