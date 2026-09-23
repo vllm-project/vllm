@@ -309,6 +309,7 @@ def _selective_scan_update_kernel(
     USE_RS_ROUNDING: tl.constexpr,
     PHILOX_ROUNDS: tl.constexpr,
 ):
+    """SSM state update; an accepted count past the state row zeroes the output."""
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
     pid_h = tl.program_id(axis=2)
