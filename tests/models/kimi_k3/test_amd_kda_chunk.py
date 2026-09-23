@@ -13,17 +13,17 @@ import torch
 from vllm.platforms import current_platform
 
 
-def _on_gfx950() -> bool:
-    if not current_platform.is_rocm():
+def _fused_chunk_available() -> bool:
+    if not (current_platform.is_rocm() and torch.cuda.is_available()):
         return False
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.models.kimi_k3.amd.ops.kda_chunk import is_fused_kda_chunk_supported
 
-    return on_gfx950()
+    return is_fused_kda_chunk_supported()
 
 
 pytestmark = pytest.mark.skipif(
-    not _on_gfx950(),
-    reason="The fused KDA chunk kernel is only built for gfx950",
+    not _fused_chunk_available(),
+    reason="The fused KDA chunk kernel needs a gfx950 build that includes it",
 )
 
 HEAD_DIM = 128

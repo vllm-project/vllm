@@ -26,14 +26,22 @@ from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDAMetadataBuilder
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
 )
-from vllm.models.kimi_k3.amd.ops.kda_chunk import KDA_CHECKPOINT_ALIGNMENT
+from vllm.models.kimi_k3.amd.ops.kda_chunk import (
+    KDA_CHECKPOINT_ALIGNMENT,
+    is_fused_kda_chunk_supported,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 pytestmark = pytest.mark.skipif(
-    not (current_platform.is_rocm() and torch.cuda.is_available()),
-    reason="The ROCm KDA prefill checkpoint needs a ROCm device",
+    not (
+        current_platform.is_rocm()
+        and torch.cuda.is_available()
+        and is_fused_kda_chunk_supported()
+    ),
+    reason="The ROCm KDA prefill checkpoint is exported by the fused chunk "
+    "kernel, which needs a gfx950 build that includes it",
 )
 
 # A mamba block size the chunk walk lands on. The real K3 value is 768; any
