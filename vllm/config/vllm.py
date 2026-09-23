@@ -28,6 +28,7 @@ from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
 from .attention import AttentionConfig, HiSparseConfig
+from .aux_output import AuxOutputConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -376,6 +377,8 @@ class VllmConfig:
     """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    aux_output_config: AuxOutputConfig = Field(default_factory=AuxOutputConfig)
+    """Execution auxiliary output configuration."""
     engram_config: EngramConfig | None = None
     """N-gram embedding storage and sharding settings."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
@@ -554,6 +557,7 @@ class VllmConfig:
             vllm_factors.append(self.ec_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
+        vllm_factors.append(self.aux_output_config.compute_hash())
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
                 additional_config_hash = safe_hash(
@@ -939,6 +943,7 @@ class VllmConfig:
 
         model_config.hf_config = hf_config
         model_config.model_arch_config = model_config.get_model_arch_config()
+        model_config.is_submodel_config = True
 
         return replace(self, model_config=model_config)
 
@@ -1083,6 +1088,58 @@ class VllmConfig:
 
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
+
+    def _verify_aux_output_compatibility(self) -> None:
+        """Reject configurations unsupported by enabled auxiliary outputs."""
+        if not self.aux_output_config.enabled:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError(
+                "AuxOutput Connector requires Model Runner V2; set "
+                "VLLM_USE_V2_MODEL_RUNNER=1."
+            )
+        if self.model_config.runner_type != "generate":
+            raise ValueError("AuxOutput Connector only supports generate runners.")
+        if not self.model_config.is_moe:
+            raise ValueError("AuxOutput Connector only supports MoE models.")
+        if not self.cache_config.enable_prefix_caching:
+            raise ValueError("AuxOutput Connector requires prefix caching.")
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.enable_adaptive_verification
+        ):
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "adaptive speculative verification."
+            )
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "pipeline parallelism (PP > 1)."
+            )
+        if (
+            self.parallel_config.decode_context_parallel_size > 1
+            or self.parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "context parallelism (DCP/PCP > 1)."
+            )
+
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is not None:
+            for connector_name in (
+                "NixlConnector",
+                "NixlPullConnector",
+                "NixlPushConnector",
+                "MoRIIOConnector",
+                "MooncakeConnector",
+            ):
+                if kv_transfer_config.has_connector(connector_name):
+                    raise ValueError(
+                        "--enable-return-routed-experts is incompatible with "
+                        f"{connector_name}; PD auxiliary output is not supported."
+                    )
 
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
@@ -1275,6 +1332,12 @@ class VllmConfig:
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 
+        if self.model_config is not None and self.model_config.is_submodel_config:
+            # with_hf_config() view: the parent config was already validated,
+            # and this view's empty architecture list makes the model-dependent checks
+            # below unsafe (e.g. use_mla resolves the architecture registry).
+            return
+
         self._resolve_mm_encoder_only()
 
         if self.performance_mode != "balanced":
@@ -1293,38 +1356,6 @@ class VllmConfig:
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
-
-        if (
-            self.model_config is not None
-            and self.model_config.enable_return_routed_experts
-        ):
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with "
-                    "pipeline parallelism (PP > 1)."
-                )
-            if (
-                self.parallel_config.decode_context_parallel_size > 1
-                or self.parallel_config.prefill_context_parallel_size > 1
-            ):
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with context "
-                    "parallelism (DCP > 1 or PCP > 1)."
-                )
-
-            # Incompatible with any KV connector — covers both PD disaggregation
-            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
-            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
-            # change when KV blocks live outside local GPU memory, breaking the
-            # slot-indexed routed_experts buffer).
-            if (
-                self.kv_transfer_config is not None
-                and self.kv_transfer_config.is_kv_transfer_instance
-            ):
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with KV "
-                    "connectors (PD disaggregation, KV cache offload)."
-                )
 
         if (
             self.model_config is not None
@@ -1438,11 +1469,12 @@ class VllmConfig:
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
                     and self.speculative_config.method != "draft_model"
                     and self.speculative_config.method != "dspark"
+                    and self.speculative_config.method != "dflash"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark kind of "
-                        "speculative decoding"
+                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark/DFlash "
+                        "kind of speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -1471,6 +1503,7 @@ class VllmConfig:
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
                 and self.speculative_config.method != "draft_model"
                 and self.speculative_config.method != "dspark"
+                and self.speculative_config.method != "dflash"
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
@@ -1499,6 +1532,15 @@ class VllmConfig:
                     "Async scheduling is disabled for ROCm DeepEP "
                     "high-throughput DBO because that combination can corrupt "
                     "DP+EP generation accuracy."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.parallel_config.pipeline_parallel_size > 1
+                and not self.use_v2_model_runner
+            ):
+                logger.warning_once(
+                    "Async scheduling is disabled because the V1 model runner "
+                    "does not support it with pipeline parallelism."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1563,11 +1605,14 @@ class VllmConfig:
 
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.warning_once(
-                "Enforce eager set, disabling torch.compile and CUDAGraphs. "
-                "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
+                "Enforce eager set, disabling torch.compile, CUDAGraphs, and JIT "
+                "kernel warmup. This is equivalent to setting -cc.mode=none "
+                "-cc.cudagraph_mode=none and "
+                "--kernel_config.enable_jit_warmup=False"
             )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            self.kernel_config.enable_jit_warmup = False
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
@@ -1859,6 +1904,16 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        # After the platform hook, which has the last word on async scheduling.
+        if (
+            self.diffusion_config is not None
+            and self.scheduler_config.async_scheduling
+            and self.scheduler_config.scheduler_cls is None
+        ):
+            self.scheduler_config.scheduler_cls = (
+                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
+            )
+
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
@@ -2032,6 +2087,7 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+        self._verify_aux_output_compatibility()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
             # Such an instance publishes encoder embeddings and runs no language
@@ -2689,7 +2745,7 @@ class VllmConfig:
             f"quantization={self.model_config.quantization}, "
             f"quantization_config={self.model_config.quantization_config}, "  # noqa
             f"enforce_eager={self.model_config.enforce_eager}, "
-            f"enable_return_routed_experts={self.model_config.enable_return_routed_experts}, "  # noqa
+            f"aux_output_config={self.aux_output_config!r}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "
@@ -2939,6 +2995,20 @@ class VllmConfig:
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallel")
+
+        # Note(arpera):
+        # MRV1 + PP>1 + async sched + structured output
+        # does not work in vLLM. For more info see:
+        # https://github.com/vllm-project/vllm/issues/45014
+        # Since recently MRV1 has been deprecated then
+        # there was decided not to fix the issue but instead
+        # to disallow such configuration.
+        # At the same time MRV2 works fine in this case.
+        if (
+            self.parallel_config.pipeline_parallel_size > 1
+            and self.scheduler_config.async_scheduling
+        ):
+            unsupported.append("pipeline parallelism with async scheduling")
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
