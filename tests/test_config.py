@@ -289,6 +289,46 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
         VllmConfig.validate_block_size(config)
 
 
+def test_nixl_dcp_check_skipped_for_submodel_config():
+    # with_hf_config() builds a submodule view of the config (e.g. a
+    # multimodal model's text stack) whose architecture list is empty.
+    # Re-running VllmConfig validation on it is unsafe: the NIXL DCP check
+    # reads use_mla, which resolves the architecture registry.
+    model_config = ModelConfig("Qwen/Qwen2-VL-2B-Instruct", max_model_len=2048)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        device_config=DeviceConfig(device="cpu"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+    )
+    submodel_config = vllm_config.with_hf_config(model_config.hf_text_config)
+    assert submodel_config.model_config.is_submodel_config
+    assert submodel_config.model_config.architectures == []
+    assert submodel_config.model_config.use_mla is False
+
+
+def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
+    # Pretend the model has a single KV head so the DCP feasibility checks
+    # pass and the MLA-only assert is what actually fires.
+    monkeypatch.setattr(ModelConfig, "get_total_num_kv_heads", lambda self: 1)
+    with pytest.raises(ValidationError, match="only supported for MLA models"):
+        VllmConfig(
+            model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+                distributed_executor_backend="mp",
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="NixlConnector",
+                kv_role="kv_both",
+            ),
+        )
+
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
@@ -647,6 +687,15 @@ def test_v2_model_runner_supports_extract_hidden_states():
             parallel_drafting=False,
             enable_adaptive_verification=False,
         ),
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_v2_model_runner_supports_custom_logits_processors():
+    config = VllmConfig()
+    config.model_config = cast(
+        ModelConfig, SimpleNamespace(logits_processors=["a.b:C"])
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
@@ -1073,10 +1122,11 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
 
 def test_v1_model_runner_rejects_v2_only_features():
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             prefill_context_parallel_size=2,
-            enable_batch_sharded_sampling=False,
+            distributed_executor_backend="mp",
         ),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
         speculative_config=None,
         model_config=None,
     )
@@ -1236,6 +1286,47 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_v1_model_runner_drops_async_scheduling_with_pipeline_parallelism(monkeypatch):
+    """PP>1 must stay buildable whenever the V1 model runner is selected, such
+    as the external_launcher fallback; async scheduling is dropped instead."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
+    )
+    assert cfg.scheduler_config.async_scheduling is False
+
+
+def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
+    """Only the async combination desyncs the grammar FSM (#45014), so plain
+    PP>1 must stay usable on the V1 model runner."""
+    config = SimpleNamespace(
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        speculative_config=None,
+        model_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
+
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
+
+    config.scheduler_config.async_scheduling = True
+    unsupported = VllmConfig._get_v1_model_runner_unsupported_features(config)
+    assert "pipeline parallelism with async scheduling" in unsupported
+
+
 def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
 
@@ -1276,21 +1367,33 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
 
 
 @pytest.mark.parametrize(
+    "cpu_offload,dp_size,elastic_ep,expected",
+    [(True, 2, False, True), (False, 2, False, False), (True, 1, False, False)],
+)
+def test_engram_dp_shared_memory_defaults_when_supported(
+    cpu_offload, dp_size, elastic_ep, expected
+):
+    """Unset dp_shared_memory enables sharing only for offloaded, non-elastic DP."""
+    parallel = ParallelConfig(data_parallel_size=dp_size)
+    parallel.enable_elastic_ep = elastic_ep
+    config = EngramConfig(cpu_offload=cpu_offload)
+    config.resolve_dp_shared_memory(parallel)
+    assert config.dp_shared_memory is expected
+
+
+@pytest.mark.parametrize(
     "dp_size,load_format,multithread,error",
     [
         (1, "auto", False, "requires data_parallel_size > 1"),
-        (2, "dummy", False, "requires load_format"),
-        (2, "sharded_state", False, "requires load_format"),
         (2, "auto", False, None),
         (2, "safetensors", True, None),
-        (2, "pt", True, None),
     ],
 )
 def test_engram_dp_shared_memory_config_validation(
     monkeypatch, dp_size, load_format, multithread, error
 ):
     """Reject invalid shared configs before distributed init; allow threaded loads."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     config = cast(
         VllmConfig,
         SimpleNamespace(
@@ -1315,7 +1418,7 @@ def test_engram_dp_shared_memory_config_validation(
 
 
 @pytest.mark.parametrize(
-    "architecture, ple_layers, cuda, supported",
+    "architecture, ple_layers, accelerator, supported",
     [
         ("DeepseekV41ForCausalLM", [1], True, True),
         ("DeepseekV41ForCausalLM", [], True, False),
@@ -1330,9 +1433,11 @@ def test_engram_dp_shared_memory_config_validation(
         (None, None, True, False),
     ],
 )
-def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, supported):
+def test_engram_model_support(
+    monkeypatch, architecture, ple_layers, accelerator, supported
+):
     """A similarly named HF field must not enable unsupported implementations."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: accelerator)
     model = (
         cast(
             ModelConfig,
@@ -1369,16 +1474,8 @@ def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, suppo
         assert resolved.engram_config.cpu_offload is True
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"), [(None, True), ("0", False), ("1", True)]
-)
-def test_engram_cpu_offload_environment_default(monkeypatch, value, expected):
-    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
-    if value is not None:
-        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", value)
-    assert EngramConfig().cpu_offload is expected
-    assert EngramConfig(cpu_offload=False).cpu_offload is False
-    assert EngramConfig(cpu_offload=True).cpu_offload is True
+def test_engram_cpu_offload_default():
+    assert EngramConfig().cpu_offload is True
 
 
 def test_engram_config_defaults_to_none():
@@ -1421,7 +1518,7 @@ def test_engram_explicit_config_requires_supported_model():
 @pytest.mark.parametrize("explicit", [False, True])
 def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, explicit):
     """MTP may inherit cross-DP sharding without having its own PLE layers."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     target = SimpleNamespace(
         architecture="Qwen4ExpForCausalLM",
         hf_text_config=SimpleNamespace(ple_layer_ids=[1] if target_has_ple else []),
@@ -1495,6 +1592,41 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.world_size == 8
 
 
+@pytest.mark.parametrize("data_parallel_size", [4, 8])
+def test_nnodes_within_dp_when_replicas_outnumber_nodes(data_parallel_size):
+    """A replica that fits on one node spans one node, never zero.
+
+    External LB pins ``data_parallel_size_local`` to 1, so the ratio rounds
+    down to 0 as soon as there are more DP replicas than nodes. Anything
+    dividing by ``nnodes_within_dp`` then raises ZeroDivisionError.
+    """
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_size_local=1,
+        data_parallel_external_lb=True,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+    assert parallel_config.local_world_size == parallel_config.world_size
+
+
+@pytest.mark.parametrize("nnodes", [4, 9])
+def test_nnodes_within_dp_rejects_uneven_internal_lb(nnodes):
+    parallel_config = ParallelConfig(
+        data_parallel_size=8,
+        data_parallel_size_local=1,
+        distributed_executor_backend="mp",
+        nnodes=nnodes,
+    )
+
+    with pytest.raises(ValueError, match="Invalid data parallel configuration"):
+        _ = parallel_config.nnodes_within_dp
+
+
 def test_draft_model_enables_async_scheduling_by_default():
     parallel_config = ParallelConfig(distributed_executor_backend="uni")
     model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
@@ -1515,6 +1647,71 @@ def test_draft_model_enables_async_scheduling_by_default():
         speculative_config=speculative_config,
     )
 
+    assert cfg.scheduler_config.async_scheduling is True
+
+
+def test_dflash_allows_async_scheduling(tmp_path: Path):
+    """DFlash must stay async-schedulable: it was the only parallel-drafting
+    method excluded from the allowlist."""
+    from transformers import LlamaConfig
+
+    common = dict(
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=256,
+        max_position_embeddings=2048,
+    )
+    target_path = tmp_path / "target"
+    draft_path = tmp_path / "draft"
+    _write_json(
+        target_path / "config.json",
+        LlamaConfig(architectures=["LlamaForCausalLM"], **common).to_dict(),
+    )
+    _write_json(
+        draft_path / "config.json",
+        dict(
+            common,
+            architectures=["DFlash2DraftModel"],
+            model_type="qwen3",
+            num_hidden_layers=1,
+            layer_types=["sliding_attention"],
+            sliding_window=128,
+            dflash_config=dict(
+                block_size=4,
+                mask_token_id=255,
+                target_layer_ids=[0],
+                conv_group_size=2,
+                conv_kernel_size=2,
+                selector_rank=8,
+                selector_top_k=4,
+            ),
+        ),
+    )
+    parallel_config = ParallelConfig(distributed_executor_backend="uni")
+    model_config = ModelConfig(
+        model=str(target_path), tokenizer_mode="skip", max_model_len=2048
+    )
+    speculative_config = SpeculativeConfig(
+        method="dflash",
+        model=str(draft_path),
+        num_speculative_tokens=3,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+    cfg = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
+    )
+
+    assert speculative_config.method == "dflash"
     assert cfg.scheduler_config.async_scheduling is True
 
 
