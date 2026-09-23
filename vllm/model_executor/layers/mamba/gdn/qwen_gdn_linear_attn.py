@@ -132,9 +132,10 @@ def _resolve_gdn_prefill_backend(
         if backend == "aiter_flydsl":
             if not rocm_aiter_ops.is_gdn_flydsl_prefill_available():
                 raise RuntimeError(
-                    "GDN prefill backend 'aiter_flydsl' was requested but is "
-                    "not available: "
-                    f"{rocm_aiter_ops.gdn_flydsl_prefill_unavailable_reason()}"
+                    "GDN prefill backend 'aiter_flydsl' was requested but the "
+                    "AITER FlyDSL prefill kernels are not importable. Check "
+                    "that VLLM_ROCM_USE_AITER=1, that this is a CDNA 3 or "
+                    "newer GPU, and that the installed AITER exports them."
                 )
             if head_k_dim != 128 or head_v_dim != 128:
                 logger.warning_once(
