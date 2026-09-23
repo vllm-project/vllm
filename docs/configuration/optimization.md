@@ -156,10 +156,18 @@ GPU. vLLM can pin each worker with `numactl` before the Python subprocess starts
 so the interpreter, imports, and early allocator state are created with the
 desired NUMA policy from the beginning.
 
-Use `--numa-bind` to enable the feature. By default, vLLM auto-detects the
-GPU-to-NUMA mapping and uses `--cpunodebind=<node> --membind=<node>` for each
-worker. When you need a custom CPU policy, add `--numa-bind-cpus` and vLLM will
-switch to `--physcpubind=<cpu-list> --membind=<node>`.
+By default, vLLM binds automatically when the environment supports it:
+CUDA-alike platform, multiple NUMA nodes, `numactl` installed, permission to
+set NUMA memory policy, the `spawn` multiprocessing start method (the CLI
+default), and no `--device-ids`. Otherwise it starts unbound. Use
+`--numa-bind` to make a missing `numactl` or undetectable GPU-to-NUMA topology a
+startup error, or `--no-numa-bind` to disable binding. Passing
+`--numa-bind-nodes` or `--numa-bind-cpus` implies `--numa-bind`.
+
+When binding, vLLM auto-detects the GPU-to-NUMA mapping and uses
+`--cpunodebind=<node> --membind=<node>` for each worker. When you need a custom
+CPU policy, add `--numa-bind-cpus` and vLLM will switch to
+`--physcpubind=<cpu-list> --membind=<node>`.
 
 These `--numa-bind*` options only apply to GPU execution processes. They do not
 configure the CPU backend's separate thread-affinity controls. Automatic
@@ -174,7 +182,7 @@ order as the GPU indices. Each CPU list must use
 `numactl --physcpubind` syntax such as `0-3`, `0,2,4-7`, or `16-31,48-63`.
 
 ```bash
-# Auto-detect NUMA nodes for visible GPUs
+# Require binding, auto-detecting NUMA nodes for visible GPUs
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --tensor-parallel-size 4 \
   --numa-bind
@@ -195,7 +203,8 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Notes:
 
-- CLI usage forces multiprocessing to use the `spawn` method automatically. If you enable NUMA binding through the Python API, also set `VLLM_WORKER_MULTIPROC_METHOD=spawn`.
+- CLI usage forces multiprocessing to use the `spawn` method automatically. The Python API defaults to `fork`, so default binding stays off there; set `VLLM_WORKER_MULTIPROC_METHOD=spawn` to get it, and also when enabling NUMA binding explicitly.
+- `--membind` restricts each process's host memory to its NUMA node, so host-memory-heavy setups (e.g. large CPU KV offload) must fit within one node's memory per process; use `--no-numa-bind` otherwise.
 - Automatic detection relies on NVML and NUMA support from the host. If it cannot determine the mapping reliably, pass `--numa-bind-nodes` explicitly.
 - Explicit `--numa-bind-nodes` and `--numa-bind-cpus` values must be valid `numactl` inputs. vLLM does a small amount of validation, but the effective binding semantics are still determined by `numactl`.
 - The current implementation binds GPU execution processes such as `EngineCore` and multiprocessing workers. It does not apply NUMA binding to frontend API server processes or the DP coordinator.
