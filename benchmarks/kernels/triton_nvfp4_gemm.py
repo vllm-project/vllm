@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton implementation of NVFP4 GEMM (FP4 x FP4 -> BF16/FP16).
 
-Uses tl.dot_scaled for block-scaled FP4 matrix multiplication on SM100+.
-This serves as a portable reference/fallback when CUTLASS kernels are
-not available (e.g., SM120 without CUTLASS support).
+Uses tl.dot_scaled for block-scaled FP4 matrix multiplication on Blackwell
+(SM100 and SM120). This is a reference implementation for benchmarking
+against the CUTLASS NVFP4 GEMM in benchmark_nvfp4_gemm.py (issue #21014);
+it is not a dispatch backend and nothing in vllm/ calls it.
 
 Data format (NVFP4):
   - FP4 values: E2M1 format, 2 packed per uint8 byte along K dimension
