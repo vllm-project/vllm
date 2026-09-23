@@ -27,7 +27,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV41SparseSWAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950
+from vllm.platforms.rocm import _ON_GFX950, on_gfx950
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -38,7 +38,6 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
-    mxfp8_wo_a_bmm_supported,
     rocm_inv_rope_einsum,
     rocm_inverse_rope_mxfp8_rows,
     rocm_inverse_rope_rows_,
@@ -668,28 +667,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             transpose_scale=False,
         )
 
-    @functools.cached_property
-    def _use_mxfp8_wo_a(self) -> bool:
-        """Whether attention emits MXFP8 and wo_a runs as a grouped FP8 GEMM.
-
-        Resolved at the first forward, after the MXFP8 linear has finished
-        post-processing the wo_a weight it checks.
-        """
-        return (
-            self.padded_heads == self.n_local_heads
-            and self.head_dim % 32 == 0
-            and mxfp8_wo_a_bmm_supported(
-                self.wo_a,
-                self.n_local_groups,
-                self.o_lora_rank,
-                self.n_local_heads * self.head_dim // self.n_local_groups,
-            )
-        )
-
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
     ) -> torch.Tensor | QuantizedActivation:
-        if not self._use_mxfp8_wo_a:
+        if not on_gfx950():
             return super()._alloc_attn_out(num_tokens, hidden_states)
         # wo_a's MXFP8 input: the decode reduce writes it directly, prefill
         # rows are rotated and quantized after their bf16 attention.
@@ -1103,7 +1084,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         shapes: list[tuple[tuple[int, ...], torch.dtype]] = [
             ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
         ]
-        if self._use_mxfp8_wo_a:
+        if on_gfx950():
             shapes.append(
                 (
                     (num_prefill_tokens, self.n_local_heads, self.head_dim),

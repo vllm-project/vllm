@@ -1893,33 +1893,6 @@ def _mxfp8_wo_a_bmm_config(num_tokens: int, n_groups: int) -> tuple[int, ...]:
     return 128, 128, 128, 4, 2
 
 
-def mxfp8_wo_a_bmm_supported(
-    wo_a: torch.nn.Module, n_groups: int, o_lora_rank: int, group_dim: int
-) -> bool:
-    """Whether ``rocm_mxfp8_wo_a_bmm`` can run this ``wo_a`` as loaded.
-
-    Needs native MX matrix cores (gfx950) and the one-byte MXFP8 weight with
-    per-row E8M0 scales that the ROCm MXFP8 linear keeps after loading.
-    """
-    if not (_ON_GFX950 and current_platform.supports_mx()):
-        return False
-    weight = getattr(wo_a, "weight", None)
-    scale = getattr(wo_a, "weight_scale", None)
-    if weight is None or scale is None:
-        return False
-    n = n_groups * o_lora_rank
-    return (
-        weight.dtype == torch.float8_e4m3fn
-        and tuple(weight.shape) == (n, group_dim)
-        and weight.is_contiguous()
-        and scale.dtype == torch.uint8
-        and tuple(scale.shape) == (n, group_dim // 32)
-        and scale.is_contiguous()
-        and o_lora_rank % 64 == 0
-        and group_dim % 1024 == 0
-    )
-
-
 def _rocm_mxfp8_wo_a_bmm_impl(
     a: torch.Tensor,
     a_scale: torch.Tensor,
