@@ -383,20 +383,9 @@ class DefaultModelLoader(BaseModelLoader):
             self._encoder_only_weights_mapper = None
             return
 
-        # Optional model-declared module prefixes (vLLM attr names). When set,
-        # still pair with hf_to_vllm_mapper for HF key classification.
-        declared = getattr(model, "mm_encoder_only_lm_prefixes", None)
-        weights_mapper = getattr(model, "hf_to_vllm_mapper", None)
-        if declared is not None:
-            prefixes = tuple(p if p.endswith(".") else f"{p}." for p in declared)
-            self._encoder_only_lm_prefixes = prefixes or None
-            self._encoder_only_weights_mapper = (
-                weights_mapper if self._encoder_only_lm_prefixes else None
-            )
-            return
-
         # Derive from _language_model_names; fail-closed on shared HF roots
         # (Molmo/Phi-4-MM/Muse). Qwen nested/flat keys classified via mapper.
+        weights_mapper = getattr(model, "hf_to_vllm_mapper", None)
         self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
             getattr(model, "_language_model_names", None),
             weights_mapper=weights_mapper,

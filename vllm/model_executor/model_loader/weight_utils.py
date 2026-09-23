@@ -731,8 +731,6 @@ def resolve_mm_encoder_only_lm_prefixes(
     Returns ``None`` (leave the safetensors file list unchanged) when a module
     prefix is a shared HF checkpoint root for both LM and non-LM weights —
     fail-closed so Molmo / Phi-4-MM / Muse cannot under-load the encoder.
-    Models may also declare ``mm_encoder_only_lm_prefixes`` on the module to
-    supply an explicit override (handled by the loader).
     """
     prefixes = _normalize_module_prefixes(language_model_names)
     shared = _shared_hf_root_module_prefixes(prefixes, weights_mapper)
@@ -741,8 +739,8 @@ def resolve_mm_encoder_only_lm_prefixes(
             "mm-encoder-only whole-shard filter not applied: LM module "
             "prefix(es) %s share an HF checkpoint root with non-LM weights "
             "(via WeightsMapper). Encoder-only load keeps the full "
-            "safetensors file list; declare finer "
-            "``mm_encoder_only_lm_prefixes`` or use key-level filtering later.",
+            "safetensors file list; finer HF prefixes or key-level "
+            "filtering can enable skip later.",
             shared,
         )
         return None
