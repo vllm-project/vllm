@@ -268,12 +268,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
     @staticmethod
     def _plan_dtype(spec_dtype: torch.dtype) -> torch.dtype:
-        """Dtype plan() must be given for a cache of ``spec_dtype``.
-
-        An fp8 KV cache is allocated as uint8 storage and run() views it as
-        float8_e4m3fn; plan() has to be told the same dtype, the wrapper
-        rejects uint8.
-        """
+        """fp8 KV is stored as uint8, but plan() needs float8_e4m3fn."""
         return torch.float8_e4m3fn if spec_dtype == torch.uint8 else spec_dtype
 
     def __init__(

@@ -879,18 +879,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.use_pcp = self.pcp_world_size > 1
         self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        # KV compression. Default to 1 for no compression.
+        # KV compression (DeepseekV4). Default to 1 for no compression.
         self.compress_ratio = 1
-        # Get compress_ratio for DeepseekV4 support
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
-            # MLA compression is a whole number of tokens per state (fractions
-            # are whisper block pooling and never reach MLA).
             assert isinstance(self.kv_cache_spec.tokens_per_state, int)
             self.compress_ratio = self.kv_cache_spec.tokens_per_state
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
-        # The chunker feeds this budget compressed seq_lens, and the consumer
-        # K-gather workspace holds max_prefill_buffer / compress_ratio rows, so
-        # the budget must be sized in the same units.
+        # In compressed rows, like the chunker's seq_lens and the workspace.
         self.max_prefill_buffer_size = (
             get_max_prefill_buffer_size(self.vllm_config) // self.compress_ratio
         )

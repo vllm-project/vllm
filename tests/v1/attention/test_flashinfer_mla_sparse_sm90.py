@@ -240,11 +240,7 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     ],
 )
 def test_plan_dtype_translates_fp8_storage(spec_dtype, expected):
-    """An fp8 cache is allocated as uint8 but planned as float8_e4m3fn.
-
-    The wrapper rejects uint8, so a cache spec carrying the storage dtype has
-    to be translated before it reaches plan(); other dtypes pass through.
-    """
+    """uint8 fp8 storage is planned as float8_e4m3fn; others pass through."""
     assert FlashInferMLASparseSM90Builder._plan_dtype(spec_dtype) == expected
 
 

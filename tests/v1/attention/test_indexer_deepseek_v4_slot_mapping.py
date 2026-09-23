@@ -367,12 +367,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
 
 @pytest.mark.parametrize("compress_ratio", [1, 4])
 def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
-    """The chunker admits compressed rows against ``max_prefill_buffer_size``,
-    and the consumer K-gather workspace holds
-    ``get_max_prefill_buffer_size() // compress_ratio`` rows, so the budget
-    must be sized in the same units. An undivided budget lets a step admit up
-    to ``compress_ratio``x more rows than the workspace holds.
-    """
+    """The chunker budget is in compressed rows, like the K-gather workspace."""
     max_model_len = 1024
     kv_cache_spec = MLAAttentionSpec(
         block_size=256,
@@ -395,8 +390,7 @@ def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
     workspace_rows = get_max_prefill_buffer_size(vllm_config) // compress_ratio
     assert builder.max_prefill_buffer_size == workspace_rows
 
-    # Enough requests at max length that their compressed rows overflow the
-    # workspace unless the chunker splits them.
+    # Overflows the workspace unless the chunker splits.
     num_reqs = 3 * (workspace_rows // (max_model_len // compress_ratio)) + 1
     compressed_seq_lens = torch.full((num_reqs,), max_model_len // compress_ratio)
     query_lens = torch.ones(num_reqs, dtype=torch.int64)
