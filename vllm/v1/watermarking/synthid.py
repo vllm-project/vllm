@@ -96,6 +96,7 @@ class SynthIDWatermarker(Watermarker):
         Returns:
             Integer SynthID keys with shape
             [batch_size, vocab_size, depth], where ``depth == len(keys)``.
+
         """
         batch_size = contexts.shape[0]
 
@@ -192,6 +193,7 @@ class SynthIDWatermarker(Watermarker):
         This implementation intentionally mirrors HuggingFace so that
         generated text remains behaviorally compatible with its SynthID
         implementation.
+
         """
         depth = g_values.shape[-1]
 
