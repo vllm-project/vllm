@@ -2,41 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Llama 3.x/4 JSON tool-call parser (llama3_json / llama4_json).
 
-Format (tool_chat_template_llama3.1/3.2/llama4 JSON templates)::
+Format: ``[<|python_tag|>]{"name": "f", "parameters": {...}}; {"name": "g", ...}``
+-- a bare JSON envelope with no tool-name state and no end marker. A ``{``
+opens a call; it closes when the envelope's JSON balances
+(``tool_call_ends_on_args_balance``); the name is the top-level ``"name"``;
+``parameters``/``arguments`` is carved out as a verbatim prefix-stable
+substring. Separators (``;``, newlines, or none under the xgrammar "llama"
+tag) are dropped like all text after the first completed call, matching
+legacy. A balanced ``{...}`` with no top-level ``"name"`` is prose JSON,
+not a call; its text is restored as content in place.
 
-    [<|python_tag|>]{"name": "f", "parameters": {...}}; {"name": "g", ...}
+Two deliberate contract changes vs. legacy, both forced by the streaming
+contract (append-only, must match non-streaming exactly):
 
-The payload is a bare JSON envelope with no tool-name state and no end
-marker: a ``{`` opens a tool call, the call closes when the envelope's
-JSON balances (``tool_call_ends_on_args_balance``), the name is the
-envelope's top-level ``"name"`` value, and the ``parameters``/
-``arguments`` value is carved out of the envelope as a verbatim
-prefix-stable substring.  Separators between calls (``;``, newlines,
-or nothing at all under the xgrammar "llama" structural tag) are
-dropped like all text after the first completed call, matching the
-legacy parser.  A balanced ``{...}`` that never produces a top-level
-``"name"`` key was prose JSON, not a tool call; its text is restored
-as content in place.
-
-Deliberate contract changes vs. the legacy parser, both forced by the
-streaming contract (output is append-only and must match the
-non-streaming result exactly):
-
-* Prose preceding an envelope is returned as ``content`` alongside the
-  tool calls.  Legacy returned ``content=None`` non-streaming and, from
-  its streaming path, returned the whole output — prose *and* envelope —
-  as content with no tool call at all.  Prose emitted before the opening
-  ``{`` arrives cannot be retracted, so reporting it in both modes is
-  the only parity-preserving option; it matches the other engine-backed
-  parsers, and the OpenAI chat-completion schema allows ``content`` and
-  ``tool_calls`` together.
-* When an envelope carries both ``parameters`` and ``arguments``, the
-  one appearing first in the text wins.  Legacy preferred ``arguments``
-  non-streaming, but its streaming path asserted on the duplicate and
-  emitted no arguments at all.  The value streams as soon as its key is
-  seen, so honoring a later ``arguments`` would have to retract the
-  already-streamed ``parameters`` text, which the engine's safe-prefix
-  guard turns into permanently truncated JSON.
+* Prose before an envelope is returned as ``content`` alongside the calls.
+  Legacy returned ``content=None`` non-streaming and the whole output as
+  content with no call at all when streaming. Prose before the opening
+  ``{`` can't be retracted, so reporting it in both modes is the only
+  parity-preserving option, and OpenAI's schema allows both together.
+* When an envelope carries both ``parameters`` and ``arguments``, the one
+  appearing first wins. Legacy preferred ``arguments`` non-streaming but
+  asserted on the duplicate while streaming. Honoring a later key would
+  mean retracting already-streamed text, which the append-only guard
+  can't do.
 """
 
 from __future__ import annotations
@@ -66,11 +54,9 @@ if TYPE_CHECKING:
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
 PYTHON_TAG = "<|python_tag|>"
-# Llama 4 wraps tool calls in these instead of prefixing <|python_tag|>.
-# They must be consumed rather than left as content: the engine sets
-# skip_special_tokens=False so the detokenizer no longer strips them, and
-# the drop machinery only covers tokenizer.all_special_tokens, which on a
-# real Llama tokenizer is just begin_of_text/eot_id.
+# Llama 4 wraps calls in these instead of <|python_tag|>; must be consumed,
+# not left as content -- skip_special_tokens=False means the detokenizer
+# no longer strips them, and drop machinery only covers all_special_tokens.
 PYTHON_START = "<|python_start|>"
 PYTHON_END = "<|python_end|>"
 _WS = " \t\r\n"
@@ -78,24 +64,19 @@ _HEX = "0123456789abcdefABCDEF"
 _STRUCTURAL_RE = re.compile(r'["{}\[\]]')
 _PRIMITIVE_END_RE = re.compile(r"[,}\] \t\r\n]")
 _ESCAPES = '"\\/bfnrt'
-# What can end a JSON string token: its closing quote, an escape, or a
-# raw control character (which JSON forbids unescaped).
+# Ends a JSON string token: closing quote, an escape, or an unescaped control char.
 _STR_STOP = re.compile(r'["\\\x00-\x1f]')
-# Matched by position in the envelope, not by this order: the first
-# alias in the text wins (see the module docstring).
+# Matched by position, not this order: the first alias in the text wins.
 _ARG_KEYS = ("arguments", "parameters")
 
 
 def _string_close(raw: str, start: int, pos: int) -> tuple[int, int]:
-    """Find the end of the JSON string opening at ``raw[start]``, searching
-    from ``raw[pos]``.
+    """End of the string opening at ``raw[start]``, searching from ``raw[pos]``.
 
-    Returns ``(end, resume)``: the index just past the closing quote, or
-    ``-1`` and the position to resume from while the string is
-    unterminated.  A quote closes the string when the backslash run
-    directly before it has even length, which is what character-by-
-    character escape toggling amounts to, so resuming part-way through
-    matches a scan from ``start``.
+    Returns ``(end, resume)``: index past the closing quote, or -1 and the
+    resume point while unterminated. Even trailing backslashes mean the
+    quote closes (same as toggling escape char by char), so resuming
+    mid-scan matches a scan from ``start``.
     """
     i = pos
     while True:
@@ -111,11 +92,9 @@ def _string_close(raw: str, start: int, pos: int) -> tuple[int, int]:
 
 
 def _scan_json_value(raw: str, start: int) -> int | None:
-    """Return the end index (exclusive) of the JSON value starting at
-    ``raw[start]``, or ``None`` while it is still unterminated.
-
-    Handles objects, arrays, strings, and primitives (numbers and
-    literals end at a top-level ``,``/``}``/``]`` or whitespace).
+    """End index (exclusive) of the JSON value at ``raw[start]``, or ``None``
+    while unterminated. Handles objects/arrays/strings/primitives (numbers
+    and literals end at a top-level ``,``/``}``/``]`` or whitespace).
     """
     first = raw[start]
     if first in "{[":
@@ -160,16 +139,13 @@ def _scan_json_value(raw: str, start: int) -> int | None:
 
 
 class _ValueScan:
-    """Resumable :func:`_scan_json_value` for one value of growing text.
+    """Resumable :func:`_scan_json_value` for one growing value.
 
-    :meth:`end` answers what :func:`_scan_json_value` would, and may be
-    called again every time *raw* grows by appending: the scan is a
-    left-to-right fold with no lookahead, so resuming from the saved
-    cursor returns exactly what a rescan from ``start`` would, which
-    makes streaming a value cost time linear in it rather than
-    quadratic.  Runs between structural characters are skipped with
-    ``str.find`` rather than walked, since a streamed value is looked at
-    once per feed.
+    :meth:`end` may be called again as *raw* grows by appending: a
+    left-to-right fold with no lookahead, so resuming from the saved cursor
+    matches a rescan from ``start`` -- linear rather than quadratic per
+    value. Runs between structural chars use ``str.find`` since a value is
+    looked at once per feed.
     """
 
     __slots__ = ("start", "_pos", "_depth", "_str_start", "_end")
@@ -294,12 +270,10 @@ def _scan_top_level_start(raw: str, key_names: tuple[str, ...]) -> int:
 class _KeyScan:
     """Resumable :func:`_scan_top_level_start` for one growing envelope.
 
-    :meth:`start` answers what the function would, and may be called again
-    each time *raw* grows by appending: the scan is a left-to-right fold
-    with no lookahead, so resuming from the saved cursor returns exactly
-    what a rescan from 0 would.  Without this, an envelope whose argument
-    key has not arrived yet -- ordinary prose containing a stray ``{`` --
-    is rescanned in full on every feed, which is quadratic in its length.
+    A left-to-right fold with no lookahead, so resuming from the saved
+    cursor matches a rescan from 0. Without this, an envelope whose key
+    hasn't arrived yet -- prose containing a stray ``{`` -- is rescanned
+    in full on every feed: quadratic in its length.
     """
 
     __slots__ = (
@@ -320,9 +294,8 @@ class _KeyScan:
         self._escape = False
         self._string_start = -1
         self._last_string: str | None = None
-        # Set once the ``:`` of a matching key is seen; the value offset is
-        # then just the next non-whitespace character, which may not have
-        # arrived yet.
+        # Set once the matching key's ``:`` is seen; the value is the next
+        # non-whitespace char, which may not have arrived yet.
         self._value_from = -1
         self._result: int | None = None
 
@@ -376,12 +349,10 @@ class _KeyScan:
 
 
 def _scan_top_level(raw: str, key_names: tuple[str, ...]) -> str | None:
-    """Return the raw text span of the first top-level *key_names* value
-    in a (possibly incomplete) JSON envelope.
-
-    Verbatim substring (prefix-stable across growing input, required by
-    the engine's argument-delta diffing), possibly an unterminated
-    prefix; ``None`` when the value has not started.
+    """Raw text span of the first top-level *key_names* value in a
+    (possibly incomplete) envelope. Verbatim substring (prefix-stable,
+    required by the engine's arg-delta diffing), possibly unterminated;
+    ``None`` when not started.
     """
     value_start = _scan_top_level_start(raw, key_names)
     if value_start < 0:
@@ -432,13 +403,10 @@ def _top_level_keys(raw: str) -> set[str]:
 
 
 def _top_level_name(raw: str) -> str | None:
-    """Extract the completed top-level ``"name"`` value from a (possibly
-    incomplete) envelope, or ``None``.
-
-    Unlike the engine's regex-based name extraction, this never picks up
-    a ``"name"`` key nested inside the parameters object, and only
-    accepts a terminated string value (an unterminated span ending in an
-    escaped quote must not be misread as complete).
+    """Completed top-level ``"name"`` value from a (possibly incomplete)
+    envelope, or ``None``. Unlike the engine's regex extraction, never
+    picks up a nested ``"name"``, and only accepts a terminated string
+    (an unterminated span ending in an escaped quote isn't complete).
     """
     return _name_from_span(_scan_top_level(raw, ("name",)))
 
@@ -459,11 +427,9 @@ def _name_from_span(span: str | None) -> str | None:
 def _envelope_name(raw: str) -> str | None:
     """Classify *raw* as a tool-call envelope and return its name.
 
-    A call must carry a ``parameters``/``arguments`` key alongside the
-    top-level ``name``: legacy raised KeyError on the bare
-    ``{"name": "f"}`` form and fell back to content, and prose JSON that
-    merely contains a ``name`` field (e.g. a user-data example object) is
-    likewise not a call.
+    Needs a ``parameters``/``arguments`` key alongside ``name``: legacy
+    raised KeyError on bare ``{"name": "f"}`` and fell back to content,
+    and prose JSON merely containing a ``name`` field is likewise not a call.
     """
     name = _top_level_name(raw)
     if name is None:
@@ -496,8 +462,7 @@ def _scan_number(raw: str, start: int) -> tuple[int, int]:
         while i < n and "0" <= raw[i] <= "9":
             i += 1
         if i == frac_start:
-            # JSON requires a digit after the point; an exponent cannot
-            # rescue "1.e5", so the token stops being completable here.
+            # No digit after the point; an exponent can't rescue "1.e5".
             return i, complete
         complete = i
     if i < n and raw[i] in "eE":
@@ -515,18 +480,15 @@ def _scan_number(raw: str, start: int) -> tuple[int, int]:
 def _scan_string_end(raw: str, start: int) -> tuple[int, int]:
     """Scan the JSON string opening at ``raw[start]``.
 
-    Returns ``(end, safe_end)``: ``end`` is the index after the closing
-    quote (``-1`` while unterminated, on an invalid escape, or on a raw
-    control character), and ``safe_end`` the longest prefix a closing
-    quote may be appended to (i.e. not inside a ``\\`` or ``\\uXXXX``
-    escape and before any unescaped U+0000-U+001F).
+    Returns ``(end, safe_end)``: ``end`` past the closing quote (-1 while
+    unterminated, on an invalid escape, or a raw control char), and
+    ``safe_end`` the longest prefix a closing quote can be appended to.
     """
     n = len(raw)
     i = start + 1
     while True:
-        # One pass to whichever comes first: JSON forbids raw control
-        # characters inside strings, so one ends the string just as an
-        # invalid escape does.
+        # JSON forbids raw control chars in strings, so one ends the
+        # string just as an invalid escape does.
         match = _STR_STOP.search(raw, i)
         if match is None:
             return -1, n
@@ -555,18 +517,15 @@ def _closeable_prefix(raw: str) -> tuple[int, str]:
     """Return ``(end, closers)``: the longest prefix of *raw* that becomes
     valid JSON when *closers* (only ``"``/``}``/``]``) is appended.
 
-    Truncated or malformed model output leaves the argument span as a
-    JSON fragment.  Emitting the fragment verbatim yields invalid
-    arguments, and retracting what streaming already sent is impossible,
-    so the fragment is instead cut back to its last completable point and
-    closed by appending — an append-only repair that keeps streaming and
-    non-streaming byte-identical.  ``end`` never moves backwards as *raw*
-    grows (closeability of a prefix does not depend on what follows),
-    which is what keeps the streamed text prefix-stable.
+    Truncated/malformed model output leaves the argument span as a JSON
+    fragment; emitting it verbatim is invalid and retracting already-sent
+    text is impossible, so it's cut back to the last completable point and
+    closed by appending -- an append-only repair, keeping streaming and
+    non-streaming byte-identical. ``end`` never moves backwards as *raw*
+    grows, which keeps the streamed text prefix-stable.
 
-    Lexical errors inside a token are cut back the same way: a raw
-    control character ends its string (escaping it would rewrite bytes
-    already streamed) and a fractionless ``1.e5`` keeps only ``1``.
+    Lexical errors are cut back the same way: a raw control char ends its
+    string, and a fractionless ``1.e5`` keeps only ``1``.
     """
     stack: list[str] = []
     closers = ""
@@ -673,10 +632,9 @@ def _llama_bare_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 def _llama_arg_converter(raw_args: str, partial: bool) -> str:
-    """Carve the arguments value out of the JSON envelope (verbatim,
-    prefix-stable; see ``inkling._inkling_arg_converter`` for the full
-    rationale), cut back to the part that can still be closed into valid
-    JSON — and closed once the call is final."""
+    """Carve the arguments value out of the envelope (verbatim, prefix-
+    stable; see ``inkling._inkling_arg_converter`` for the rationale), cut
+    back to what still closes into valid JSON, and closed once final."""
     span = _args_value_span(raw_args)
     if span is None:
         return "" if partial else "{}"
@@ -734,11 +692,9 @@ def _array_items(raw: str, start: int, end: int) -> list[tuple[int, int]]:
         if value_end is None or value_end > end:
             break
         if value_end <= i:
-            # No progress: _scan_json_value counts "{[" and "}]" alike, so a
-            # closer at an element position (``[1}``) scans as a complete
-            # value of length zero and the loop would spin.  Unreachable
-            # while every caller sanitises through _closeable_prefix; the
-            # guard costs one comparison and bounds the primitive anyway.
+            # No progress: a closer at an element position (``[1}``) scans
+            # as a zero-length value, and the loop would spin. Guarded here
+            # since callers are expected to sanitise through _closeable_prefix.
             break
         items.append((i, value_end))
         i = value_end
@@ -767,10 +723,9 @@ _CONSTRAINING_KEYS = (
 def _constrains_object(schema: dict) -> bool:
     """Whether *schema* restricts which objects are valid.
 
-    ``{}``, ``{"type": "object"}`` and a ``properties`` that names no keys
-    accept anything an unconstrained model writes -- including the
-    ``{"name", "parameters"}`` envelope.  Everything else narrows the shape,
-    so the model emits bare parameters.
+    ``{}``, ``{"type": "object"}`` and an empty ``properties`` accept
+    anything, including the ``{"name", "parameters"}`` envelope. Anything
+    else narrows the shape, so the model emits bare parameters.
     """
     for key in _CONSTRAINING_KEYS:
         value = schema.get(key)
@@ -799,13 +754,12 @@ def _json_type_name(value: object) -> str:
 
 
 def _declared_types(schema: object) -> set[str]:
-    """Return the JSON types permitted by *schema*.
+    """JSON types permitted by *schema*.
 
-    Sibling constraints and ``allOf`` intersect; ``anyOf``/``oneOf`` union
-    their branches.  A schema with no type constraint permits every type,
-    unlike ``extract_types_from_schema``, whose fallback is string -- which
-    is why an integer under ``{}``, a ``const`` or a ``$ref`` used to be
-    rewritten as a string.
+    Sibling constraints and ``allOf`` intersect; ``anyOf``/``oneOf`` union.
+    No type constraint permits every type, unlike
+    ``extract_types_from_schema``'s string fallback -- why an integer
+    under ``{}``, a ``const`` or a ``$ref`` used to be rewritten as a string.
     """
     all_types = set(_ALL_JSON_TYPES)
     if not isinstance(schema, dict):
@@ -870,9 +824,8 @@ def _collect_type_edits(
     """Record ``(start, end, replacement)`` for every scalar span in
     ``raw[start:end]`` whose literal type disagrees with *schema*.
 
-    Mirrors ``ParserEngine._coerce_dict``/``_coerce_value`` (nested objects
-    recurse through ``properties``, arrays through ``items``) but works on
-    text spans instead of a decoded object.
+    Mirrors ``ParserEngine._coerce_dict``/``_coerce_value`` but works on
+    text spans (objects recurse through ``properties``, arrays ``items``).
     """
     if raw[start] == "{":
         properties = schema.get("properties")
@@ -897,26 +850,22 @@ def _collect_type_edits(
     try:
         coerced, changed = ParserEngine._coerce_value(value, schema)
     except RecursionError:
-        # The guarded json.loads above only covers this span; _coerce_value
-        # re-enters json.loads on the decoded *string* via
-        # coerce_to_schema_type, and deeply nested content there raises
-        # RecursionError -- a RuntimeError, so neither guard catches it and
-        # it escapes the parser and fails the request.  Leaving the value
-        # uncoerced is what the legacy parser did.
+        # json.loads above only covers this span; _coerce_value re-enters
+        # json.loads on the decoded string via coerce_to_schema_type, whose
+        # deep nesting can raise RecursionError too -- left uncoerced, as legacy did.
         return
     if changed:
         edits.append((start, end, json.dumps(coerced, ensure_ascii=False)))
 
 
 def _splice_types(raw: str, start: int, end: int, schema: dict) -> str:
-    """Return ``raw[start:end]`` with schema-coerced scalars substituted in
-    place and every other byte kept verbatim.
+    """``raw[start:end]`` with schema-coerced scalars substituted in place,
+    every other byte kept verbatim.
 
     Re-serialising the decoded object (what the engine does) rewrites the
-    model's separators, so the corrected value stops being an extension of
-    the verbatim text Llama has already streamed and the engine's
-    append-only guard drops it.  Splicing only rewrites the values that
-    actually change, keeping the result prefix-compatible.
+    model's separators, so the append-only guard drops the correction.
+    Splicing only rewrites values that actually change, keeping the
+    result prefix-compatible.
     """
     edits: list[tuple[int, int, str]] = []
     _collect_type_edits(raw, start, end, schema, edits)
@@ -940,13 +889,12 @@ def llama_json_config(
 ) -> ParserEngineConfig:
     """Config for the Llama JSON format.
 
-    *markers* is the subset of the tool markers present in the tokenizer's
-    vocabulary.  Only those become **text** terminals: a marker the model
-    cannot emit as a token is one it can only have written as ordinary
-    prose, and consuming it there deletes the client's text.  Llama 3
-    tokenizers carry ``<|python_tag|>`` but not the Llama 4 wrappers, so
-    declaring all three unconditionally silently ate
-    ``<|python_start|>`` typed as text.
+    *markers* is the subset of tool markers present in the tokenizer's
+    vocab; only those become **text** terminals -- a marker the model
+    can't emit as a token can only have been written as prose, and
+    consuming it there deletes the client's text (Llama 3 lacks the
+    Llama 4 wrappers, so declaring all three unconditionally ate one
+    typed as literal text).
     """
     return ParserEngineConfig(
         name="llama_json",
@@ -973,9 +921,8 @@ def llama_json_config(
             # The tag alone opens nothing: ipython-style non-JSON after
             # <|python_tag|> stays content; the "{" starts the call.
             (ParserState.CONTENT, "PYTHON_TAG"): Transition(ParserState.CONTENT, ()),
-            # Llama 4's wrappers are consumed the same way, so they never
-            # surface as content on either the streaming or the
-            # non-streaming path.
+            # Llama 4's wrappers are consumed the same way, never surfacing
+            # as content in either mode.
             (ParserState.CONTENT, "PYTHON_START"): Transition(ParserState.CONTENT, ()),
             (ParserState.CONTENT, "PYTHON_END"): Transition(ParserState.CONTENT, ()),
             # Transitions for markers absent from the vocab are harmless:
@@ -999,11 +946,10 @@ def llama_json_config(
 class _ArgScan:
     """Per-slot incremental state for the argument scans.
 
-    Both the accumulated envelope and the argument text carved out of it
-    only ever grow by appending, so every scan below resumes where the
-    previous feed stopped instead of rescanning from the start.  ``slot``
-    identity catches the one way the text can shrink: the slot being
-    recycled as prose JSON, or reset between requests.
+    The envelope and its carved-out argument text only ever grow by
+    appending, so each scan resumes rather than rescans. ``slot`` identity
+    catches the one way text can shrink: recycled as prose JSON, or reset
+    between requests.
     """
 
     __slots__ = (
@@ -1019,22 +965,14 @@ class _ArgScan:
 
     def __init__(self, slot: ToolCallSlot) -> None:
         self.slot = slot
-        # Scan for where the arguments value begins in the envelope.
-        self.key: _KeyScan | None = None
-        # Scans for the envelope's top-level "name". Resumed rather than
-        # restarted: this runs on every feed, and until the key arrives it
-        # would otherwise rescan the whole accumulated text each time --
-        # quadratic for ordinary prose containing a stray "{".
+        self.key: _KeyScan | None = None  # args-key scan
+        # Where the envelope's top-level "name" is; same resumability need.
         self.name_key: _KeyScan | None = None
         self.name_value: _ValueScan | None = None
-        # Scan of the arguments value inside the envelope, from the
-        # offset the value starts at.
-        self.value: _ValueScan | None = None
-        # Members already spliced and streamed, and the scan of the
-        # trailing (still unfinished) member value.
-        self.spliced: str = ""
+        self.value: _ValueScan | None = None  # args value scan
+        self.spliced: str = ""  # members already spliced/streamed
         self.cursor: int = 0
-        self.member: _ValueScan | None = None
+        self.member: _ValueScan | None = None  # trailing member's scan
 
 
 class LlamaJsonParser(ParserEngine):
@@ -1048,16 +986,13 @@ class LlamaJsonParser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
-        # Deliberately no vocab check for <|python_tag|>: Llama 4
-        # tokenizers lack the token (legacy raised RuntimeError there);
-        # token-id resolution silently skips unresolved tokens and the
-        # text terminal covers both families.
+        # No vocab check for <|python_tag|>: Llama 4 tokenizers lack it
+        # (legacy raised RuntimeError there); the text terminal covers both.
         self._engine_to_dense: dict[int, int] = {}
         self._phantom_count: int = 0
         self._drop_content: bool = False
-        # Set per request from tool_choice, and deliberately not cleared by
-        # _reset: the non-streaming path resets *after*
-        # _check_skip_tool_parsing has run.
+        # Set per request from tool_choice; not cleared by _reset, since
+        # non-streaming resets *after* _check_skip_tool_parsing runs.
         self._forced_tool_choice: bool = False
         # Named choices can be constrained to emit only bare parameters.
         self._named_bare_args_name: str | None = None
@@ -1095,18 +1030,14 @@ class LlamaJsonParser(ParserEngine):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> None:
         super()._check_skip_tool_parsing(request)
-        # The base only suppresses for tool_choice="none" WITH tools, but
-        # requests without tools default to tool_choice="none" too, and a
-        # bare "{" in ordinary content would otherwise be parsed as a
-        # tool call and eaten.
+        # Base only suppresses tool_choice="none" WITH tools, but no-tools
+        # requests also default to "none"; a bare "{" would else be eaten.
         tool_choice = getattr(request, "tool_choice", None)
         if not self._suppress_tool_calls and tool_choice == "none":
             self._suppress_tool_calls = True
-        # Required/named choice constrains the model to emit nothing but
-        # tool calls, so there is no content to keep.  Without this the
-        # JSON-array schema those choices apply -- ``[{...}, {...}]`` --
-        # leaks its opening bracket as content before the first call
-        # completes (after that _drop_content already covers it).
+        # Required/named choice emits only tool calls; without this, the
+        # array schema those choices apply (``[{...}, {...}]``) leaks its
+        # opening bracket as content before the first call completes.
         self._forced_tool_choice = False
         if tool_choice is not None and tool_choice != "none":
             from openai.types.responses import ToolChoiceFunction
@@ -1156,19 +1087,17 @@ class LlamaJsonParser(ParserEngine):
             schema = getattr(text_format, "schema_", None)
         if schema is None:
             return None
-        # An *effectively unconstrained* schema does not forbid the
-        # {"name": ..., "parameters": ...} envelope, and a model free to
-        # write either writes the envelope the chat template asks for -- so
-        # reading the whole object as the arguments would hand the executor
-        # the envelope.  Any schema that constrains the object at all makes
-        # bare parameters the shape actually generated.
+        # An unconstrained schema doesn't forbid the {"name",...,
+        # "parameters",...} envelope, so a free model writes the envelope
+        # the chat template asks for -- reading it whole would hand the
+        # executor the envelope. Any schema that constrains the object at
+        # all makes bare parameters the shape actually generated.
         #
-        # Testing for a literal "properties" key gets both ends wrong: it
-        # arms for {"type": "object", "properties": {}} (which constrains
-        # nothing, and is what adjust_request installs for a parameterless
-        # tool), and it refuses to arm for anyOf / oneOf / allOf / $ref /
-        # additionalProperties / enum, which do constrain -- leaving those
-        # with no tool call at all.
+        # A literal "properties" check gets both ends wrong: it arms for
+        # {"type":"object","properties":{}} (constrains nothing; what
+        # adjust_request installs for a parameterless tool), and refuses to
+        # arm for anyOf/oneOf/allOf/$ref/additionalProperties/enum, which
+        # do constrain.
         if not isinstance(schema, dict) or not _constrains_object(schema):
             return None
         return name or None
@@ -1184,9 +1113,8 @@ class LlamaJsonParser(ParserEngine):
                 delta = DeltaMessage(content=ws)
             else:
                 delta.content = (delta.content or "") + ws
-        # Same gap for text withheld under a forced tool choice: if no call
-        # was ever promoted it is the whole response, so it must not be lost
-        # when the engine has nothing else buffered.
+        # Same gap for text held under a forced tool choice: if no call was
+        # promoted, it's the whole response and must not be lost here.
         if self._held_forced and not self._drop_content:
             held = "".join(self._held_forced)
             self._held_forced.clear()
@@ -1197,10 +1125,8 @@ class LlamaJsonParser(ParserEngine):
         return delta
 
     def _try_extract_name(self, idx: int) -> str | None:
-        # Top-level extraction only (the engine's regex would match a
-        # "name" key nested inside the parameters object), gated on the
-        # envelope classification: a name is only emitted once an args key
-        # proves this is a call.
+        # Top-level only (the engine's regex would match a nested "name"),
+        # gated on an args key proving this is actually a call.
         if self._named_bare_args_name is not None:
             return self._named_bare_args_name
         raw = self._tool_slots[idx].args
@@ -1235,11 +1161,9 @@ class LlamaJsonParser(ParserEngine):
 
     @property
     def _suppress_content(self) -> bool:
-        """Whether no further content may be emitted.
-
-        Either a real call has completed, or the request forced a tool
-        choice and the whole output is tool calls by construction.
-        """
+        """Whether no further content may be emitted: either a real call
+        has completed, or the request forced a tool choice and the whole
+        output is tool calls by construction."""
         return self._drop_content or self._forced_tool_choice
 
     def _flush_held_ws(self, out: list[SemanticEvent]) -> None:
@@ -1254,20 +1178,17 @@ class LlamaJsonParser(ParserEngine):
     ) -> list[SemanticEvent]:
         """Classify tool-call closures as real calls or prose JSON.
 
-        A balanced ``{...}`` with no top-level ``"name"`` was ordinary
-        content: its events are replaced in place by a TEXT_CHUNK so the
-        swallowed text is restored (legacy fell back to content here),
-        and its slot index is recycled so real calls stream with dense
-        indices.  After the first real call completes, all further
-        content is dropped (legacy returned content=None with calls;
-        leading prose is kept per the engine convention).
+        A balanced ``{...}`` with no top-level ``"name"`` is ordinary
+        content: its events become a TEXT_CHUNK restoring the swallowed
+        text (legacy fell back to content), and its slot is recycled so
+        real calls stream with dense indices. After the first real call,
+        further content is dropped (legacy: content=None with calls;
+        leading prose kept per engine convention).
 
-        Whitespace-only text before any non-whitespace content is held
-        rather than forwarded: with a candidate call open, the engine
-        would drop it as whitespace-before-tools even when the call turns
-        out to be prose JSON, making streamed content chunk-dependent.
-        The hold is flushed before the next content and discarded once a
-        real call completes (the engine strips it in non-streaming too).
+        Whitespace-only text is held, not forwarded: with a candidate
+        call open, the engine would drop it as whitespace-before-tools
+        even if the call turns out to be prose -- held text is flushed
+        before the next content, discarded once a real call completes.
         """
         out: list[SemanticEvent] = []
         pending: dict[int, list[str]] = {}
@@ -1280,31 +1201,23 @@ class LlamaJsonParser(ParserEngine):
                     self._held_ws.clear()
                     self._held_forced.clear()
                 elif self._forced_tool_choice:
-                    # A forced tool choice constrains the model to emit only
-                    # tool calls, so the wire format's scaffolding (the "["
-                    # of the required-mode array) must not reach the client.
-                    # But if generation is cut before any call is promoted,
-                    # that text is all the client gets, and dropping it
-                    # returns an empty message.  Hold it instead and release
-                    # it at finish only if nothing was promoted; streaming is
-                    # append-only, so nothing held is ever retracted.
+                    # Forced choice means the wire scaffolding (required-
+                    # mode's "[") must not reach the client -- but if cut
+                    # before any call is promoted, that text is the whole
+                    # response. Hold it; release at finish only if nothing
+                    # was promoted.
                     self._held_ws.clear()
                     self._held_forced.append(event.value)
                 elif not event.value.strip():
-                    # Every whitespace run is held, not just the leading one.
-                    # Non-streaming strips the whitespace around a tool call,
-                    # so forwarding the run between prose and an envelope
-                    # ("Sure. {call}") made the two routes disagree on the
-                    # most ordinary shape there is.  Held whitespace is
-                    # flushed before the next real content and discarded once
-                    # a call completes, which is what the other route does.
+                    # Every whitespace run is held, not just the leading
+                    # one: non-streaming strips whitespace around a call, so
+                    # forwarding it here ("Sure. {call}") made the routes
+                    # disagree on the most ordinary shape there is.
                     self._held_ws.append(event.value)
                 else:
                     self._flush_held_ws(out)
-                    # A delta can carry text and its trailing whitespace in
-                    # one chunk, so splitting is what makes the hold above
-                    # chunk-size independent rather than only correct at one
-                    # token per delta.
+                    # A delta can carry text plus trailing whitespace in one
+                    # chunk; splitting keeps the hold above chunk-size independent.
                     body = event.value.rstrip()
                     if body != event.value:
                         if body:
@@ -1344,19 +1257,14 @@ class LlamaJsonParser(ParserEngine):
                         self._tool_slots[dense_idx] = ToolCallSlot()
                     self._phantom_count += 1
                     del self._engine_to_dense[engine_idx]
-                    # Gated on _drop_content, NOT _suppress_content: once a
-                    # real call has completed, later prose is dropped.  But a
-                    # forced tool choice must not suppress this restore -- if
-                    # generation is cut before any call is promoted, this text
-                    # is the entire response, and dropping it returns an empty
-                    # message to a client that asked for a specific tool.
+                    # Gated on _drop_content, NOT _suppress_content: forced
+                    # choice must not suppress this restore -- if cut before
+                    # any call is promoted, this text is the whole response.
                     if accumulated and not self._drop_content:
                         if self._forced_tool_choice:
-                            # Hold rather than emit.  Text under a forced
-                            # choice is already held, so emitting here would
-                            # put this ahead of everything generated before
-                            # it, and would leak the required-mode "[" if a
-                            # real call is promoted later.
+                            # Hold, don't emit: text under a forced choice
+                            # is already held, so emitting here would jump
+                            # ahead and leak the required-mode "[" later.
                             self._held_forced.append(accumulated)
                         else:
                             self._flush_held_ws(out)
@@ -1378,10 +1286,9 @@ class LlamaJsonParser(ParserEngine):
     def _retract_call(out: list[SemanticEvent], start: int, dense_idx: int) -> None:
         """Drop this batch's events for a call that turned out to be prose.
 
-        A call's events are appended contiguously from *start*, so only that
-        suffix is examined.  Rebuilding the whole list instead made a document
-        of N prose-JSON objects cost O(N^2) -- 128 KB of JSON lines took
-        seconds of CPU in a single parse.
+        A call's events are contiguous from *start*, so only that suffix is
+        examined. Rebuilding the whole list instead made N prose-JSON
+        objects cost O(N^2) -- 128 KB of JSON lines took seconds of CPU.
         """
         if start >= len(out):
             return
@@ -1397,17 +1304,13 @@ class LlamaJsonParser(ParserEngine):
     def _coalesce_arg_events(
         events: list[SemanticEvent],
     ) -> list[SemanticEvent]:
-        """Merge each run of consecutive same-index ARG_VALUE_CHUNK events
-        into one.
+        """Merge each run of consecutive same-index ARG_VALUE_CHUNK events.
 
-        The engine emits ~one arg event per character, and every event
-        triggers a full O(len) rescan of the accumulated envelope (the
-        arg converter plus the engine's safe-prefix scan), making a single
-        call O(n^2).  Coalescing collapses a whole feed's arg chars into
-        one event, so the rescan runs once per feed instead of once per
-        char; a non-streaming parse (all events in one feed) becomes O(n).
-        Tool-call boundary events (START/NAME/END) break the run, so call
-        boundaries and parallel-call indices are preserved.
+        The engine emits ~one arg event per char, each triggering a full
+        O(len) rescan (arg converter plus the engine's safe-prefix scan),
+        making a call O(n^2). Coalescing runs the rescan once per feed
+        instead of once per char, so non-streaming becomes O(n). Boundary
+        events (START/NAME/END) break the run, preserving call indices.
         """
         out: list[SemanticEvent] = []
         buf: list[str] = []
@@ -1435,11 +1338,9 @@ class LlamaJsonParser(ParserEngine):
         return out
 
     def _tool_properties(self, func_name: str) -> dict:
-        """Cache the tool's schema properties by name.
-
-        ``find_tool_properties`` walks the whole tool list, and streaming
-        resolves the schema again for every argument chunk; the cache is
-        dropped when a request swaps the tool list in.
+        """Cache the tool's schema properties by name: ``find_tool_properties``
+        walks the whole tool list, and streaming resolves the schema again
+        per argument chunk. Dropped when a request swaps the tool list.
         """
         if not func_name:
             return {}
@@ -1455,13 +1356,11 @@ class LlamaJsonParser(ParserEngine):
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
         """Coerce argument values in place instead of re-serialising.
 
-        The engine returns ``json.dumps`` of the coerced object, whose
-        separators need not match the verbatim model text that Llama
-        streams as argument deltas; the correction then fails the
-        append-only ``startswith`` guard and is dropped, leaving truncated
-        (invalid) JSON in the stream.  Splicing also works on a truncated
-        envelope (completed members only), so non-streaming keeps matching
-        the stream byte for byte there too.
+        The engine's ``json.dumps`` of the coerced object needn't match
+        the verbatim model text Llama streams, so it fails the append-only
+        ``startswith`` guard and is dropped -- leaving truncated JSON.
+        Splicing also works on a truncated envelope, keeping non-streaming
+        byte-identical to streaming there too.
         """
         properties = self._tool_properties(func_name)
         if not properties or not args_json.startswith("{"):
@@ -1475,19 +1374,17 @@ class LlamaJsonParser(ParserEngine):
         string_keys: set[str] | None,
         scan: _ArgScan | None = None,
     ) -> str:
-        """Return the longest prefix of the final spliced arguments that is
-        already decided.
+        """Longest prefix of the final spliced arguments already decided.
 
         Every byte outside a value span survives splicing verbatim, and a
-        value's coerced form depends only on that value, so a completed
-        value can be spliced and streamed at once.  Only an unfinished
-        value is held back — unless it is a string under a string-typed
-        key, which coercion can never rewrite.
+        coerced value depends only on itself, so a completed value can be
+        spliced and streamed at once. Only an unfinished value is held
+        back -- unless it's a string under a string-typed key, which
+        coercion never rewrites.
 
-        With a *scan*, members settled by an earlier feed are not walked
-        again: everything before ``scan.cursor`` has already been spliced
-        into ``scan.spliced`` and *raw* only grows by appending, so
-        resuming there yields the same string as a full rescan.
+        With a *scan*, members already settled aren't walked again:
+        everything before ``scan.cursor`` is in ``scan.spliced``, and
+        *raw* only grows by appending, so resuming matches a full rescan.
         """
         if not raw.startswith("{"):
             return self._safe_arg_prefix(raw, string_keys)
@@ -1582,11 +1479,10 @@ class LlamaJsonParser(ParserEngine):
     def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
         """Stream a schema-spliced prefix instead of raw model text.
 
-        The engine streams the arguments verbatim and only applies schema
-        coercion at flush; the re-serialised result is then not an
-        extension of what was already sent, so the correction is silently
-        dropped.  Splicing each completed value as it is streamed keeps the
-        stream append-only and convergent with the non-streaming result.
+        The engine streams verbatim and only coerces at flush; the
+        re-serialised result then isn't an extension of what was already
+        sent, so the correction is silently dropped. Splicing each value
+        as it streams keeps the stream append-only and non-streaming-convergent.
         """
         if self._arg_converter is None or not self._stream_arg_deltas:
             return super()._compute_arg_delta(idx, raw_delta)
@@ -1623,10 +1519,8 @@ class LlamaJsonParser(ParserEngine):
     ) -> DeltaMessage | None:
         events = self._coalesce_arg_events(events)
         if self._suppress_tool_calls:
-            # Bare-JSON tool markup is indistinguishable from ordinary
-            # JSON content, so with tool_choice="none" (or no tools at
-            # all) return it as content in place instead of dropping it
-            # like marker-based formats do.
+            # Bare-JSON markup is indistinguishable from ordinary JSON
+            # content, so tool_choice="none" returns it as content, not dropped.
             events = [
                 SemanticEvent(EventType.TEXT_CHUNK, e.value, e.tool_index)
                 if e.value and e.type == EventType.ARG_VALUE_CHUNK
