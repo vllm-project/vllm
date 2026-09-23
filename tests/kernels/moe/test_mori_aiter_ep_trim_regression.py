@@ -1,27 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Real multi-node MoRI dispatch/AITER GEMM/MoRI combine regression test for
-the buffer-trim fix in rocm_aiter_moe.py / prepare_finalize/mori.py.
+"""Real multi-node MoRI dispatch + AITER GEMM + MoRI combine regression test
+for the buffer-trim fix in rocm_aiter_moe.py / prepare_finalize/mori.py.
 
-Drives the three real production primitives directly (MoriPrepareAndFinalize
-.prepare()/.finalize() and AiterExperts.apply()) instead of going through
-FusedMoEFactory/the full FusedMoE layer -- this is intentional, see
-test_moe_layer_multinode.py's docstring for why that heavier construction
-path doesn't work here (older pinned vLLM install used for multi-node CI
-lacks FusedMoEFactory).
+Drives MoriPrepareAndFinalize.prepare()/.finalize() and AiterExperts.apply()
+directly, bypassing FusedMoEFactory (see test_moe_layer_multinode.py).
 
-Reproduces on real 4-node/EP32 InterNodeV1 hardware: without the trim,
-repeated dispatch/combine rounds on the same (reused) mori_op buffers
-produce all-zero combined output for genuinely valid, real tokens (MoRI's
-own reported valid-row count balloons toward the oversized buffer's full
-capacity instead of the true tiny per-round count, and AITER's output for
-those rows is discarded/corrupted downstream in combine()). A single round
-right after construction is NOT enough to show this -- it takes at least
-one prior large round to have populated/reused the buffer. With the trim
-applied, results stay correct and nonzero across repeated rounds.
-
-Launch (mirrors test_moe_layer_multinode.py -- one torchrun per host, all
-pointed at the same rendezvous, one host acting as rank 0):
+Launch (one torchrun per host, same rendezvous, one host as rank 0):
 
     MASTER_ADDR=<node0-ip> MASTER_PORT=29525 \\
     torchrun --nnodes 4 --nproc-per-node 8 --node-rank <0..3> \\
@@ -205,9 +190,8 @@ def test_mori_dispatch_aiter_combine_trim_regression():
         return final_out[:n_real].float() if n_real > 0 else final_out[:0].float()
 
     # warmup, then repeated (big, small) cycles reusing the same mori_op /
-    # dispatch buffers -- validated on real EP32/4-node hardware to require
-    # >=1 prior big round before a small round's real tokens get corrupted
-    # (a single round right after construction is not enough).
+    # dispatch buffers -- a big round must precede a small round to trigger
+    # the bug.
     round_trip(MAX_TOK, 5.0)
     for _ in range(NUM_BIG_SMALL_ROUNDS):
         round_trip(MAX_TOK, 99.0)

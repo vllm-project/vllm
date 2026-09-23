@@ -10,8 +10,7 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - MoE-facing FP8 group-quant activation quality
 - deterministic routing and representative gfx942 / gfx950 coverage
 - ``AiterExperts.apply()`` trimming an oversized EP-dispatch-shaped buffer
-  down to the valid token prefix before calling AITER (regression coverage
-  for the buffer-size correctness defect fixed by that trim)
+  down to the valid token prefix before calling AITER
 
 Generic fused-MoE backend selection and non-ROCm kernel coverage live in the
 generic MoE test files under ``tests/kernels/moe``.
@@ -971,10 +970,7 @@ def test_aiter_experts_apply_trims_oversized_dispatch_buffer(
     valid_tokens: int,
 ):
     """AiterExperts.apply() must trim an oversized EP-dispatch-shaped buffer
-    down to the valid token prefix before calling AITER, which silently
-    corrupts its output once the row count crosses large thresholds
-    (e.g. 65536), regardless of how many rows hold real data.
-    """
+    down to the valid token prefix before calling AITER."""
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.config import VllmConfig
     from vllm.forward_context import set_forward_context
