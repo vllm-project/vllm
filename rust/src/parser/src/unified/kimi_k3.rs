@@ -60,15 +60,15 @@ use winnow::prelude::*;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
 use self::structural_tag::KIMI_K3_STRUCTURAL_TAG_BUILDER;
-use super::{AttributionMode, Result, UnifiedParser, UnifiedParserOutput, token_id};
+use super::{AttributionMode, Result, UnifiedParser, UnifiedParserOutput, special_token};
 use crate::output_grammar::{
     self, BuiltOutputGrammar, OutputGrammarContext, visible_format_from_builder,
 };
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
-    Attributed, Marker, MarkerScanState, attributed, parse_buffered_event, safe_text_len_mul,
-    take_until_marker,
+    Attributed, Marker, MarkerScanState, SpecialToken, attributed, parse_buffered_event,
+    safe_text_len_mul, take_until_marker,
 };
 
 const OPEN: &str = "<|open|>";
@@ -96,22 +96,21 @@ const MAX_PREFILL_TAG_TOKENS: usize = 8;
 
 type KimiK3Input<'i> = Attributed<'i>;
 
-/// Token IDs of the K3 structural special tokens in the active tokenizer.
-#[derive(Clone, Copy, Debug)]
-struct TokenIds {
-    open: u32,
-    close: u32,
-    sep: u32,
-    end_of_msg: u32,
+/// The K3 structural special tokens, resolved once from the active tokenizer.
+struct SpecialTokens {
+    open: SpecialToken,
+    close: SpecialToken,
+    sep: SpecialToken,
+    end_of_msg: SpecialToken,
 }
 
-impl TokenIds {
+impl SpecialTokens {
     fn new(tokenizer: &dyn Tokenizer) -> Result<Self> {
         Ok(Self {
-            open: token_id(tokenizer, OPEN)?,
-            close: token_id(tokenizer, CLOSE)?,
-            sep: token_id(tokenizer, SEP)?,
-            end_of_msg: token_id(tokenizer, END_OF_MSG)?,
+            open: special_token(tokenizer, OPEN)?,
+            close: special_token(tokenizer, CLOSE)?,
+            sep: special_token(tokenizer, SEP)?,
+            end_of_msg: special_token(tokenizer, END_OF_MSG)?,
         })
     }
 }
@@ -140,16 +139,16 @@ struct Markers {
 impl Markers {
     /// Build the markers; under [`AttributionMode::TextOnly`] they carry no
     /// token guards and match by spelling alone.
-    fn new(ids: TokenIds, attribution: AttributionMode) -> Self {
+    fn new(tokens: &SpecialTokens, attribution: AttributionMode) -> Self {
         let guarded = |marker: Marker| match attribution {
             AttributionMode::Tokens => marker,
             AttributionMode::TextOnly => marker.without_guards(),
         };
         let open = |tag: &str| {
-            guarded(Marker::special(OPEN, ids.open).then_text(tag).then_special(SEP, ids.sep))
+            guarded(Marker::special(&tokens.open).then_text(tag).then_special(&tokens.sep))
         };
         let close = |tag: &str| {
-            guarded(Marker::special(CLOSE, ids.close).then_text(tag).then_special(SEP, ids.sep))
+            guarded(Marker::special(&tokens.close).then_text(tag).then_special(&tokens.sep))
         };
 
         Self {
@@ -160,10 +159,10 @@ impl Markers {
             tools_open: open("tools"),
             tools_close: close("tools"),
             message_close: close("message"),
-            end_of_msg: guarded(Marker::special(END_OF_MSG, ids.end_of_msg)),
-            call_open: guarded(Marker::special(OPEN, ids.open).then_text("call")),
+            end_of_msg: guarded(Marker::special(&tokens.end_of_msg)),
+            call_open: guarded(Marker::special(&tokens.open).then_text("call")),
             call_close: close("call"),
-            sep: guarded(Marker::special(SEP, ids.sep)),
+            sep: guarded(Marker::special(&tokens.sep)),
         }
     }
 
@@ -260,22 +259,22 @@ pub struct KimiK3UnifiedParser {
     /// Number of calls emitted in the current response.
     emitted_call_count: usize,
     tokenizer: DynTokenizer,
-    token_ids: TokenIds,
+    special_tokens: SpecialTokens,
 }
 
 impl KimiK3UnifiedParser {
     /// Create a Kimi K3 parser expecting token-attributed input
     /// ([`AttributionMode::Tokens`]).
     pub fn new(_tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
-        let token_ids = TokenIds::new(tokenizer.as_ref())?;
+        let special_tokens = SpecialTokens::new(tokenizer.as_ref())?;
 
         Ok(Self {
             buffer: DecodedText::default(),
             mode: KimiK3Mode::default(),
-            markers: Markers::new(token_ids, AttributionMode::default()),
+            markers: Markers::new(&special_tokens, AttributionMode::default()),
             emitted_call_count: 0,
             tokenizer,
-            token_ids,
+            special_tokens,
         })
     }
 
@@ -286,7 +285,7 @@ impl KimiK3UnifiedParser {
     /// [`AttributionMode::Tokens`] parser treats every marker as content.
     #[must_use]
     pub fn with_attribution_mode(mut self, attribution: AttributionMode) -> Self {
-        self.markers = Markers::new(self.token_ids, attribution);
+        self.markers = Markers::new(&self.special_tokens, attribution);
         self
     }
 
@@ -299,12 +298,14 @@ impl KimiK3UnifiedParser {
     fn initialize_mode(&mut self, prompt_token_ids: &[u32]) {
         self.mode = KimiK3Mode::Idle;
 
-        let Some(sep_pos) = prompt_token_ids.iter().rposition(|&id| id == self.token_ids.sep)
+        let Some(sep_pos) =
+            prompt_token_ids.iter().rposition(|&id| id == self.special_tokens.sep.id)
         else {
             return;
         };
-        let Some(open_pos) =
-            prompt_token_ids[..sep_pos].iter().rposition(|&id| id == self.token_ids.open)
+        let Some(open_pos) = prompt_token_ids[..sep_pos]
+            .iter()
+            .rposition(|&id| id == self.special_tokens.open.id)
         else {
             return;
         };
@@ -1341,8 +1342,8 @@ mod tests {
 
     #[test]
     fn kimi_k3_markers_spell_the_documented_strings() {
-        let token_ids = super::TokenIds::new(&tokenizer()).unwrap();
-        let markers = super::Markers::new(token_ids, AttributionMode::Tokens);
+        let special_tokens = super::SpecialTokens::new(&tokenizer()).unwrap();
+        let markers = super::Markers::new(&special_tokens, AttributionMode::Tokens);
 
         assert_eq!(markers.think_open.as_str(), THINK_OPEN);
         assert_eq!(markers.think_close.as_str(), THINK_CLOSE);

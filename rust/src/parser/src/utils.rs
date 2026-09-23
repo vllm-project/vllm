@@ -12,7 +12,7 @@ use crate::tool::{Result, ToolParserError};
 pub(crate) mod marker;
 pub(crate) mod recursion;
 
-pub use marker::{Attributed, Marker, MarkerLike, MarkerStream, attributed};
+pub use marker::{Attributed, Marker, MarkerLike, MarkerStream, SpecialToken, attributed};
 
 /// Return the byte length of the longest proper prefix of `token` that is also
 /// a suffix of `buffer`.
