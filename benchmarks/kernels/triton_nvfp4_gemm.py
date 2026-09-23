@@ -14,8 +14,8 @@ Data format (NVFP4):
 """
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit(do_not_specialize_on_alignment=["alpha_ptr"])
