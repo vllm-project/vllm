@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
@@ -13,6 +14,7 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.config import (
     VllmConfig,
+    get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
 )
 from vllm.logger import init_logger
@@ -30,6 +32,11 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
+    split_decodes_prefills_and_extends,
+)
+from vllm.v1.attention.backends.zentorch_sdpa import (
+    should_use_zentorch_prefill_sdpa,
+    zentorch_prefill_sdpa,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -126,6 +133,14 @@ class CPUAttentionMetadata:
 
     encoder_cache: torch.Tensor | None = None
 
+    # Decoder prefill split for zentorch_sdpa. Decodes stay native;
+    # extends and fresh prefills are packed after them.
+    prefill_query_start_loc: torch.Tensor | None = None
+    num_extend_reqs: int = 0
+    num_native_reqs: int = 0
+    num_native_tokens: int = 0
+    native_scheduler_metadata: torch.Tensor | None = None
+
 
 class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]):
     def __init__(
@@ -164,6 +179,13 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         self.is_encoder_only_attention = isinstance(
             kv_cache_spec, EncoderOnlyAttentionSpec
         )
+        self.use_zentorch_prefill_sdpa = (
+            not self.is_cross_attention
+            and not self.is_encoder_only_attention
+            and _group_uses_zentorch_prefill_sdpa(self)
+        )
+        if self.use_zentorch_prefill_sdpa:
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
     def _set_isa_to_layers(self, layer_names: list[str]) -> None:
         attn_layers = get_layers_from_vllm_config(
@@ -278,8 +300,78 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             encoder_cache=encoder_cache_tensor,
             dynamic_causal=dynamic_casual,
         )
-
+        if self.use_zentorch_prefill_sdpa:
+            self._record_prefill_split(attn_metadata, common_attn_metadata)
         return attn_metadata
+
+    def _record_prefill_split(
+        self,
+        attn_metadata: CPUAttentionMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> None:
+        """Mark the decode prefix vs extend/prefill suffix on a reordered batch.
+
+        split_decodes_prefills_and_extends assumes requests are packed
+        [decode | extend | fresh prefill]. The native kernel keeps the decode
+        prefix; zentorch_sdpa takes the rest. A non-causal or dynamic-causal
+        step, or a batch with no extend/prefill rows, stays fully native.
+        """
+        if (
+            not attn_metadata.causal
+            or attn_metadata.dynamic_causal is not None
+            or common_attn_metadata.seq_lens_cpu_upper_bound is None
+        ):
+            return
+
+        decode_threshold = self.reorder_batch_threshold or 1
+        (
+            _,
+            num_extends,
+            num_fresh_prefills,
+            _,
+            extend_tokens,
+            fresh_prefill_tokens,
+        ) = split_decodes_prefills_and_extends(
+            common_attn_metadata, decode_threshold=decode_threshold
+        )
+
+        num_prefill_reqs = int(num_extends) + int(num_fresh_prefills)
+        if not num_prefill_reqs:
+            return
+        num_prefill_tokens = int(extend_tokens) + int(fresh_prefill_tokens)
+
+        num_reqs = common_attn_metadata.num_reqs
+        num_native_reqs = num_reqs - num_prefill_reqs
+        num_native_tokens = (
+            common_attn_metadata.num_actual_tokens - num_prefill_tokens
+        )
+        query_start_loc = attn_metadata.query_start_loc
+
+        attn_metadata.num_extend_reqs = int(num_extends)
+        attn_metadata.num_native_reqs = num_native_reqs
+        attn_metadata.num_native_tokens = num_native_tokens
+        attn_metadata.prefill_query_start_loc = (
+            query_start_loc[num_native_reqs : num_reqs + 1] - num_native_tokens
+        )
+
+        if num_native_reqs:
+            attn_metadata.native_scheduler_metadata = (
+                ops.cpu_attn_get_scheduler_metadata(
+                    num_reqs=num_native_reqs,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    head_dim=self.head_dim,
+                    seq_lens=attn_metadata.seq_lens[:num_native_reqs],
+                    dtype=self.dtype,
+                    query_start_loc=query_start_loc[: num_native_reqs + 1],
+                    causal=attn_metadata.causal,
+                    sliding_window_size=self.window_size,
+                    isa=self.isa,
+                    enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
+                    dynamic_causal=attn_metadata.dynamic_causal,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                )
+            )
 
 
 class CPUAttentionBackendImpl(AttentionImpl):
@@ -334,6 +426,26 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "heads in the layer"
             )
 
+        vllm_config = get_current_vllm_config_or_none()
+        dtype = (
+            vllm_config.model_config.dtype
+            if vllm_config is not None
+            else torch.bfloat16
+        )
+        self.use_zentorch_prefill_sdpa = (
+            vllm_config is not None
+            and should_use_zentorch_prefill_sdpa(
+                attn_type=self.attn_type,
+                alibi_slopes=self.alibi_slopes,
+                sliding_window=self.sliding_window,
+                logits_soft_cap=self.logits_soft_cap,
+                sinks=self.sinks,
+                is_fp8_kv_cache=self.is_fp8_kv_cache,
+                kv_sharing_target_layer_name=self.kv_sharing_target_layer_name,
+                dtype=dtype,
+            )
+        )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -368,12 +480,51 @@ class CPUAttentionBackendImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
-        num_actual_tokens = attn_metadata.num_actual_tokens
-
         is_encoder_attention = self.attn_type in (
             AttentionType.ENCODER_ONLY,
             AttentionType.ENCODER,
         )
+
+        # A reordered batch with a prefill suffix attends those rows densely.
+        # Decode tokens (the prefix) still go through the paged kernel below.
+        if (
+            not is_encoder_attention
+            and self.use_zentorch_prefill_sdpa
+            and attn_metadata.prefill_query_start_loc is not None
+        ):
+            num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
+            key_cache, value_cache = kv_cache.view(
+                (num_blocks, num_kv_heads, block_size * 2, -1)
+            ).chunk(2, dim=2)
+            zentorch_prefill_sdpa(
+                query,
+                key,
+                value,
+                output,
+                key_cache,
+                value_cache,
+                attn_metadata,
+                self.scale,
+            )
+            if attn_metadata.num_native_reqs == 0:
+                return output
+            attn_metadata = copy.copy(attn_metadata)
+            attn_metadata.num_actual_tokens = attn_metadata.num_native_tokens
+            attn_metadata.query_start_loc = attn_metadata.query_start_loc[
+                : attn_metadata.num_native_reqs + 1
+            ]
+            attn_metadata.seq_lens = attn_metadata.seq_lens[
+                : attn_metadata.num_native_reqs
+            ]
+            attn_metadata.block_table = attn_metadata.block_table[
+                : attn_metadata.num_native_reqs
+            ]
+            attn_metadata.scheduler_metadata = (
+                attn_metadata.native_scheduler_metadata
+            )
+            attn_metadata.prefill_query_start_loc = None
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
         if is_encoder_attention:
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
@@ -518,3 +669,15 @@ def _get_attn_isa(
             return "vec"
     else:
         return "vec16"
+
+
+def _group_uses_zentorch_prefill_sdpa(
+    builder: CPUAttentionMetadataBuilder,
+) -> bool:
+    layers = get_layers_from_vllm_config(
+        builder.vllm_config, Attention, builder.layer_names
+    )
+    return any(
+        getattr(layer.impl, "use_zentorch_prefill_sdpa", False)
+        for layer in layers.values()
+    )
