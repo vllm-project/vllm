@@ -36,8 +36,6 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
-# fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
-FP8_DS_MLA_ROW_BYTES = 656
 HiSparseTopKResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
