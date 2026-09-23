@@ -17,7 +17,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
-    QSAForwardMetadata,
+    QSAIndexerMetadata,
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
@@ -197,15 +197,15 @@ class QSAIndexer(nn.Module):
 
     def _metadata(
         self,
-    ) -> tuple[QSAForwardMetadata, QSAForwardMetadata] | None:
+    ) -> tuple[QSAIndexerMetadata, QSAIndexerMetadata] | None:
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
             metadata = metadata[0]
         if not isinstance(metadata, dict):
             return None
-        raw = cast(QSAForwardMetadata, metadata[self.raw_key_cache.prefix])
+        raw = cast(QSAIndexerMetadata, metadata[self.raw_key_cache.prefix])
         compressed = cast(
-            QSAForwardMetadata, metadata[self.compressed_key_cache.prefix]
+            QSAIndexerMetadata, metadata[self.compressed_key_cache.prefix]
         )
         if raw.num_actual_tokens != compressed.num_actual_tokens:
             raise RuntimeError("QSA side-cache metadata token counts disagree")

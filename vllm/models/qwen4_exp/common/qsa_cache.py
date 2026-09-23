@@ -573,7 +573,7 @@ build_qsa_metadata = (
 
 
 @dataclass
-class QSAForwardMetadata(AttentionMetadata):
+class QSAIndexerMetadata(AttentionMetadata):
     """Common per-forward metadata for one QSA side cache."""
 
     block_table: torch.Tensor
@@ -596,7 +596,7 @@ class QSAForwardMetadata(AttentionMetadata):
     compress_ratio: int
 
 
-class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
+class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
     """Build QSA metadata from vLLM's cache-group-specific common metadata."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -653,7 +653,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> QSAForwardMetadata:
+    ) -> QSAIndexerMetadata:
         del common_prefix_len, fast_build
         num_tokens = common_attn_metadata.num_actual_tokens
         decode_threshold = self.reorder_batch_threshold
@@ -702,7 +702,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
                 request_capacity=request_capacity,
             )
         )
-        return QSAForwardMetadata(
+        return QSAIndexerMetadata(
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=slot_mapping,
             seq_lens=common_attn_metadata.seq_lens,
@@ -747,8 +747,8 @@ class QSAStateBackend(AttentionBackend):
         )
 
     @staticmethod
-    def get_builder_cls() -> type[QSAMetadataBuilder]:
-        return QSAMetadataBuilder
+    def get_builder_cls() -> type[QSAIndexerMetadataBuilder]:
+        return QSAIndexerMetadataBuilder
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
@@ -876,9 +876,9 @@ class QSACompressedKeyCache(_QSAStateCache):
 
 __all__ = [
     "QSACompressedKeyCache",
-    "QSAForwardMetadata",
+    "QSAIndexerMetadata",
     "QSAKeyStateCache",
-    "QSAMetadataBuilder",
+    "QSAIndexerMetadataBuilder",
     "QSAStateBackend",
     "canonical_qsa_rope_positions",
     "circular_qsa_slot_mapping",
