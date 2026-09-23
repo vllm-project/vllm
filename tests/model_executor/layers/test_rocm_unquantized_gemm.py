@@ -17,9 +17,10 @@ if current_platform.is_cuda():
 from vllm.model_executor.layers import utils
 
 
-def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
+@pytest.mark.parametrize("m", [1, 128])
+def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch, m):
     x = torch.randn(1, 64, dtype=torch.float16)
-    weight = torch.randn(128, 64, dtype=torch.float16)
+    weight = torch.randn(m, 64, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
@@ -40,6 +41,20 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     wvsplitk_mock.assert_called_once()
     llmm1_mock.assert_not_called()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only kernel test")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("n", range(1, 6))
+def test_rocm_unquantized_gemm_single_output_real_kernel(dtype, n):
+    torch.manual_seed(0)
+    x = torch.randn(n, 2048, device="cuda", dtype=dtype)
+    weight = torch.randn(1, 2048, device="cuda", dtype=dtype)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
 
 def test_rocm_unquantized_gemm_makes_skinny_activation_contiguous(monkeypatch):
@@ -149,9 +164,9 @@ def test_rocm_unquantized_gemm_noncontiguous_activation_real_kernel(monkeypatch,
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
 
-def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x, n):
+def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x, n, m):
     x = torch.randn(n, 64, dtype=torch.float16)
-    weight = torch.randn(128, 64, dtype=torch.float16)
+    weight = torch.randn(m, 64, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
@@ -180,16 +195,18 @@ def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x, n):
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 
-def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch):
+@pytest.mark.parametrize("m", [1, 128])
+def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
     # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); n > 5 must
     # fall back to torch.nn.functional.linear.
-    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x=False, n=6)
+    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x=False, n=6, m=m)
 
 
-def test_rocm_unquantized_gemm_gfx120x_n_gt_8_falls_back(monkeypatch):
+@pytest.mark.parametrize("m", [1, 128])
+def test_rocm_unquantized_gemm_gfx120x_n_gt_8_falls_back(monkeypatch, m):
     # SWMMAC skinny GEMM handles n in [5, 8] on gfx120x (see PR #45559);
     # n > 8 must fall back to torch.nn.functional.linear.
-    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x=True, n=9)
+    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x=True, n=9, m=m)
 
 
 def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):

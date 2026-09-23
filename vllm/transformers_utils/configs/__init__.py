@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Model configs may be defined in this directory for the following reasons:
+"""Model configs may be defined in this directory for the following reasons:
 
 - There is no configuration file defined by HF Hub or Transformers library.
 - There is a need to override the existing config to support vLLM.
@@ -18,6 +17,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "AfmoeConfig": "vllm.transformers_utils.configs.afmoe",
     "AXK1Config": "vllm.transformers_utils.configs.AXK1",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
+    "BailingMoeV3TextConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
+    "BailingMoeV3VisionConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
+    "BailingMoeV3VLConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
     "ColModernVBertConfig": "vllm.transformers_utils.configs.colmodernvbert",
     "ColPaliConfig": "vllm.transformers_utils.configs.colpali",
@@ -33,6 +35,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "DiffusionGemmaTextConfig": "vllm.transformers_utils.configs.diffusion_gemma",
     "DeepseekVLV2Config": "vllm.transformers_utils.configs.deepseek_vl2",
     "DeepseekV4Config": "vllm.transformers_utils.configs.deepseek_v4",
+    "DeepseekV41Config": "vllm.transformers_utils.configs.deepseek_v41",
     "Dots3NoteConfig": "vllm.transformers_utils.configs.dots3_note",
     "K3DSparkConfig": "vllm.transformers_utils.configs.k3_dspark",
     "DotsOCRConfig": "vllm.transformers_utils.configs.dotsocr",
@@ -40,6 +43,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FunAudioChatConfig": "vllm.transformers_utils.configs.funaudiochat",
     "FunAudioChatAudioEncoderConfig": "vllm.transformers_utils.configs.funaudiochat",
     "Granite4VisionConfig": "vllm.transformers_utils.configs.granite4_vision",
+    "Glm5NextConfig": "vllm.transformers_utils.configs.glm5_next",
+    "Glm5NextTextConfig": "vllm.transformers_utils.configs.glm5_next",
+    "Glm5NextVisionConfig": "vllm.transformers_utils.configs.glm5_next",
     "HYV3Config": "vllm.transformers_utils.configs.hy_v3",
     "HYV4Config": "vllm.transformers_utils.configs.hy_v4",
     "HyperCLOVAXConfig": "vllm.transformers_utils.configs.hyperclovax",
@@ -48,10 +54,8 @@ _CLASS_TO_MODULE: dict[str, str] = {
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
     # `FalconConfig` class from the official HuggingFace transformers library.
     "RWConfig": "vllm.transformers_utils.configs.falcon",
-    "LagunaConfig": "vllm.transformers_utils.configs.laguna",
     "Lfm2MoeConfig": "vllm.transformers_utils.configs.lfm2_moe",
     "MedusaConfig": "vllm.transformers_utils.configs.medusa",
-    "MellumConfig": "vllm.transformers_utils.configs.mellum",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
@@ -110,6 +114,9 @@ __all__ = [
     "AfmoeConfig",
     "AXK1Config",
     "BagelConfig",
+    "BailingMoeV3TextConfig",
+    "BailingMoeV3VisionConfig",
+    "BailingMoeV3VLConfig",
     "ChatGLMConfig",
     "ColModernVBertConfig",
     "ColPaliConfig",
@@ -133,15 +140,16 @@ __all__ = [
     "FunAudioChatConfig",
     "FunAudioChatAudioEncoderConfig",
     "Granite4VisionConfig",
+    "Glm5NextConfig",
+    "Glm5NextTextConfig",
+    "Glm5NextVisionConfig",
     "HYV3Config",
     "HYV4Config",
     "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",
-    "LagunaConfig",
     "Lfm2MoeConfig",
     "MedusaConfig",
-    "MellumConfig",
     "MiDashengLMConfig",
     "MiniMaxM3Config",
     "MiniMaxM3MTPConfig",

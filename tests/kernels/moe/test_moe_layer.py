@@ -84,7 +84,7 @@ def on_gfx950() -> bool:
     return False
 
 
-fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
+fp8_dtype = current_platform.fp8_dtype()
 
 SHAPE_COMBOS = [
     (1, 128, 256),
@@ -191,6 +191,9 @@ def mock_normalize_e4m3fn_to_e4m3fnuz(
 # NOTE: Not able to use monkeypatch because of the spawned parallel workers.
 def override_normalize_e4m3fn_to_e4m3fnuz():
     vllm.model_executor.layers.quantization.utils.w8a8_utils.normalize_e4m3fn_to_e4m3fnuz = mock_normalize_e4m3fn_to_e4m3fnuz  # noqa: E501
+    vllm.model_executor.layers.quantization.fp8.normalize_e4m3fn_to_e4m3fnuz = (
+        mock_normalize_e4m3fn_to_e4m3fnuz  # noqa: E501
+    )
 
 
 def sp_wrapper(
@@ -237,8 +240,7 @@ def maybe_roundup_layer_hidden_size(
     act_dtype: torch.dtype,
     backend: str | None,
 ) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
+    """Given layer hidden size and MoE configurations, round up hidden_size
     if necessary.
 
     Args:
@@ -250,6 +252,7 @@ def maybe_roundup_layer_hidden_size(
         Rounded up hidden_size if rounding up is required based on the configs
         and all2all backend.
         Original hidden size otherwise.
+
     """
     if backend == "deepep_high_throughput":
         from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -942,6 +945,7 @@ def create_shared_experts_from_config(
 
     Returns:
         TestMLP instance or None if config is None
+
     """
     if shared_experts_config is None:
         return None
@@ -988,6 +992,7 @@ def setup_moe_test_data(
 
     Returns:
         MoETestData containing all test data and transforms
+
     """
     # For latent MoE: latent_size = k // 2
     latent_size = k // 2
@@ -1707,7 +1712,6 @@ def test_moe_layer_no_parallel(
     monkeypatch,
 ):
     """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False)."""
-
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 

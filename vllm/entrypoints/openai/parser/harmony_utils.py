@@ -24,6 +24,7 @@ from openai_harmony import (
 
 from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -87,8 +88,7 @@ MCP_BUILTIN_TOOLS: set[str] = set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
 
 
 def has_custom_tools(tool_types: set[str]) -> bool:
-    """
-    Checks if the given tool types are custom tools
+    """Checks if the given tool types are custom tools
     (i.e. any tool other than MCP builtin tools)
     """
     return not tool_types.issubset(MCP_BUILTIN_TOOLS)
@@ -123,9 +123,10 @@ def get_system_message(
     if reasoning_effort is not None:
         if reasoning_effort not in REASONING_EFFORT:
             supported_values = ", ".join(REASONING_EFFORT)
-            raise ValueError(
+            raise VLLMValidationError(
                 f"reasoning_effort={reasoning_effort!r} is not supported by "
-                f"Harmony. Supported values are: {supported_values}."
+                f"Harmony. Supported values are: {supported_values}.",
+                parameter="reasoning_effort",
             )
         sys_msg_content = sys_msg_content.with_reasoning_effort(
             REASONING_EFFORT[reasoning_effort]
@@ -181,7 +182,10 @@ def get_developer_message(
             elif tool.type == "function":
                 function_tools.append(tool)
             else:
-                raise ValueError(f"tool type {tool.type} not supported")
+                raise VLLMValidationError(
+                    f"tool type {tool.type!r} is not supported.",
+                    parameter="tools",
+                )
         if function_tools:
             function_tool_descriptions = [
                 create_tool_definition(tool) for tool in function_tools
@@ -204,8 +208,7 @@ def get_system_or_developer_message(role: str, instructions: str) -> Message:
 
 
 def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
-    """
-    Parse a list of messages from request.messages in the Chat Completion API to
+    """Parse a list of messages from request.messages in the Chat Completion API to
     Harmony messages.
     """
     msgs: list[Message] = []
@@ -225,9 +228,8 @@ def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
 
 
 def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
-    """
-    Harmony models expect the analysis messages (representing raw chain of thought) to
-    be dropped after an assistant message to the final channel is produced from the
+    """Harmony models expect the analysis messages (representing raw chain of thought)
+    to be dropped after an assistant message to the final channel is produced from the
     reasoning of those messages.
 
     The openai-harmony library does this if the very last assistant message is to the
@@ -257,8 +259,7 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
 
 
 def flatten_input_text_content(content: Any) -> str | None:
-    """
-    Extract text parts from a Chat Completion or Responses API content field and
+    """Extract text parts from a Chat Completion or Responses API content field and
     flatten them into a single string. Returns None if no text content is found.
     """
     if content is None or isinstance(content, str):
@@ -281,8 +282,7 @@ def flatten_input_text_content(content: Any) -> str | None:
 def extract_instructions_from_messages(
     messages: Sequence[Any],
 ) -> tuple[str | None, list[Any]]:
-    """
-    Peel a leading system/developer Chat Completion or Responses message and
+    """Peel a leading system/developer Chat Completion or Responses message and
     flatten its instruction text.
     """
     remaining_messages = list(messages)
@@ -297,7 +297,10 @@ def extract_instructions_from_messages(
         elif hasattr(first_message, "model_dump"):
             first_message = first_message.model_dump(exclude_none=True)
         else:
-            raise ValueError(f"Unknown message type: {type(first_message)}")
+            raise VLLMValidationError(
+                f"Unknown message type: {type(first_message)}",
+                parameter="input",
+            )
 
     if first_message.get("role") not in (
         "system",
@@ -319,9 +322,7 @@ def build_harmony_preamble(
     container_description: str | None = None,
     with_custom_tools: bool = False,
 ) -> list[Message]:
-    """
-    Build the standard Harmony system/developer prefix for a request.
-    """
+    """Build the standard Harmony system/developer prefix for a request."""
     developer_instructions = system_instructions = None
     if envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         system_instructions = instructions
@@ -351,8 +352,7 @@ def build_harmony_preamble(
 def parse_chat_input_to_harmony_message(
     chat_msg, tool_id_names: dict[str, str] | None = None
 ) -> list[Message]:
-    """
-    Parse a message from request.messages in the Chat Completion API to
+    """Parse a message from request.messages in the Chat Completion API to
     Harmony messages.
     """
     tool_id_names = tool_id_names or {}

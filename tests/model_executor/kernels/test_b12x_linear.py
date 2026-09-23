@@ -115,7 +115,9 @@ def test_b12x_backend_registration_priority_and_selection(
     assert names.index(before) < names.index(kernel_cls.__name__) < names.index(after)
 
     monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
-    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "b12x")
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
     monkeypatch.setattr(
         kernel_cls,
         "is_supported",
@@ -784,7 +786,14 @@ def test_b12x_backend_preserves_w4a16_fallback(monkeypatch) -> None:
     import vllm.model_executor.kernels.linear as linear_mod
 
     monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
-    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "b12x")
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
+    monkeypatch.setitem(
+        linear_mod._POSSIBLE_NVFP4_KERNELS,
+        PlatformEnum.CUDA,
+        [B12xNvFp4LinearKernel, MarlinNvFp4LinearKernel],
+    )
     monkeypatch.setattr(
         MarlinNvFp4LinearKernel,
         "is_supported",

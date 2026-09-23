@@ -430,7 +430,6 @@ def qwen4_exp_qsa_with_output(
     layer_name: LayerNameType,
 ) -> None:
     """Run the complete QSA state/update/attend transaction."""
-
     layer_name = _resolve_layer_name(layer_name)
     layer = get_forward_context().no_compile_layers[layer_name]
     if not isinstance(layer, Qwen4ExpQSAAttention):
@@ -445,23 +444,10 @@ def qwen4_exp_qsa_with_output(
     )
 
 
-def qwen4_exp_qsa_with_output_fake(
-    hidden_states: torch.Tensor,
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    del hidden_states, positions, query, key, value, output, layer_name
-
-
 direct_register_custom_op(
     op_name="qwen4_exp_qsa_with_output",
     op_func=qwen4_exp_qsa_with_output,
     mutates_args=["output"],
-    fake_impl=qwen4_exp_qsa_with_output_fake,
 )
 
 

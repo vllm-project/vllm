@@ -18,14 +18,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     int8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-    ZenCPUExpertsInt8,
-    select_experts,
-)
+from vllm.model_executor.layers.fused_moe.experts.cpu_moe import ZenCPUExpertsInt8
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     Int8MoeBackend,
     backend_to_kernel_cls,
 )
+from vllm.model_executor.layers.fused_moe.router.cpu_router import _softmax_topk
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
@@ -199,19 +197,27 @@ def test_zen_int8_dispatch_contract(
         0.5 * HIDDEN_SIZE**0.5
     )
     router_logits = torch.randn((BATCH_SIZE, EXPERT_NUM), dtype=torch.bfloat16)
+    topk_weights, topk_ids = _softmax_topk(router_logits, topk_num, False)
 
     experts = ZenCPUExpertsInt8(moe_config, quant_config)
     # zentorch_fused_moe takes no expert_map.
     assert not experts.supports_expert_map()
-    output = experts.apply(
+    output = torch.empty_like(input)
+    experts.apply(
+        output=output,
         hidden_states=input,
         w1=w13,
         w2=w2,
-        router_logits=router_logits,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
         activation=act,
         global_num_experts=EXPERT_NUM,
         expert_map=None,
         a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
         apply_router_weight_on_input=False,
     )
 
@@ -230,14 +236,6 @@ def test_zen_int8_dispatch_contract(
     else:
         assert call["w13_bias"] is None and call["w2_bias"] is None
 
-    topk_weights, topk_ids = select_experts(
-        hidden_states=input,
-        router_logits=router_logits,
-        use_grouped_topk=False,
-        top_k=topk_num,
-        renormalize=False,
-        scoring_func="softmax",
-    )
     ref = ref_fused_moe_int8(
         input,
         w13,

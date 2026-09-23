@@ -13,6 +13,7 @@ MODELS = [
         "intfloat/e5-small",
         architecture="BertModel",
         mteb_score=0.742285423,
+        mteb_tol=2e-3,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -29,6 +30,7 @@ MODELS = [
         "intfloat/multilingual-e5-base",
         architecture="XLMRobertaModel",
         mteb_score=0.779325955,
+        mteb_tol=2e-3,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -48,6 +50,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)

@@ -34,9 +34,9 @@
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
-/vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337 @russellb
+/vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
 /vllm/entrypoints/mcp @heheda12345
-/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337 @russellb
+/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
@@ -73,7 +73,7 @@
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
-/vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
+/vllm/v1/structured_output @mgoin @aarnphm @benchislett @arpera
 /vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/simple_kv_offload @ivanium
@@ -107,10 +107,9 @@
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
 /tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
-/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
-/tests/v1/structured_output @mgoin @russellb @aarnphm
+/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @aarnphm @arpera
+/tests/v1/structured_output @mgoin @aarnphm @arpera
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
-/tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91
 /tests/v1/kv_connector/nixl_integration @NickLucche
@@ -218,7 +217,20 @@ mkdocs.yaml @hmellor
 /vllm/config/pooler.py @noooop
 /vllm/model_executor/layers/pooler @noooop
 
+# Reinforcement learning
+/vllm/distributed/weight_transfer @aoshen02
+/vllm/entrypoints/serve/dev/rlhf @njhill @aoshen02
+/tests/distributed/test_weight_transfer.py @aoshen02
+/tests/entrypoints/weight_transfer @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
+/tests/entrypoints/serve/dev/rlhf @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
+/tests/v1/worker/test_gpu_worker_weight_transfer.py @aoshen02
+/examples/rl @aoshen02
+/examples/features/pause_resume @aoshen02
+/docs/training/rlhf.md @aoshen02
+/docs/training/async_rl.md @aoshen02
+/docs/training/weight_transfer @aoshen02
+
 # Security guide and policies
-/docs/usage/security.md @russellb @jperezdealgaba
-/SECURITY.md @russellb @jperezdealgaba
-/docs/contributing/vulnerability_management.md @russellb @jperezdealgaba
+/docs/usage/security.md @jperezdealgaba
+/SECURITY.md @jperezdealgaba
+/docs/contributing/vulnerability_management.md @jperezdealgaba

@@ -5,12 +5,13 @@
 import copy
 import functools
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupChoices
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
@@ -46,6 +47,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import (
+        compile_flash_attn_varlen_func_from_specs,
         flash_attn_supports_sinks,
         flash_attn_varlen_func,
         get_scheduler_metadata,
@@ -67,7 +69,13 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    KVCacheSpec,
+    KVQuantMode,
+    SlidingWindowSpec,
+)
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
     should_skip_dcp_context_attention,
@@ -76,6 +84,200 @@ from vllm.v1.worker.cp_utils import (
 )
 
 logger = init_logger(__name__)
+
+FA4_DENSE_FLOAT_DTYPES = (torch.bfloat16, torch.float16)
+FA4_DENSE_Q_TILE = 128
+FA4_DENSE_NUM_BLOCKS = 256
+FA4_DENSE_MAX_SEQLEN_K = 8192
+
+
+class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"]):
+    """Warm paged, causal FA4 on Blackwell and Hopper."""
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        q_stage: int
+        dtype: torch.dtype
+        qhead_per_kvhead: int
+        head_dim: int
+        page_size: int
+        has_window_left: bool
+        has_window_right: bool
+        softcap: float
+        is_single_batch: bool
+        num_splits: int
+
+    @staticmethod
+    def kernel(*args: Any, **kwargs: Any) -> Any:
+        assert flash_attn_varlen_func is not None
+        return flash_attn_varlen_func(*args, **kwargs)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        q_stage: int,
+        dtype: torch.dtype,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        page_size: int,
+        window_size: tuple[int, int],
+        softcap: float,
+        is_single_batch: bool = True,
+        num_splits: int = 1,
+    ) -> CompileKey:
+        return self.CompileKey(
+            q_stage=q_stage,
+            dtype=dtype,
+            qhead_per_kvhead=num_qo_heads // num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+            has_window_left=window_size[0] >= 0,
+            has_window_right=window_size[1] >= 0,
+            softcap=softcap,
+            is_single_batch=is_single_batch,
+            num_splits=num_splits,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+        num_qo_heads: int,
+    ) -> list[CompileKey]:
+        capability = current_platform.get_device_capability()
+        major = capability.major if capability is not None else None
+        if (
+            vllm_config.parallel_config.decode_context_parallel_size != 1
+            or vllm_config.model_config.rswa_window is not None
+            or kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
+            or kv_cache_spec.dtype not in FA4_DENSE_FLOAT_DTYPES
+            or not isinstance(kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))
+        ):
+            return []
+        head_dim = kv_cache_spec.head_size
+        page_size = kv_cache_spec.block_size
+        sliding_window = kv_cache_spec.sliding_window
+        window_size = (
+            (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+        )
+        softcap = float(
+            getattr(
+                vllm_config.model_config.hf_text_config, "attn_logit_softcapping", 0
+            )
+            or 0
+        )
+        if (
+            major in (10, 11)
+            and uses_fa4_hd256_kernel(head_dim)
+            and page_size == FA4_HD256_PAGE_SIZE
+        ):
+            q_stages = WarmupChoices(1, 2)
+            single_batches = WarmupChoices(True, False)
+            split_counts = WarmupChoices(1)
+        elif (
+            major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
+        ):
+            # SM90 forward has split/non-split variants; its transitive
+            # combine specializes at 32/64/128/256 splits.
+            q_stages = WarmupChoices(1)
+            single_batches = WarmupChoices(False)
+            split_counts = WarmupChoices(1, 32, 64, 128, 256)
+        else:
+            return []
+
+        return self._trace_dispatch(self.dispatch)(
+            q_stage=q_stages,
+            is_single_batch=single_batches,
+            num_splits=split_counts,
+            dtype=vllm_config.model_config.dtype,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=kv_cache_spec.num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+            window_size=WarmupChoices(window_size),
+            softcap=softcap,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        assert compile_flash_attn_varlen_func_from_specs is not None
+        max_seqlen_q = FA4_DENSE_Q_TILE + 1 if compile_key.q_stage == 2 else 1
+        batch_size = 1 if compile_key.is_single_batch else 2
+        kv_shape = (
+            FA4_DENSE_NUM_BLOCKS,
+            compile_key.page_size,
+            1,
+            compile_key.head_dim,
+        )
+        kv_stride = (
+            2 * compile_key.page_size * compile_key.head_dim,
+            2 * compile_key.head_dim,
+            2 * compile_key.head_dim,
+            1,
+        )
+        compile_flash_attn_varlen_func_from_specs(
+            q_shape=(
+                batch_size * max_seqlen_q,
+                compile_key.qhead_per_kvhead,
+                compile_key.head_dim,
+            ),
+            k_shape=kv_shape,
+            v_shape=kv_shape,
+            k_stride=kv_stride,
+            v_stride=kv_stride,
+            q_dtype=compile_key.dtype,
+            cu_seqlens_q_shape=(batch_size + 1,),
+            seqused_k_shape=(batch_size,),
+            page_table_shape=(
+                batch_size,
+                FA4_DENSE_MAX_SEQLEN_K // compile_key.page_size,
+            ),
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
+            causal=True,
+            window_size=[
+                1 if compile_key.has_window_left else -1,
+                1 if compile_key.has_window_right else -1,
+            ],
+            softcap=compile_key.softcap,
+            num_splits=2 if compile_key.num_splits > 1 else 1,
+            fa_version=4,
+            return_softmax_lse=False,
+        )
+        if compile_key.head_dim == 512 and compile_key.num_splits > 1:
+            from torch._subclasses.fake_tensor import FakeTensorMode
+
+            from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd_combine
+
+            # FA4's forward compile-only entry returns before its transitive
+            # SplitKV combine. Call the native combine entry in FakeTensorMode:
+            # it populates the native cache without launching the kernel.
+            with FakeTensorMode():
+                _flash_attn_fwd_combine(
+                    torch.empty(
+                        (compile_key.num_splits, 2, 1, 512),
+                        dtype=torch.float32,
+                        device="cuda",
+                    ),
+                    torch.empty(
+                        (compile_key.num_splits, 2, 1),
+                        dtype=torch.float32,
+                        device="cuda",
+                    ),
+                    torch.empty((2, 1, 512), dtype=compile_key.dtype, device="cuda"),
+                    cu_seqlens=torch.empty((3,), dtype=torch.int32, device="cuda"),
+                )
+
+    def __call__(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs: Any,
+    ) -> Any:
+        return self.kernel(q=q, k=k, v=v, **kwargs)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -128,6 +330,10 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
+
+    @classmethod
+    def supports_rswa(cls) -> bool:
+        return True
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
@@ -443,15 +649,27 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
-
-        self.fa4_hd256 = uses_fa4_hd256_kernel(self.headdim) and (
-            get_flash_attn_version(
-                head_size=self.headdim,
-                kv_cache_block_size=self.block_size,
-                supports_fa4_hd256=True,
-            )
-            == 4
+        head_size_v = getattr(kv_cache_spec, "head_size_v", None)
+        fa_version = get_flash_attn_version(
+            head_size=self.headdim,
+            head_size_v=head_size_v,
+            kv_cache_block_size=self.block_size,
+            supports_fa4_hd256=True,
         )
+        self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
+            self.headdim, head_size_v
+        )
+
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
+            and fa_version == 4
+        ):
+            _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
+                vllm_config=vllm_config,
+                kv_cache_spec=kv_cache_spec,
+                num_qo_heads=self.num_heads_q,
+            )
 
         try:
             from vllm.distributed.parallel_state import get_dcp_group
@@ -548,8 +766,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlashAttentionMetadata:
-        """
-        fast_build disables AOT scheduling, used when there will be few
+        """fast_build disables AOT scheduling, used when there will be few
         iterations i.e. spec-decode
         """
         num_reqs = common_attn_metadata.num_reqs
@@ -832,6 +1049,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
 class FlashAttentionImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
 
     def __init__(
         self,
@@ -959,17 +1177,25 @@ class FlashAttentionImpl(AttentionImpl):
         """Forward pass with FlashAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization; not supported
+                by this backend.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
         NOTE: FP8 quantization, flash-attn expect the size of
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
+
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
@@ -1159,7 +1385,7 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table = block_table[:, :num_pages]
                     num_splits = 1
 
-                flash_attn_varlen_func(
+                _FA4_DENSE_ATTENTION_KERNEL(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
@@ -1446,6 +1672,7 @@ class FlashAttentionImpl(AttentionImpl):
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
+
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
@@ -1832,3 +2059,6 @@ def cascade_attention(
 
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
+
+
+_FA4_DENSE_ATTENTION_KERNEL = FA4DenseAttentionKernel()

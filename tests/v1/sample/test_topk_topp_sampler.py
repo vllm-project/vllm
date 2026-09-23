@@ -50,8 +50,7 @@ def _seed_default_generator(seed: int) -> None:
 
 @pytest.fixture(autouse=True)
 def reset_default_device():
-    """
-    Explicitly set the default device, which can affect subsequent tests.
+    """Explicitly set the default device, which can affect subsequent tests.
     Adding this fixture helps avoid this problem.
     """
     original_device = torch.get_default_device()
@@ -78,6 +77,10 @@ def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
         @staticmethod
         def is_cuda():
             return False
+
+        @staticmethod
+        def is_cuda_alike():
+            return True
 
         @staticmethod
         def is_cpu():
@@ -167,8 +170,7 @@ def test_topk_impl_equivalence():
     "interface differences between Python and FlashInfer implementations"
 )
 def test_flashinfer_sampler():
-    """
-    This test verifies that the FlashInfer top-k and top-p sampling
+    """This test verifies that the FlashInfer top-k and top-p sampling
     implementation produces the same results as the Python implementation.
 
     NOTE: FlashInfer did not directly expose an interface for fused top-k and
@@ -233,6 +235,44 @@ def test_flashinfer_sampler():
     assert torch.allclose(python_probs, flashinfer_probs, atol=2e-2), (
         "FlashInfer and Python sampling implementations do not match!"
     )
+
+
+@pytest.mark.skipif(
+    not FLASHINFER_TOPK_TOPP_SUPPORTED,
+    reason="Requires CUDA and flashinfer",
+)
+def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
+    """FlashInfer swallows arch-detection errors (e.g. SM 12.x with a CUDA
+    toolkit older than 12.9), leaving an empty target-arch set that makes
+    every JIT spec fail with a misleading "requires sm75 or higher" error at
+    first use, killing the engine during startup profiling (issue #42393).
+    The sampler gate must detect this and fall back to native sampling, and
+    surface the real reason when the user explicitly opted in.
+    """
+    import flashinfer.jit.core
+    from flashinfer.compilation_context import CompilationContext
+
+    from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sampler_supported
+
+    def fake_check_cuda_arch():
+        raise RuntimeError("FlashInfer requires GPUs with sm75 or higher")
+
+    def fake_normalize_cuda_arch(major, minor):
+        raise RuntimeError("SM 12.x requires CUDA >= 12.9")
+
+    monkeypatch.setattr(flashinfer.jit.core, "check_cuda_arch", fake_check_cuda_arch)
+    monkeypatch.setattr(
+        CompilationContext,
+        "_normalize_cuda_arch",
+        staticmethod(fake_normalize_cuda_arch),
+    )
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert flashinfer_sampler_supported() is False
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(RuntimeError, match="SM 12.x requires CUDA >= 12.9"):
+        flashinfer_sampler_supported()
 
 
 # =============================================================================
@@ -770,6 +810,77 @@ class TestTritonTopkTopp:
             finite_in = (logits[i] > float("-inf")).sum().item()
             if finite_in > 0:
                 assert kept > 0, f"Row {i}: no tokens kept"
+
+    def test_mixed_batch_grammar_rows_get_topp(self):
+        """Grammar-masked rows in a mixed top-k batch must still get top-p.
+
+        Regression: with the split top-p pipeline active (batch <= 64), a
+        row with k < vocab but <= k finite logits was covered by neither the
+        monolithic kernel (standalone top-p disabled) nor the split pipeline
+        (skips rows with k < vocab), so its top-p was silently dropped.
+        """
+        batch_size, vocab_size = 8, 32000
+        logits = torch.full((batch_size, vocab_size), float("-inf"))
+        # Rows 0-2: grammar rows (30 finite tokens); k=50 is a no-op for them.
+        for i in range(3):
+            idx = torch.randperm(vocab_size, generator=self.generator)[:30]
+            logits[i, idx] = torch.randn(30, generator=self.generator)
+        # Rows 3-4: p-only rows (k = vocab); rows 5-7: normal top-k+top-p.
+        logits[3:5] = torch.randn(2, vocab_size, generator=self.generator)
+        logits[5:] = torch.randn(3, vocab_size, generator=self.generator)
+        k = torch.tensor(
+            [50, 50, 50, vocab_size, vocab_size, 50, 50, 50], dtype=torch.int32
+        )
+        p = torch.tensor([0.5, 0.5, 0.5, 0.9, 0.9, 0.9, 0.9, 0.9])
+
+        self._compare_results(logits, k, p)
+
+        # Top-p must actually trim the grammar rows beyond the (no-op) top-k.
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        kept_topk_only = (
+            apply_top_k_top_p_triton(logits.clone(), k, None)[:3] != float("-inf")
+        ).sum(-1)
+        kept_topk_topp = (
+            apply_top_k_top_p_triton(logits.clone(), k, p)[:3] != float("-inf")
+        ).sum(-1)
+        assert (kept_topk_topp < kept_topk_only).all(), (
+            f"top-p did not trim grammar rows: {kept_topk_only.tolist()} -> "
+            f"{kept_topk_topp.tolist()}"
+        )
+
+    def test_topp_tie_break_deterministic(self):
+        """Boundary-duplicate trimming must be deterministic across calls.
+
+        Regression: the split top-p mask kernel handed out the tie budget in
+        cross-program atomic order, so which copies of a tied boundary value
+        survived could vary between identical calls.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch_size, vocab_size = 4, 128256
+        # 1000 tied top tokens; the p=0.5 boundary lands inside the tie
+        # group (each tied token has mass e/(1000e+1000) ~ 0.073%).
+        logits = torch.full((batch_size, vocab_size), float("-inf"))
+        logits[:, :1000] = 1.0
+        logits[:, 1000:2000] = 0.0
+        p = torch.full((batch_size,), 0.5, dtype=torch.float32)
+
+        results = [apply_top_k_top_p_triton(logits.clone(), None, p) for _ in range(5)]
+        for r in results[1:]:
+            assert torch.equal(results[0], r), "non-deterministic tie break"
+
+        # The split pipeline now keeps the first `numkeep` copies in index
+        # order, exactly like the monolithic kernel and the PyTorch impl.
+        kept_idx = (results[0][0] != float("-inf")).nonzero().flatten()
+        assert kept_idx.min().item() == 0
+        assert kept_idx.max().item() == len(kept_idx) - 1
+        pytorch_kept = (
+            (apply_top_k_top_p_pytorch(logits.clone(), None, p)[0] != float("-inf"))
+            .sum()
+            .item()
+        )
+        assert len(kept_idx) == pytorch_kept
 
 
 # =============================================================================
