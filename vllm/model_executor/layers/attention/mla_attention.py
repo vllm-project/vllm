@@ -202,7 +202,7 @@ import functools
 import itertools
 import math
 from abc import abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
@@ -2259,7 +2259,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     @staticmethod
     def _resolve_non_causal_multi_token_decode(
         layer_names: list[str],
-        static_forward_context: Mapping[str, Any],
+        static_forward_context: dict[str, Any],
     ) -> bool:
         """Whether this builder's layers run a non-causal multi-token decode.
 
