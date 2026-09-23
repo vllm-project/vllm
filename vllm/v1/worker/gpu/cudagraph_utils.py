@@ -830,7 +830,6 @@ def prepare_inputs_to_capture(
         attn_groups,
         kv_cache_config,
         for_capture=full_cudagraph,
-        is_dummy_batch=True,
     )
     return AttentionState(attn_metadata, slot_mappings_by_layer)
 

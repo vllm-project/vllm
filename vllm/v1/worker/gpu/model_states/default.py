@@ -176,7 +176,6 @@ class DefaultModelState(ModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
         ubatch_idx: int = 0,
-        is_dummy_batch: bool = False,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
@@ -212,7 +211,7 @@ class DefaultModelState(ModelState):
                 sliding_window=self.model_config.get_sliding_window(),
             )
         attn_metadata = build_attn_metadata(
-            is_dummy_batch=is_dummy_batch,
+            is_dummy_batch=input_batch.is_dummy,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,

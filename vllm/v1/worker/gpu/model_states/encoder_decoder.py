@@ -117,7 +117,6 @@ class EncoderDecoderModelState(ModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
         ubatch_idx: int = 0,
-        is_dummy_batch: bool = False,
     ) -> dict[str, Any]:
         assert ubatch_idx == 0, "DBO is not supported"
         if cudagraph_mode == CUDAGraphMode.FULL:
@@ -140,7 +139,7 @@ class EncoderDecoderModelState(ModelState):
         else:
             max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
         attn_metadata = build_attn_metadata(
-            is_dummy_batch=is_dummy_batch,
+            is_dummy_batch=input_batch.is_dummy,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,

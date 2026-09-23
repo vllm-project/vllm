@@ -333,7 +333,6 @@ class UBatchRunner:
         slot_mappings: torch.Tensor,
         cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         for_capture: bool = False,
-        is_dummy_batch: bool = False,
     ) -> UBatchState:
         """Split the batch into the microbatches the step will run on.
 
@@ -373,7 +372,6 @@ class UBatchRunner:
                     self.kv_cache_config,
                     ubatch_idx=i,
                     for_capture=for_capture,
-                    is_dummy_batch=is_dummy_batch,
                 )
             )
             slot_mappings_by_layer.append(

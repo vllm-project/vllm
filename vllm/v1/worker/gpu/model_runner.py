@@ -1798,7 +1798,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 cg_mode=batch_desc.cg_mode,
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
-                is_dummy_batch=dummy_run,
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
@@ -1825,7 +1824,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # from the zeroed dummy block tables instead of retaining state
                 # indices from the previous real batch.
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
-                is_dummy_batch=dummy_run,
             )
 
         input_ids = input_batch.input_ids

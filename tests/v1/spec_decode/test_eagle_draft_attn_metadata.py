@@ -97,6 +97,7 @@ def _run_build(
             num_query_per_req=num_query_per_req,
             seq_lens_cpu_upper_bound=base,
             step=step,
+            is_dummy=False,
         )
     return captured
 
