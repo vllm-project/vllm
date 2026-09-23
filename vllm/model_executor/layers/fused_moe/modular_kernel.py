@@ -1442,7 +1442,8 @@ class FusedMoEKernelModularImpl:
         """Cap expert assignments without changing token positions.
 
         Returns:
-            IDs and weights with dropped assignments set to -1 and 0.
+            IDs and weights with dropped assignments set to -1 and 0, and a
+            mask of fully dropped rows (None when dropping is disabled or empty).
             Equal weights retain their original token/slot order.
 
         """
@@ -1457,7 +1458,11 @@ class FusedMoEKernelModularImpl:
         if topk_ids.numel() == 0:
             return topk_ids, topk_weights, None
         if capacity == 0:
-            return torch.full_like(topk_ids, -1), torch.zeros_like(topk_weights), None
+            return (
+                torch.full_like(topk_ids, -1),
+                torch.zeros_like(topk_weights),
+                torch.ones(topk_ids.shape[0], dtype=torch.bool, device=topk_ids.device),
+            )
 
         ids = topk_ids.reshape(-1)
         weights = topk_weights.reshape(-1)
@@ -1478,7 +1483,7 @@ class FusedMoEKernelModularImpl:
         keep = torch.empty_like(keep_sorted)
         keep.scatter_(0, order, keep_sorted)
         keep = keep.reshape_as(topk_ids)
-        dropped_rows = (topk_ids < 0).all(dim=1)
+        dropped_rows = ~keep.any(dim=1)
 
         return (
             topk_ids.masked_fill(~keep, -1),

@@ -111,7 +111,10 @@ def test_dropping_top1_preserves_weight_application(
     torch.testing.assert_close(output, expected)
 
 
-def test_dropping_preserves_rows_after_async_finalize_and_shared_input(monkeypatch):
+@pytest.mark.parametrize("capacity", [0, 1])
+def test_dropping_preserves_rows_after_async_finalize_and_shared_input(
+    monkeypatch, capacity
+):
     class AsyncPrepareFinalize(MoEPrepareAndFinalizeNoDPEPModular):
         def supports_async(self):
             return True
@@ -123,11 +126,14 @@ def test_dropping_preserves_rows_after_async_finalize_and_shared_input(monkeypat
             def receiver():
                 self.finalize(*args, **kwargs)
                 # A combine backend may leave fully dropped rows unwritten.
-                args[0][[0, 2]] = float("nan")
+                if capacity == 0:
+                    args[0].fill_(float("nan"))
+                else:
+                    args[0][[0, 2]] = float("nan")
 
             return receiver
 
-    kernel, _ = make_kernel(monkeypatch, 1, AsyncPrepareFinalize())
+    kernel, _ = make_kernel(monkeypatch, capacity, AsyncPrepareFinalize())
     states = torch.ones(3, 2)
     shared_input = torch.ones(3, 4)
     shared = Mock()
@@ -140,9 +146,10 @@ def test_dropping_preserves_rows_after_async_finalize_and_shared_input(monkeypat
         shared_experts=shared,
         shared_experts_input=shared_input,
     )
-    torch.testing.assert_close(
-        output, torch.tensor([[0.0, 0.0], [0.8, 0.8], [0.0, 0.0]])
-    )
+    expected = torch.zeros_like(states)
+    if capacity:
+        expected[1] = 0.8
+    torch.testing.assert_close(output, expected)
     assert shared.call_args.args[0] is shared_input
 
 
