@@ -317,6 +317,7 @@ class CandidateSelector(nn.Module):
         rank: int,
         top_k: int,
         params_dtype: torch.dtype,
+        quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
         super().__init__()
@@ -332,7 +333,7 @@ class CandidateSelector(nn.Module):
             rank,
             bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "hidden_projection"),
             return_bias=False,
         )
@@ -383,6 +384,7 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
                 rank=int(draft_config["selector_rank"]),
                 top_k=int(draft_config["selector_top_k"]),
                 params_dtype=vllm_config.model_config.dtype,
+                quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "candidate_selector"),
             )
 
