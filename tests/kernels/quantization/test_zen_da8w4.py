@@ -22,7 +22,11 @@ from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
 )
 from vllm.model_executor.layers.fused_moe.oracle import int_wna16
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+
+if not current_platform.is_cpu():
+    pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
 GROUP_SIZE = 128
 IN_FEATURES = 512
