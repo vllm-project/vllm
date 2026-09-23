@@ -18,7 +18,7 @@ from tests.v1.engine.utils import (
 from vllm import PoolingParams
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
@@ -1549,3 +1549,52 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("finish_reason", [FinishReason.ERROR, FinishReason.ABORT])
+def test_pooling_engine_initiated_finish_without_pooling_output(
+    finish_reason: FinishReason,
+):
+    """Engine-initiated finishes for pooling requests (which have no
+    detokenizer) must not crash the output processor.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/33865:
+    the engine answers e.g. a retryable mm-cache miss with
+    ``finish_reason=error`` and no pooling output; the output processor must
+    surface a finished output carrying the finish reason so the serving layer
+    can fail just this request, instead of asserting on the missing
+    detokenizer and killing the output handler.
+    """
+    # Pooling requests never touch the tokenizer, so None suffices here.
+    output_processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2, 3, 4, 5],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    output_processor.add_request(request, None)
+
+    processed_outputs = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+    assert not processed_outputs.reqs_to_abort
+    assert len(processed_outputs.request_outputs) == 1
+    request_output = processed_outputs.request_outputs[0]
+    assert isinstance(request_output, PoolingRequestOutput)
+    assert request_output.finished
+    assert request_output.finish_reason == str(finish_reason)
+    assert not output_processor.has_request(request.request_id)

@@ -246,6 +246,10 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
+        finish_reason: The reason why the request finished, if finished.
+            `"error"` indicates a request-level engine failure (e.g. a
+            retryable multi-modal cache miss); `outputs` carries no valid
+            data in that case.
 
     """
 
@@ -256,11 +260,13 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids: list[int],
         num_cached_tokens: int,
         finished: bool,
+        finish_reason: str | None = None,
     ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.finished = finished
+        self.finish_reason = finish_reason
         self.outputs = outputs
 
     def __repr__(self) -> str:
@@ -270,6 +276,14 @@ class PoolingRequestOutput(Generic[_O]):
             f"prompt_token_ids={self.prompt_token_ids}, "
             f"num_cached_tokens={self.num_cached_tokens}, "
             f"finished={self.finished})"
+        )
+
+
+def _raise_if_errored(request_output: PoolingRequestOutput) -> None:
+    if request_output.finish_reason == "error":
+        raise RuntimeError(
+            f"Request {request_output.request_id} failed with an internal "
+            "engine error and has no pooling output; please retry the request."
         )
 
 
@@ -306,12 +320,14 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "EmbeddingRequestOutput":
+        _raise_if_errored(request_output)
         return EmbeddingRequestOutput(
             request_id=request_output.request_id,
             outputs=EmbeddingOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            finish_reason=request_output.finish_reason,
         )
 
 
@@ -349,12 +365,14 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "ClassificationRequestOutput":
+        _raise_if_errored(request_output)
         return ClassificationRequestOutput(
             request_id=request_output.request_id,
             outputs=ClassificationOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            finish_reason=request_output.finish_reason,
         )
 
 
@@ -389,10 +407,12 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "ScoringRequestOutput":
+        _raise_if_errored(request_output)
         return ScoringRequestOutput(
             request_id=request_output.request_id,
             outputs=ScoringOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            finish_reason=request_output.finish_reason,
         )

@@ -20,6 +20,8 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.tracing import (
@@ -32,6 +34,8 @@ from vllm.utils.async_utils import make_async, merge_async_iterators
 from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
+
+logger = init_logger(__name__)
 
 
 class PoolingBaseServing(ABC, BaseServing):
@@ -199,6 +203,16 @@ class PoolingBaseServing(ABC, BaseServing):
         final_res_batch = [None] * num_inputs
 
         async for i, res in ctx.result_generator:
+            if res.finish_reason == "error":
+                # Request-level engine failure (e.g. a retryable multi-modal
+                # cache miss); fail just this request with a 500 instead of
+                # taking down the server. Retrying is safe: the frontend has
+                # already invalidated the drifted sender-cache entries.
+                logger.error(
+                    "Pooling request %s failed with an internal engine error",
+                    res.request_id,
+                )
+                raise GenerationError("Internal server error")
             final_res_batch[i] = res
 
         if None in final_res_batch:

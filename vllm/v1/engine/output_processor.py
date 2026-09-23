@@ -312,6 +312,20 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
+        if self.detokenizer is None and pooling_output is None:
+            # Pooling request that the engine finished without pooling data
+            # (e.g. a retryable mm-cache miss or a request-level preprocessing
+            # error): surface a finished output carrying the finish reason so
+            # the serving layer can fail just this request instead of
+            # asserting on the missing detokenizer.
+            assert finished
+            return self._new_request_output(
+                self.external_req_id,
+                [self._new_pooling_output(EMPTY_CPU_TENSOR)],
+                finished,
+                finish_reason=str(finish_reason),
+            )
+
         if self.stream_interval > 1:
             assert self.detokenizer is not None
 
@@ -342,6 +356,7 @@ class RequestState:
                 external_req_id,
                 [self._new_pooling_output(pooling_output)],
                 finished,
+                finish_reason=str(finish_reason) if finished else None,
             )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
@@ -369,6 +384,7 @@ class RequestState:
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        finish_reason: str | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -385,6 +401,7 @@ class RequestState:
                 num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=prompt_token_ids,
                 finished=finished,
+                finish_reason=finish_reason,
             )
         assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
@@ -704,8 +721,7 @@ class OutputProcessor:
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
-            if pooling_output is None:
-                assert req_state.detokenizer is not None
+            if pooling_output is None and req_state.detokenizer is not None:
                 assert req_state.logprobs_processor is not None
                 if engine_core_output.new_sampling_mask is not None:
                     req_state.sampling_mask_chunks.append(
