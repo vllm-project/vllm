@@ -174,6 +174,7 @@ def fused_recurrent_kda_fwd_kernel(
     num_stages: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
+    """Recurrent KDA forward; an invalid state index zeroes the output."""
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
 
