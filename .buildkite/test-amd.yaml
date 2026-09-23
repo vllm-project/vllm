@@ -5252,3 +5252,27 @@ steps:
   - amdgfx950nightly
   - amdmi355
   optional: true
+
+- label: ":amd: (MI355) MRV2 Sampler JIT Warmup"
+  timeout_in_minutes: 10
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - tests/jit_monitor/
+  - tests/models/utils.py
+  - tests/models/registry.py
+  - tests/utils.py
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/model_executor/warmup/
+  - vllm/v1/sample/ops/topk_topp_sampler.py
+  - vllm/utils/jit_monitor.py
+  - vllm/config/observability.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  commands:
+  - pytest -v -s tests/jit_monitor/test_no_runtime_jit_rocm.py --timeout=300
