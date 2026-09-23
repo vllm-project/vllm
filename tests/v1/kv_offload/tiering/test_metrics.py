@@ -131,7 +131,9 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
         jobs[1], JobResult(job_id=1, success=True, transfer_time=0.25)
     )
     tracker.on_job_finished(jobs[2], JobResult(job_id=2, success=False))
-    tracker.on_job_finished(jobs[3], JobResult(job_id=3, success=False))
+    tracker.on_job_finished(
+        jobs[3], JobResult(job_id=3, success=False, checksum_failed=True)
+    )
 
     stats = tracker.take_stats()
     assert stats is not None
@@ -143,6 +145,7 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
     assert values[TieringOffloadingMetrics.READ_TIME][label] == 0.25
     assert values[TieringOffloadingMetrics.CASCADE_JOB_FAILURES][label] == 1
     assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
+    assert values[TieringOffloadingMetrics.CHECKSUM_FAILURES] == {label: 1}
     tracker.assert_idle()
 
 

@@ -35,10 +35,9 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
-    CHECKSUM_FAILURES,
     FileSystemTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
@@ -788,7 +787,6 @@ def test_checksum_is_recorded_and_verified(
     tier.submit_load(make_job(2, [key(1)], [1], is_promotion=True))
     assert all(r.success for r in drain(tier))
     assert torch.equal(tensor[1], expected)
-    assert tier.get_stats() is None
 
 
 @pytest.mark.parametrize("bad_record", [False, True])
@@ -796,7 +794,7 @@ def test_checksum_is_recorded_and_verified(
 def test_checksum_mismatch_fails_load_and_removes_block(
     fs_tier_with_checksums, monkeypatch, use_c_ext, bad_record
 ):
-    """A corrupt block or record is removed and counted; earlier blocks are kept."""
+    """A corrupt block or record is removed and flagged; earlier blocks are kept."""
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -819,11 +817,8 @@ def test_checksum_mismatch_fails_load_and_removes_block(
     results = drain(tier)
     assert len(results) == 1 and not results[0].success
     assert tuple(results[0].successful_keys) == (key(1),)
+    assert results[0].checksum_failed
     assert not os.path.exists(bad_path)
-
-    stats = tier.get_stats()
-    assert stats is not None
-    assert stats.data["data"][CHECKSUM_FAILURES] == {("fs",): 1}
 
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
@@ -894,7 +889,7 @@ def test_checksum_failure_metric_is_defined_only_when_enabled(fs_tier, monkeypat
 
     assert FileSystemTierManager.build_metric_definitions({}) == {}
     metrics = FileSystemTierManager.build_metric_definitions({"checksum_blocks": True})
-    assert metrics[CHECKSUM_FAILURES].labelnames == ("tier",)
+    assert metrics[TieringOffloadingMetrics.CHECKSUM_FAILURES].labelnames == ("tier",)
 
     def failing_load(*args, **kwargs):
         raise OSError(errno.EBADMSG, "Bad message")
@@ -902,8 +897,9 @@ def test_checksum_failure_metric_is_defined_only_when_enabled(fs_tier, monkeypat
     monkeypatch.setattr(mgr_mod, "batch_load_block", failing_load)
     tier, _ = fs_tier
     tier.submit_load(make_job(1, [key(1)], [0], is_promotion=True))
-    assert not any(r.success for r in drain(tier))
-    assert tier.get_stats() is None
+    results = drain(tier)
+    assert len(results) == 1
+    assert not any(r.success or r.checksum_failed for r in results)
 
 
 # ---------------------------------------------------------------------------
