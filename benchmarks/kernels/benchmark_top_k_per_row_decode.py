@@ -65,6 +65,19 @@ def check(logits, indices, k):
     torch.testing.assert_close(selected, expected, atol=0, rtol=0)
 
 
+def capture(run):
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(3):
+            run()
+    torch.cuda.current_stream().wait_stream(side)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    return graph
+
+
 def benchmark(backend: str, rows: int, live: int, args) -> dict:
     logits, seq_lens, indices = make_inputs(
         rows, live, args.capacity, args.top_k, args.seed
@@ -77,9 +90,18 @@ def benchmark(backend: str, rows: int, live: int, args) -> dict:
     run()
     torch.accelerator.synchronize()
     check(logits, indices, args.top_k)
-    ms = triton.testing.do_bench(run, warmup=args.warmup, rep=args.rep)
+    timed = run
+    if args.graph:
+        graph = capture(run)
+        indices.zero_()
+        graph.replay()
+        torch.accelerator.synchronize()
+        check(logits, indices, args.top_k)
+        timed = graph.replay
+    ms = triton.testing.do_bench(timed, warmup=args.warmup, rep=args.rep)
     return dict(
         backend=backend,
+        mode="graph" if args.graph else "eager",
         rows=rows,
         live=live,
         capacity=args.capacity,
@@ -103,6 +125,11 @@ def main():
     parser.add_argument("--top-k", type=int, default=512)
     parser.add_argument(
         "--backends", nargs="+", choices=list(BACKENDS), default=["native", "aiter"]
+    )
+    parser.add_argument(
+        "--graph",
+        action="store_true",
+        help="Time a captured graph replay, matching how decode actually runs",
     )
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--rep", type=int, default=200)
