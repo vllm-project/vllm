@@ -2006,6 +2006,23 @@ def _get_packed_kv_cache_groups(
     if not layout.is_block_outermost or len(page_sizes) <= 1:
         return None
 
+    # Packing skips page unification, which is what scales sliding-window
+    # specs up from the smallest kernel block, so scale them here instead.
+    attn_block_size = max(
+        (s.block_size for s in kv_cache_spec.values() if isinstance(s, AttentionSpec)),
+        default=0,
+    )
+    kv_cache_spec = {
+        name: (
+            replace(spec, block_size=attn_block_size)
+            if type(spec) is SlidingWindowSpec
+            and spec.page_size_padded is None
+            and attn_block_size % spec.block_size == 0
+            else spec
+        )
+        for name, spec in kv_cache_spec.items()
+    }
+
     buckets: list[dict[str, KVCacheSpec]] = []
     for name, spec in kv_cache_spec.items():
         for bucket in buckets:

@@ -4383,3 +4383,21 @@ def test_trailing_layer_fallback_requires_exact_partition():
     _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
 
     assert not any(g.is_eagle_group for g in trimmed)
+
+
+def test_packed_groups_scale_sliding_window_block_size():
+    # Packing skips page unification, so it must scale sliding-window blocks.
+    target = new_kv_cache_spec(block_size=592, num_kv_heads=2, head_size=256)
+    draft = new_kv_cache_spec(block_size=592, num_kv_heads=8, head_size=128)
+    sw = new_sliding_window_spec(
+        block_size=16, num_kv_heads=8, head_size=128, sliding_window=4096
+    )
+    specs = {
+        **{f"full.{i}": target for i in range(10)},
+        "draft.full": draft,
+        **{f"draft.sw.{i}": sw for i in range(5)},
+    }
+    config = _spec_decode_grouping_config(method="dflash")
+    groups = get_kv_cache_groups(config, specs)
+    sw_group = next(g for g in groups if "draft.sw.0" in g.layer_names)
+    assert sw_group.kv_cache_spec.block_size == 592
