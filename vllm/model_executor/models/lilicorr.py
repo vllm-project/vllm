@@ -27,7 +27,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from .nemotron_h import NemotronHMLP
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .qwen3_dflash2 import DFlash2Qwen3DecoderLayer
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix
 
 
 class LiLiCorrLatticeAttention(nn.Module):
@@ -465,20 +465,6 @@ class LiLiCorr(DFlashQwen3Model):
 
 class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
     model_cls = LiLiCorr
-    # Keep exported Sequential names compatible with the shared Nemotron MLP.
-    _lilicorr_weights_mapper = WeightsMapper(
-        orig_to_new_substr={
-            "lilicorr.feature_mlp.0": "lilicorr.feature_norm",
-            "lilicorr.feature_mlp.1": "lilicorr.feature_mlp.up_proj",
-            "lilicorr.feature_mlp.3": "lilicorr.feature_mlp.down_proj",
-            ".mlp.0": ".mlp.up_proj",
-            ".mlp.2": ".mlp.down_proj",
-        }
-    )
-
-    hf_to_vllm_mapper = (
-        DFlashQwen3ForCausalLM.hf_to_vllm_mapper | _lilicorr_weights_mapper
-    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         spec = vllm_config.speculative_config
@@ -539,7 +525,7 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
         head_weights: list[tuple[str, torch.Tensor]] = []
 
         def normalized_weights():
-            for name, value in self._lilicorr_weights_mapper.apply(weights):
+            for name, value in weights:
                 name = name.removeprefix("model.")
                 seen.add(name)
                 # The backbone stacks up_proj into gate_up_proj. Load the
