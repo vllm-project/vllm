@@ -55,7 +55,7 @@ steps:
       source_file_dependencies:
         - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
         - tests/v1/kv_connector/nixl_integration/
-        - tests/v1/kv_connector/test_rocm_pd_accuracy.py
+        - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
         - tests/utils.py
         - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
         - vllm/platforms/rocm.py
@@ -64,7 +64,7 @@ steps:
       commands:
         - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
         # Preserve all six model/TP pairs with native AITER attention.
-        - pytest -v -s v1/kv_connector/test_rocm_pd_accuracy.py -k nixl
+        - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_rocm.py
 
 - label: ":nvidia: (L4) Push NixlConnector PP prefill PD accuracy"
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus

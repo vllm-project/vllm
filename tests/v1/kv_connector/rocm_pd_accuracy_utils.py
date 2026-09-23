@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm P/D accuracy with native transport and attention implementations.
+"""Shared ROCm P/D accuracy harness for Mooncake and NIXL integration tests.
 
 Keep the models, TP pairs, full GSM8K workload, and acceptance checks of the
 Mooncake and FlashInfer/NIXL sweeps. Mooncake uses same-host HIP IPC; NIXL uses
@@ -17,25 +17,19 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
 import requests
 from prometheus_client.parser import text_string_to_metric_families
 
-from tests.utils import RemoteOpenAIServer, spawn_new_process_for_each_test
+from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
-pytestmark = [
-    pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm P/D equivalents"),
-    pytest.mark.distributed(num_gpus=4),
-]
-
 _ROOT = Path(__file__).resolve().parents[3]
-_QWEN = "Qwen/Qwen3-0.6B"
-_DEEPSEEK = "deepseek-ai/deepseek-vl2-tiny"
+QWEN_MODEL = "Qwen/Qwen3-0.6B"
+DEEPSEEK_MODEL = "deepseek-ai/deepseek-vl2-tiny"
 _REVISIONS = {
-    _QWEN: "c1899de289a04d12100db370d81485cdf75e47ca",
-    _DEEPSEEK: "66c54660eae7e90c9ba259bfdf92d07d6e3ce8aa",
+    QWEN_MODEL: "c1899de289a04d12100db370d81485cdf75e47ca",
+    DEEPSEEK_MODEL: "66c54660eae7e90c9ba259bfdf92d07d6e3ce8aa",
 }
 
 
@@ -104,21 +98,7 @@ def _proxy(connector: str, prefill, decode, bootstrap_port: int):
                 process.wait(timeout=10)
 
 
-@pytest.mark.parametrize(
-    "connector,model,prefill_tp,decode_tp",
-    [
-        pytest.param("mooncake", _QWEN, 1, 1, id="mooncake-hip-qwen-p1-d1"),
-        pytest.param("mooncake", _QWEN, 2, 2, id="mooncake-hip-qwen-p2-d2"),
-        pytest.param("nixl", _QWEN, 2, 2, id="nixl-aiter-qwen-p2-d2"),
-        pytest.param("nixl", _QWEN, 1, 2, id="nixl-aiter-qwen-p1-d2"),
-        pytest.param("nixl", _QWEN, 2, 1, id="nixl-aiter-qwen-p2-d1"),
-        pytest.param("nixl", _DEEPSEEK, 1, 1, id="nixl-aiter-deepseek-p1-d1"),
-        pytest.param("nixl", _DEEPSEEK, 1, 2, id="nixl-aiter-deepseek-p1-d2"),
-        pytest.param("nixl", _DEEPSEEK, 2, 1, id="nixl-aiter-deepseek-p2-d1"),
-    ],
-)
-@spawn_new_process_for_each_test
-def test_rocm_pd_accuracy(connector, model, prefill_tp, decode_tp, monkeypatch):
+def run_rocm_pd_accuracy(connector, model, prefill_tp, decode_tp, monkeypatch):
     """Transferred KV must feed decoding while full upstream accuracy holds."""
     # Preserve the caller's allocation instead of querying host-wide SMI indices.
     selectors = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
