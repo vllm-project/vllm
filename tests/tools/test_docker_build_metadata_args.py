@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import os
 import shlex
 import subprocess
+import tarfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
 ROCM_CI_BAKE = REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh"
 ROCM_IMAGE_SMOKE = REPO_ROOT / ".buildkite" / "scripts" / "rocm" / "smoke-test-image.sh"
+ROCM_TEST_RUNNER = (
+    REPO_ROOT / ".buildkite" / "scripts" / "hardware_ci" / "run-amd-test.sh"
+)
 
 
 def run_helper(
@@ -362,3 +367,208 @@ def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
         "origin",
         "HEAD",
     ]
+
+
+def prepare_rocm_native_artifacts(tmp_path: Path) -> dict[str, str]:
+    """Publish small real artifacts while stubbing network and package installs."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_commands = {
+        "buildkite-agent": """#!/bin/bash
+set -eu
+printf '%s\\n' "$*" >> "$FAKE_BUILDKITE_LOG"
+if [[ "$1 $2" == 'artifact download' ]]; then
+    mkdir -p "$4/$(dirname "$3")"
+    cp "$FAKE_ARTIFACT_ROOT/$3" "$4/$3"
+elif [[ "$1 $2" != 'artifact upload' ]]; then
+    exit 99
+fi
+""",
+        "python3": """#!/bin/bash
+set -eu
+if [[ "$1 $2" == '-m pip' ]]; then
+    printf '%s\\n' "$*" >> "$FAKE_PIP_LOG"
+elif [[ "$1" == '-c' && "$2" == *'m.version("vllm")'* ]]; then
+    echo '0.20.0+test'
+else
+    exit 99
+fi
+""",
+        "git": '#!/bin/sh\ntouch "$FAKE_GIT_CALLED"\nexit 99\n',
+    }
+    for name, body in fake_commands.items():
+        command = fake_bin / name
+        command.write_text(body)
+        command.chmod(0o755)
+
+    wheel_dir = tmp_path / "wheel-export"
+    for directory in ("tests", ".buildkite", "requirements"):
+        (wheel_dir / directory).mkdir(parents=True)
+        (wheel_dir / directory / "from-artifact").write_text(directory)
+    (wheel_dir / "vllm-test.whl").write_bytes(b"test wheel")
+    source_dir = tmp_path / "source"
+    (source_dir / "vllm").mkdir(parents=True)
+    for filename in ("setup.py", "pyproject.toml", "vllm/__init__.py"):
+        (source_dir / filename).write_text("# matching build source\n")
+    with tarfile.open(wheel_dir / "vllm-rocm-source.tar.gz", "w:gz") as archive:
+        archive.add(source_dir, arcname=".")
+
+    env = {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "BUILDKITE": "false",
+        "BUILDKITE_COMMIT": "abc123",
+        "BUILDKITE_BUILD_ID": "build-123",
+        "CI_BASE_IMAGE": "rocm/vllm-dev:ci_base-build-build-123",
+        "VLLM_CI_BASE_IMAGE": "rocm/vllm-dev:ci_base-build-build-123",
+        "UPLOAD_ROCM_WHEEL_ARTIFACTS": "1",
+        "VLLM_CI_USE_ARTIFACTS": "1",
+        "VLLM_CI_REQUIRE_WORKSPACE_MOUNT": "0",
+        "VLLM_CI_WORKSPACE": str(tmp_path / "workspace"),
+        "TMPDIR": str(tmp_path),
+        "FAKE_ARTIFACT_ROOT": str(tmp_path),
+        "FAKE_BUILDKITE_LOG": str(tmp_path / "buildkite.log"),
+        "FAKE_PIP_LOG": str(tmp_path / "pip.log"),
+        "FAKE_GIT_CALLED": str(tmp_path / "git-called"),
+    }
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; upload_wheel_artifacts_if_present',
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        check=True,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return env
+
+
+def run_rocm_native_workspace(
+    tmp_path: Path, env: dict[str, str], test_command: str
+) -> subprocess.CompletedProcess[str]:
+    # Load only workspace preparation; the full runner launches actual tests.
+    definitions = (
+        ROCM_TEST_RUNNER.read_text()
+        .split("validate_native_workspace() {", maxsplit=1)[1]
+        .split("\ninitialize_native_environment() {", maxsplit=1)[0]
+    )
+    script = "set -eo pipefail\nvalidate_native_workspace() {" + definitions
+    script += """
+prepare_native_workspace "$1"
+printf '%s\\n' "${VLLM_VERSION_OVERRIDE:-}" \\
+    "${VLLM_PRECOMPILED_WHEEL_LOCATION:-}" > workspace-environment
+"""
+    return subprocess.run(
+        ["bash", "-c", script, "bash", test_command],
+        check=False,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_rocm_publisher_binds_separate_source_to_install_artifact(
+    tmp_path: Path,
+) -> None:
+    prepare_rocm_native_artifacts(tmp_path)
+    artifacts = tmp_path / "artifacts" / "vllm-rocm-install"
+    source = artifacts / "vllm-rocm-source.tar.gz"
+    with tarfile.open(artifacts / "vllm-rocm-install.tar.gz") as archive:
+        names = archive.getnames()
+        assert not any(name.endswith("vllm-rocm-source.tar.gz") for name in names)
+        source_checksum = archive.extractfile("./.vllm-ci-artifact/source.sha256")
+        assert source_checksum is not None
+        assert source_checksum.read().decode().split() == [
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+            source.name,
+        ]
+        for filename, expected in {
+            "commit.txt": "abc123",
+            "native-base-image.txt": "rocm/vllm-dev:ci_base-build-build-123",
+            "wheel-filename.txt": "vllm-test.whl",
+        }.items():
+            metadata = archive.extractfile(f"./.vllm-ci-artifact/{filename}")
+            assert metadata is not None
+            assert metadata.read().decode().strip() == expected
+    subprocess.run(
+        ["sha256sum", "-c", "vllm-rocm-install.tar.gz.sha256"],
+        cwd=artifacts,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_rocm_python_only_workspace_uses_source_artifact_without_checkout(
+    tmp_path: Path,
+) -> None:
+    env = prepare_rocm_native_artifacts(tmp_path)
+    result = run_rocm_native_workspace(
+        tmp_path, env, "bash .buildkite/scripts/python_only_compile.sh"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    workspace = Path(env["VLLM_CI_WORKSPACE"])
+    for filename in ("setup.py", "pyproject.toml", "vllm/__init__.py"):
+        assert (workspace / filename).read_text() == "# matching build source\n"
+    assert (workspace / "tests" / "from-artifact").is_file()
+    assert not (workspace / ".git").exists()
+    assert not Path(env["FAKE_GIT_CALLED"]).exists()
+    version, wheel = (tmp_path / "workspace-environment").read_text().splitlines()
+    assert version == "0.20.0+test"
+    assert Path(wheel).read_bytes() == b"test wheel"
+    assert wheel in Path(env["FAKE_PIP_LOG"]).read_text()
+    downloads = [
+        line
+        for line in Path(env["FAKE_BUILDKITE_LOG"]).read_text().splitlines()
+        if line.startswith("artifact download")
+    ]
+    assert len(downloads) == 3
+    assert all(line.endswith("--step image-build-amd") for line in downloads)
+    assert "vllm-rocm-source.tar.gz" in downloads[-1]
+
+
+def test_rocm_python_only_workspace_rejects_corrupt_source(tmp_path: Path) -> None:
+    env = prepare_rocm_native_artifacts(tmp_path)
+    source = tmp_path / "artifacts" / "vllm-rocm-install" / "vllm-rocm-source.tar.gz"
+    with source.open("ab") as archive:
+        archive.write(b"corrupted download")
+
+    result = run_rocm_native_workspace(tmp_path, env, "python_only_compile.sh")
+
+    assert result.returncode != 0
+    assert "FAILED" in result.stdout + result.stderr
+    assert not (Path(env["VLLM_CI_WORKSPACE"]) / "setup.py").exists()
+
+
+def test_rocm_python_only_workspace_rejects_another_commit(tmp_path: Path) -> None:
+    env = prepare_rocm_native_artifacts(tmp_path)
+    env["BUILDKITE_COMMIT"] = "another-commit"
+
+    result = run_rocm_native_workspace(tmp_path, env, "python_only_compile.sh")
+
+    assert result.returncode != 0
+    assert "does not match another-commit" in result.stderr
+    assert "vllm-rocm-source.tar.gz" not in Path(env["FAKE_BUILDKITE_LOG"]).read_text()
+    assert not Path(env["FAKE_PIP_LOG"]).exists()
+
+
+def test_rocm_regular_workspace_never_downloads_or_overlays_source(
+    tmp_path: Path,
+) -> None:
+    env = prepare_rocm_native_artifacts(tmp_path)
+    source = tmp_path / "artifacts" / "vllm-rocm-install" / "vllm-rocm-source.tar.gz"
+    source.unlink()
+
+    result = run_rocm_native_workspace(tmp_path, env, "pytest tests")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    workspace = Path(env["VLLM_CI_WORKSPACE"])
+    assert (workspace / "tests" / "from-artifact").is_file()
+    assert not (workspace / "vllm").exists()
+    assert not (workspace / "setup.py").exists()
+    assert "vllm-rocm-source.tar.gz" not in Path(env["FAKE_BUILDKITE_LOG"]).read_text()
