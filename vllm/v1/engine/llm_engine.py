@@ -34,6 +34,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
@@ -102,12 +103,17 @@ class LLMEngine:
         )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
+        # Hand the renderer to the client. In multiprocess mode the client
+        # starts the MM warmup only after engine-core fork (the why is in
+        # BaseRenderer.start_mm_warmup_in_background); InprocClient takes no
+        # renderer, so MM warmup stays inside renderer.warmup() there.
         self.engine_core = EngineCoreClient.make_client(
             multiprocess_mode=multiprocess_mode,
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
+            renderer=renderer,
         )
 
         self.logger_manager: StatLoggerManager | None = None
@@ -129,7 +135,7 @@ class LLMEngine:
             model = self._get_driver_model_for_cleanup()
             if model is not None:
                 self._finalizer = weakref.finalize(
-                    self, LLMEngine._cleanup_instance_caches, model
+                    self, LLMEngine._cleanup_instance_caches, weakref.ref(model)
                 )
 
         if self.external_launcher_dp:
@@ -166,7 +172,6 @@ class LLMEngine:
         enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
-
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
@@ -211,7 +216,6 @@ class LLMEngine:
 
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
-
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
@@ -225,7 +229,9 @@ class LLMEngine:
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        session_id: str | None = None,
         prompt_text: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> str:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -235,8 +241,9 @@ class LLMEngine:
         if isinstance(prompt, EngineCoreRequest):
             logger.warning_once(
                 "Passing EngineCoreRequest to LLMEngine.generate() and .add_requests() "
-                "is deprecated and will be removed in v0.18. You should instead pass "
-                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+                "is deprecated and will be removed in the future. You should "
+                "instead pass the outputs of Renderer.render_cmpl() or "
+                "Renderer.render_chat()."
             )
 
             request = prompt
@@ -257,6 +264,8 @@ class LLMEngine:
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
+                session_id=session_id,
+                kv_hints=kv_hints,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -305,7 +314,9 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
-            iteration_stats = IterationStats() if self.log_stats else None
+            iteration_stats = (
+                IterationStats() if self.log_stats and outputs.outputs else None
+            )
             processed_outputs = self.output_processor.process_outputs(
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,
@@ -319,17 +330,15 @@ class LLMEngine:
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
-            if (
-                self.logger_manager is not None
-                and outputs.scheduler_stats is not None
-                and len(outputs.outputs) > 0
-            ):
+            if self.logger_manager is not None and outputs.scheduler_stats is not None:
+                # Record even when this step produced no request outputs.
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
                     mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
-                self.do_log_stats_with_interval()
+                if outputs.outputs:
+                    self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
 
@@ -340,6 +349,9 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
+        # Join the background MM warmup first: the mm_processor_cache is not
+        # safe for concurrent access with its apply/clear.
+        self.renderer._join_mm_warmup()
         self.renderer.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
@@ -366,10 +378,17 @@ class LLMEngine:
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    def wake_up(self, tags: list[str] | None = None):
-        self.engine_core.wake_up(tags)
+    def release_kv_cache_memory(self) -> None:
+        self.renderer.clear_mm_cache()
+        self.engine_core.release_kv_cache_memory()
 
         if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(1, 0)
+
+    def wake_up(self, tags: list[str] | None = None):
+        fully_awake = self.engine_core.wake_up(tags)
+
+        if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
 
     def is_sleeping(self) -> bool:
@@ -441,10 +460,13 @@ class LLMEngine:
         return getattr(model_runner, "model", None)
 
     @staticmethod
-    def _cleanup_instance_caches(model) -> None:
+    def _cleanup_instance_caches(model_ref: "weakref.ref[nn.Module]") -> None:
         """Remove the bytecode hooks that pin the compiled model."""
         from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 
+        model = model_ref()
+        if model is None:
+            return
         for module in model.modules():
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()

@@ -51,6 +51,11 @@ logger = init_logger(__name__)
 class NixlBaseConnectorScheduler:
     """Base implementation of Scheduler side methods shared by pull and push."""
 
+    # Emitted in kv_transfer_params so an external router can distinguish a
+    # pull (READ) producer from a push (WRITE) one. Overridden by the push
+    # scheduler.
+    _TRANSFER_MODE: str = "pull"
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -58,6 +63,12 @@ class NixlBaseConnectorScheduler:
         kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
+        parallel_config = vllm_config.parallel_config
+        # TP1 PCP+DCP exposes its DCP shards as transfer ranks.
+        self.transfer_tp_size = max(
+            parallel_config.tensor_parallel_size,
+            parallel_config.decode_context_parallel_size,
+        )
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
@@ -85,13 +96,10 @@ class NixlBaseConnectorScheduler:
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.kv_cache_groups
+                for g in kv_cache_config.transfer_groups
             )
         )
-        self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
-        )
+        self._has_mamba = kv_cache_config.has_mamba_layers
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -104,7 +112,9 @@ class NixlBaseConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._reqs_need_recv: dict[
+            ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
+        ] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
@@ -126,7 +136,7 @@ class NixlBaseConnectorScheduler:
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
-            for g in kv_cache_config.kv_cache_groups
+            for g in kv_cache_config.transfer_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
@@ -141,7 +151,7 @@ class NixlBaseConnectorScheduler:
             g.kv_cache_spec.num_speculative_blocks
             if isinstance(g.kv_cache_spec, MambaSpec)
             else None
-            for g in kv_cache_config.kv_cache_groups
+            for g in kv_cache_config.transfer_groups
         ]
         # Only "all" mode keeps a state per block position; the other modes
         # keep a single running state in the last non-speculative slot.
@@ -189,6 +199,9 @@ class NixlBaseConnectorScheduler:
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode"):
+            self._truncate_request_for_prefill(request)
+
         # NOTE (NickLucche) This excludes request meant for P, ie heartbeats are
         # effectively disabled for Bidirectional KV transfer.
         if params is None or not params.get("do_remote_prefill"):
@@ -199,6 +212,7 @@ class NixlBaseConnectorScheduler:
         host = params.get("remote_host")
         port = params.get("remote_port")
         tp_size = params.get("tp_size")
+        dcp_size = params.get("dcp_size", 1)
         pp_size = params.get("pp_size", 1)
         if (
             remote_engine_id is None
@@ -214,6 +228,7 @@ class NixlBaseConnectorScheduler:
                 host=host,
                 port=port,
                 tp_size=tp_size,
+                dcp_size=dcp_size,
                 pp_size=pp_size,
             )
         self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
@@ -252,8 +267,11 @@ class NixlBaseConnectorScheduler:
         for per-step partial lists (host-buffer save), where the SSM strip
         does not apply.
         """
-        if len(block_ids) == 0 or not self._is_hma_required:
-            # No blocks to clip eg Full prefix cache hit or not a hybrid model.
+        if len(block_ids) == 0:
+            # No blocks to clip, e.g. a full prefix cache hit.
+            return block_ids
+        block_ids = self.kv_cache_config.select_transfer_block_ids(block_ids)
+        if not self._is_hma_required:
             return block_ids
         # NOTE (NickLucche) This logic is currently handled at the connector level
         # because offloading connectors might want to receive the whole sequence even
@@ -281,11 +299,11 @@ class NixlBaseConnectorScheduler:
     def set_xfer_handshake_metadata(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set the KV connector handshake metadata for this connector.
+        """Set the KV connector handshake metadata for this connector.
 
         Args:
             metadata (dict): the handshake metadata to set.
+
         """
         encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
@@ -364,36 +382,56 @@ class NixlBaseConnectorScheduler:
                     (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
                 )
 
+    def _prefill_backoff(self) -> int:
+        """Trailing prompt tokens the prefiller must not compute; the decoder
+        recomputes them locally.
+
+        Mamba needs h(N-1) so the decoder can derive h(N) itself. Multi-module
+        MTP needs to keep its whole lookahead window off of the prefiller, which
+        would otherwise embed the unverified drafts in the MTP layer's KV cache. The
+        decoder would never rebuild them, because the update is sized by the rejection
+        count, which is zero for the first decode.
+        """
+        return max(
+            1 if self._has_mamba else 0,
+            self.vllm_config.num_prefill_lookahead_tokens - 1,
+        )
+
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
-        if self._has_mamba and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
+        """D-side only. The number of prompt tokens to load from the prefiller.
+        Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
+        will recompute locally."""
+        backoff = self._prefill_backoff()
+        if backoff and num_prompt_tokens > backoff:
+            return num_prompt_tokens - backoff
         return num_prompt_tokens
 
-    def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the last prompt token so the prefiller computes
-        h(N-1) instead of h(N). The decoder recomputes the last token to
-        derive h(N) correctly.
+    def _truncate_request_for_prefill(self, request: "Request") -> None:
+        """P-side only: drop the trailing ``_prefill_backoff()`` prompt tokens
+        so the prefiller stops short of what the decoder recomputes locally.
+        For Mamba that is the single token needed to yield h(N-1); for
+        multi-module MTP it is the drafter's whole lookahead window.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
+        backoff = self._prefill_backoff()
         params = request.kv_transfer_params
         if (
-            params is not None
+            backoff
+            and params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > 1
+            and request.num_prompt_tokens > backoff
         ):
             if request.prompt_token_ids is not None:
-                request.prompt_token_ids.pop()
+                del request.prompt_token_ids[-backoff:]
             elif request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-1]
+                request.prompt_embeds = request.prompt_embeds[:-backoff]
             else:
                 return
 
-            request._all_token_ids.pop()
-            request.num_prompt_tokens -= 1
+            del request._all_token_ids[-backoff:]
+            request.num_prompt_tokens -= backoff
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
@@ -441,12 +479,19 @@ class NixlBaseConnectorScheduler:
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, block_ids) in self._reqs_need_recv.items():
+        for req_id, (
+            req,
+            block_ids,
+            cached,
+            awaiting_kvs,
+        ) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req_to_recv(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
+                local_num_computed_blocks=cached,
+                awaiting_kvs=awaiting_kvs,
             )
 
         if self.use_host_buffer:

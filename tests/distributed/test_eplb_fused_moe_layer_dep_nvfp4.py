@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# Test that the interaction between EPLB and FusedMoE Layer is okay for DP w/ NVFP4
+# Test that the interaction between EPLB and MoERunner Layer is okay for DP w/ NVFP4
 
 from dataclasses import dataclass
 
@@ -19,11 +19,12 @@ from vllm.distributed.parallel_state import (
     get_eplb_group,
 )
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory, MoERunner
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
 )
+from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -44,7 +45,7 @@ def make_fused_moe_layer(
     rank: int,
     layer_idx: int,
     test_config: TestConfig,
-) -> FusedMoE:
+) -> MoERunner:
     quant_config = None
 
     device = torch.device(f"cuda:{rank}")
@@ -55,7 +56,7 @@ def make_fused_moe_layer(
         exclude_modules=[],
     )
 
-    fml = FusedMoE(
+    fml = FusedMoEFactory(
         num_experts=test_config.num_experts,
         top_k=test_config.num_topk,
         hidden_size=test_config.hidden_size,
@@ -270,6 +271,8 @@ def test_eplb_fml(
 ):
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    if current_platform.is_xpu():
+        pytest.skip("NVFP4 quantization and flashinfer backends are CUDA-only")
 
     num_local_experts = num_experts // world_size
     num_topk = 4

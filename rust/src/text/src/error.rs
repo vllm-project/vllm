@@ -15,6 +15,8 @@ pub enum Error {
     Tokenizer(String),
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
+    #[error("text request `{request_id}` stop strings cannot be empty")]
+    EmptyStopString { request_id: String },
     #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
@@ -33,6 +35,15 @@ pub enum Error {
     MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
+    #[error(
+        "truncate_prompt_tokens={value} cannot be greater than max_model_len - \
+         max_tokens = {budget}. Please request a smaller truncation size."
+    )]
+    TruncatePromptTokensExceedsBudget { value: u64, budget: u32 },
+    #[error("invalid truncate_prompt_tokens={value}; must be >= -1")]
+    InvalidTruncatePromptTokens { value: i64 },
+    #[error("truncate_prompt_tokens is not supported for multimodal requests")]
+    TruncateUnsupportedWithMultimodal,
     #[error("invalid repetition detection params: {message}")]
     InvalidRepetitionDetection { message: String },
     #[error("text request stream `{request_id}` closed before terminal output")]
@@ -51,15 +62,22 @@ impl Error {
         match self {
             Self::PromptTooLong { .. }
             | Self::EmptyPromptTokenIds { .. }
+            | Self::EmptyStopString { .. }
             | Self::Logprobs(_)
             | Self::TokenIds(_)
             | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
+            | Self::TruncatePromptTokensExceedsBudget { .. }
+            | Self::InvalidTruncatePromptTokens { .. }
+            | Self::TruncateUnsupportedWithMultimodal
             | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
-            | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => true,
+            | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::EngineCoreClient(
+                EngineCoreError::InvalidDataParallelRank { .. },
+            )) => true,
             _ => false,
         }
     }

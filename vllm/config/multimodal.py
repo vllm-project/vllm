@@ -3,15 +3,29 @@
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict, final
+from typing import Any, Literal, TypeAlias, TypeVar, final, overload
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+import torch
+from pydantic import (
+    ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    field_validator,
+    model_validator,
+)
 from pydantic.dataclasses import dataclass
+from pydantic_core import core_schema
 
 import vllm.envs as envs
+from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.utils import config
+from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = init_logger(__name__)
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -46,30 +60,61 @@ class AudioDummyOptions(BaseDummyOptions):
 
 
 @final
-class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
-    """Type annotations for modality types predefined by vLLM."""
+class MultiModalDummyOptions(dict[str, BaseDummyOptions]):
+    """Dummy data options for each modality.
 
-    image: ImageDummyOptions
-    """Options for dummy images."""
+    Lookups of the modalities predefined by vLLM return their own options
+    class, while any other modality returns
+    [`BaseDummyOptions`][vllm.config.multimodal.BaseDummyOptions].
+    """
 
-    video: VideoDummyOptions
-    """Options for dummy videos."""
+    @overload  # type: ignore[override]
+    def get(self, key: Literal["image"], /) -> ImageDummyOptions | None: ...
 
-    audio: AudioDummyOptions
-    """Options for dummy audios."""
+    @overload
+    def get(self, key: Literal["image"], default: _T, /) -> ImageDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: Literal["video"], /) -> VideoDummyOptions | None: ...
+
+    @overload
+    def get(self, key: Literal["video"], default: _T, /) -> VideoDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: Literal["audio"], /) -> AudioDummyOptions | None: ...
+
+    @overload
+    def get(self, key: Literal["audio"], default: _T, /) -> AudioDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: str, /) -> BaseDummyOptions | None: ...
+
+    @overload
+    def get(self, key: str, default: _T, /) -> BaseDummyOptions | _T: ...
+
+    def get(self, key: str, default: object = None, /) -> object:
+        return super().get(key, default)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            cls, handler.generate_schema(dict[str, BaseDummyOptions])
+        )
 
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
 VideoPruningMethod = Literal["evs", "vidcom2"]
 MMTensorIPC = Literal["direct_rpc", "torch_shm"]
-MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
-"""
-A dictionary containing an entry for each modality type of dummy data.
-
-The built-in modalities are defined by
-[`MultiModalDummyOptionsBuiltins`][vllm.config.multimodal.MultiModalDummyOptionsBuiltins].
-"""
+MMHasherAlgorithm = Literal["blake3", "sha256", "sha512"]
+MMProcessorDevice: TypeAlias = str
+"""`"auto"`, `"cpu"`, or the platform's own accelerator name
+(`current_platform.device_type`, e.g. `"cuda"` on CUDA and ROCm,
+`"xpu"` on XPU). Validated against that set by the CLI."""
 
 
 @config
@@ -79,7 +124,9 @@ class MultiModalConfig:
     language_model_only: bool = False
     """If True, disables all multimodal inputs by setting all modality limits to 0.
     Equivalent to setting `--limit-mm-per-prompt` to 0 for every modality."""
-    limit_per_prompt: MMDummyOptions = Field(default_factory=dict)
+    limit_per_prompt: MultiModalDummyOptions = Field(
+        default_factory=MultiModalDummyOptions
+    )
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
@@ -122,6 +169,11 @@ class MultiModalConfig:
 
     For example, for Phi-3-Vision:
     `{"num_crops": 4}`."""
+    mm_device_do_normalize: bool | None = True
+    """
+    Move the do_normalize computation in the mm preprocessing to before the ViT, 
+    and let the device do it, so that CPU computation can be saved.
+    """
     mm_processor_cache_gb: float = Field(default=4, ge=0)
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.
@@ -130,10 +182,16 @@ class MultiModalConfig:
     resulting in a total memory usage of
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
+    A single processed item larger than this budget is served uncached
+    (with a warning) instead of failing. Raise this value to cache such items.
+
     Set to `0` to disable this cache completely (not recommended)."""
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    mm_hasher_algorithm: MMHasherAlgorithm = "blake3"
+    """Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
+    `"sha512"` for FIPS-compliant deployments."""
     mm_shm_cache_max_object_size_mb: int = Field(default=128, ge=0)
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
@@ -204,6 +262,20 @@ class MultiModalConfig:
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
+    allow_missing_mm_embeddings: bool = False
+    """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.
+
+    In an encode/prefill/decode (EPD) deployment the encoder instance publishes
+    embeddings through the EC connector. An EC consumer loads those embeddings
+    from the connector, while a KV consumer receives the resulting prompt KV
+    cache. Their requests only need the grid/size metadata that sizes the
+    placeholder range.
+
+    Derived, not user-settable: `VllmConfig.__post_init__` sets this to True
+    on EC and KV consumers. Everywhere else it stays False so that a request
+    which forgets its embeddings still fails fast in the frontend, with a clear
+    error, rather than deep inside the model."""
+
     mm_ipc_gpu_memory_gb: float = Field(default=0, ge=0)
     """Amount of GPU memory (in GiB) sequestered on the engine's device for
     GPU-side multimodal work in the API-server (frontend) process, such as
@@ -220,8 +292,8 @@ class MultiModalConfig:
     def _validate_limit_per_prompt(
         cls,
         value: dict[str, int | dict[str, int]],
-    ) -> MMDummyOptions:
-        out: MMDummyOptions = {}
+    ) -> MultiModalDummyOptions:
+        out = MultiModalDummyOptions()
 
         for k, v in value.items():
             # Handle legacy format where only count is specified
@@ -301,9 +373,124 @@ class MultiModalConfig:
                 )
         return self
 
-    def compute_hash(self) -> str:
+    @staticmethod
+    def fold_mm_processor_device(
+        mm_processor_kwargs: dict[str, Any] | None,
+        mm_processor_device: MMProcessorDevice | None,
+    ) -> dict[str, Any] | None:
+        """Fold the `mm_processor_device` convenience flag into the kwargs.
+
+        The flag keeps no state of its own: `mm_processor_kwargs["device"]` is
+        the only representation of where the processor runs, so an explicit
+        `device` there always wins and `"auto"` stays unresolved for
+        `VllmConfig`, which is where the EC role needed to resolve it lives.
+
+        Args:
+            mm_processor_kwargs: The kwargs as given, or None.
+            mm_processor_device: The flag's value, or None when unset.
+
+        Returns:
+            The kwargs to build the config with, unchanged unless the flag adds
+            a `device`.
+
         """
-        WARNING: Whenever a new field is added to this config,
+        if mm_processor_device in (None, "auto"):
+            return mm_processor_kwargs
+        if (mm_processor_kwargs or {}).get("device") is not None:
+            return mm_processor_kwargs
+
+        from vllm.platforms import current_platform
+
+        # Any explicit value other than "cpu" means "the accelerator", so a
+        # programmatically-set "cuda" still works on a platform whose device type
+        # is named differently ("xpu"), and degrades to CPU where there is none.
+        device = (
+            "cpu"
+            if mm_processor_device == "cpu"
+            else (current_platform.device_type or "cpu")
+        )
+        return {**(mm_processor_kwargs or {}), "device": device}
+
+    def get_mm_processor_device_type(self) -> str | None:
+        """The torch device type `mm_processor_kwargs["device"]` names.
+
+        `mm_processor_kwargs` is untyped, so `device` may be any form torch
+        accepts -- `"cuda"`, `"cuda:1"`, `torch.device(...)`, or a bare index.
+        Normalising through torch rather than parsing the string keeps the
+        non-string forms from slipping past a caller's comparison.
+
+        Returns:
+            The device type, or None when no device is requested.
+
+        Raises:
+            ValueError: If `device` is not something `torch.device` accepts.
+                `validate_mm_processor_device` is what surfaces this during
+                startup, so the value is only parsed once.
+
+        """
+        device = (self.mm_processor_kwargs or {}).get("device")
+        if device is None:
+            return None
+        try:
+            return torch.device(device).type  # type: ignore[arg-type]
+        except (RuntimeError, TypeError, ValueError):
+            raise ValueError(
+                f'Invalid "device" in mm_processor_kwargs: {device!r}. Expected a '
+                'torch device such as "cpu", "cuda" or "cuda:0".'
+            ) from None
+
+    def validate_mm_processor_device(self, ec_config: ECTransferConfig | None) -> None:
+        """Check `mm_processor_kwargs["device"]` for this deployment.
+
+        The only place the requested device is validated, so it runs even on a
+        CPU-only platform: the value is parsed before any early return.
+
+        Args:
+            ec_config: The deployment's EC config, or None when it is not an
+                encode/prefill/decode deployment. Passed in because it is not
+                reachable from here, and because a field assigned after
+                construction would not re-trigger this config's validators.
+
+        Raises:
+            ValueError: If the requested device is not a torch device, or if it
+                is the accelerator on an instance that also runs the language
+                model.
+
+        """
+        from vllm.platforms import current_platform
+
+        device_type = self.get_mm_processor_device_type()
+        accelerator = current_platform.device_type
+        if device_type is None or accelerator in ("", "cpu"):
+            return
+        if device_type != accelerator:
+            return
+
+        if ec_config is None or not ec_config.is_encode_only:
+            raise ValueError(
+                f"Cannot run the multi-modal processor on {device_type!r}: this "
+                "instance also runs the language model. The processor would "
+                "share the device with the model's forward pass, so its "
+                "transform kernels contend with that compute, and because it "
+                "runs in the API-server process its allocations are outside the "
+                "memory the engine profiled for its KV cache -- risking OOM or "
+                "a silently shrunken cache.\n"
+                "Accelerator preprocessing is only supported on an encode-only "
+                "instance of an encode/prefill/decode deployment (an EC "
+                "producer that is not also a consumer), which runs no forward "
+                "pass and allocates no KV cache.\n"
+                'Use --mm-processor-device=cpu, or drop "device" from '
+                "--mm-processor-kwargs."
+            )
+
+        logger.info_once(
+            "Running the multi-modal processor on %s. Override with "
+            "--mm-processor-device=cpu.",
+            device_type,
+        )
+
+    def compute_hash(self) -> str:
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -320,13 +507,13 @@ class MultiModalConfig:
             self.mm_encoder_tp_mode,
             self.mm_encoder_attn_dtype,
             self.mm_encoder_fp8_scale_path,
+            self.mm_device_do_normalize,
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:
-        """
-        Get the maximum number of input items allowed per prompt
+        """Get the maximum number of input items allowed per prompt
         for the given modality (backward compatible).
         """
         if self.language_model_only:
@@ -344,11 +531,13 @@ class MultiModalConfig:
         self,
         inference_kwargs: Mapping[str, object],
     ) -> dict[str, object]:
-        """
-        Get the keyword arguments to pass to the multi-modal processor
+        """Get the keyword arguments to pass to the multi-modal processor
         according to the extra arguments passed during inference.
         """
         kwargs = self.mm_processor_kwargs or {}
+        if self.mm_device_do_normalize:
+            kwargs["do_normalize"] = False
+            kwargs["do_rescale"] = False
         return kwargs | dict(inference_kwargs)
 
     def use_gpu_video_backend(self) -> bool:

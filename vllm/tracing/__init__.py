@@ -94,9 +94,7 @@ def instrument(
     attributes: dict[str, str] | None = None,
     record_exception: bool = True,
 ):
-    """
-    Generic decorator to instrument functions.
-    """
+    """Generic decorator to instrument functions."""
     if obj is None:
         return functools.partial(
             instrument,
@@ -136,6 +134,8 @@ def instrument_manual(
         attributes: Optional dict of span attributes.
         context: Optional trace context (e.g., from extract_trace_context).
         kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        error: Optional exception to record on the span.
+
     """
     is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():
@@ -147,8 +147,7 @@ def instrument_manual(
 
 
 def is_tracing_available() -> bool:
-    """
-    Returns True if any tracing backend (OTel, Profiler, etc.) is available.
+    """Returns True if any tracing backend (OTel, Profiler, etc.) is available.
     Use this to guard expensive tracing logic in the main code.
     """
     check_available = [

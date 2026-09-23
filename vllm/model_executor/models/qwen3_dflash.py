@@ -32,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.multimodal.inputs import NestedTensors
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
@@ -56,10 +57,13 @@ _SLIDING_ATTENTION = "sliding_attention"
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
-    """``dflash_config.causal`` overrides all layers; else only SWA layers causal."""
+    """Resolve explicit causality before falling back to legacy layer defaults."""
+    is_causal = getattr(config, "is_causal", None)
+    if is_causal is not None:
+        return bool(is_causal)
     override = (getattr(config, "dflash_config", None) or {}).get("causal")
     if override is not None:
-        return override
+        return bool(override)
     layer_types = getattr(config, "layer_types", None)
     return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
 
@@ -164,8 +168,10 @@ class DFlashQwen3Attention(nn.Module):
         rms_norm_eps: float = 1e-06,
         attention_bias: bool = False,
         add_swa_attention_sink_bias: bool = False,
+        v_scale: float | None = None,
         sliding_window: int | None = None,
         causal: bool = False,
+        is_neox_style: bool = True,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -188,6 +194,7 @@ class DFlashQwen3Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
+        self.v_scale = v_scale
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -209,6 +216,7 @@ class DFlashQwen3Attention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position,
+            is_neox_style=is_neox_style,
             rope_parameters=rope_parameters,
         )
 
@@ -258,6 +266,8 @@ class DFlashQwen3Attention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
 
+        if self.v_scale is not None:
+            v = v * self.v_scale
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -291,6 +301,13 @@ class DFlashQwen3DecoderLayer(nn.Module):
         # non-causal) from the draft config.
         sliding_window, causal = _resolve_layer_attention(config, layer_idx)
 
+        # RoPE layout. The rotation applies to the draft's own Q/K, so this is
+        # fixed by how the head was distilled, not by the target: a neox-trained
+        # head on an interleaved target still needs neox. A mismatch is silent --
+        # acceptance collapses and nothing errors -- so a checkpoint that was
+        # distilled the other way has to say so here.
+        is_neox_style = getattr(config, "is_neox_style", True)
+
         self.self_attn = DFlashQwen3Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -299,8 +316,10 @@ class DFlashQwen3DecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             attention_bias=getattr(config, "attention_bias", False),
             add_swa_attention_sink_bias=add_swa_attention_sink_bias,
+            v_scale=dflash_config.get("attention_value_scale"),
             sliding_window=sliding_window,
             causal=causal,
+            is_neox_style=is_neox_style,
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -344,8 +363,17 @@ class DFlashQwen3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
+    decoder_layer_cls = DFlashQwen3DecoderLayer
+
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={"midlayer.": "layers.0."},
+        orig_to_new_substr={
+            "midlayer.": "layers.0.",
+            # Muse-Glimmer-30B-assistant names the aux-hidden-state encoder
+            # `encoder.fc` / `encoder.output_norm_enc`; this head calls them
+            # `fc` / `hidden_norm`. Same tensors and shapes, different names.
+            "encoder.output_norm_enc.": "hidden_norm.",
+            "encoder.fc.": "fc.",
+        },
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
@@ -370,10 +398,10 @@ class DFlashQwen3Model(nn.Module):
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
 
-        if drafter_config is not None and "use_aux_hidden_state" in drafter_config:
-            self.use_aux_hidden_state = drafter_config["use_aux_hidden_state"]
-        else:
-            self.use_aux_hidden_state = True
+        self.use_aux_hidden_state = drafter_config.get(
+            "use_aux_hidden_state",
+            getattr(self.config, "use_aux_hidden_state", True),
+        )
 
         current_vllm_config = get_current_vllm_config()
 
@@ -388,7 +416,9 @@ class DFlashQwen3Model(nn.Module):
         # at that slot id. Some checkpoints (XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash) ship
         # with a separate mask embedding tensor to use instead. When present, we load it
         # and substitute it for embed_tokens[mask_token_id] when computing embeddings.
-        self.mask_token_id = drafter_config.get("mask_token_id")
+        self.mask_token_id = drafter_config.get(
+            "mask_token_id", getattr(self.config, "mask_token_id", None)
+        )
         self.mask_embedding = nn.Parameter(
             torch.zeros(self.config.hidden_size, dtype=vllm_config.model_config.dtype),
             requires_grad=False,
@@ -397,7 +427,7 @@ class DFlashQwen3Model(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                DFlashQwen3DecoderLayer(
+                self.decoder_layer_cls(
                     current_vllm_config,
                     config=self.config,
                     layer_idx=layer_idx,
@@ -537,6 +567,15 @@ class DFlashQwen3Model(nn.Module):
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
         all_k_normed = torch.empty_like(all_k)
+        if current_platform.is_xpu():
+            for layer_idx in range(all_k.shape[0]):
+                ops.rms_norm(
+                    all_k_normed[layer_idx],
+                    all_k[layer_idx],
+                    self._k_norm_weights[layer_idx],
+                    self._rms_norm_eps,
+                )
+            return all_k_normed
         ops.rms_norm(
             all_k_normed,
             all_k,
@@ -598,6 +637,10 @@ class DFlashQwen3Model(nn.Module):
 
         if context_slot_mapping is None:
             return
+
+        v_scale = getattr(self.layers[0].self_attn, "v_scale", None)
+        if v_scale is not None:
+            all_v.mul_(v_scale)
 
         # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
@@ -662,16 +705,16 @@ class DFlashQwen3Model(nn.Module):
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+    model_cls = DFlashQwen3Model
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
-        self.model = DFlashQwen3Model(
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
+        self.model = self.model_cls(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,
@@ -798,21 +841,18 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             model_weights["model.mask_embedding"] = mask_embedding
             self.model.has_separate_mask_embedding = True
 
-        skip_substrs = []
+        orig_to_new_substr = {}
         if not includes_draft_id_mapping:
-            skip_substrs.append("draft_id_to_target_id")
+            orig_to_new_substr["draft_id_to_target_id"] = None
         if not includes_embed_tokens:
-            skip_substrs.append("embed_tokens")
+            orig_to_new_substr["embed_tokens"] = None
         if not self.model.use_aux_hidden_state:
-            skip_substrs.append("fc.")
+            orig_to_new_substr["fc."] = None
         if not self.model.has_separate_mask_embedding:
-            skip_substrs.append("mask_embedding")
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-            skip_substrs=skip_substrs,
-        )
-        loader.load_weights(model_weights.items())
+            orig_to_new_substr["mask_embedding"] = None
+        mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(model_weights.items(), mapper=mapper)
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:

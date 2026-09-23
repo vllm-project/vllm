@@ -11,6 +11,7 @@ import math
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
@@ -24,43 +25,10 @@ _AITER_SWIGLU_ALPHA = 1.702
 _AITER_SWIGLU_BETA = 1.0
 
 
-def is_aiter_mxfp8_moe_available() -> bool:
-    """True when the FlyDSL MXFP8 MoE can run here: gfx950, the ``flydsl``
-    package is importable, AND the installed aiter carries the mxfp8 FlyDSL
-    2-stage support from ROCm/aiter#3811.
-
-    ``flydsl`` and ``aiter`` are separate packages, so ``is_flydsl_available()``
-    (flydsl pkg + arch) is necessary but not sufficient: an older aiter without
-    #3811 still ships the flydsl pkg and the ``aiter.ops.flydsl`` module but a
-    broken/missing ``per_1x32 + fp8`` 2-stage path. Without this extra gate a
-    nightly lacking #3811 would wrongly select FlyDSL instead of falling back to
-    the native Triton dot_scaled path. #3811 added no probe-able public symbol,
-    so detect the ``minimax_m3_mxfp8`` tuned config it shipped. Every check fails
-    closed (returns False -> triton dot_scaled), which is always safe."""
-    if not (current_platform.is_rocm() and current_platform.supports_mx()):
-        return False
-    try:
-        import os
-
-        import aiter
-        from aiter.ops.flydsl.utils import is_flydsl_available
-
-        if not is_flydsl_available():
-            return False
-        return os.path.exists(
-            os.path.join(
-                os.path.dirname(aiter.__file__),
-                "configs",
-                "model_configs",
-                "minimax_m3_mxfp8_tuned_fmoe.csv",
-            )
-        )
-    except Exception:
-        return False
-
-
 class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
     """MXFP8 MoE through AITER's FlyDSL two-stage grouped GEMM (gfx950)."""
+
+    consumes_expert_mask = True
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
@@ -77,10 +45,7 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        # Device capability only (gfx950 / MX-capable ROCm). The flydsl package
-        # check lives in is_supported_config so a missing package is reported
-        # distinctly from an unsupported device.
-        return current_platform.is_rocm() and current_platform.supports_mx()
+        return current_platform.supports_mx() and rocm_aiter_ops.is_fused_moe_enabled()
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config) -> bool:
@@ -93,12 +58,6 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         is_supported, reason = super().is_supported_config(
             cls, moe_config, weight_key, activation_key, activation_format
         )
-        # _supports_current_device() only gates on the device; surface a clear
-        # reason when the device is fine but the flydsl package is missing.
-        if is_supported and not is_aiter_mxfp8_moe_available():
-            return False, (
-                "kernel requires the aiter flydsl package, which is not installed"
-            )
         if (
             is_supported
             and moe_config.activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE
@@ -145,29 +104,12 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        # Re-tag the preshuffled weights: replace_parameter drops the
-        # is_shuffled flag, without which aiter picks a broken CK kernel.
-        w1.is_shuffled = True
-        w2.is_shuffled = True
-
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
 
-        # Under EP, aiter expects ``expert_mask``: a 0/1 *local-expert* mask over
-        # global ids with a trailing fake-expert sentinel slot (shape
-        # ``[global_num_experts + 1]``), from which it derives the global->local
-        # compaction. What ``RoutedExperts.expert_map`` hands us depends on the
-        # aiter master switch (``rocm_aiter_fmoe_enabled``).
-        # Branching on the (static) master flag — not the tensor contents —
-        # keeps this HIP-graph/torch.compile safe (no data-dependent sync).
-        # ``None`` under pure TP.
-        if expert_map is None:
-            expert_mask = None
-        elif self.moe_config.rocm_aiter_fmoe_enabled:
-            expert_mask = expert_map
-        else:
-            local_mask = (expert_map >= 0).to(torch.int32)
-            expert_mask = torch.cat([local_mask, local_mask.new_zeros(1)])
+        # RoutedExperts.expert_map hands AITER experts the precomputed 0/1
+        # expert_mask (with trailing sentinel) instead of the vLLM expert_map.
+        expert_mask = expert_map
 
         # Route through the graph-safe ``rocm_aiter_fused_moe`` custom op so the
         # call is captured under HIP graphs / torch.compile (a direct

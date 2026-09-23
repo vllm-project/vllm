@@ -9,12 +9,12 @@ from unittest.mock import Mock
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
 
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import build_response_output_items
 from vllm.tokenizers import get_tokenizer

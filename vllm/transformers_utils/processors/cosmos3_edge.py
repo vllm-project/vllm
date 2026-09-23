@@ -8,12 +8,16 @@ import torch
 from torchvision.transforms import InterpolationMode
 from transformers import AutoTokenizer
 from transformers.feature_extraction_utils import BatchFeature
-from transformers.image_utils import ChannelDimension, PILImageResampling, SizeDict
+from transformers.image_utils import (
+    ChannelDimension,
+    PILImageResampling,
+    SizeDict,
+    get_image_size,
+)
 from transformers.models.qwen3_vl.processing_qwen3_vl import Qwen3VLProcessor
 from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
     Qwen3VLVideoProcessor,
     Qwen3VLVideoProcessorInitKwargs,
-    get_image_size,
     smart_resize,
 )
 from transformers.models.siglip2.image_processing_siglip2 import (
@@ -22,6 +26,7 @@ from transformers.models.siglip2.image_processing_siglip2 import (
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import TensorType
+from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import group_videos_by_shape, reorder_videos
 
 
@@ -65,8 +70,7 @@ class Cosmos3EdgeImageProcessor(Siglip2ImageProcessor):
         resample: PILImageResampling | InterpolationMode | int | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """
-        Rescales the image so that the following conditions are met:
+        """Rescales the image so that the following conditions are met:
 
         1. Both dimensions (height and width) are divisible by 'factor'.
         2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
@@ -225,8 +229,11 @@ class Cosmos3EdgeVideoProcessor(Qwen3VLVideoProcessor):
                     max_pixels=size.longest_edge,
                 )
                 stacked_videos = stacked_videos.view(B * T, C, H, W)
-                stacked_videos = self.resize(
-                    stacked_videos,
+                # The target size is already computed, so bypass Qwen3-VL's
+                # dynamic resize, which expects an unflattened video tensor.
+                stacked_videos = BaseVideoProcessor.resize(
+                    self,
+                    image=stacked_videos,
                     size=SizeDict(height=resized_height, width=resized_width),
                     resample=resample,
                 )
@@ -314,6 +321,7 @@ class Cosmos3EdgeProcessor(Qwen3VLProcessor):
             normalize, and patch video inputs.
         chat_template: An optional Jinja template used to render chat messages
             into a tokenizable string.
+
     """
 
     attributes = ["image_processor", "tokenizer", "video_processor"]

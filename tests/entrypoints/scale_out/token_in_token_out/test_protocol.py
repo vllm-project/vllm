@@ -9,7 +9,13 @@ fail loudly if the validator semantics ever drift.
 
 import json
 
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+import pytest
+
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateRequest,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
 from vllm.sampling_params import SamplingParams
 
 
@@ -68,3 +74,39 @@ def test_internal_instance_construction_treats_all_as_provided():
     assert req.is_sampling_param_provided("temperature")
     # And keys we never touched should also count as provided in this path.
     assert req.is_sampling_param_provided("top_p")
+
+
+def test_multimodal_features_reject_mismatched_parallel_fields():
+    with pytest.raises(ValueError, match="same length"):
+        MultiModalFeatures(
+            mm_hashes={"image": ["a", "b"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=1)]},
+            kwargs_data={"image": ["encoded"]},
+        )
+
+
+def test_multimodal_features_reject_overlapping_placeholders():
+    with pytest.raises(ValueError, match="non-overlapping"):
+        MultiModalFeatures(
+            mm_hashes={"image": ["a", "b"]},
+            mm_placeholders={
+                "image": [
+                    PlaceholderRangeInfo(offset=1, length=2),
+                    PlaceholderRangeInfo(offset=2, length=2),
+                ]
+            },
+            kwargs_data={"image": ["a", "b"]},
+        )
+
+
+def test_generate_request_rejects_placeholder_outside_prompt():
+    with pytest.raises(ValueError, match="within the token_ids sequence"):
+        GenerateRequest(
+            token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(),
+            features=MultiModalFeatures(
+                mm_hashes={"image": ["a"]},
+                mm_placeholders={"image": [PlaceholderRangeInfo(offset=2, length=2)]},
+                kwargs_data={"image": ["encoded"]},
+            ),
+        )

@@ -16,8 +16,7 @@ class BlameResult:
 
 @contextlib.contextmanager
 def blame(func: Callable) -> Generator[BlameResult, None, None]:
-    """
-    Trace the function calls to find the first function that satisfies the
+    """Trace the function calls to find the first function that satisfies the
     condition. The trace stack will be stored in the result.
 
     Usage:
