@@ -12,7 +12,7 @@ from vllm.models.qwen4_exp.amd.ops.qsa import (
 )
 from vllm.models.qwen4_exp.amd.ops.qsa_prepare import qsa_prepare
 from vllm.models.qwen4_exp.amd.qsa_indexer import apply_qsa_rope
-from vllm.models.qwen4_exp.common.qsa_cache import (
+from vllm.models.qwen4_exp.common.qsa import (
     canonical_qsa_rope_positions,
     circular_qsa_slot_mapping,
     compressed_qsa_slot_mapping,

@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.common import qsa_cache
-from vllm.models.qwen4_exp.common.qsa_cache import QSAIndexerMetadataBuilder
+from vllm.models.qwen4_exp.common import qsa as qsa_common
+from vllm.models.qwen4_exp.common.qsa import QSAIndexerMetadataBuilder
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
@@ -370,7 +370,7 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
     capacity = compress_ratio * -(-(compress_ratio + num_spec) // compress_ratio)
     query_len = num_spec + 1
 
-    slots = qsa_cache.circular_qsa_slot_mapping(
+    slots = qsa_common.circular_qsa_slot_mapping(
         torch.tensor([[1]], dtype=torch.int32),
         torch.zeros(query_len, dtype=torch.int32),
         torch.arange(chunk_start, chunk_start + query_len),
@@ -384,8 +384,8 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
 
 def _qsa_key_cache(
     block_size: int, compress_ratio: int, **kwargs
-) -> qsa_cache.QSAKeyStateCache:
-    return qsa_cache.QSAKeyStateCache(
+) -> qsa_common.QSAKeyStateCache:
+    return qsa_common.QSAKeyStateCache(
         head_size=64,
         dtype=torch.bfloat16,
         cache_config=SimpleNamespace(block_size=block_size),
@@ -400,7 +400,7 @@ def _qsa_key_cache(
 
 def test_qsa_state_caches_adapt_the_unified_logical_layout() -> None:
     raw_cache = _qsa_key_cache(block_size=32, compress_ratio=4)
-    compressed_cache = qsa_cache.QSACompressedKeyCache(
+    compressed_cache = qsa_common.QSACompressedKeyCache(
         head_size=64,
         dtype=torch.bfloat16,
         cache_config=SimpleNamespace(block_size=32),
@@ -633,7 +633,7 @@ def test_qsa_triton_metadata_matches_pytorch(
         else None
     )
     actual_buffers = make_buffers()
-    actual = qsa_cache.build_qsa_metadata_triton(
+    actual = qsa_common.build_qsa_metadata_triton(
         common,
         *actual_buffers,
         storage_block_size=2,
@@ -646,7 +646,7 @@ def test_qsa_triton_metadata_matches_pytorch(
         torch.empty_like(actual_k_work) if actual_k_work is not None else None
     )
     expected_buffers = make_buffers()
-    expected = qsa_cache._build_qsa_metadata_torch(
+    expected = qsa_common._build_qsa_metadata_torch(
         common,
         *expected_buffers,
         storage_block_size=2,
@@ -696,14 +696,14 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
     max_num_work = (num_tokens + 3) // 4
     actual_k_work = torch.empty(max_num_work, 2, dtype=torch.int32, device=device)
     expected_k_work = torch.empty_like(actual_k_work)
-    actual = qsa_cache.build_qsa_metadata_triton(
+    actual = qsa_common.build_qsa_metadata_triton(
         common,
         *make_buffers(),
         storage_block_size=8,
         compress_ratio=4,
         k_work_metadata_buffer=actual_k_work,
     )
-    expected = qsa_cache._build_qsa_metadata_torch(
+    expected = qsa_common._build_qsa_metadata_torch(
         common,
         *make_buffers(),
         storage_block_size=8,

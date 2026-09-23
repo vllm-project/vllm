@@ -17,7 +17,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
-from ..common.qsa_cache import (
+from ..common.qsa import (
     QSACompressedKeyCache,
     QSAIndexerMetadata,
     QSAKeyStateCache,

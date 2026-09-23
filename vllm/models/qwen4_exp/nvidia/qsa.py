@@ -61,7 +61,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa_cache import QSAIndexerMetadata
+from ..common.qsa import QSAIndexerMetadata
 from . import model
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
