@@ -26,6 +26,8 @@ DP_SIZE = 2
 # - CPU: Gloo DP allreduce timeout (30s) detects the dead peer.
 # - nixl_ep: kernel masks the dead rank after Buffer's default timeout_ms=30000 (30s).
 # - Deadline (45s): slowest fallback (30s) + margin.
+# NOTE: comment-only change to keep this lane selected by CI test
+# selection on the #58318 bisect probe; remove before any real merge.
 CPU_DISTRIBUTED_TIMEOUT_S = 30
 FAULT_DETECTION_DEADLINE_S = 45
 
