@@ -11,8 +11,7 @@ import pytest
 import torch
 from PIL import Image
 
-from vllm.config import ModelConfig
-from vllm.config.multimodal import MultiModalConfig
+from vllm.config import ModelConfig, MultiModalConfig, SchedulerConfig
 from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
@@ -41,6 +40,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.utils.collection_utils import flatten_2d_lists
 
+from ..models.utils import build_model_context
 from .utils import random_image
 
 pytestmark = pytest.mark.cpu_test
@@ -1405,17 +1405,12 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
 
     requires_tokenizer = False
 
-    def __init__(self, *, with_cache: bool = True) -> None:
-        cache = None
-        if with_cache:
-            cache = MultiModalProcessorOnlyCache(
-                _LazyTestModelConfig(mm_processor_cache_gb=1)  # type: ignore[arg-type]
-            )
+    def __init__(self) -> None:
         super().__init__(
             _LazyTestProcessingInfo(),  # type: ignore[arg-type]
             dummy_inputs=None,  # type: ignore[arg-type]
-            cache=cache,
         )
+
         # Raw bytes visible to byte-consuming models (see dots3_note) at
         # HF-processing time, one entry per lazy item.
         self.seen_original_bytes = list[bytes]()
@@ -1460,6 +1455,12 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
         return [PromptInsertion("image", PromptIndexTargets.start(), [0])]
 
 
+def _lazy_cache():
+    return MultiModalProcessorOnlyCache(
+        _LazyTestModelConfig(mm_processor_cache_gb=1)  # type: ignore[arg-type]
+    )
+
+
 class _CountingDecoder:
     """Decoder that records how many times it ran."""
 
@@ -1472,9 +1473,13 @@ class _CountingDecoder:
         return self.value
 
 
-def _cached_apply(processor, lazy_items, timing_ctx=None):
+def _lazy_inputs(processor, lazy_items, cache):
     mm_items = MultiModalDataParser().parse_mm_data({"image": lazy_items})
-    inputs = ProcessorInputs(prompt=[], mm_data_items=mm_items)
+    return ProcessorInputs(prompt=[], mm_data_items=mm_items, cache=cache)
+
+
+def _lazy_apply(processor, lazy_items, cache=None, timing_ctx=None):
+    inputs = _lazy_inputs(processor, lazy_items, cache)
     return processor._cached_apply_hf_processor(
         inputs, timing_ctx or TimingContext(enabled=False)
     )
@@ -1482,14 +1487,15 @@ def _cached_apply(processor, lazy_items, timing_ctx=None):
 
 def test_lazy_cache_hit_skips_decode():
     """A cache hit must not decode; a miss decodes once and releases bytes."""
-    processor = _LazyTestProcessor(with_cache=True)
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
     data = b"fake-image-bytes"
 
     # First request (miss): the item is decoded once and its bytes released.
     decoder_1 = _CountingDecoder(Image.new("RGB", (4, 4)))
     lazy_1 = LazyMedia(decoder_1, data)
     timing_ctx = TimingContext(enabled=True)
-    _cached_apply(processor, [lazy_1], timing_ctx)
+    _lazy_apply(processor, [lazy_1], cache, timing_ctx)
     assert decoder_1.calls == 1
     assert lazy_1.original_bytes == b""
     assert "decode_mm_items" in timing_ctx.stage_secs
@@ -1498,7 +1504,7 @@ def test_lazy_cache_hit_skips_decode():
     # right after hashing.
     decoder_2 = _CountingDecoder(Image.new("RGB", (4, 4)))
     lazy_2 = LazyMedia(decoder_2, data)
-    _cached_apply(processor, [lazy_2])
+    _lazy_apply(processor, [lazy_2], cache)
     assert decoder_2.calls == 0
     assert lazy_2.original_bytes == b""
 
@@ -1519,12 +1525,13 @@ def test_lazy_cache_miss_decodes_in_parallel():
 
         return decode
 
-    processor = _LazyTestProcessor(with_cache=True)
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
     lazy_items = [
         LazyMedia(make_decoder(idx), f"image-{idx}".encode())
         for idx in range(num_items)
     ]
-    _cached_apply(processor, lazy_items)
+    _lazy_apply(processor, lazy_items, cache)
 
     assert calls == [1] * num_items
 
@@ -1532,7 +1539,8 @@ def test_lazy_cache_miss_decodes_in_parallel():
 def test_lazy_decode_error_becomes_unprocessable():
     """A decode failure surfaces as VLLMUnprocessableEntityError, and
     in-flight sibling decodes are still awaited rather than abandoned."""
-    processor = _LazyTestProcessor(with_cache=True)
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
 
     def bad_decode():
         raise ValueError("corrupt media")
@@ -1545,9 +1553,10 @@ def test_lazy_decode_error_becomes_unprocessable():
         return Image.new("RGB", (4, 4))
 
     with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
-        _cached_apply(
+        _lazy_apply(
             processor,
             [LazyMedia(bad_decode, b"broken"), LazyMedia(slow_decode, b"good")],
+            cache,
         )
 
     assert exc_info.value.parameter == "image_url"
@@ -1557,10 +1566,11 @@ def test_lazy_decode_error_becomes_unprocessable():
 def test_lazy_miss_bytes_available_during_hf_processing():
     """Byte-consuming models (e.g. dots3_note) must still see non-empty
     original_bytes on the cached path; bytes are released afterwards."""
-    processor = _LazyTestProcessor(with_cache=True)
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
     lazy = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
 
-    _cached_apply(processor, [lazy])
+    _lazy_apply(processor, [lazy], cache)
 
     # The HF-facing layer saw the raw bytes for the miss item...
     assert processor.seen_original_bytes == [b"image-bytes"]
@@ -1571,20 +1581,16 @@ def test_lazy_miss_bytes_available_during_hf_processing():
 def test_lazy_miss_bytes_released_on_hf_processor_error():
     """Bytes of cache-miss lazy items are released even if HF processing
     raises (try/finally in `_cached_apply_hf_processor`)."""
-    processor = _LazyTestProcessor(with_cache=True)
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
     processor.fail_hf_processor = True
     lazy = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
 
     with pytest.raises(RuntimeError, match="boom"):
-        _cached_apply(processor, [lazy])
+        _lazy_apply(processor, [lazy], cache)
 
     assert processor.seen_original_bytes == [b"image-bytes"]
     assert lazy.original_bytes == b""
-
-
-def _lazy_inputs(processor, lazy_items):
-    mm_items = MultiModalDataParser().parse_mm_data({"image": lazy_items})
-    return ProcessorInputs(prompt=[], mm_data_items=mm_items)
 
 
 @pytest.mark.asyncio
@@ -1595,7 +1601,8 @@ async def test_lazy_phase1_does_not_block_mm_worker():
     import asyncio
     from concurrent.futures import ThreadPoolExecutor
 
-    processor = _LazyTestProcessor(with_cache=True)
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
     executor = ThreadPoolExecutor(max_workers=1)  # stands in for _mm_executor
 
     decode_entered = threading.Event()
@@ -1606,9 +1613,11 @@ async def test_lazy_phase1_does_not_block_mm_worker():
         release_decode.wait(timeout=30)
         return Image.new("RGB", (4, 4))
 
-    inputs_a = _lazy_inputs(processor, [LazyMedia(gated_decode, b"a-bytes")])
+    inputs_a = _lazy_inputs(processor, [LazyMedia(gated_decode, b"a-bytes")], cache)
     inputs_b = _lazy_inputs(
-        processor, [LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"b-bytes")]
+        processor,
+        [LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"b-bytes")],
+        cache,
     )
 
     try:
@@ -1652,19 +1661,22 @@ def test_lazy_phase2_rederives_miss_to_hit():
     """If another request caches a miss item between phase 1 and phase 2
     (A1, B1, B2, A2 interleaving), phase 2 must re-check the cache and skip
     reprocessing instead of blindly applying the HF processor."""
-    processor = _LazyTestProcessor(with_cache=True)
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
     data = b"shared-bytes"
 
     # A starts first: its phase 1 sees a cache miss and submits the decode.
     lazy_a = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
-    inputs_a = _lazy_inputs(processor, [lazy_a])
+    inputs_a = _lazy_inputs(processor, [lazy_a], cache)
     state_a = processor.apply_phase1(inputs_a, TimingContext(enabled=False))
     state_a.wait_decodes()
 
     # B's whole apply interleaves between A's phases and caches the content.
     lazy_b = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
     hf_before = processor.hf_calls
-    processor.apply(_lazy_inputs(processor, [lazy_b]), TimingContext(enabled=False))
+    processor.apply(
+        _lazy_inputs(processor, [lazy_b], cache), TimingContext(enabled=False)
+    )
     assert processor.hf_calls == hf_before + 1
 
     # A's phase 2 re-checks the cache, finds the hit, and skips reprocessing.
@@ -1677,15 +1689,16 @@ def test_lazy_phase2_handles_hit_eviction():
     """If a phase-1 hit is evicted before phase 2, phase 2 must fall back to
     decoding and processing it instead of asserting on a missing cache
     entry."""
-    processor = _LazyTestProcessor(with_cache=True)
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
     data = b"evict-me"
 
     first = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
-    _cached_apply(processor, [first])
+    _lazy_apply(processor, [first], cache)
     assert processor.hf_calls == 1
 
     lazy2 = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
-    inputs2 = _lazy_inputs(processor, [lazy2])
+    inputs2 = _lazy_inputs(processor, [lazy2], cache)
     state = processor.apply_phase1(inputs2, TimingContext(enabled=False))
 
     # Hit in phase 1: nothing to decode, bytes released after hashing.
@@ -1694,8 +1707,42 @@ def test_lazy_phase2_handles_hit_eviction():
 
     # The item is evicted between the phases; the decode closure still
     # holds the bytes, so the phase-2 fallback can process it.
-    processor.cache.clear_cache()  # type: ignore[union-attr]
+    cache.clear_cache()
     result = processor.apply_phase2(state)
 
     assert processor.hf_calls == 2
     assert result["mm_kwargs"]["image"][0] is not None
+
+
+@pytest.mark.parametrize(
+    ("chunked_prefill", "max_model_len", "expected_seq_len"),
+    [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
+)
+def test_dummy_inputs_scheduler_budget(
+    chunked_prefill, max_model_len, expected_seq_len
+):
+    ctx = build_model_context(
+        "llava-hf/llava-v1.6-mistral-7b-hf",
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": 1},
+    )
+    ctx.model_config.max_model_len = max_model_len
+
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
+
+    kwargs = {}
+    if chunked_prefill is not None:
+        kwargs["scheduler_config"] = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1,
+            enable_chunked_prefill=chunked_prefill,
+        )
+
+    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    assert len(result["prompt_token_ids"]) == expected_seq_len
