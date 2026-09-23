@@ -376,7 +376,7 @@ class ChunkGatedDeltaRule(CustomOp):
 
 # flashinfer's mm_bf16 accepts 1 <= m <= 32.
 _BA_PROJ_MAX_TOKENS = 32
-_BA_PROJ_BACKEND = "cudnn"
+_BA_PROJ_BACKEND = "auto"
 # cuBLAS has a dedicated GEMV path at one token and is faster there.
 _BA_PROJ_MIN_TOKENS = 2
 # 2 * num_v_heads is 96 or less for every shipped Qwen GDN model.
