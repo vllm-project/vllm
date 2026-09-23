@@ -248,6 +248,7 @@ def test_safetensors_metadata_of_repo_without_safetensors():
     )
     api = SimpleNamespace(
         get_safetensors_metadata=get_safetensors_metadata,
+        list_repo_files=MagicMock(return_value=["pytorch_model.bin"]),
         snapshot_download=MagicMock(side_effect=LocalEntryNotFoundError("no cache")),
     )
 
@@ -255,6 +256,75 @@ def test_safetensors_metadata_of_repo_without_safetensors():
         assert get_safetensors_params_metadata("some/pytorch-only-model") == {}
 
     get_safetensors_metadata.assert_called_once()
+
+
+def test_safetensors_metadata_with_nonstandard_checkpoint_name():
+    from huggingface_hub.errors import NotASafetensorsRepoError
+    from huggingface_hub.utils import SafetensorsFileMetadata, TensorInfo
+
+    filename = "gptq_model-4bit-128g.safetensors"
+    tensor = TensorInfo(dtype="I32", shape=[4, 8], data_offsets=(0, 128))
+    api = SimpleNamespace(
+        get_safetensors_metadata=MagicMock(
+            side_effect=NotASafetensorsRepoError("no standard checkpoint name")
+        ),
+        list_repo_files=MagicMock(
+            return_value=["config.json", filename, "other/model.safetensors"]
+        ),
+        parse_safetensors_file_metadata=MagicMock(
+            return_value=SafetensorsFileMetadata(
+                metadata={}, tensors={"model.layers.0.mlp.down_proj.qweight": tensor}
+            )
+        ),
+        snapshot_download=MagicMock(side_effect=AssertionError("cold cache")),
+    )
+
+    with patch.object(config_module, "hf_api", lambda: api):
+        metadata = get_safetensors_params_metadata("some/gptq-model", revision="pin")
+
+    assert metadata["model.layers.0.mlp.down_proj.qweight"]["dtype"] == "I32"
+    api.parse_safetensors_file_metadata.assert_called_once_with(
+        "some/gptq-model", filename, revision="pin"
+    )
+    api.snapshot_download.assert_not_called()
+
+
+@pytest.mark.parametrize("error_name", ["OfflineModeIsEnabled", "GatedRepoError"])
+def test_safetensors_metadata_uses_cached_weights_on_hub_error(tmp_path, error_name):
+    import huggingface_hub.errors
+    import torch
+    from safetensors.torch import save_file
+
+    save_file(
+        {"layer.qweight": torch.zeros(2, dtype=torch.int32)},
+        tmp_path / "model.safetensors",
+    )
+    error_kwargs = (
+        {"response": MagicMock(headers={})} if error_name == "GatedRepoError" else {}
+    )
+    error = getattr(huggingface_hub.errors, error_name)(
+        "Hub unavailable", **error_kwargs
+    )
+    api = SimpleNamespace(
+        get_safetensors_metadata=MagicMock(side_effect=error),
+        list_repo_files=MagicMock(),
+        snapshot_download=MagicMock(return_value=str(tmp_path)),
+    )
+
+    with (
+        patch.object(config_module, "hf_api", lambda: api),
+        patch("vllm.transformers_utils.repo_utils.time.sleep"),
+    ):
+        metadata = get_safetensors_params_metadata("some/gptq-model", revision="pin")
+
+    assert metadata["layer.qweight"]["dtype"] == "I32"
+    api.list_repo_files.assert_not_called()
+    api.snapshot_download.assert_called_once_with(
+        repo_id="some/gptq-model",
+        revision="pin",
+        allow_patterns=["*.safetensors"],
+        local_files_only=True,
+    )
 
 
 @pytest.mark.parametrize(
