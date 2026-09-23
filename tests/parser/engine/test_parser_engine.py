@@ -1700,11 +1700,11 @@ class TestSafeArgPrefix:
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
+        """Each partial argument string maps to its streamable prefix."""
         assert ParserEngine._safe_arg_prefix(json_str) == expected
 
     def test_schema_typed_trailing_string_is_withheld_with_its_key(self):
-        # ``count`` may be coerced to a number, so its value cannot stream and
-        # the separator must not be left dangling either.
+        """A string value for a key the schema may coerce is withheld with its key."""
         json_str = '{"path": "README.md", "count": "1'
         assert (
             ParserEngine._safe_arg_prefix(json_str, {"path"}) == '{"path": "README.md"'
@@ -1740,6 +1740,7 @@ class TestJsonPrefixTerminator:
         ],
     )
     def test_json_prefix_terminator(self, prefix, expected):
+        """Each prefix gets its shortest parsing suffix, or "" when none exists."""
         suffix = ParserEngine._json_prefix_terminator(prefix)
         assert suffix == expected
         if suffix:
