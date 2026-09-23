@@ -72,6 +72,15 @@ class AttentionBackend(ABC):
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
+    @classmethod
+    def get_supported_kernel_block_sizes_for_spec(
+        cls, kv_cache_spec: "AttentionSpec"
+    ) -> list[int | MultipleOf]:
+        """Kernel block sizes for the layers behind `kv_cache_spec`, which need not
+        share the model-wide shapes (e.g. a spec-decode drafter's head size).
+        """
+        return cls.get_supported_kernel_block_sizes()
+
     @staticmethod
     @abstractmethod
     def get_name() -> str:

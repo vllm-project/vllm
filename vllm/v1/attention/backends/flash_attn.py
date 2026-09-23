@@ -292,12 +292,12 @@ class FlashAttentionBackend(AttentionBackend):
     head_size_v: int | None = None
 
     @classmethod
-    def _get_fa4_hd256_block_size(cls) -> int | None:
-        vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is None or vllm_config.model_config is None:
-            return None
-
-        head_size = vllm_config.model_config.get_head_size()
+    def _get_fa4_hd256_block_size(cls, head_size: int | None = None) -> int | None:
+        if head_size is None:
+            vllm_config = get_current_vllm_config_or_none()
+            if vllm_config is None or vllm_config.model_config is None:
+                return None
+            head_size = vllm_config.model_config.get_head_size()
         if (
             uses_fa4_hd256_kernel(head_size, cls.head_size_v)
             and get_flash_attn_version(
@@ -314,6 +314,15 @@ class FlashAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
         if block_size := cls._get_fa4_hd256_block_size():
             # Sliding-window specs select the smallest advertised size.
+            return [block_size]
+        return [MultipleOf(16)]
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_spec(
+        cls, kv_cache_spec: AttentionSpec
+    ) -> list[int | MultipleOf]:
+        # The model-wide head size is the target's; a drafter's layers may differ.
+        if block_size := cls._get_fa4_hd256_block_size(kv_cache_spec.head_size):
             return [block_size]
         return [MultipleOf(16)]
 

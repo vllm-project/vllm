@@ -425,6 +425,29 @@ def test_select_common_block_size_no_valid_option():
         select_common_block_size(48, [backend_a, backend_b])
 
 
+def test_select_common_block_size_resolves_sizes_per_spec():
+    class _SpecAwareBackend:
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [128]
+
+        @staticmethod
+        def get_supported_kernel_block_sizes_for_spec(kv_cache_spec):
+            return [128] if kv_cache_spec.head_size == 256 else [MultipleOf(16)]
+
+    def spec(head_size: int) -> FullAttentionSpec:
+        return FullAttentionSpec(
+            block_size=832, num_kv_heads=8, head_size=head_size, dtype="bfloat16"
+        )
+
+    # 832 is a hybrid hd256 target's mamba-aligned manager block; its drafter's
+    # hd128 layers must not be held to the model-wide 128-token page.
+    backend = _SpecAwareBackend()
+    with pytest.raises(ValueError):
+        select_common_block_size(832, [backend])
+    assert select_common_block_size(832, [backend], [spec(128)]) == 832
+
+
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
     model.get_mm_lora_token_counts.side_effect = (
