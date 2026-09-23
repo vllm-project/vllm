@@ -7,6 +7,7 @@ from typing import Literal
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -37,6 +38,23 @@ class GDNAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
+
+
+class QwenGDNAttentionBackend(GDNAttentionBackend):
+    """GDN backend with full batch-invariance support for Qwen3.5/3.6."""
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "QWEN_GDN_ATTN"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        import torch
+        return torch.cuda.is_available() and torch.version.hip is None
+
 
 @dataclass
 class GDNAttentionMetadata:
@@ -54,6 +72,7 @@ class GDNAttentionMetadata:
     non_spec_query_start_loc: torch.Tensor | None = (
         None  # shape: [batch - num_spec_decodes + 1,]
     )
+    non_spec_query_start_loc_cpu: list[int] | None = None
 
     spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec]
     non_spec_state_indices_tensor: torch.Tensor | None = (
@@ -497,6 +516,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
+        non_spec_query_start_loc_cpu = (
+            non_spec_query_start_loc.tolist()
+            if non_spec_query_start_loc is not None and envs.VLLM_BATCH_INVARIANT
+            else None
+        )
+
         if (
             self.use_full_cuda_graph
             and num_prefills == 0
@@ -534,6 +559,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_has_initial_state=prefill_has_initial_state,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
+            non_spec_query_start_loc_cpu=non_spec_query_start_loc_cpu,
             spec_state_indices_tensor=spec_state_indices_tensor,
             non_spec_state_indices_tensor=non_spec_state_indices_tensor,
             spec_sequence_masks=spec_sequence_masks,

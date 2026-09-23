@@ -1025,6 +1025,7 @@ class MambaSpec(KVCacheSpec):
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
+    non_causal: bool = False
 
     @property
     def state_content_size_bytes(self) -> int:

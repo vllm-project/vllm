@@ -11,6 +11,7 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
+    get_attention_config,
     skip_if_not_cuda,
     skip_unsupported,
 )
@@ -55,7 +56,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
-    attention_config = {"backend": backend}
+    attention_config = get_attention_config(backend)
     # Force the C++ RMSNorm implementation so we actually exercise the
     # num_tokens-dependent block-size branches.
     kernel_config = None
@@ -103,6 +104,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
             max_model_len=max_model_len,
             attention_config=attention_config,
             kernel_config=kernel_config,
+            enforce_eager=backend == "GDN_ATTN",
         )
 
         # Baseline generation for the needle prompt alone.
@@ -186,6 +188,14 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
         print(f"{'=' * 80}\n")
 
+    _attn_cfg = {
+        **get_attention_config(backend),
+        **(
+            {"flex_attn_block_m": block_m, "flex_attn_block_n": block_n}
+            if backend != "GDN_ATTN"
+            else {}
+        ),
+    }
     llm = LLM(
         model=TEST_MODEL,
         tensor_parallel_size=tp_size,
@@ -193,11 +203,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_model_len=8192,
         dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
-        attention_config={
-            "backend": backend,
-            "flex_attn_block_m": block_m,
-            "flex_attn_block_n": block_n,
-        },
+        enforce_eager=backend == "GDN_ATTN",
+        attention_config=_attn_cfg,
     )
 
     # Use more realistic prompts for better token generation
@@ -408,7 +415,8 @@ def test_simple_generation(backend):
         max_model_len=2048,
         dtype="auto",
         enable_prefix_caching=False,
-        attention_config={"backend": backend},
+        enforce_eager=backend == "GDN_ATTN",
+        attention_config=get_attention_config(backend),
     )
 
     prompt = "the capital of france is"
@@ -471,7 +479,8 @@ def test_logprobs_without_batch_invariance_should_fail(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="auto",
-        attention_config={"backend": backend},
+        enforce_eager=backend == "GDN_ATTN",
+        attention_config=get_attention_config(backend),
     )
 
     # build ragged prompts to change shapes significantly across BS=1 vs BS=N
@@ -689,7 +698,8 @@ def test_decode_logprobs_match_prefill_logprobs(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="auto",
-        attention_config={"backend": backend},
+        enforce_eager=backend == "GDN_ATTN",
+        attention_config=get_attention_config(backend),
     )
 
     # Use a few test prompts
@@ -923,6 +933,7 @@ def LLM_with_max_seqs(
     max_model_len: int,
     attention_config: dict | None = None,
     kernel_config: dict | None = None,
+    enforce_eager: bool = False,
 ) -> LLM:
     """Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
     using the high-level v1 LLM API, while constraining memory usage.
@@ -939,6 +950,7 @@ def LLM_with_max_seqs(
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
         attention_config=attention_config,
+        enforce_eager=enforce_eager,
         # Enable for MOE models
         # enable_expert_parallel=True,
         **extra_kwargs,
