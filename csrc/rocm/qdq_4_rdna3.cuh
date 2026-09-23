@@ -113,6 +113,69 @@ __forceinline__ __device__ void dequant_4bit_8_fp16(uint32_t qa, half2 (&dq)[4],
 // bf16 path
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Exact factored form.
+//
+// dequant_4bit_8_fp16 above bakes the zero/scale bias into every weight, which
+// forces z = scale * (-1024 - zero) to be *stored* as fp16. At scale ~0.02 that
+// costs ~0.008 abs per (group, column) constant, and the error then accumulates
+// along the K/groups axis: measured max abs error against an FP32 dequantised
+// reference is 0.34-1.26 on the four linear shapes of a 27B dense W4A16 G32
+// model, i.e. a ~3% typical perturbation with |ref| ~ 7 — the same order as the
+// quantisation it serves, and deterministic, so it acts as a permanently
+// coarser quantisation. Computing the product in fp32 does not help: the error
+// is in the fp16 *representation* of z, not in the multiply.
+//
+// Instead use the identity, exact for any grouping:
+//
+//     sum_k a_k * w_k  =  y * sum_k a_k * (1024 + q_k)  +  z * sum_k a_k
+//
+// z is constant within a group, so it is applied once per group in fp32 and
+// never narrowed. sum_k a_k does not depend on the output column, so one extra
+// v_dot2 against half2(1,1) is shared by all four columns a thread owns.
+//
+// This is what the bf16 M_COUNT==1 branch of q_gemm_rdna3.cu already does
+// (sum_a via a second v_dot2, bias as y_b_f * partial + z_b_f * sum_a); these
+// helpers bring the same treatment to fp16, where the double-pair trick needs
+// two (y, z) pairs and two activation sums because the upper nibbles carry a
+// factor of 16.
+//
+// Measured on gfx1100 against the same reference: 0.0040-0.0126 max abs error
+// (64-142x better than the baked form, and 1.1-1.4x better than the WMMA path,
+// which still narrows B to fp16 once). Cost is free at M=1-2 (0.99-1.02x),
+// 3-14% at M=4-8 and 15-28% at M=12.
+// ---------------------------------------------------------------------------
+__forceinline__ __device__ void prep_zero_scale_fp16_f32(uint32_t zero,
+                                                         half scale,
+                                                         float (&y)[2],
+                                                         float (&z)[2]) {
+  const float s = __half2float(scale);
+  const float zf = (float)(int)zero;
+  y[0] = s;  // low pairs:  (1024 + q) * s
+  z[0] = s * (-1024.0f - zf);
+  y[1] = s * (1.0f / 16.0f);  // high pairs: (1024 + 16q) * s/16
+  z[1] = s * (-64.0f - zf);
+}
+
+// Magic values only, with no y/z applied: low pairs land in [0] and [2], high
+// pairs in [1] and [3], the same split dequant_4bit_8_fp16 uses.
+__forceinline__ __device__ void magic_4bit_8_fp16(uint32_t qa, half2 (&qm)[4]) {
+  const uint32_t c0 = 0x64006400;
+  union {
+    uint32_t u;
+    half2 h2;
+  } t;
+  t.u = (qa & 0x000F000F) | c0;
+  qm[0] = t.h2;
+  t.u = (qa & 0x00F000F0) | c0;
+  qm[1] = t.h2;
+  const uint32_t qa_hi = qa >> 8;
+  t.u = (qa_hi & 0x000F000F) | c0;
+  qm[2] = t.h2;
+  t.u = (qa_hi & 0x00F000F0) | c0;
+  qm[3] = t.h2;
+}
+
 // Bit-trick magic for bf16:
 //   bf16(128) == 0x4300 (sign 0, exp 134, mantissa 0).
 //   For nibble n in [0..15], bits [3:0] of mantissa hold n exactly because

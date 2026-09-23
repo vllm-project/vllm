@@ -341,13 +341,16 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
   int qk = offset_k / 8;
   const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
 
-  // Per-column dequant constants. We hold one set of (z, y) pairs per column.
-  // fp16 uses the exllama (z1z16, y1y16) double-pair to enable the upper-
-  // nibble-*16 trick. bf16 uses fp32 scalars (z, y) because the dequant
-  // produces fp32 directly — see prep_zero_scale_bf16_f32 / the FMA
-  // bypass for the missing v_pk_fma_bf16 on gfx11.
-  half2 z1z16_h[4][2], y1y16_h[4][2];
+  // Per-column dequant constants, fp32 for both dtypes. fp16 needs two (y, z)
+  // pairs because the upper-nibble trick carries a factor of 16; bf16 needs one
+  // because its dequant produces fp32 directly — see prep_zero_scale_bf16_f32 /
+  // the FMA bypass for the missing v_pk_fma_bf16 on gfx11. Neither narrows the
+  // bias to the activation dtype: see the exact factored form in
+  // qdq_4_rdna3.cuh for why that matters.
   float z_b_f[4], y_b_f[4];
+  // fp16 exact factored form: y and z per column and per nibble parity, in
+  // fp32, never narrowed. See qdq_4_rdna3.cuh.
+  float yf_h[4][2], zf_h[4][2];
 
   auto refresh_group = [&](int g) {
     const uint32_t* qz_row = b_qzeros + g * (size_n / 8);
@@ -359,8 +362,8 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
     if constexpr (std::is_same<T, half>::value) {
   #pragma unroll
       for (int i = 0; i < 4; ++i) {
-        prep_zero_scale_fp16((uint32_t)(zeros[i] + zero_offset), scales[i],
-                             z1z16_h[i], y1y16_h[i]);
+        prep_zero_scale_fp16_f32((uint32_t)(zeros[i] + zero_offset), scales[i],
+                                 yf_h[i], zf_h[i]);
       }
     } else {
   #pragma unroll
@@ -410,24 +413,53 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
     }
     b_ptr += 4 * size_n;
 
+    // fp16 exact factored form: sum_a per row, split by nibble parity, summed
+    // across the whole group. It depends on neither the output column nor the
+    // weights, so the z correction is applied once after the j loop instead of
+    // four times inside it — see qdq_4_rdna3.cuh. Two floats per row, so no
+    // measurable register pressure: the M_COUNT=8 instantiation sits at 124
+    // VGPRs and occupancy 10 either way, matching the baked form exactly.
+    float sum_lo[M_COUNT] = {}, sum_hi[M_COUNT] = {};
+
   #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const int a_off = (k - offset_k) + 8 * j;
 
       if constexpr (std::is_same<T, half>::value) {
-        half2 dq[4][4];
-        dequant_4bit_8_fp16((uint32_t)b_w[j].x, dq[0], z1z16_h[0], y1y16_h[0]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].y, dq[1], z1z16_h[1], y1y16_h[1]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].z, dq[2], z1z16_h[2], y1y16_h[2]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].w, dq[3], z1z16_h[3], y1y16_h[3]);
+        // Magic values with no bias folded in; the bias is applied once per
+        // group in fp32 below. See the exact factored form in qdq_4_rdna3.cuh.
+        half2 qm[4][4];
+        magic_4bit_8_fp16((uint32_t)b_w[j].x, qm[0]);
+        magic_4bit_8_fp16((uint32_t)b_w[j].y, qm[1]);
+        magic_4bit_8_fp16((uint32_t)b_w[j].z, qm[2]);
+        magic_4bit_8_fp16((uint32_t)b_w[j].w, qm[3]);
+
+        constexpr uint32_t FP16_ONES = 0x3C003C00u;  // half2(1.0, 1.0)
+        const half2 ones = *reinterpret_cast<const half2*>(&FP16_ONES);
 
   #pragma unroll
         for (int m = 0; m < M_COUNT; ++m) {
-          const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
-          block_c[m][0] += dot22_8_f(dq[0], a_ptr);
-          block_c[m][1] += dot22_8_f(dq[1], a_ptr);
-          block_c[m][2] += dot22_8_f(dq[2], a_ptr);
-          block_c[m][3] += dot22_8_f(dq[3], a_ptr);
+          const half2* a2 = reinterpret_cast<const half2*>(&block_a[m][a_off]);
+          // sum_a split by nibble parity (the high pairs carry a factor of 16).
+          // It does not depend on the output column, so one v_dot2 per pair is
+          // shared by the four columns this thread owns; and it does not depend
+          // on the weights, so it accumulates across the whole group and the z
+          // correction is applied once, after the j loop.
+          sum_lo[m] = __builtin_amdgcn_fdot2(a2[0], ones, sum_lo[m], false);
+          sum_hi[m] = __builtin_amdgcn_fdot2(a2[1], ones, sum_hi[m], false);
+          sum_lo[m] = __builtin_amdgcn_fdot2(a2[2], ones, sum_lo[m], false);
+          sum_hi[m] = __builtin_amdgcn_fdot2(a2[3], ones, sum_hi[m], false);
+  #pragma unroll
+          for (int c = 0; c < 4; ++c) {
+            float pl = 0.0f, ph = 0.0f;
+            pl = __builtin_amdgcn_fdot2(qm[c][0], a2[0], pl, /*clamp=*/false);
+            ph = __builtin_amdgcn_fdot2(qm[c][1], a2[1], ph, /*clamp=*/false);
+            pl = __builtin_amdgcn_fdot2(qm[c][2], a2[2], pl, /*clamp=*/false);
+            ph = __builtin_amdgcn_fdot2(qm[c][3], a2[3], ph, /*clamp=*/false);
+            // Only the y half here: y and z are both group constants, but z
+            // multiplies sum_a, which is still being accumulated.
+            block_c[m][c] += yf_h[c][0] * pl + yf_h[c][1] * ph;
+          }
         }
       } else if constexpr (M_COUNT == 1) {
         // bf16 decode (M=1), v_dot2_f32_bf16 path. Mirrors the data-flow of
@@ -589,6 +621,18 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
                 __fmaf_rn(y_b_f[col], partial,
                           __fmaf_rn(z_b_f[col], sum_a[m], block_c[m][col]));
           }
+        }
+      }
+    }
+
+    if constexpr (std::is_same<T, half>::value) {
+      // z is a group constant and sum_a is complete for this group: one pair of
+      // FMAs per (row, column), instead of one pair per j-iteration.
+  #pragma unroll
+      for (int m = 0; m < M_COUNT; ++m) {
+  #pragma unroll
+        for (int c = 0; c < 4; ++c) {
+          block_c[m][c] += zf_h[c][0] * sum_lo[m] + zf_h[c][1] * sum_hi[m];
         }
       }
     }
@@ -832,10 +876,55 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   // configuration did not reproduce it — so the win is not worth the risk until
   // someone has a harness that fails first.
 
+  // fp16 used to stay scalar until M=64 because the exllama bit-trick dequant
+  // is faster there. It is also far less accurate, and that half of the trade
+  // was never measured. Max abs error against an FP32 dequantised reference, on
+  // the four linear shapes of a 27B dense W4A16 G32 model at TP4 (K/N as
+  // served), for every M from 1 to 24:
+  //
+  //   layer          K     N    scalar        wmma      ratio
+  //   qkv_proj    5120  2048    0.82-1.17   0.020-0.025   36-48x
+  //   o_proj      1536  5120    0.35-0.70   0.011-0.014   31-53x
+  //   gate_up     5120  8704    0.81-1.26   0.021-0.025   40-55x
+  //   down_proj   4352  5120    0.80-1.07   0.020-0.023   36-49x
+  //
+  // The error is not the split-K epilogue: it is the bit-trick rounding the
+  // per-(group, column) offset constant scale*(-1024-zero) to fp16 (~0.008 abs
+  // at scale 0.02), which then accumulates along the K/groups axis. With
+  // |ref| ~ 7 that is a ~3% typical perturbation — the same order as the
+  // quantisation it is meant to be serving, and deterministic, so it acts as a
+  // permanently coarser quantisation on every token.
+  //
+  // Speed is the other half, and it is a real cost: scalar/wmma measured on the
+  // same shapes is 0.42-0.87 for qkv, 0.62-1.55 for o_proj, 0.32-1.20 for
+  // gate_up and 0.45-1.10 for down_proj over M=1..24. WMMA loses below M~12 and
+  // is roughly a wash at 16-24, where a decode batch of seqs*(k+1) lands. Net
+  // on this model: a few percent of decode for ~40x less GEMM error.
+  //
+  // 12, from the measured crossover between the two *exact* paths (the scalar
+  // dequant is now exact too — see qdq_4_rdna3.cuh). Ratio scalar/wmma on the
+  // four shapes of a 27B dense W4A16 G32 model at TP4, alternating both arms in
+  // one process, min of 3; >1 means WMMA is faster:
+  //
+  //   layer          K     N   M=4   M=8  M=12  M=16  M=24
+  //   qkv_proj    5120  2048  0.87  0.93  0.87  0.90  1.03
+  //   o_proj      1536  5120  1.34  1.59  1.76  1.63  1.20
+  //   gate_up     5120  8704  0.79  0.84  1.54  1.58  1.30
+  //   down_proj   4352  5120  0.87  1.00  1.32  1.41  1.31
+  //
+  // At M>=12 WMMA wins on three of four, and on the expensive ones (gate_up is
+  // 0.099 ms against qkv's 0.030). Below that the scalar path wins and is also
+  // the more accurate of the two, so it keeps the band.
+  //
+  // The crossover is really a function of N/K, not of M alone: WMMA wins early
+  // where N/K is large (o_proj 3.3 always, gate_up 1.7 from 12, down 1.18 from
+  // 8-12) and never up to M=24 where it is small (qkv 0.4) — the 16x16 tile
+  // fills in the dimension it has to spare. A shape-aware dispatch is where the
+  // rest of the performance is; it is not done here because tuning that needs a
+  // machine that is not also serving traffic.
+  constexpr int64_t WMMA_MIN_M = 12;
   if (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
-      b_q_weight.size(1) % 16 == 0 &&
-      ((a.scalar_type() == torch::kBFloat16 && a.size(0) >= 16) ||
-       (a.scalar_type() == torch::kHalf && a.size(0) >= 64))) {
+      b_q_weight.size(1) % 16 == 0 && a.size(0) >= WMMA_MIN_M) {
     return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales,
                                 use_v2_format);
   }
