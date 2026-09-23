@@ -59,8 +59,7 @@ class BlockTables:
             self.block_tables.append(block_table)
 
         self.num_blocks = UvaBackedTensor(
-            (self.num_kv_cache_groups, self.max_num_reqs),
-            dtype=torch.int32,
+            (self.num_kv_cache_groups, self.max_num_reqs), dtype=torch.int32
         )
         self.fused_writer: FusedStagedWriter | None = None
         if self.num_kv_cache_groups > 1:
