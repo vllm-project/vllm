@@ -52,6 +52,19 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
+class KvHintAction(msgspec.Struct, frozen=True):
+    action_id: str
+    action_type: str
+    action_version: str
+    payload: dict[str, object]
+
+
+class KvHintsEnvelope(msgspec.Struct, frozen=True):
+    protocol_version: str
+    message_id: str
+    actions: list[KvHintAction]
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,
@@ -78,6 +91,7 @@ class EngineCoreRequest(
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
     session_id: str | None = None
+    kv_hints: KvHintsEnvelope | None = None
 
 
 class EngineCoreOutput(
@@ -101,6 +115,14 @@ class EngineCoreOutput(
     num_nans_in_logits: int = 0
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
+    spec_decode_metrics: object | None = None
+
+
+class ExtendedEngineCoreOutput(EngineCoreOutput):
+    # Match Omni's append-only schema without requiring Omni or torch.
+    multimodal_output: dict[str, object] | None = None
+    is_segment_finished: bool = False
+    new_prompt_len_snapshot: int | None = None
 
 
 class EngineCoreOutputs(
@@ -145,6 +167,18 @@ request = EngineCoreRequest(
     arrival_time=42.5,
     client_index=0,
     session_id="session-1",
+    kv_hints=KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="msg-1",
+        actions=[
+            KvHintAction(
+                action_id="action-1",
+                action_type="example.action",
+                action_version="1.0",
+                payload={"key": "value"},
+            )
+        ],
+    ),
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
@@ -207,17 +241,28 @@ outputs = EngineCoreOutputs(
     finished_requests={"req-1"},
 )
 
+extended_outputs = EngineCoreOutputs(
+    outputs=[
+        ExtendedEngineCoreOutput(
+            **msgspec.structs.asdict(outputs.outputs[0]),
+            multimodal_output={"audio": b"\x00\x01"},
+            is_segment_finished=True,
+            new_prompt_len_snapshot=12,
+        )
+    ],
+    finished_requests=outputs.finished_requests,
+)
+extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
+# The ordinary frontend's schema ignores even non-default extension values.
+assert msgspec.msgpack.decode(extended_outputs_bytes, type=EngineCoreOutputs) == outputs
+
 sampling_mask_wire = [
     [
         "<i4",
         [5],
-        msgpack.ExtType(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
+        msgspec.msgpack.Ext(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
     ],
-    [
-        "<i8",
-        [2],
-        msgpack.ExtType(3, np.array([0, 5], dtype=np.int64).tobytes()),
-    ],
+    None,
     None,
 ]
 outputs_with_sampling_mask = EngineCoreOutputs(
@@ -423,6 +468,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    effective_attention_block_size: int | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -446,6 +492,7 @@ ready_response = EngineCoreReadyResponse(
     weight_transfer_backend="nccl",
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
+    effective_attention_block_size=64,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
@@ -507,3 +554,4 @@ print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
+print(extended_outputs_bytes.hex())
