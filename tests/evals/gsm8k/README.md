@@ -38,3 +38,19 @@ env:                      # Environment variables (optional)
 The `server_args` field accepts any arguments that can be passed to `vllm serve`.
 
 The `env` field accepts a dictionary of environment variables to set for the server process.
+
+## MoE token-dropping experiments
+
+Set `VLLM_TEST_MOE_EXPERT_CAPACITY` in the evaluation YAML to limit assignments
+per expert per source rank:
+
+```yaml
+env:
+  VLLM_TEST_MOE_EXPERT_CAPACITY: "128"
+```
+
+Use `--enforce-eager` and a compatible modular MoE backend, such as
+`--moe-backend triton`. Unset the variable for the baseline; zero drops all
+assignments, and negative values are rejected. Prepare/finalize backends that
+do not support token dropping ignore the limit; monolithic kernels reject it.
+Keep concurrency and scheduler batch limits fixed when comparing accuracy.
