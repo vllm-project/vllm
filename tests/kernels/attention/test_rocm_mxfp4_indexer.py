@@ -225,7 +225,7 @@ def _decode_metadata(case, rows, ratio, query_lens):
     )
 
 
-def _prefill_metadata(case, rows, ratio, chunk_bounds, query_start_loc):
+def _prefill_metadata(case, rows, ratio, chunk_bounds, query_start_loc, varlen):
     chunks = []
     for req_lo, req_hi, t0, t1 in chunk_bounds:
         ends = torch.tensor(
@@ -263,6 +263,9 @@ def _prefill_metadata(case, rows, ratio, chunk_bounds, query_start_loc):
             ratio,
             CAND_BLOCK,
             0.0,
+            torch.tensor(query_start_loc, dtype=torch.int32, device=DEVICE)
+            if varlen
+            else None,
         ),
     )
 
@@ -421,12 +424,17 @@ def test_decode_layers_match_reference(monkeypatch, block, query_lens):
         ([760, 500], [300, 500], [(0, 1, 0, 300), (1, 2, 300, 560), (1, 2, 560, 800)]),
         # three requests in one chunk; the first two share a launch
         ([600, 450, 900], [200, 200, 120], [(0, 3, 0, 520)]),
+        # four requests with four different query lengths in one chunk
+        ([900, 600, 450, 700], [150, 90, 200, 60], [(0, 4, 0, 500)]),
     ],
-    ids=["sliced", "batched"],
+    ids=["sliced", "batched", "ragged"],
 )
+# Varlen packs a chunk whose requests' rows differ into one launch; off, the
+# chunk launches once per run of equal-row requests.
+@pytest.mark.parametrize("varlen", [True, False], ids=["varlen", "per_run"])
 @BLOCKS
 def test_prefill_layers_match_reference(
-    monkeypatch, seq_lens, new_tokens, chunks, block
+    monkeypatch, seq_lens, new_tokens, chunks, varlen, block
 ):
     case = _Case(seq_lens, block)
     rows = [
@@ -439,5 +447,5 @@ def test_prefill_layers_match_reference(
         monkeypatch,
         case,
         rows,
-        lambda r: _prefill_metadata(case, rows, r, chunks, query_start_loc),
+        lambda r: _prefill_metadata(case, rows, r, chunks, query_start_loc, varlen),
     )

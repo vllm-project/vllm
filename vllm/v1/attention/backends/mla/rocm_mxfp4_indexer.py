@@ -4,7 +4,8 @@
 
 Extends the dense indexer metadata with what aiter's paged MXFP4 MQA-logits
 kernel needs to read the cache in place: each prefill chunk split into its
-requests, the decode rows as next_n-row sequences on uniform steps, and, with
+requests (or packed through query_start_loc when their rows differ), the decode
+rows as next_n-row sequences on uniform steps, and, with
 ``AttentionConfig.indexer_sparse_logits``, the per-step state the candidate
 consumers share. Selected for every V4.1 indexer cache when
 ``indexer_kv_dtype="mxfp4"`` on ROCm.
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field, fields
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import (
@@ -69,6 +71,9 @@ class RocmMxfp4PrefillPlan:
     use_gather: bool = False
     gathers: list = field(default_factory=list)
     """Per request, the pool the first consumer resolved for the others."""
+    query_start_loc: torch.Tensor | None = None
+    """[chunk.num_reqs + 1] int32 row offsets of the chunk's requests when they
+    launch packed, as one varlen launch; None launches per run instead."""
 
 
 @dataclass
@@ -136,12 +141,15 @@ def plan_prefill_chunks(
     compress_ratio: int,
     candidate_block_size: int,
     min_gather_width: float | None,
+    query_start_loc_device: torch.Tensor | None = None,
 ) -> list[RocmMxfp4PrefillPlan]:
     """Split each chunk into its requests.
 
     ``query_start_loc`` and ``seq_lens_cpu`` are the step's host copies (the
     latter an upper bound), ``context_lens`` the device compressed lengths.
-    A chunk covers whole requests, or a query slice of one request.
+    A chunk covers whole requests, or a query slice of one request. Given the
+    device ``query_start_loc``, a chunk whose requests do not all share one
+    query length launches once, packed, instead of once per run.
     """
     block = candidate_block_size
     plans = []
@@ -163,6 +171,10 @@ def plan_prefill_chunks(
                     continue
             launches.append((lo, hi, req, 1))
         reqs = slice(first, first + chunk.num_reqs)
+        packed = None
+        if query_start_loc_device is not None and len(launches) > 1:
+            packed = torch.clamp(query_start_loc_device[first : reqs.stop + 1], t0, t1)
+            packed -= t0
         width = int(seq_lens_cpu[reqs].max()) // compress_ratio
         row_ends = chunk.cu_seqlen_ke - chunk.cu_seqlen_ks
         plans.append(
@@ -175,6 +187,7 @@ def plan_prefill_chunks(
                 block_ends=(row_ends + block - 1) // block if block else None,
                 use_gather=min_gather_width is not None and width >= min_gather_width,
                 gathers=[None] * len(requests),
+                query_start_loc=packed,
             )
         )
     return plans
@@ -359,5 +372,6 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                 self.num_candidate_cols * _GATHER_MIN_CUT_PREFILL
                 if self.num_candidate_cols
                 else None,
+                cm.query_start_loc if envs.VLLM_ROCM_MXFP4_INDEXER_VARLEN else None,
             )
         return metadata

@@ -67,6 +67,23 @@ def test_chunks_split_into_requests_and_launches():
     torch.testing.assert_close(plans[2].block_ends, torch.tensor([4, 4, 4]).int())
     assert [p.use_gather for p in plans] == [False, True, True]
     assert all(p.gathers == [None] * len(p.requests) for p in plans)
+    # Without the device query_start_loc (varlen off) every chunk launches per run.
+    assert all(p.query_start_loc is None for p in plans)
+
+    packed = plan_prefill_chunks(
+        chunks,
+        query_start_loc,
+        seq_lens,
+        context_lens,
+        2,
+        8,
+        20.0,
+        torch.tensor(query_start_loc, dtype=torch.int32),
+    )
+    # Only the ragged chunk packs, with offsets local to the chunk; the
+    # single-request slices keep their one uniform launch.
+    assert packed[0].query_start_loc.tolist() == [0, 3, 6, 11]
+    assert packed[1].query_start_loc is None and packed[2].query_start_loc is None
 
 
 def test_no_gather_without_candidates():
