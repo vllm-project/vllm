@@ -45,7 +45,9 @@ UPPER = [1328, 21, 466, 65, 67, 129, 303, 1003, 2000]
 PENDING_CYCLES = 200_000_000
 
 
-@pytest.mark.parametrize("split", ["default", "disabled", "one_page_chunks"])
+@pytest.mark.parametrize(
+    "split", ["default", "disabled", "split_every_block_size_pages"]
+)
 @pytest.mark.parametrize("block_size", [16, 64])
 @pytest.mark.parametrize("kind", ["prefill", "decode"])
 def test_fa2_plan_from_upper_bound_matches_exact_plan(
@@ -66,7 +68,8 @@ def test_fa2_plan_from_upper_bound_matches_exact_plan(
     extra: dict[str, Any] = {}
     if split == "disabled":
         extra["disable_split_kv"] = True
-    elif split == "one_page_chunks":
+    elif split == "split_every_block_size_pages":
+        # fixed_split_size counts pages: chunks of block_size pages each.
         extra["fixed_split_size"] = block_size
     pages = [cdiv(n, block_size) for n in upper]
     block_ids = torch.randperm(4096, dtype=torch.int32, device="cuda")
