@@ -1437,6 +1437,7 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    vllm_config: VllmConfig,
 ) -> list[KVCacheGroupSpec]:
     """Generates the KV cache groups for hybrid models with multiple
     attention types but still with a uniform page size (physical memory per
@@ -1496,6 +1497,8 @@ def _get_kv_cache_groups_uniform_page_size(
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
+        vllm_config: The global VllmConfig
+
     Returns:
         The generated KVCacheGroupSpecs
 
@@ -1533,24 +1536,26 @@ def _get_kv_cache_groups_uniform_page_size(
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
     # split to 3 groups with 2 layers each:
     # (full.0, full.1), (sw.0, sw.2), (sw.1, padding).
-    # Pick the group size with the least padding, from the smallest bucket
-    # (bounding the number of groups; at least 2 so a single-layer drafter
-    # bucket cannot force per-layer groups) up to the largest. Padding a full
-    # attention layer wastes memory across the whole context, so it is
-    # weighted over sliding window / mamba padding, whose memory is bounded.
-    # Ties prefer fewer groups.
+    # Pick the group size that wastes the fewest worst-case (max_model_len)
+    # bytes per request on padding layers, from the smallest bucket (bounding
+    # the number of groups; at least min_kv_cache_group_layers so e.g. a
+    # single-layer drafter bucket cannot force per-layer groups) up to the
+    # largest. Ties prefer fewer groups.
     bucket_sizes = [len(layers) for layers in layer_buckets]
-    pad_weights = [
-        1.0 if isinstance(specs[0], FullAttentionSpec) else 0.1
+    min_group_layers = vllm_config.cache_config.min_kv_cache_group_layers
+    padding_layer_bytes = [
+        max(spec.max_memory_usage_bytes(vllm_config) for spec in specs)
         for specs in spec_buckets
     ]
     group_size = min(
-        range(max(min(bucket_sizes), 2), max(bucket_sizes) + 1),
+        range(
+            min(max(min(bucket_sizes), min_group_layers), max(bucket_sizes)),
+            max(bucket_sizes) + 1,
+        ),
         key=lambda size: (
-            sum(w * (-n % size) for n, w in zip(bucket_sizes, pad_weights)),
+            sum(b * (-n % size) for n, b in zip(bucket_sizes, padding_layer_bytes)),
             sum(cdiv(n, size) for n in bucket_sizes),
         ),
-        default=1,
     )
     grouped_layers = []
     for layers in layer_buckets:
@@ -2351,7 +2356,7 @@ def get_kv_cache_groups(
         if fallback_groups is None:
             raise
         return fallback_groups
-    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec, vllm_config)
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:

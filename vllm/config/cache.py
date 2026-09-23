@@ -187,6 +187,11 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
+    min_kv_cache_group_layers: int = Field(default=3, gt=0)
+    """Minimum number of layers per KV cache group for hybrid models, unless
+    every attention type has fewer layers. Fewer layers per group means more
+    groups and more per-step attention metadata overhead; more layers per
+    group can require more padding layers and less KV cache capacity."""
     mamba_cache_mode: MambaCacheMode = "none"
     """The cache strategy for Mamba layers:
 
