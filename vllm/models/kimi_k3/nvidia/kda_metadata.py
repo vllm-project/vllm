@@ -436,7 +436,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_token_start = None
         non_spec_token_start = None
         if num_spec_decodes == 0:
-            # V2 already excludes prefills from full decode graphs via has_prefill.
+            # V2 excludes prefills from full decode graphs (uniform and varlen).
             # Classify first chunks as prefills to mask recycled state;
             # resumed one-token chunks can still use the decode kernels.
             assert m.seq_lens_cpu_upper_bound is not None
