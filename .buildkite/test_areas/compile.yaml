@@ -201,6 +201,31 @@ steps:
     - nvidia-smi
     # Run just llama3 (fp8 & bf16) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Fusion E2E TP2 AR-RMS FP8 Config Sweep"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/model_executor/
+      - vllm/distributed/
+      - vllm/v1/attention/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/compile/fusions_e2e/
+      - tests/utils.py
+      - tests/conftest.py
+      - csrc/quantization/
+      commands:
+      # Existing MI300 jobs own BF16; TP2 Quick owns the excluded Llama cell.
+      - amd-smi
+      - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_CUSTOM_AR=1 pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k 'test_tp2_ar_rms_fp8_fusions and Llama-3 and ROCM_AITER_UNIFIED_ATTN and (dynamo_partition or +quant_fp8 or +rms_norm)'
 
 - label: ":nvidia: (H100) Fusion E2E TP2 AsyncTP Config Sweep"
   key: fusion-e2e-tp2-asynctp-config-sweep-h100
@@ -268,3 +293,30 @@ steps:
     # for ar-rms-quant-fp4, also sweep llama3
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "(FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))) or Llama-3.1-8B-Instruct-FP4"
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Fusion E2E TP2 FP8 BF16 rewrites"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/model_executor/
+      - vllm/distributed/
+      - vllm/v1/attention/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/compile/fusions_e2e/
+      - tests/utils.py
+      - tests/conftest.py
+      - csrc/quantization/
+      commands:
+      # Dummy-weight rewrite coverage; trained FP8 AR/RMS equivalence is unresolved.
+      # TODO: FP4 output-quant and trained MXFP4 AR/RMS fusion remain unsupported.
+      - amd-smi
+      - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_CUSTOM_AR=1 pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k 'test_tp2_ar_rms_fp8_fusions and qwen3 and ROCM_AITER_UNIFIED_ATTN and +quant_fp8 and (dynamo_partition or not +rms_norm)'
+      - pytest -v -s tests/compile/fusions_e2e/test_tp2_rocm_moe.py
