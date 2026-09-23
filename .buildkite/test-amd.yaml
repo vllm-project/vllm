@@ -1886,7 +1886,7 @@ steps:
   - vllm/config/
   - tests/kernels/quantization/test_rocm_skinny_gemms.py
   commands:
-  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) DeepEP FP8 MoE Kernels" # TBD
   timeout_in_minutes: 55
@@ -4229,6 +4229,35 @@ steps:
   commands:
   - pytest -v -s kernels/moe/test_moe_layer.py
 
+- label: ":amd: (MI355) MoRI EP Numerics"
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/kernels/moe/test_mori_moe.py
+  - tests/kernels/moe/utils.py
+  - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
+  - tests/kernels/utils.py
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/utils/torch_utils.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/
+  - vllm/config/
+  - vllm/forward_context.py
+  - vllm/v1/worker/workspace.py
+  - vllm/platforms/
+  - vllm/_aiter_ops.py
+  - requirements/rocm-test.txt
+  optional: true
+  commands:
+  - amd-smi
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 pytest -v -s kernels/moe/test_mori_moe.py
+
 - label: ":amd: (MI355) Quantization Kernels Shard %N"
   timeout_in_minutes: 120
   parallelism: 6
@@ -4254,7 +4283,30 @@ steps:
   - tests/kernels/quantization/test_rocm_skinny_gemms.py
   optional: true
   commands:
-  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) NVFP4 Dense Emulation Shard %N"
+  timeout_in_minutes: 10
+  parallelism: 3
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/kernels/quantization/test_nvfp4_emulation.py
+  - tests/kernels/quantization/nvfp4_utils.py
+  - tests/conftest.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py
+  - vllm/config/kernel.py
+  - vllm/platforms/
+  - vllm/envs.py
+  - vllm/utils/torch_utils.py
+  - requirements/rocm-test.txt
+  optional: true
+  commands:
+  - amd-smi
+  - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) FP8 MoE Kernels" # TBD
   timeout_in_minutes: 40
