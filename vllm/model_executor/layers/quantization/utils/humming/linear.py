@@ -101,6 +101,19 @@ def prepare_humming_linear_layer_config(
         param_dtype=layer.params_dtype,
     )
 
+    if (
+        weight_schema.has_zero_point
+        and input_schema.a_dtype is not None
+        and weight_schema.b_dtype.num_bits == input_schema.a_dtype.num_bits
+    ):
+        raise ValueError(
+            "Humming does not support asymmetric (zero_point) weights "
+            "when weight and activation bit widths are equal "
+            f"(W{weight_schema.b_dtype.num_bits}"
+            f"A{input_schema.a_dtype.num_bits}). "
+            "Use symmetric weights or a different activation bit width."
+        )
+
     tensors.update(input_tensors)
     layer.weight_schema = weight_schema
     input_schema = check_and_fallback_input_schema(
