@@ -60,13 +60,7 @@ VISION_PROMPT = {
 }
 
 
-def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
-    vllm_config = MagicMock()
-    vllm_config.observability_config.otlp_traces_endpoint = None
-    vllm_config.scheduler_config.stream_interval = 1
-    vllm_config.profiler_config.profiler = "cuda"
-    vllm_config.profiler_config.ignore_frontend = False
-
+def _mock_async_llm_dependencies(monkeypatch: pytest.MonkeyPatch):
     renderer = MagicMock()
     engine_core = MagicMock()
     engine_core.profile_async = AsyncMock()
@@ -90,6 +84,16 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
         "make_async_mp_client",
         MagicMock(return_value=engine_core),
     )
+    return engine_core
+
+
+def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config.profiler_config.profiler = "cuda"
+    vllm_config.profiler_config.ignore_frontend = False
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
 
     engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
 
@@ -101,6 +105,25 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
 
     assert engine.profiler is None
     engine_core.profile_async.assert_has_awaits([call(True, None), call(False)])
+
+
+def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config.profiler_config.profiler = "torch"
+    vllm_config.profiler_config.ignore_frontend = False
+    vllm_config.profiler_config.torch_profiler_activities = ["CUDA"]
+    _mock_async_llm_dependencies(monkeypatch)
+    profiler = MagicMock()
+    monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    assert engine.profiler is None
+    profiler.assert_not_called()
 
 
 async def generate(
@@ -457,7 +480,6 @@ async def test_customize_loggers(monkeypatch):
     If a customized logger is provided at the init, it should
     be added to the default loggers.
     """
-
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(
@@ -642,7 +664,6 @@ async def test_check_health():
 @pytest.mark.asyncio
 async def test_abort_final_output(output_kind: RequestOutputKind):
     """Test that abort() returns a final output with correct information."""
-
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
