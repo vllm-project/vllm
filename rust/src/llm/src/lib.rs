@@ -42,6 +42,7 @@ impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
+        std::sync::LazyLock::force(&request_metrics::ITL_FLUSH_INTERVAL_TOKENS);
         Self {
             client,
             randomize_request_id: true,

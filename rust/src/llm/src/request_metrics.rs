@@ -20,7 +20,8 @@ const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
 const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 const ITL_FLUSH_INTERVAL_ENV: &str = "VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS";
 const DEFAULT_ITL_FLUSH_INTERVAL_TOKENS: u32 = 32;
-static ITL_FLUSH_INTERVAL_TOKENS: LazyLock<u32> = LazyLock::new(|| {
+const ITL_FLUSH_INTERVAL_SECS: f64 = 1.0;
+pub(crate) static ITL_FLUSH_INTERVAL_TOKENS: LazyLock<u32> = LazyLock::new(|| {
     let value = std::env::var_os(ITL_FLUSH_INTERVAL_ENV);
     itl_flush_interval_tokens(value.as_ref().map(|value| value.to_string_lossy()).as_deref())
 });
@@ -60,6 +61,7 @@ pub(crate) struct RequestMetricsTracker {
     pending_itl: InterTokenLatencyObservations,
     itl_flush_interval_tokens: u32,
     last_itl_flush_token_count: u32,
+    last_itl_flush_ts: f64,
 
     arrival_time: f64,
     prompt_len: u32,
@@ -125,6 +127,7 @@ impl RequestMetricsTracker {
             pending_itl: InterTokenLatencyObservations::default(),
             itl_flush_interval_tokens: *ITL_FLUSH_INTERVAL_TOKENS,
             last_itl_flush_token_count: 0,
+            last_itl_flush_ts: 0.0,
             arrival_time,
             prompt_len,
             max_tokens_param,
@@ -173,6 +176,7 @@ impl RequestMetricsTracker {
                 self.first_token_latency = received_at - self.arrival_time;
                 self.handles.time_to_first_token_seconds.observe(self.first_token_latency);
                 self.first_token_ts = batch_timestamp;
+                self.last_itl_flush_ts = batch_timestamp;
                 self.is_prefilling = false;
             } else if self.last_token_ts > 0.0 {
                 self.pending_itl.observe(batch_timestamp - self.last_token_ts);
@@ -181,6 +185,7 @@ impl RequestMetricsTracker {
             self.last_token_ts = batch_timestamp;
             if self.num_generation_tokens - self.last_itl_flush_token_count
                 >= self.itl_flush_interval_tokens
+                || batch_timestamp - self.last_itl_flush_ts >= ITL_FLUSH_INTERVAL_SECS
             {
                 self.flush_pending_itl();
             }
@@ -238,6 +243,7 @@ impl RequestMetricsTracker {
     pub(crate) fn flush_pending_itl(&mut self) {
         self.handles.inter_token_latency_seconds.flush(&mut self.pending_itl);
         self.last_itl_flush_token_count = self.num_generation_tokens;
+        self.last_itl_flush_ts = self.last_token_ts;
     }
 
     /// Record prompt token counters through cached metric handles.
@@ -283,6 +289,12 @@ impl RequestMetricsTracker {
                 finished_reason: finish_reason.as_str(),
             })
             .inc();
+    }
+}
+
+impl Drop for RequestMetricsTracker {
+    fn drop(&mut self) {
+        self.flush_pending_itl();
     }
 }
 
@@ -440,22 +452,22 @@ mod tests {
         let mut tracker = RequestMetricsTracker::new(model_name, 0, 100.0, 1, Some(65), 1);
         tracker.itl_flush_interval_tokens = DEFAULT_ITL_FLUSH_INTERVAL_TOKENS;
         for tokens in 1_u32..=65 {
-            observe_tokens(&mut tracker, 10.0 + f64::from(tokens) * 0.5, 1);
+            observe_tokens(&mut tracker, 10.0 + f64::from(tokens) / 128.0, 1);
             if let Some((_, observations)) = [(31, 0), (32, 31), (63, 31), (64, 63), (65, 63)]
                 .into_iter()
                 .find(|(at, _)| *at == tokens)
             {
                 assert_eq!(
                     published_itl(&tracker),
-                    (observations, observations as f64 * 0.5)
+                    (observations, observations as f64 / 128.0)
                 );
                 assert_eq!(tracker.handles.generation_tokens.get(), u64::from(tokens));
             }
         }
         tracker.record_finished(150.0, crate::FinishReason::Length);
-        assert_eq!(published_itl(&tracker), (64, 32.0));
+        assert_eq!(published_itl(&tracker), (64, 0.5));
         tracker.flush_pending_itl();
-        assert_eq!(published_itl(&tracker), (64, 32.0));
+        assert_eq!(published_itl(&tracker), (64, 0.5));
     }
 
     #[test]
@@ -467,27 +479,100 @@ mod tests {
         b.itl_flush_interval_tokens = 32;
         observe_tokens(&mut a, 10.0, 16);
         observe_tokens(&mut b, 10.0, 16);
-        observe_tokens(&mut a, 10.5, 14);
-        observe_tokens(&mut b, 10.5, 15);
+        observe_tokens(&mut a, 10.125, 14);
+        observe_tokens(&mut b, 10.125, 15);
         assert_eq!(published_itl(&a), (0, 0.0));
-        observe_tokens(&mut a, 11.0, 2);
-        assert_eq!(published_itl(&a), (2, 1.0));
-        observe_tokens(&mut b, 11.0, 1);
-        assert_eq!(published_itl(&a), (4, 2.0));
+        observe_tokens(&mut a, 10.25, 2);
+        assert_eq!(published_itl(&a), (2, 0.25));
+        observe_tokens(&mut b, 10.25, 1);
+        assert_eq!(published_itl(&a), (4, 0.5));
 
         // One oversized update produces one observation and restarts the interval.
-        observe_tokens(&mut a, 11.5, 65);
-        assert_eq!(published_itl(&a), (5, 2.5));
-        observe_tokens(&mut a, 12.0, 31);
-        observe_tokens(&mut a, 12.5, 0);
-        assert_eq!(published_itl(&a), (5, 2.5));
-        observe_tokens(&mut a, 13.0, 1);
-        assert_eq!(published_itl(&a), (7, 4.0));
+        observe_tokens(&mut a, 10.375, 65);
+        assert_eq!(published_itl(&a), (5, 0.625));
+        observe_tokens(&mut a, 10.5, 31);
+        observe_tokens(&mut a, 10.625, 0);
+        assert_eq!(published_itl(&a), (5, 0.625));
+        observe_tokens(&mut a, 10.75, 1);
+        assert_eq!(published_itl(&a), (7, 1.0));
 
         // An interval of one flushes each subsequent token update.
         b.itl_flush_interval_tokens = 1;
-        observe_tokens(&mut b, 14.0, 1);
-        assert_eq!(published_itl(&b), (8, 7.0));
+        observe_tokens(&mut b, 11.0, 1);
+        assert_eq!(published_itl(&b), (8, 1.75));
+    }
+
+    #[test]
+    fn elapsed_output_time_flushes_and_resets_both_intervals() {
+        let model_name = format!("itl-time-interval-{}", Uuid::new_v4().simple());
+        let mut tracker = RequestMetricsTracker::new(model_name, 0, 100.0, 1, None, 1);
+        tracker.itl_flush_interval_tokens = 32;
+        let mut published = Vec::new();
+        for (timestamp, tokens) in [
+            (10.0, 1),
+            (10.5, 1),
+            (11.0, 0),
+            (11.0, 1),
+            (11.5, 1),
+            (12.0, 1),
+            (12.125, 31),
+            (12.25, 1),
+        ] {
+            observe_tokens(&mut tracker, timestamp, tokens);
+            published.push(format!("{timestamp}: {:?}", published_itl(&tracker)));
+        }
+        expect_test::expect![[r#"
+            10: (0, 0.0)
+            10.5: (0, 0.0)
+            11: (0, 0.0)
+            11: (2, 1.0)
+            11.5: (2, 1.0)
+            12: (4, 2.0)
+            12.125: (4, 2.0)
+            12.25: (6, 2.25)"#]]
+        .assert_eq(&published.join("\n"));
+    }
+
+    #[test]
+    fn finishing_publishes_only_observed_intervals() {
+        for (finish_reason, tokens) in [
+            (crate::FinishReason::Length, 1_u32),
+            (crate::FinishReason::Length, 2),
+            (crate::FinishReason::Abort, 2),
+            (crate::FinishReason::Error, 2),
+        ] {
+            let model_name = format!("itl-finish-{}", Uuid::new_v4().simple());
+            let mut tracker = RequestMetricsTracker::new(model_name, 0, 100.0, 1, None, 1);
+            tracker.itl_flush_interval_tokens = 32;
+            for i in 0..tokens {
+                observe_tokens(&mut tracker, 10.0 + f64::from(i) * 0.5, 1);
+            }
+            observe_tokens(&mut tracker, 10.75, 0);
+            assert_eq!(published_itl(&tracker), (0, 0.0));
+            tracker.record_finished(110.0, finish_reason);
+            assert_eq!(
+                published_itl(&tracker),
+                (u64::from(tokens - 1), f64::from(tokens - 1) * 0.5)
+            );
+            tracker.flush_pending_itl();
+            assert_eq!(
+                published_itl(&tracker),
+                (u64::from(tokens - 1), f64::from(tokens - 1) * 0.5)
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_tracker_publishes_the_tail_once() {
+        let model_name = format!("itl-drop-{}", Uuid::new_v4().simple());
+        let mut tracker = RequestMetricsTracker::new(model_name.clone(), 0, 100.0, 1, None, 1);
+        tracker.itl_flush_interval_tokens = 32;
+        let observer = RequestMetricsTracker::new(model_name, 0, 100.0, 1, None, 1);
+        observe_tokens(&mut tracker, 10.0, 1);
+        observe_tokens(&mut tracker, 10.5, 1);
+        assert_eq!(published_itl(&observer), (0, 0.0));
+        drop(tracker);
+        assert_eq!(published_itl(&observer), (1, 0.5));
     }
 
     #[test]

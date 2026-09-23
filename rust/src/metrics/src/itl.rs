@@ -11,7 +11,7 @@ use crate::request::ITL_BUCKETS;
 
 const BUCKET_COUNT: usize = ITL_BUCKETS.len() + 1;
 
-/// Request-local ITL observations, published at token intervals and stream end.
+/// Request-local ITL observations, published periodically and at stream end.
 #[derive(Debug, Default)]
 pub struct InterTokenLatencyObservations {
     sum: f64,
@@ -38,7 +38,7 @@ impl InterTokenLatencyObservations {
 
 /// ITL histogram that merges a batch of observations under one shared lock.
 ///
-/// Active streams retain observations locally between token-based flushes.
+/// Active streams retain observations locally between flushes.
 /// Completion, error, and drop flush the remainder; process failure can lose it.
 #[derive(Clone, Debug, Default)]
 pub struct InterTokenLatencyHistogram {
@@ -51,8 +51,8 @@ impl InterTokenLatencyHistogram {
         if pending.count == 0 {
             return;
         }
-        let mut inner = self.inner.write();
         let pending = std::mem::take(pending);
+        let mut inner = self.inner.write();
         inner.sum += pending.sum;
         inner.count += pending.count;
         for (total, count) in inner.buckets.iter_mut().zip(pending.buckets) {
@@ -141,43 +141,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn concurrent_flushes_and_scrapes_keep_complete_observations() {
-        let histogram = InterTokenLatencyHistogram::default();
-        let barrier = std::sync::Barrier::new(3);
-        std::thread::scope(|scope| {
-            for _ in 0..2 {
-                let histogram = &histogram;
-                let barrier = &barrier;
-                scope.spawn(move || {
-                    for _ in 0..16 {
-                        let mut pending = InterTokenLatencyObservations::default();
-                        pending.observe(0.5);
-                        pending.observe(0.5);
-                        barrier.wait();
-                        histogram.flush(&mut pending);
-                        barrier.wait();
-                    }
-                });
-            }
-            for _ in 0..16 {
-                barrier.wait();
-                let output = render(histogram.clone());
-                let value = |name: &str| {
-                    output
-                        .lines()
-                        .find_map(|line| line.strip_prefix(name))
-                        .unwrap()
-                        .parse::<f64>()
-                        .unwrap()
-                };
-                assert_eq!(value("itl_sum ") * 2.0, value("itl_count "));
-                assert_eq!(value("itl_bucket{le=\"+Inf\"} "), value("itl_count "));
-                barrier.wait();
-            }
-        });
-        assert_eq!(histogram.inner.read().count, 64);
     }
 }

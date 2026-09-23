@@ -166,6 +166,7 @@ if TYPE_CHECKING:
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
+    VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS: str | None = None
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
@@ -1422,6 +1423,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # binary installed with the vllm package. Used when VLLM_USE_RUST_FRONTEND=1
     # or VLLM_USE_RUST_BENCH=1.
     "VLLM_RUST_FRONTEND_PATH": lambda: _resolve_rust_cli_path(),
+    # Rust frontend ITL publication interval. Rust parses this positive u32,
+    # defaults to 32, and warns and falls back to 32 for invalid values.
+    "VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS": lambda: os.getenv(
+        "VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS"
+    ),
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
@@ -2309,6 +2315,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
+        "VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",

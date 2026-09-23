@@ -84,15 +84,21 @@ want the inter-output latency distribution.
 The Rust frontend measures ITL using the engine output timestamps when it
 processes each eligible output update. It stores observations locally per
 request, then publishes them to `vllm:inter_token_latency_seconds` after 32
-generated tokens by default. Delayed publication does not change the measured
+generated tokens by default, or on the next token-bearing output at least one
+second after the previous flush, whichever occurs first. The time interval uses
+engine output timestamps and starts at the first token. Each flush resets both
+intervals. The first token counts toward the token threshold; an output that
+crosses that threshold flushes once, including all observations from that output.
+Delayed publication does not change the measured
 intervals: the first output and empty outputs add no ITL observation, and a
 multi-token output adds one observation.
 
 Pending observations are also published before returning terminal output,
 an error, or an unexpected close, and when the stream is dropped. Metric
 collection sees only published observations. Short-window rates can therefore
-be delayed or uneven. There is no wall-clock bound on visibility delay if a
-stream stalls, and process failure loses any observations still pending.
+be delayed or uneven. The time check runs only when tokens arrive, so it does
+not bound wall-clock visibility delay during a stall. Process failure loses any
+observations still pending.
 Generated-token counters and TTFT retain their existing update timing.
 
 Set [`VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS`](../configuration/env_vars.md#rust-frontend)

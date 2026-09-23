@@ -166,6 +166,21 @@ def test_rust_bench_auto_path_missing_fails_fast() -> None:
         environment_variables["VLLM_RUST_FRONTEND_PATH"]()
 
 
+@pytest.mark.parametrize("value", [None, "1", "32", "invalid"])
+def test_rust_itl_interval_is_registered_without_python_parsing(value):
+    from vllm.platforms.interface import Platform
+
+    name = "VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS"
+    with patch.dict(os.environ, {} if value is None else {name: value}, clear=True):
+        Platform.validate_environ(hard_fail=True)
+        assert environment_variables[name]() == value
+
+
+def test_rust_itl_interval_is_not_compile_factor(monkeypatch):
+    monkeypatch.setenv("VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS", "1")
+    assert "VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS" not in envs.compile_factors()
+
+
 class TestEnvWithChoices:
     """Test cases for env_with_choices function."""
 

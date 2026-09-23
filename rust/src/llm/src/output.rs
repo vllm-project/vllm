@@ -329,7 +329,6 @@ impl FusedStream for GenerateOutputStream {
 
 impl Drop for GenerateOutputStream {
     fn drop(&mut self) {
-        self.request_metrics.flush_pending_itl();
         if self.raw_stream.is_terminated() {
             // Already terminated cleanly, no need to record abort metrics.
             return;
