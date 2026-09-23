@@ -290,3 +290,112 @@ def test_supports_combination_gates(monkeypatch, default_vllm_config):
     assert call() is None
     monkeypatch.setattr(sm90_mod, "has_flashinfer_sm90_nope_mla", lambda: False)
     assert "requires FlashInfer" in (call() or "")
+
+
+CHUNK = sm90_mod._MAX_PLAN_CHUNK_ROWS
+
+
+def test_builder_chunks_large_plan(monkeypatch):
+    """Steps past the chunk row limit plan one chunk per state.
+
+    flashinfer 0.6.18's SM90 plan silently overflows its schedule arrays
+    above 16384 work items, so rows are split: the shared state plans the
+    first _MAX_PLAN_CHUNK_ROWS rows and pooled chunk states plan the rest,
+    each with its own kv_len slice.
+    """
+    created = []
+
+    def fake_state(max_tokens, **_kwargs):
+        state = FakeState(TOPK, max_tokens=max_tokens)
+        created.append(state)
+        return state
+
+    monkeypatch.setattr(sm90_mod, "_SM90State", fake_state)
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    builder._index_topk = 2048
+    builder._index_kpool = 4
+    builder._async_scheduling = False
+    builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: False)
+    builder.state = FakeState(TOPK, max_tokens=CHUNK * 2)
+    builder._state_kwargs = {}
+    builder._chunk_states = []
+    metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
+    metadata.state = None
+    metadata.chunk_states = None
+    metadata.num_prefills = 1
+    metadata.num_decode_tokens = 0
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder,
+        "build",
+        lambda *_args, **_kwargs: metadata,
+    )
+    num_rows = CHUNK + 10
+    cam = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc_cpu=torch.tensor([0, num_rows], dtype=torch.int32),
+        seq_lens=torch.tensor([num_rows], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([num_rows], dtype=torch.int32),
+        positions=None,
+    )
+
+    result = builder.build(0, cam)
+
+    assert result.state is builder.state
+    assert result.chunk_states == created
+    first_tokens, first_lens = builder.state.plan_calls[0]
+    assert first_tokens == CHUNK and first_lens.numel() == CHUNK
+    second_tokens, second_lens = created[0].plan_calls[0]
+    assert second_tokens == 10 and second_lens.numel() == 10
+    # ctx == position + 1 for this single full prefill.
+    assert int(first_lens[-1]) == 2048 + CHUNK % 4
+    assert int(second_lens[0]) == 2048 + (CHUNK + 1) % 4
+
+
+def test_forward_mqa_chunked(monkeypatch):
+    """Chunked metadata runs each state's own row range and concatenates."""
+    impl = object.__new__(FlashInferMLASparseSM90Impl)
+    impl.num_heads = 2
+    impl.head_size = HEAD
+    impl.scale = HEAD**-0.5
+    impl.kv_lora_rank = HEAD
+    impl.qk_rope_head_dim = 0
+    impl.kv_cache_dtype = "auto"
+    impl.use_fp8_kv_cache = False
+    rows = CHUNK + 2
+    impl.topk_indices_buffer = torch.full((rows, TOPK), -1, dtype=torch.int32)
+    impl.topk_indices_buffer[0, :2] = torch.tensor([7, 3])
+    impl.topk_indices_buffer[rows - 1, :3] = torch.tensor([1, 2, 3])
+    monkeypatch.setattr(
+        sm90_mod, "triton_convert_req_index_to_global_index", ref_convert
+    )
+
+    state = FakeState(TOPK, max_tokens=CHUNK)
+    chunk_state = FakeState(TOPK, max_tokens=64)
+    meta = SimpleNamespace(
+        req_id_per_token=torch.zeros(rows, dtype=torch.int32),
+        block_table=torch.tensor([[3] + [0] * 15], dtype=torch.int32),
+        block_size=BLOCK_SIZE,
+        state=state,
+        chunk_states=[chunk_state],
+    )
+    q_nope = torch.randn(rows, impl.num_heads, HEAD, dtype=torch.bfloat16)
+    q_rope = torch.empty(rows, impl.num_heads, 0, dtype=torch.bfloat16)
+    cache = torch.zeros(8 * BLOCK_SIZE, HEAD, dtype=torch.bfloat16)
+
+    out, lse = impl.forward_mqa(
+        (q_nope, q_rope), cache, meta, SimpleNamespace(_k_scale_float=None)
+    )
+
+    assert lse is None and out.shape == (rows, impl.num_heads, HEAD)
+    first_q = state.wrapper.run_args[0]
+    second_q = chunk_state.wrapper.run_args[0]
+    assert first_q.shape[0] == CHUNK and second_q.shape[0] == 2
+    # Each chunk state received the slots of its own row range.
+    first_slots = state.kv_indices[: CHUNK * TOPK].view(CHUNK, TOPK)
+    assert first_slots[0, :2].tolist() == [3 * BLOCK_SIZE + 7, 3 * BLOCK_SIZE + 3]
+    second_slots = chunk_state.kv_indices[: 2 * TOPK].view(2, TOPK)
+    assert second_slots[1, :3].tolist() == [
+        3 * BLOCK_SIZE + 1,
+        3 * BLOCK_SIZE + 2,
+        3 * BLOCK_SIZE + 3,
+    ]

@@ -26,6 +26,14 @@ converted index buffer (illegal address). Per-step content (top-k slots)
 is written into the reserved buffers by kernels inside the captured
 forward, and captured runs read the refreshed plan buffers on replay.
 
+Plan work limit: flashinfer 0.6.18 sizes the SM90 plan schedule for 16384
+work items and silently corrupts it past that (raised to 65536 with a hard
+error in flashinfer 0.7.0). With one row per query token, large chunked
+prefills exceed 16384 rows and crash or compute garbage. Steps with more
+than ``_MAX_PLAN_CHUNK_ROWS`` query rows are therefore planned and run as
+independent row chunks, one ``_SM90State`` per chunk; chunks are plain
+varlen row ranges, so the decomposition is exact, not an approximation.
+
 KV cache format: plain contiguous E4M3 ``[num_blocks, block_size, 512]``
 (uint8 storage) with a per-tensor ``k_scale``; BF16 caches also work. The
 per-token x 128-channel-group ``ckv_scale_arr`` layout is supported by the
@@ -62,6 +70,14 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
+
+# flashinfer 0.6.18's SM90 batch-MLA plan hardcodes max_total_num_works=16384
+# and silently overflows its schedule arrays past it (fixed in 0.7.0 with a
+# 65536 limit plus a hard error). Each row here yields at least one work item,
+# and split-kv rows add ceil(kv_len / kv_len_limit) - 1 more; chunking at 8192
+# rows keeps works <= rows + total_kv_len / kv_len_limit < 16384 for any
+# kv_len mix, since kv_len_limit tracks total_kv_len / num_clusters.
+_MAX_PLAN_CHUNK_ROWS = 8192
 
 
 class FlashInferMLASparseSM90Backend(AttentionBackend):
@@ -259,6 +275,11 @@ class _SM90State:
 @dataclass
 class FlashInferMLASparseSM90Metadata(FlashInferMLASparseMetadata):
     state: _SM90State | None = None
+    # Steps with more than _MAX_PLAN_CHUNK_ROWS query rows split plan/run
+    # into row chunks: state covers rows [0, _MAX_PLAN_CHUNK_ROWS) and
+    # chunk_states[c] covers rows [(c+1)*_MAX_PLAN_CHUNK_ROWS, ...). None
+    # when the step fits a single plan.
+    chunk_states: list["_SM90State"] | None = None
 
 
 class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
@@ -286,16 +307,22 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             )
         topk_indices_buffer = impl.topk_indices_buffer
         assert topk_indices_buffer is not None
-        self.state = _SM90State(
-            device,
-            impl.num_heads,
-            kv_cache_spec.dtype,
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            topk_indices_buffer.shape[1],
+        self._state_kwargs = dict(
+            device=device,
+            num_heads=impl.num_heads,
+            kv_dtype=kv_cache_spec.dtype,
+            topk_width=topk_indices_buffer.shape[1],
             kv_lora_rank=impl.kv_lora_rank,
             qk_rope_head_dim=impl.qk_rope_head_dim,
             sm_scale=impl.scale,
         )
+        self.state = _SM90State(
+            max_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+            **self._state_kwargs,
+        )
+        # Lazily grown pool of chunk-sized states for steps whose row count
+        # exceeds _MAX_PLAN_CHUNK_ROWS (see metadata.chunk_states).
+        self._chunk_states: list[_SM90State] = []
         # seq_lens_cpu_upper_bound is optimistic on decode rows under async
         # spec decode, so the fast sync-free path is only safe without it;
         # under async scheduling the exact (device) positions are used at
@@ -384,8 +411,26 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]
-        self.state.plan(num_rows, kv_lens)
+        if num_rows <= _MAX_PLAN_CHUNK_ROWS:
+            self.state.plan(num_rows, kv_lens)
+            metadata.state = self.state
+            metadata.chunk_states = None
+            return metadata
+        # The step would overflow flashinfer 0.6.18's 16384-work plan limit:
+        # plan row chunks into the shared state (first chunk) plus pooled
+        # chunk-sized states; forward_mqa runs the chunks in order.
+        num_chunks = (num_rows + _MAX_PLAN_CHUNK_ROWS - 1) // _MAX_PLAN_CHUNK_ROWS
+        while len(self._chunk_states) < num_chunks - 1:
+            self._chunk_states.append(
+                _SM90State(max_tokens=_MAX_PLAN_CHUNK_ROWS, **self._state_kwargs)
+            )
+        states = [self.state, *self._chunk_states[: num_chunks - 1]]
+        for c, state in enumerate(states):
+            row_start = c * _MAX_PLAN_CHUNK_ROWS
+            row_end = min(row_start + _MAX_PLAN_CHUNK_ROWS, num_rows)
+            state.plan(row_end - row_start, kv_lens[row_start:row_end])
         metadata.state = self.state
+        metadata.chunk_states = self._chunk_states[: num_chunks - 1]
         return metadata
 
 
@@ -465,9 +510,6 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         # Refresh top-k rows in graph and clamp masked tails to a valid slot;
         # per-row lengths are already baked into the host-side plan.
         width = topk_slots.shape[1]
-        state.kv_indices[: num_tokens * width].copy_(
-            topk_slots.reshape(-1).clamp_(min=0).to(torch.int32)
-        )
 
         flat = (
             kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)
@@ -482,5 +524,32 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             if self.use_fp8_kv_cache
             else {}
         )
-        out = state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)
-        return out, None
+        chunk_states = getattr(attn_metadata, "chunk_states", None)
+        if not chunk_states:
+            state.kv_indices[: num_tokens * width].copy_(
+                topk_slots.reshape(-1).clamp_(min=0).to(torch.int32)
+            )
+            out = state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)
+            return out, None
+        # Chunked plan (see metadata.chunk_states): each state runs its own
+        # row range; every chunk is an independent set of varlen rows.
+        outs = []
+        for c, chunk_state in enumerate([state, *chunk_states]):
+            row_start = c * _MAX_PLAN_CHUNK_ROWS
+            rows = min(num_tokens - row_start, _MAX_PLAN_CHUNK_ROWS)
+            chunk_state.kv_indices[: rows * width].copy_(
+                topk_slots[row_start : row_start + rows]
+                .reshape(-1)
+                .clamp_(min=0)
+                .to(torch.int32)
+            )
+            outs.append(
+                chunk_state.wrapper.run(
+                    q_nope[row_start : row_start + rows],
+                    q_pe[row_start : row_start + rows],
+                    ckv,
+                    kpe,
+                    **scale_kwargs,
+                )
+            )
+        return torch.cat(outs, dim=0), None
