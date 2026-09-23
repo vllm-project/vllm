@@ -28,6 +28,16 @@ Example:
         - fill_mean (float): Mean value for random normal fill (default: 0.015)
         - fill_std (float): Standard deviation for random fill (default: 0.0)
           Set to 0 for constant values, >0 for random sampling
+        - startup_fill (bool): Fill the whole KV cache once at startup instead
+          of filling each new request's blocks in the step that schedules it
+          (default: False). Circular-buffer caches are still zeroed per
+          request, and attention caches whose new blocks the engine zeroes
+          before use (hybrid Mamba or mixed-precision KV caches) are still
+          filled per request. The fill is not redone after sleep mode
+          discards the KV cache.
+
+    The dummy KV cache is only meant for performance measurement; outputs are
+    not meaningful for accuracy evaluation.
 
 """
 
@@ -91,6 +101,24 @@ def _get_fp8_dtype(spec: KVCacheSpec, cache_dtype: str) -> torch.dtype | None:
     if cache_dtype == "fp8_e5m2":
         return torch.float8_e5m2
     return None
+
+
+def _get_startup_fill_group_ids(kv_cache_config: "KVCacheConfig") -> set[int]:
+    """KV cache groups that startup fill covers.
+
+    Circular buffers are zero-filled per request. Attention groups whose new
+    blocks the engine zeroes before use are filled per request, since the
+    zeroing would wipe the startup fill.
+    """
+    group_ids = set()
+    for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+        spec = group.kv_cache_spec
+        if any(isinstance(s, CircularBufferSpec) for s in iter_layer_specs(spec)):
+            continue
+        if kv_cache_config.needs_kv_cache_zeroing and isinstance(spec, AttentionSpec):
+            continue
+        group_ids.add(group_idx)
+    return group_ids
 
 
 @dataclass
@@ -220,6 +248,14 @@ class DecodeBenchConnectorScheduler:
     """Scheduler-side implementation for DecodeBenchConnector."""
 
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
+        kv_transfer_config = vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        self.startup_fill = kv_transfer_config.get_from_extra_config(
+            "startup_fill", False
+        )
+        self._startup_fill_group_ids = (
+            _get_startup_fill_group_ids(kv_cache_config) if self.startup_fill else set()
+        )
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_sizes = tuple(
@@ -304,6 +340,9 @@ class DecodeBenchConnectorScheduler:
                 strict=True,
             )
         ):
+            if group_idx in self._startup_fill_group_ids:
+                block_ids_per_group_list.append([])
+                continue
             is_circular_buffer = all(
                 isinstance(spec, CircularBufferSpec)
                 for spec in iter_layer_specs(group.kv_cache_spec)
@@ -339,6 +378,9 @@ class DecodeBenchConnectorScheduler:
                 )
             block_ids_per_group_list.append(block_ids)
         block_ids_per_group = tuple(block_ids_per_group_list)
+        self._filled_requests.add(req_id)
+        if self.startup_fill and not any(block_ids_per_group):
+            return
 
         # Store the blocks to fill for all group. _pending_fills doesn't need cleanup
         # as it's cleared after build_connector_meta
@@ -346,7 +388,6 @@ class DecodeBenchConnectorScheduler:
             block_ids_per_group,
             num_external_tokens,
         )
-        self._filled_requests.add(req_id)
 
         block_counts = tuple(len(group) for group in block_ids_per_group)
         logger.debug(
@@ -385,6 +426,12 @@ class DecodeBenchConnectorWorker:
         assert kv_transfer_config is not None
         self.fill_mean = kv_transfer_config.get_from_extra_config("fill_mean", 0.015)
         self.fill_std = kv_transfer_config.get_from_extra_config("fill_std", 0.0)
+        self.startup_fill = kv_transfer_config.get_from_extra_config(
+            "startup_fill", False
+        )
+        self._startup_fill_group_ids = (
+            _get_startup_fill_group_ids(kv_cache_config) if self.startup_fill else set()
+        )
 
         # Will be populated via register_kv_caches
         self.kv_caches: dict[str, torch.Tensor] | None = None
@@ -413,6 +460,17 @@ class DecodeBenchConnectorWorker:
                 for spec in iter_layer_specs(group.kv_cache_spec)
             )
         }
+        num_zeroed_groups = len(
+            self.group_to_layers.keys()
+            - self._startup_fill_group_ids
+            - self._zero_fill_group_ids
+        )
+        if self.startup_fill and num_zeroed_groups:
+            logger.info(
+                "DecodeBenchConnector: the engine zeroes new blocks of %d KV "
+                "cache groups before use, so they are still filled per request.",
+                num_zeroed_groups,
+            )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Store references to the KV cache tensors."""
@@ -421,6 +479,48 @@ class DecodeBenchConnectorWorker:
         logger.debug(
             "DecodeBenchConnector: Registered %d KV cache layers",
             len(kv_caches),
+        )
+
+        if self.startup_fill:
+            self._fill_all_kv_caches()
+
+    def _fill_all_kv_caches(self):
+        """Fill the KV cache tensors of the startup-filled groups once, in
+        place, with dummy values, so that no per-request fill is needed.
+        """
+        assert self.kv_caches is not None
+
+        num_layers = 0
+        for group_idx in sorted(self._startup_fill_group_ids):
+            for layer_name in self.group_to_layers[group_idx]:
+                kv_cache = self.kv_caches.get(layer_name)
+                if isinstance(kv_cache, torch.Tensor):
+                    tensors = [kv_cache]
+                elif isinstance(kv_cache, (list, tuple)) and all(
+                    isinstance(t, torch.Tensor) for t in kv_cache
+                ):
+                    tensors = list(kv_cache)
+                else:
+                    logger.warning_once(
+                        "DecodeBenchConnector: skipping startup fill for layer "
+                        "%s whose KV cache is %s, not a tensor or a list/tuple "
+                        "of tensors.",
+                        layer_name,
+                        type(kv_cache).__name__,
+                    )
+                    continue
+                for tensor in tensors:
+                    fill_dtype = self._fp8_dtypes.get(layer_name, tensor.dtype)
+                    self._fill_tensor(tensor, self.fill_mean, self.fill_std, fill_dtype)
+                num_layers += 1
+
+        logger.info(
+            "DecodeBenchConnector: Filled %d KV cache layers at startup with %s "
+            "values (mean=%.3f, std=%.3f)",
+            num_layers,
+            "random" if self.fill_std > 0 else "constant",
+            self.fill_mean,
+            self.fill_std,
         )
 
     def start_fill_kv(self, metadata: DecodeBenchConnectorMetadata):
@@ -503,7 +603,9 @@ class DecodeBenchConnectorWorker:
                 isinstance(t, torch.Tensor) for t in kv_cache
             ):
                 for state_tensor in kv_cache:
-                    self._fill_state_tensor(state_tensor, fill_mean, fill_std)
+                    self._fill_tensor(
+                        state_tensor, fill_mean, fill_std, state_tensor.dtype
+                    )
             else:
                 logger.warning_once(
                     "DecodeBenchConnector: skipping fill for layer %s whose KV "
@@ -595,23 +697,41 @@ class DecodeBenchConnectorWorker:
         fill_mean = min(max(fill_mean, finfo.min), finfo.max)
         return torch.full(size, fill_mean, dtype=dtype, device=device)
 
-    def _fill_state_tensor(
-        self, kv_cache: torch.Tensor, fill_mean: float, fill_std: float
+    def _fill_tensor(
+        self,
+        kv_cache: torch.Tensor,
+        fill_mean: float,
+        fill_std: float,
+        fill_dtype: torch.dtype,
     ):
-        """Fill an entire non-block-indexed state tensor with dummy values.
+        """Fill an entire tensor in place with dummy values.
 
-        Hybrid / linear-attention layers (e.g. Mamba, Kimi Delta Attention)
-        store their per-layer state as tensors with no num_blocks dimension,
-        so the whole tensor is filled with the same constant or random values
-        used for block fills, rather than selected block rows.
+        Used for startup fills, and for hybrid / linear-attention layers (e.g.
+        Mamba, Kimi Delta Attention) whose per-layer state tensors are filled
+        in their entirety with the same constant or random values used for
+        block fills, rather than selected block rows.
 
         Args:
-            kv_cache: A state tensor to fill in its entirety.
+            kv_cache: A tensor to fill in its entirety.
             fill_mean: Mean value for the fill.
             fill_std: Standard deviation for the fill.
+            fill_dtype: Dtype the values are encoded as, e.g. the fp8 dtype
+                of a uint8 fp8 cache.
 
         """
-        if fill_std > 0:
-            kv_cache.normal_(mean=fill_mean, std=fill_std)
-        else:
-            kv_cache.fill_(fill_mean)
+        view = kv_cache.view(fill_dtype)
+        if fill_std == 0 or not fill_dtype.is_floating_point:
+            view.fill_(
+                self._make_fill_values(
+                    (), torch.device("cpu"), fill_dtype, fill_mean, fill_std
+                )
+            )
+            return
+        # Sample in chunks to bound the temporary memory.
+        rows = max(1, (1 << 24) // max(1, view[0].numel()))
+        for chunk in view.split(rows):
+            chunk.copy_(
+                self._make_fill_values(
+                    chunk.shape, chunk.device, fill_dtype, fill_mean, fill_std
+                )
+            )
