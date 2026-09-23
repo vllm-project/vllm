@@ -398,12 +398,53 @@ def build_qsa_metadata_triton(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build QSA side-cache and optional pre-indexer work metadata."""
     num_tokens = common_attn_metadata.num_actual_tokens
-    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
     token_to_req = token_to_req_buffer[:num_tokens]
     logical_positions = logical_positions_buffer[:num_tokens]
     visible_blocks = visible_blocks_buffer[:num_tokens]
     slot_mapping = slot_mapping_buffer[:num_tokens]
-    num_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+    if num_tokens == 0 and k_work_metadata_buffer is None:
+        return token_to_req, logical_positions, visible_blocks, slot_mapping
+    _launch_qsa_metadata_kernel(
+        common_attn_metadata.query_start_loc,
+        common_attn_metadata.seq_lens,
+        common_attn_metadata.slot_mapping,
+        common_attn_metadata.block_table_tensor,
+        token_to_req,
+        logical_positions,
+        visible_blocks,
+        slot_mapping,
+        k_work_metadata_buffer,
+        num_mapped_tokens=int(common_attn_metadata.query_start_loc_cpu[-1]),
+        storage_block_size=storage_block_size,
+        compress_ratio=compress_ratio,
+        circular_buffer_size=circular_buffer_size,
+        request_capacity=request_capacity,
+    )
+    if circular_buffer_size == 0 and compress_ratio == 1:
+        slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+    return token_to_req, logical_positions, visible_blocks, slot_mapping
+
+
+def _launch_qsa_metadata_kernel(
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    common_slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    logical_positions: torch.Tensor,
+    visible_blocks: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_work_metadata_buffer: torch.Tensor | None,
+    *,
+    num_mapped_tokens: int,
+    storage_block_size: int,
+    compress_ratio: int,
+    circular_buffer_size: int,
+    request_capacity: int | None,
+) -> None:
+    """Fill QSA metadata in place; capture-safe given fixed shapes and scalars."""
+    num_tokens = token_to_req.shape[0]
+    num_reqs = query_start_loc.shape[0] - 1
     assert num_reqs > 0
 
     if k_work_metadata_buffer is not None:
@@ -417,10 +458,6 @@ def build_qsa_metadata_triton(
         request_scan_size = 1
         max_num_work = 0
 
-    if num_tokens == 0 and k_work_metadata_buffer is None:
-        return token_to_req, logical_positions, visible_blocks, slot_mapping
-
-    block_table = common_attn_metadata.block_table_tensor
     num_search_steps = int(math.ceil(math.log2(num_reqs)))
     work_search_steps = int(math.ceil(math.log2(num_reqs)))
     # The same grid covers token tiles and, for the compressed cache, work tiles.
@@ -429,9 +466,9 @@ def build_qsa_metadata_triton(
         cdiv(max_num_work, 256) if k_work_metadata_buffer is not None else 0
     )
     _build_qsa_metadata_kernel[(max(num_token_blocks, num_work_blocks, 1),)](
-        common_attn_metadata.query_start_loc,
-        common_attn_metadata.seq_lens,
-        common_attn_metadata.slot_mapping,
+        query_start_loc,
+        seq_lens,
+        common_slot_mapping,
         block_table,
         token_to_req,
         logical_positions,
@@ -456,9 +493,6 @@ def build_qsa_metadata_triton(
         WORK_BLOCK_SIZE=256,
         num_warps=4,
     )
-    if circular_buffer_size == 0 and compress_ratio == 1:
-        slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
-    return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
 def _build_qsa_metadata_torch(
@@ -581,6 +615,8 @@ class QSAForwardMetadata(AttentionMetadata):
     logical_positions: torch.Tensor
     visible_blocks: torch.Tensor
     k_work_metadata: torch.Tensor
+    common_slot_mapping: torch.Tensor
+    num_mapped_tokens: int
     num_actual_tokens: int
     num_decodes: int
     num_decode_tokens: int
@@ -597,6 +633,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
     """Build QSA metadata from vLLM's cache-group-specific common metadata."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    supports_draft_decode_metadata_update = HAS_TRITON
 
     def __init__(
         self,
@@ -708,6 +745,8 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             logical_positions=logical_positions,
             visible_blocks=visible_blocks,
             k_work_metadata=k_work_metadata,
+            common_slot_mapping=common_attn_metadata.slot_mapping,
+            num_mapped_tokens=int(common_attn_metadata.query_start_loc_cpu[-1]),
             num_actual_tokens=num_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
@@ -718,6 +757,29 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             max_seq_len=common_attn_metadata.max_seq_len,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
+        )
+
+    def update_draft_decode_metadata(self, metadata: QSAForwardMetadata) -> None:
+        if metadata.num_actual_tokens == 0:
+            return
+        build_k_work = not self.is_circular_buffer and self.compress_ratio != 1
+        _launch_qsa_metadata_kernel(
+            metadata.query_start_loc,
+            metadata.seq_lens,
+            metadata.common_slot_mapping,
+            metadata.block_table,
+            metadata.token_to_req,
+            metadata.logical_positions,
+            metadata.visible_blocks,
+            metadata.slot_mapping,
+            metadata.k_work_metadata if build_k_work else None,
+            num_mapped_tokens=metadata.num_mapped_tokens,
+            storage_block_size=self.storage_block_size,
+            compress_ratio=self.compress_ratio,
+            circular_buffer_size=(
+                self.kv_cache_spec.block_size if self.is_circular_buffer else 0
+            ),
+            request_capacity=self.request_capacity if build_k_work else None,
         )
 
 
