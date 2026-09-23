@@ -145,3 +145,182 @@ def test_forward_mqa_prepares_triton_sparse_mla_inputs(
     assert kwargs["kv_scale"] is layer._k_scale
     assert kwargs["attn_sink"] is impl.sinks
     assert lse is None
+
+
+@pytest.mark.parametrize(
+    ("model", "compress_ratio"),
+    [("deepseek_v41", 1), ("deepseek_v41", 2), ("deepseek_v4", 4)],
+)
+@torch.inference_mode()
+def test_paged_prefill_indices_match_gathered_prefill(
+    monkeypatch, model: str, compress_ratio: int
+) -> None:
+    """The aiter prefill reads the paged caches through the SWA builder's rows
+    and build_prefill_topk_ragged_indices, and must attend exactly the keys the
+    dequantize-and-gather prefill does."""
+    import importlib
+
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        build_prefill_topk_ragged_indices,
+    )
+    from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+
+    rocm = importlib.import_module(f"vllm.models.{model}.amd.rocm")
+    device = torch.device("cuda")
+    gen = torch.Generator().manual_seed(compress_ratio)
+    window, width, block_size, max_model_len = 16, 32, 16, 128
+    comp_block = block_size // compress_ratio
+    num_compressed = max_model_len // compress_ratio
+
+    # A decode row, then prefills with and without a prefix.
+    prefix_lens, query_lens = [20, 0, 13, 40], [1, 7, 20, 9]
+    seq_lens = [p + q for p, q in zip(prefix_lens, query_lens)]
+    num_decodes = num_decode_tokens = 1
+    num_tokens = sum(query_lens)
+    qsl = torch.tensor([0] + query_lens).cumsum(0).to(torch.int32)
+    positions = torch.cat([torch.arange(p, s) for p, s in zip(prefix_lens, seq_lens)])
+    token_to_req = torch.repeat_interleave(
+        torch.arange(len(query_lens)), torch.tensor(query_lens)
+    )
+    swa_bt = torch.randperm(32, generator=gen)[:16].view(4, 4).to(device, torch.int32)
+    comp_bt = torch.randperm(32, generator=gen)[:16].view(4, 4).to(device, torch.int32)
+
+    vllm_config = create_vllm_config(
+        model_name="facebook/opt-125m",
+        max_model_len=max_model_len,
+        block_size=block_size,
+        max_num_seqs=4,
+        max_num_batched_tokens=64,
+        hf_config_override={
+            "compress_ratios": [compress_ratio],
+            "index_topk": width,
+            "sliding_window": window,
+        },
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    slots = swa_bt.cpu()[token_to_req, positions // block_size] * block_size + (
+        positions % block_size
+    )
+    common = CommonAttentionMetadata(
+        query_start_loc=qsl.to(device),
+        query_start_loc_cpu=qsl,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32).to(device),
+        seq_lens_cpu_upper_bound=torch.tensor(seq_lens, dtype=torch.int32),
+        num_reqs=len(query_lens),
+        num_actual_tokens=num_tokens,
+        max_query_len=max(query_lens),
+        max_seq_len=max(seq_lens),
+        block_table_tensor=swa_bt,
+        slot_mapping=slots.to(device, torch.int64),
+        positions=positions.to(device),
+        causal=True,
+    )
+
+    def build(enabled: bool):
+        monkeypatch.setattr(
+            rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: enabled
+        )
+        return rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
+            swa_spec, ["swa"], vllm_config, device
+        ).build(0, common)
+
+    assert build(enabled=False).prefill_swa_ragged_indices is None
+    md = build(enabled=True)
+    assert md.num_decode_tokens == num_decode_tokens
+
+    # Local top-k rows. Under each row's causal cap sit a failed candidate and
+    # one past the pool; past the cap, stale values neither path may read.
+    num_prefill_tokens = num_tokens - num_decode_tokens
+    topk = torch.full((num_prefill_tokens, width), -1, dtype=torch.int32)
+    for row in range(num_prefill_tokens):
+        visible = (int(positions[row + num_decode_tokens]) + 1) // compress_ratio
+        cap = min(visible, width)
+        topk[row, :cap] = torch.randperm(visible, generator=gen)[:cap].int()
+        if cap >= 2:
+            topk[row, :2] = torch.tensor([-1, num_compressed + 3])
+        topk[row, cap:] = torch.randint(
+            0, num_compressed, (width - cap,), generator=gen
+        ).int()
+    topk = topk.to(device)
+
+    topk_indices, topk_indptr = build_prefill_topk_ragged_indices(
+        topk,
+        md.token_to_req_indices,
+        md.query_start_loc,
+        md.seq_lens,
+        md.is_valid_token,
+        comp_bt,
+        block_size=comp_block,
+        compress_ratio=compress_ratio,
+        num_compressed=num_compressed,
+        token_offset=num_decode_tokens,
+    )
+    paged_keys = [
+        sorted([("s", x) for x in swa if x >= 0] + [("c", x) for x in top if x >= 0])
+        for swa, top in zip(
+            _rows_from_ragged(
+                md.prefill_swa_ragged_indices, md.prefill_swa_ragged_indptr
+            ),
+            _rows_from_ragged(topk_indices, topk_indptr),
+        )
+    ]
+
+    # The gathered path's combine, mapped from workspace offsets to cache slots.
+    M = num_compressed + window + num_tokens
+    combined, combined_lens = rocm.combine_topk_swa_indices(
+        topk,
+        md.query_start_loc[num_decodes:],
+        md.prefill_seq_lens,
+        md.prefill_gather_lens,
+        window,
+        compress_ratio,
+        width,
+        M,
+        num_compressed,
+    )
+    gather_start = (md.prefill_seq_lens - md.prefill_gather_lens).tolist()
+    swa_bt_cpu, comp_bt_cpu = swa_bt.cpu(), comp_bt.cpu()
+
+    def slot(block_table, req, pos, size):
+        return int(block_table[req, pos // size]) * size + pos % size
+
+    gathered_keys = []
+    for row, (values, n) in enumerate(zip(combined.tolist(), combined_lens.tolist())):
+        req = int(token_to_req[row + num_decode_tokens])
+        chunk_req = req - num_decodes
+        keys = []
+        for value in values[:n]:
+            if value < 0:
+                continue
+            offset = value - chunk_req * M
+            if offset < num_compressed:
+                keys.append(("c", slot(comp_bt_cpu, req, offset, comp_block)))
+            else:
+                pos = gather_start[chunk_req] + offset - num_compressed
+                keys.append(("s", slot(swa_bt_cpu, req, pos, block_size)))
+        gathered_keys.append(sorted(keys))
+
+    assert paged_keys == gathered_keys
+
+
+@pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41"])
+def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> None:
+    import importlib
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm = importlib.import_module(f"vllm.models.{model}.amd.rocm")
+    monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
+    assert rocm._aiter_sparse_mla_enabled(has_kv_transfer=False)
+    assert not rocm._aiter_sparse_mla_enabled(has_kv_transfer=True)
