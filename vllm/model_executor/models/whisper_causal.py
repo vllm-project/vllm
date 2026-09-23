@@ -6,7 +6,7 @@ import math
 from dataclasses import replace
 from fractions import Fraction
 from functools import partial
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 import torch
 import torch.nn.functional as F
@@ -35,11 +35,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-try:
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-except ImportError:
-    AiterFlashAttentionBackend = None
 from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.selector import get_attn_backend
@@ -47,9 +42,24 @@ from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
 
 from .utils import make_layers
 
+AiterFlashAttentionBackend: type[AttentionBackend] | None
+try:
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend as _AiterFlashAttentionBackend,
+    )
+
+    AiterFlashAttentionBackend = _AiterFlashAttentionBackend
+except ImportError:
+    AiterFlashAttentionBackend = None
+
 logger = logging.getLogger(__name__)
 
 CausalRMSNorm = partial(RMSNorm, eps=1e-5)
+
+
+class _BlockPoolingAttentionMetadata(Protocol):
+    @property
+    def slot_mapping(self) -> torch.Tensor: ...
 
 
 def _pad1d(
@@ -115,7 +125,7 @@ class WhisperCausalConv1d(nn.Conv1d):
 
 @functools.lru_cache
 def create_whisper_attention_backend_with_block_pooling(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
     block_pool_size: int,
     sliding_window: int | None = None,
 ) -> type[AttentionBackend]:
@@ -270,7 +280,7 @@ def create_whisper_attention_backend_with_block_pooling(
             key: torch.Tensor,
             value: torch.Tensor,
             kv_cache: torch.Tensor,
-            attn_metadata: AttentionMetadata,
+            attn_metadata: _BlockPoolingAttentionMetadata | None,
             output: torch.Tensor,
             output_scale: torch.Tensor | None = None,
             output_block_scale: torch.Tensor | None = None,
