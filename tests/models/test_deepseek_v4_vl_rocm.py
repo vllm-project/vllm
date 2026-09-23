@@ -7,6 +7,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.config import ParallelConfig
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
@@ -100,7 +101,9 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
         n_shared_experts=None,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=config), quant_config=None
+        model_config=SimpleNamespace(hf_config=config),
+        quant_config=None,
+        parallel_config=ParallelConfig(),
     )
 
     hash_moe = rocm_model.DeepseekV4MoE(vllm_config, prefix="model.layers.0.ffn")
@@ -113,6 +116,24 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
         assert moe.gate.bias_vl is not None
         assert factory_kwargs["bias_vl"] is moe.gate.bias_vl
         assert factory_kwargs["image_sentinel_lo"] == IMAGE_SENTINEL_BASE_ID
+
+
+def test_rocm_fse_rejects_data_parallel_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v4.amd.model import _fuse_shared_experts_enabled
+
+    config = SimpleNamespace(n_shared_experts=1)
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
+    with pytest.raises(ValueError, match="data parallelism"):
+        _fuse_shared_experts_enabled(config, ParallelConfig(data_parallel_size=2))
+
+    # Expert parallelism already disables FSE: no raise, FSE stays off.
+    assert not _fuse_shared_experts_enabled(
+        config, ParallelConfig(data_parallel_size=2, enable_expert_parallel=True)
+    )
+    assert _fuse_shared_experts_enabled(config, ParallelConfig())
 
 
 def test_rocm_mtp_forwards_input_ids_for_vision_routing(

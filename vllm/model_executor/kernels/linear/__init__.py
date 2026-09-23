@@ -26,9 +26,6 @@ from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
 )
-from vllm.model_executor.kernels.linear.mixed_precision.allspark import (
-    AllSparkLinearKernel,
-)
 from vllm.model_executor.kernels.linear.mixed_precision.conch import (
     ConchLinearKernel,
 )
@@ -101,6 +98,7 @@ from vllm.model_executor.kernels.linear.mxfp6 import (
 from vllm.model_executor.kernels.linear.mxfp6.emulation import (
     EmulationMxfp6LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp6.humming import HummingMxFp6LinearKernel
 from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
@@ -295,6 +293,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         HummingLinearKernel,
         HummingMxfp8LinearKernel,
         HummingMxFp4LinearKernel,
+        HummingMxFp6LinearKernel,
         HummingNvFp4LinearKernel,
     },
     "marlin": {
@@ -502,7 +501,6 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CUDA: [
         CutlassW4A8LinearKernel,
         MacheteLinearKernel,
-        AllSparkLinearKernel,
         MarlinLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
@@ -574,6 +572,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
 
 _POSSIBLE_MXFP6_KERNELS: dict[PlatformEnum, list[type[MxFp6LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        HummingMxFp6LinearKernel,
         EmulationMxfp6LinearKernel,
     ],
     PlatformEnum.ROCM: [
@@ -1269,7 +1268,6 @@ __all__ = [
     "ZentorchWNA16LinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
-    "AllSparkLinearKernel",
     "ConchLinearKernel",
     "CPUWNA16LinearKernel",
     "CutlassW4A8LinearKernel",
@@ -1294,6 +1292,7 @@ __all__ = [
     "MxFp6LinearLayerConfig",
     "init_mxfp6_linear_kernel",
     "EmulationMxfp6LinearKernel",
+    "HummingMxFp6LinearKernel",
     "AiterMxfp4LinearKernel",
     "EmulationMxfp4LinearKernel",
     "FlashInferMxFp4LinearKernel",

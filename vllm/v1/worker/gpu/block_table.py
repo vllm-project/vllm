@@ -59,8 +59,7 @@ class BlockTables:
             self.block_tables.append(block_table)
 
         self.num_blocks = UvaBackedTensor(
-            (self.num_kv_cache_groups, self.max_num_reqs),
-            dtype=torch.int32,
+            (self.num_kv_cache_groups, self.max_num_reqs), dtype=torch.int32
         )
         self.fused_writer: FusedStagedWriter | None = None
         if self.num_kv_cache_groups > 1:
@@ -315,6 +314,9 @@ def _compute_slot_mappings_kernel(
     mapping_enabled = tl.load(slot_mapping_enabled + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
+    # idx_mapping == -1 marks a dummy (or CUDA-graph padding) request that owns
+    # no blocks: never read its block-table row and emit PAD for its tokens.
+    is_real_req = req_state_idx >= 0
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
@@ -342,12 +344,12 @@ def _compute_slot_mappings_kernel(
         block_offsets = local_positions % kernel_block_size
         block_numbers = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + block_indices,
-            mask=is_local,
+            mask=is_local & is_real_req,
             other=0,
         )
         slot_ids = block_numbers * kernel_block_size + block_offsets
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
-        slot_ids = tl.where(mapping_enabled, slot_ids, PAD_ID)
+        slot_ids = tl.where(mapping_enabled & is_real_req, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)

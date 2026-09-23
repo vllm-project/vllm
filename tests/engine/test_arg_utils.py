@@ -9,7 +9,13 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    CompilationConfig,
+    ModelConfig,
+    config,
+)
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -87,6 +93,26 @@ def test_watermark_config_cli():
 
 
 @pytest.mark.parametrize(
+    "option",
+    ["--gpu-memory-utilization", "--device-memory-utilization"],
+)
+def test_memory_utilization_cli_aliases(option):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args([option, "0.8"]))
+
+    assert args.gpu_memory_utilization == 0.8
+
+
+def test_device_memory_utilization_property():
+    config = CacheConfig(gpu_memory_utilization=0.8)
+
+    assert config.device_memory_utilization == 0.8
+
+    config.device_memory_utilization = 0.7
+    assert config.gpu_memory_utilization == 0.7
+
+
+@pytest.mark.parametrize(
     "options",
     [
         [
@@ -114,7 +140,7 @@ def test_engram_config_cli(options):
     "options,provided,dp_shared_memory",
     [
         ([], False, False),
-        (["--engram-config", "{}"], True, False),
+        (["--engram-config", "{}"], True, None),
         (
             ["--engram-config", '{"dp_shared_memory": true}'],
             True,

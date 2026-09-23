@@ -229,7 +229,7 @@ def test_moe_wna16_humming_adapter_repacks_uint8_tensors():
 
 
 def test_moe_wna16_uses_humming_quant_config(monkeypatch):
-    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.model_executor.layers.quantization.utils import humming as humming_utils
 
     method = object.__new__(MoeWNA16Method)
     method.wna16_backend = WNA16MoEBackend.HUMMING
