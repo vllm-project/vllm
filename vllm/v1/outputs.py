@@ -326,6 +326,9 @@ class ModelRunnerOutput:
     # Iterations whose GPU timing has completed; see IterationTimer.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
+    # req_id -> reasoning tokens when a reasoning loop was detected this step
+    thinking_loop_breaks: dict[str, int] | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

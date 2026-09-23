@@ -137,6 +137,11 @@ class ThinkingBudgetState:
         self.loop_break_last_check = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        # Reasoning-section length at a detection not yet taken by
+        # ``take_loop_breaks``; 0 when there is none.
+        self.loop_break_report = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
         self._lb_reset_reqs: list[int] = []
         self._lb_reset_vals: list[int] = []
 
@@ -201,6 +206,7 @@ class ThinkingBudgetState:
             )
             self.loop_break_fired.index_copy_(0, idx, vals)
             self.loop_break_last_check.index_fill_(0, idx, 0)
+            self.loop_break_report.index_fill_(0, idx, 0)
             self._lb_reset_reqs.clear()
             self._lb_reset_vals.clear()
         if self._budget_dirty:
@@ -239,6 +245,9 @@ class ThinkingBudgetState:
             loop_break_last_check=(
                 self.loop_break_last_check if self.loop_break_enabled else None
             ),
+            loop_break_report=(
+                self.loop_break_report if self.loop_break_enabled else None
+            ),
             loop_break_min_pattern_size=(
                 self.lb_min_pattern_size if self.loop_break_enabled else 0
             ),
@@ -253,6 +262,30 @@ class ThinkingBudgetState:
                 self.lb_check_interval if self.loop_break_enabled else 1
             ),
         )
+
+    def take_loop_breaks(
+        self, idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray
+    ) -> torch.Tensor | None:
+        """Per batch row, the reasoning-section length at a loop detected since
+        the last call, or 0. None when no request in the batch is tracked."""
+        if not self.loop_break_enabled or not np.any(
+            self.use_loop_break[idx_mapping_np]
+        ):
+            return None
+        num_reqs = idx_mapping.shape[0]
+        loop_breaks = torch.empty(num_reqs, dtype=torch.int32, device=self.device)
+        _take_loop_breaks_kernel[(num_reqs,)](
+            idx_mapping, self.loop_break_report, loop_breaks
+        )
+        return loop_breaks
+
+
+@triton.jit
+def _take_loop_breaks_kernel(idx_mapping_ptr, loop_break_report_ptr, out_ptr):
+    batch_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    tl.store(out_ptr + batch_idx, tl.load(loop_break_report_ptr + req_state_idx))
+    tl.store(loop_break_report_ptr + req_state_idx, 0)
 
 
 @triton.jit
@@ -432,6 +465,7 @@ def _loop_break_detect_kernel(
     cached_last_end_ptr,
     loop_break_fired_ptr,
     loop_break_last_check_ptr,
+    loop_break_report_ptr,
     START_LEN: tl.constexpr,
     MIN_PATTERN: tl.constexpr,
     MAX_PATTERN: tl.constexpr,
@@ -517,6 +551,7 @@ def _loop_break_detect_kernel(
 
     if found == 1:
         tl.store(loop_break_fired_ptr + req_state_idx, 1)
+        tl.store(loop_break_report_ptr + req_state_idx, think_len)
 
 
 @triton.jit
@@ -690,6 +725,7 @@ def apply_thinking_budget(
     track_forced_end: bool = True,
     loop_break_fired: torch.Tensor | None = None,
     loop_break_last_check: torch.Tensor | None = None,
+    loop_break_report: torch.Tensor | None = None,
     loop_break_min_pattern_size: int = 0,
     loop_break_max_pattern_size: int = 0,
     loop_break_min_count: int = 0,
@@ -733,6 +769,7 @@ def apply_thinking_budget(
             cached_last_end,
             loop_break_fired,
             loop_break_last_check,
+            loop_break_report,
             START_LEN=start_len,
             MIN_PATTERN=loop_break_min_pattern_size,
             MAX_PATTERN=loop_break_max_pattern_size,
