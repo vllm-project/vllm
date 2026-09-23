@@ -13,9 +13,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
-    ReadSpec,
     ReqMeta,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
     is_attention_spec,
 )

@@ -50,12 +50,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
-    ReadSpec,
     RemoteMeta,
     ReqId,
     ReqMeta,
     TransferHandle,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
     is_attention_spec,

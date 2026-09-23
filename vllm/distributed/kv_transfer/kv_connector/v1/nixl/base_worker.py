@@ -51,6 +51,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+    TPMapping,
+    compute_tp_mapping,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
     zmq_ctx,
@@ -60,8 +64,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     derive_mamba_conv_split,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
-    TPMapping,
-    compute_tp_mapping,
     get_representative_spec_type,
     is_attention_spec,
     is_ssm_spec,
