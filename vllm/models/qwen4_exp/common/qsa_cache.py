@@ -294,9 +294,7 @@ def _build_qsa_metadata_kernel(
     elif compress_ratio != 1:
         compressed_position = tl.maximum(logical_position, 0) // compress_ratio
         logical_block = compressed_position // storage_block_size
-        # No ownership term: this cache is replicated, so every rank stores
-        # every state. A speculative builder that PADs a rejected row would
-        # need its own validity signal here.
+        # Replicated: every rank stores every state.
         valid = (
             mapped
             & (logical_position >= 0)
@@ -457,8 +455,7 @@ def build_qsa_metadata_triton(
     if circular_buffer_size == 0 and compress_ratio == 1:
         slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
     elif common_attn_metadata.is_dummy_batch:
-        # PAD in the slot mapping also means another rank owns the position,
-        # which this replicated cache must still write. So read the flag.
+        # PAD also means another rank's position; read the flag.
         slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
@@ -869,16 +866,14 @@ class QSACompressedKeyCache(_QSAStateCache):
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
-            # The selector scores the whole sequence, and addresses its slots
-            # globally through `_logical_to_physical_qsa_slots`.
+            # The selector scores the whole sequence, addressed globally.
             dcp_sharded=False,
-            # Span the sharded main KV block, so both share one block table.
+            # Span the sharded KV block; both share a block table.
             block_size=(
                 self.cache_config.block_size
                 * vllm_config.parallel_config.decode_context_parallel_size
             ),
-            # Must equal block_size: it pins the builder, the layer view and
-            # the store kernel to one state count.
+            # Must equal block_size: builder, view and kernel share it.
             storage_block_size=(
                 self.cache_config.block_size
                 * vllm_config.parallel_config.decode_context_parallel_size

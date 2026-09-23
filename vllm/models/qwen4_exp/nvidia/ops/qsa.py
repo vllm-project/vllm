@@ -191,10 +191,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         0.0,
     )
     output_mask = head_offsets[:, None] < GROUP_SIZE
-    # Under DCP the caller needs an ungated output and its LSE, because the
-    # gate must be applied once on the merged result rather than once per rank.
-    # The single-split branch below gates inline and keeps no LSE, so take the
-    # partial path whenever an LSE is asked for.
+    # The single-split branch gates inline and keeps no LSE.
     if NUM_SPLITS == 1 and not RETURN_LSE:
         # Preserve the unfused path's BF16 attention-output rounding before
         # applying the gate in FP32.
@@ -297,8 +294,7 @@ def _qsa_merge_splitk_kernel(
         merged,
     )
     if not APPLY_GATE:
-        # log2 space, matching the score scale. -inf when this row saw nothing,
-        # which is the identity of the cross-rank merge.
+        # log2 space; -inf is the merge identity.
         merged_lse = tl.where(
             denominator > 0, lse_max + tl.math.log2(denominator), -float("inf")
         )
@@ -690,8 +686,7 @@ def qsa_sparse_paged_attention(
             raise ValueError(
                 "QSA return_lse leaves the gate to the caller; do not pass one"
             )
-        # A dead pointer. APPLY_GATE is False on this path, so nothing reads it,
-        # and the caller's gate covers only its own heads anyway.
+        # Unused: APPLY_GATE is False on this path.
         output_gate_view = q
     else:
         if output_gate is None:
@@ -831,7 +826,7 @@ def warmup_qsa_sparse_paged_attention(
     is_fp8 = kv_cache.dtype == torch.uint8
     cache_dtype = torch.float8_e4m3fn if is_fp8 else key_cache.dtype
     num_kv_heads = key_cache.shape[2]
-    # The cache shards over tokens, not heads, so only the query grows.
+    # The cache shards over tokens, not heads.
     num_query_heads = num_query_heads * dcp_world_size
     return_lse = dcp_world_size > 1
     group_size = num_query_heads // num_kv_heads
@@ -879,8 +874,7 @@ def warmup_qsa_sparse_paged_attention(
     output_gate_ptr = TritonWarmupTensor(
         torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
     )
-    # None on the gated path, and Triton specializes on that, so it has to
-    # match what the runtime hands the kernel.
+    # Triton specializes on None; match the runtime.
     out_lse_ptr = (
         TritonWarmupTensor(torch.float32, shape=(num_rows, num_query_heads))
         if return_lse

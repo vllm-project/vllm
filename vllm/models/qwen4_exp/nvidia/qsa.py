@@ -62,9 +62,7 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # No reordering: QSA runs one varlen path over the whole batch, and
-        # under DCP still one kernel over this rank's share of the selection.
-        # State it, or the DCP guard forces decode-only batches.
+        # One varlen path, so no reorder threshold.
         self._init_reorder_batch_threshold(None, supports_dcp_with_varlen=True)
 
 
@@ -136,9 +134,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
-    # QSA scores are scaled into log2 before the softmax, so the LSE the kernel
-    # returns is base 2. The cross-rank combine branches on this, and getting it
-    # wrong corrupts the denominator without any other symptom.
+    # Scores are pre-scaled to log2; the LSE is base 2.
     lse_base_on_e: bool = False
     supports_pcp: bool = False
 
@@ -182,8 +178,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
         self.cp_kv_cache_interleave_size = 1
-        # Localized selection scratch, allocated on the first DCP forward and
-        # reused. One allocation, during warmup, so capture sees a fixed buffer.
+        # Localized-selection scratch, allocated once.
         self._dcp_local_indices: torch.Tensor | None = None
         if self.dcp_world_size > 1:
             from vllm.config import get_current_vllm_config
@@ -192,9 +187,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             self.cp_kv_cache_interleave_size = (
                 config.parallel_config.cp_kv_cache_interleave_size
             )
-            # ops/qsa_dcp.py agrees with the slot mapping only when the
-            # interleave divides the sharded block. vllm/config/vllm.py asserts
-            # this too, but skips it for NIXL P/D.
+            # config/vllm.py asserts this too, but skips it for NIXL P/D.
             block_size = config.cache_config.block_size
             if block_size % self.cp_kv_cache_interleave_size:
                 raise NotImplementedError(
@@ -321,7 +314,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         the partial results across ranks by their LSE.
         """
         from vllm.distributed.parallel_state import get_dcp_group
-        from vllm.v1.attention.ops.dcp import cp_lse_ag_out_rs
 
         from .ops.qsa import qsa_sparse_paged_attention
         from .ops.qsa_dcp import (
@@ -334,8 +326,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
         if self._dcp_local_indices is None:
             self._dcp_local_indices = torch.empty_like(topk_buffer)
-        # The selection is identical on every rank; keep what this rank owns.
-        # Into scratch, because MTP draft steps re-read the source buffer.
+        # Into scratch: MTP draft steps re-read the source buffer.
         local_indices = qsa_localize_dcp_indices(
             topk_buffer[:num_tokens],
             self._dcp_local_indices[:num_tokens],
@@ -345,8 +336,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         )
         empty_rows = qsa_dcp_empty_owner_rows(local_indices)
 
-        # Every rank computes every head, and the reduce-scatter in the merge
-        # hands each rank its own head slice back.
+        # The merge reduce-scatters each rank its own head slice.
         query_all_heads = group.all_gather(query.contiguous(), dim=1)
         partial_out, partial_lse = qsa_sparse_paged_attention(
             query_all_heads,
@@ -361,21 +351,20 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             return_lse=True,
         )
 
-        # A rank owning none of the selection contributes the merge identity.
-        # The reducer zeroes zero-weight rows, so the NaN payload cannot escape.
+        # An empty owner must contribute the merge identity.
         qsa_dcp_mask_empty_rows_(partial_lse, empty_rows)
 
-        merged, _merged_lse = cp_lse_ag_out_rs(
-            partial_out.float(),
-            partial_lse.float(),
-            group,
-            return_lse=True,
-            is_lse_base_on_e=False,
+        merged = cast(
+            "torch.Tensor",
+            self.dcp_combine(
+                partial_out.float(),
+                partial_lse.float(),
+                group,
+                is_lse_base_on_e=self.lse_base_on_e,
+            ),
         )
 
-        # The gate is identical on every rank, so it commutes with the merge:
-        # apply it once. Round before it, as the fused kernel does, so a
-        # one-rank run matches the non-DCP path bit for bit.
+        # The gate commutes with the merge; round first.
         gated = merged.to(output.dtype).float() * torch.sigmoid(
             output_gate.view_as(merged).float()
         )

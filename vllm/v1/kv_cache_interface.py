@@ -669,10 +669,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
         if self.storage_block_size is not None:
-            # storage_block_size overrides the group's kernel block for this
-            # layer's view, its builder and its store kernel. They agree only
-            # because all three derive the state count from this one number.
-            # A drift misplaces writes and raises nothing.
+            # Builder, layer view and store kernel all derive from this.
             assert self.block_size % self.storage_block_size == 0, (
                 f"storage_block_size {self.storage_block_size} must divide "
                 f"block_size {self.block_size}."
@@ -1284,10 +1281,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         Uses the registry to determine grouping base classes, so custom specs
         that inherit from FullAttentionSpec are treated as full attention.
         """
-        # A group carries one block table, so what must match is the token span
-        # of an entry, not the stored slot count: a sharded cache holding half
-        # the slots of a wider span tiles the same range as a replicated cache
-        # holding all of a narrower one.
+        # One block table per group: spans must match, not slots.
         spans = {
             spec.block_size * (dcp_world_size if spec.dcp_sharded else 1)
             for spec in kv_cache_specs.values()
@@ -1307,9 +1301,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         if not cls.is_uniform_type(kv_cache_specs, dcp_world_size):
             return None
         specs = list(kv_cache_specs.values())
-        # The slot mapper scales this by the DCP world size itself, so it must
-        # be the sharded member's block: the span counts the world size twice,
-        # and a gcd can fall below it once a third member joins.
+        # The slot mapper scales this by the world size itself.
         sharded = {spec.block_size for spec in specs if spec.dcp_sharded}
         block_size = sharded.pop() if len(sharded) == 1 else specs[0].block_size
         assert all(spec.block_size % block_size == 0 for spec in specs), (

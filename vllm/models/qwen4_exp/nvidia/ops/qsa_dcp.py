@@ -62,8 +62,7 @@ def _qsa_localize_dcp_kernel(
 
     src = src_ptr + row * stride_src_row
     dst = dst_ptr + row * stride_dst_row
-    # The trailing column is the count the attention kernel uses as its tile
-    # bound. It is never a token id.
+    # Trailing column is the tile bound, never a token id.
     valid_count = tl.load(src + SELECTION_WIDTH)
 
     columns = tl.arange(0, BLOCK_W)
@@ -74,8 +73,7 @@ def _qsa_localize_dcp_kernel(
     owned = (g >= 0) & in_range & within_count & (((g // INTERLEAVE) % WORLD) == RANK)
     local = (g // (WORLD * INTERLEAVE)) * INTERLEAVE + (g % INTERLEAVE)
 
-    # Dense prefix: an owned entry lands at the count of owned entries before
-    # it. Shapes never change, so this is safe under a captured graph.
+    # Dense prefix; shapes are fixed, so capture is safe.
     dest = tl.cumsum(owned.to(tl.int32), axis=0) - 1
     kept = tl.sum(owned.to(tl.int32), axis=0)
 
