@@ -7,7 +7,7 @@
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 # ruff: noqa: E501
 
-import functools
+from functools import cache
 
 import torch
 
@@ -16,24 +16,38 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
 
-@functools.lru_cache(maxsize=None)
-def _num_cus(device_index: int) -> int:
-    return torch.cuda.get_device_properties(device_index).multi_processor_count
+@cache
+def _num_cus(device: int) -> int:
+    from vllm.platforms import current_platform
+
+    return current_platform.get_device_properties(device).multi_processor_count
 
 
-def _select_bv(V: int, num_launch_units: int, device_index: int) -> int:
-    """Pick the V tile for the gate-fused recurrent kernel.
+@cache
+def _is_rocm() -> bool:
+    from vllm.platforms import current_platform
+
+    return current_platform.is_rocm()
+
+
+def _decode_launch_config(V: int, num_launch_units: int, device: int) -> tuple[int, int]:
+    """Pick (BV, num_warps) for the gate-fused recurrent kernel.
 
     The grid is cdiv(V, BV) * N * H, so a decode-shaped launch leaves most of
     the device idle at BV=32: a single K3 TP8 request is 48 blocks on 256 CUs.
     A smaller BV buys parallelism, but every tile re-reads the whole q/k/g
     head, so shrink only until the grid covers the device a few times over.
+
+    Tuned on MI355X (gfx950); other backends keep the original configuration.
     """
-    target = 3 * _num_cus(device_index)
+    if not _is_rocm():
+        return 32, 4
+
+    target = 3 * _num_cus(device)
     for bv in (16, 8):
         if cdiv(V, bv) * num_launch_units >= target:
-            return bv
-    return 8
+            return bv, 2
+    return 8, 2
 
 
 @triton.heuristics(
@@ -166,20 +180,20 @@ def fused_recurrent_kda_fwd_kernel(
     state_indices,
     num_accepted_tokens,
     lower_bound,
-    scale: tl.constexpr,
     N: tl.int64,
     T: tl.int64,
+    stride_qkv_token,
+    stride_g_token,
+    stride_beta_token,
+    stride_out_token,
+    stride_state_token,
+    stride_indices_seq,
+    scale: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_qkv_token: tl.constexpr,
-    stride_g_token: tl.constexpr,
-    stride_beta_token: tl.constexpr,
-    stride_out_token: tl.constexpr,
-    stride_state_token: tl.constexpr,
-    stride_indices_seq: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
@@ -192,14 +206,27 @@ def fused_recurrent_kda_fwd_kernel(
     i_v = pid % tl.cdiv(V, BV)
     i_nh = pid // tl.cdiv(V, BV)
     i_n, i_h = i_nh // H, i_nh % H
+    tl.assume(i_n >= 0)
+    tl.assume(i_h >= 0)
+    tl.assume(i_v >= 0)
+    tl.assume(stride_qkv_token > 0)
+    tl.assume(stride_g_token > 0)
+    tl.assume(stride_beta_token > 0)
+    tl.assume(stride_out_token > 0)
+    tl.assume(stride_state_token > 0)
+    tl.assume(stride_indices_seq > 0)
+
     bos = tl.load(cu_seqlens + i_n).to(tl.int64)
     eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+    tl.assume(bos >= 0)
+    tl.assume(eos >= bos)
     sequence_length = eos - bos
     if sequence_length == 0:
         return
+    tl.assume(sequence_length > 0)
 
-    o_k = tl.arange(0, BK)
-    o_v = i_v * BV + tl.arange(0, BV)
+    o_k = tl.max_contiguous(tl.multiple_of(tl.arange(0, BK), BK), BK)
+    o_v = i_v * BV + tl.max_contiguous(tl.multiple_of(tl.arange(0, BV), BV), BV)
     m_k = o_k < K
     m_v = o_v < V
     m_state = m_v[:, None] & m_k[None, :]
@@ -215,6 +242,7 @@ def fused_recurrent_kda_fwd_kernel(
     if state_index <= 0:
         tl.store(p_out, tl.zeros([BV], dtype=tl.float32), mask=m_v)
         return
+    tl.assume(state_index > 0)
 
     p_state = (
         state
@@ -231,6 +259,7 @@ def fused_recurrent_kda_fwd_kernel(
     p_g = g + bos * stride_g_token + i_h * K + o_k
     p_beta = beta + bos * stride_beta_token + i_h
     for i_t in tl.range(0, sequence_length, num_stages=num_stages):
+        tl.assume(i_t >= 0)
         b_q = tl.load(p_q, mask=m_k, other=0.0, eviction_policy="evict_last").to(
             tl.float32
         )
@@ -289,6 +318,7 @@ def fused_recurrent_kda_fwd_kernel(
             tl.int64
         )
         if final_state_index > 0:
+            tl.assume(final_state_index > 0)
             p_final_state = (
                 state
                 + final_state_index * stride_state_token
@@ -366,8 +396,10 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
-    BV = _select_bv(V, N * H, q.device.index) if use_gate_in_kernel else 8
-    num_warps = 2 if use_gate_in_kernel else 1
+    if use_gate_in_kernel:
+        BV, num_warps = _decode_launch_config(V, N * H, q.device.index)
+    else:
+        BV, num_warps = 8, 1
     grid = (cdiv(V, BV) * N * H,)
     fused_recurrent_kda_fwd_kernel[grid](
         q=q,
