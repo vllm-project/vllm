@@ -22,6 +22,8 @@ from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
 
+from ..utils import create_long_gop_video
+
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
     "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
@@ -34,6 +36,20 @@ TEST_VIDEO_URLS = [
     f"{VLLM_S3_BUCKET_URL}/multimodal_asset/slow_traffic_small.mp4",
     f"{VLLM_S3_BUCKET_URL}/multimodal_asset/vtest.avi",
 ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sampling_kwargs", [{}, {"num_frames": 4}])
+async def test_qwen2vl_single_frame_video_is_client_error(sampling_kwargs):
+    connector = MediaConnector(
+        media_io_kwargs={"video": {"backend": "opencv", **sampling_kwargs}}
+    )
+    data = create_long_gop_video(num_frames=1, width=32, height=32)
+    url = "data:video/mp4;base64," + base64.b64encode(data).decode("ascii")
+    with pytest.raises(VLLMValidationError, match="no frames after temporal alignment"):
+        connector.fetch_video(url, video_processor="Qwen2VLVideoProcessor")
+    with pytest.raises(VLLMValidationError, match="no frames after temporal alignment"):
+        await connector.fetch_video_async(url, video_processor="Qwen2VLVideoProcessor")
 
 
 @pytest.fixture(scope="module")
