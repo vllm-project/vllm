@@ -16,6 +16,14 @@ Run the same command on the base and candidate builds to compare.
 The defaults cover low-concurrency long-context decode (256K-512K tokens at 1-8
 concurrent requests), which is the band where both kernels fall back to a
 per-row serial phase and neither has been calibrated.
+
+Both kernels are radix selects, so their cost depends on how tightly the logits
+cluster, not only on the shape: a narrow value distribution puts a large share of
+a row in the bin holding the threshold, and every refinement pass has to rescan
+it. Real indexer MQA scores are fp8-derived dot products over highly correlated
+neighbouring keys, so they are far more clustered than `torch.randn` and cost the
+in-tree kernel ~2.5x more. `--dist indexer` (the default) reproduces that; use
+`--dist randn` only to reproduce older well-spread numbers.
 """
 
 import argparse
@@ -28,10 +36,21 @@ import vllm._custom_ops  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.triton_utils import triton
 
+DISTRIBUTIONS = ("indexer", "fp8", "randn")
 
-def make_inputs(rows: int, live: int, capacity: int, k: int, seed: int):
-    torch.manual_seed(seed)
-    logits = torch.randn(rows, capacity, device="cuda", dtype=torch.float32)
+
+def make_logits(rows: int, capacity: int, dist: str, spread: float):
+    normal = torch.randn(rows, capacity, device="cuda", dtype=torch.float32)
+    if dist == "randn":
+        return normal
+    if dist == "fp8":
+        return normal.to(torch.float8_e4m3fnuz).to(torch.float32)
+    return normal * spread + 3.0
+
+
+def make_inputs(rows: int, live: int, capacity: int, k: int, args):
+    torch.manual_seed(args.seed)
+    logits = make_logits(rows, capacity, args.dist, args.spread)
     seq_lens = torch.full((rows,), live, device="cuda", dtype=torch.int32)
     invalid = torch.arange(capacity, device="cuda")[None] >= seq_lens[:, None]
     logits.masked_fill_(invalid, -float("inf"))
@@ -79,9 +98,7 @@ def capture(run):
 
 
 def benchmark(backend: str, rows: int, live: int, args) -> dict:
-    logits, seq_lens, indices = make_inputs(
-        rows, live, args.capacity, args.top_k, args.seed
-    )
+    logits, seq_lens, indices = make_inputs(rows, live, args.capacity, args.top_k, args)
     fn = BACKENDS[backend]
 
     def run():
@@ -102,6 +119,7 @@ def benchmark(backend: str, rows: int, live: int, args) -> dict:
     return dict(
         backend=backend,
         mode="graph" if args.graph else "eager",
+        dist=args.dist,
         rows=rows,
         live=live,
         capacity=args.capacity,
@@ -130,6 +148,18 @@ def main():
         "--graph",
         action="store_true",
         help="Time a captured graph replay, matching how decode actually runs",
+    )
+    parser.add_argument(
+        "--dist",
+        choices=DISTRIBUTIONS,
+        default="indexer",
+        help="Logit value distribution; see the module docstring",
+    )
+    parser.add_argument(
+        "--spread",
+        type=float,
+        default=0.01,
+        help="Relative width of the --dist indexer cluster",
     )
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--rep", type=int, default=200)
