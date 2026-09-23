@@ -12,6 +12,7 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 """
 
 import functools
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -120,6 +121,60 @@ def test_inkling_override_exposes_all_mtp_depths():
 def _module_level_shrink(hf_config: PretrainedConfig) -> PretrainedConfig:
     hf_config.num_hidden_layers = 1
     return hf_config
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("attributes", "explicit", "expected", "source"),
+    [
+        ({"num_lookahead_tokens": 3}, None, 3, "num_lookahead_tokens"),
+        ({"n_predict": 2, "num_lookahead_tokens": 3}, None, 2, "n_predict"),
+        (
+            {"n_predict": None, "num_lookahead_tokens": 3},
+            None,
+            3,
+            "num_lookahead_tokens",
+        ),
+        ({"num_lookahead_tokens": 3}, 5, 5, None),
+        ({"n_predict": 2}, 4, 4, None),
+        ({"n_predict": 2}, 3, None, None),
+        ({}, None, None, None),
+    ],
+)
+def test_draft_token_default(attributes, explicit, expected, source):
+    hf_config = _make_hf_config(**attributes)
+    draft = MagicMock(hf_config=hf_config, max_model_len=128)
+    target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
+    draft.get_vocab_size.return_value = target.get_vocab_size.return_value = 32000
+    with (
+        patch("vllm.config.speculative.ModelConfig", return_value=draft),
+        patch("vllm.config.speculative.logger.info") as log,
+    ):
+        kwargs: dict[str, Any] = dict(
+            model="draft",
+            method="draft_model",
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+        )
+        if explicit is not None:
+            kwargs["num_speculative_tokens"] = explicit
+        if expected is None:
+            with pytest.raises(ValueError, match="was not provided|must be divisible"):
+                SpeculativeConfig(**kwargs)
+        else:
+            config = SpeculativeConfig(**kwargs)
+            assert config.num_speculative_tokens == expected
+        if source is not None:
+            log.assert_any_call(
+                "Defaulting num_speculative_tokens to %s from draft config %s.",
+                expected,
+                source,
+            )
+        else:
+            assert not any(
+                "Defaulting num_speculative_tokens" in call.args[0]
+                for call in log.call_args_list
+            )
 
 
 @pytest.mark.cpu_test
