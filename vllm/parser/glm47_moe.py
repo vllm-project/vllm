@@ -12,8 +12,10 @@ and tool calls may have no arguments.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -29,6 +31,7 @@ from vllm.parser.engine.parser_engine_config import (
 )
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
@@ -180,6 +183,16 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
     )
 
 
+@functools.cache
+def _glm47_moe_thinking_off_config() -> ParserEngineConfig:
+    # Keep the reasoning terminals so a template that ignores
+    # ``enable_thinking`` and opens ``<think>`` anyway (e.g. GLM-5.3) can
+    # still be parsed.
+    return dataclasses.replace(
+        glm47_moe_config(thinking=True), initial_state=ParserState.CONTENT
+    )
+
+
 class Glm47MoeParser(ParserEngine):
     """GLM-4.7 parser backed by the declarative parser engine."""
 
@@ -199,9 +212,46 @@ class Glm47MoeParser(ParserEngine):
         )
         kwargs.setdefault(
             "parser_engine_config",
-            glm47_moe_config(thinking=self.thinking_enabled),
+            glm47_moe_config()
+            if self.thinking_enabled
+            else _glm47_moe_thinking_off_config(),
         )
         super().__init__(tokenizer, tools, **kwargs)
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        if self.thinking_enabled:
+            return
+        for token_id in reversed(prompt_token_ids):
+            if token_id == self._reasoning_start_token_id:
+                self._engine.reset(initial_state=ParserState.REASONING)
+                self._streaming_initialized = True
+                return
+            if (
+                token_id == self._reasoning_end_token_id
+                or token_id in self._turn_boundary_token_ids
+            ):
+                return
+
+    def _output_closes_open_reasoning(self, model_output: str) -> bool:
+        """Whether the output ends a ``<think>`` that the prompt opened.
+
+        The non-streaming path has no prompt ids, so this detects a template
+        that ignored ``enable_thinking=False`` from the output alone.
+        """
+        if self.thinking_enabled:
+            return False
+        end = model_output.find(THINK_END)
+        return end >= 0 and THINK_START not in model_output[:end]
+
+    def _single_pass_parse(
+        self,
+        text: str,
+        token_ids: Sequence[int],
+        initial_state: ParserState | None = None,
+    ) -> tuple[str | None, str | None, ExtractedToolCallInformation]:
+        if initial_state is None and self._output_closes_open_reasoning(text):
+            initial_state = ParserState.REASONING
+        return super()._single_pass_parse(text, token_ids, initial_state)
 
     def _emit_name_delta(self, idx: int, deltas, name: str | None) -> None:
         if name is not None:
@@ -219,6 +269,9 @@ class Glm47MoeParser(ParserEngine):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
-        if not self.thinking_enabled:
+        if self._output_closes_open_reasoning(model_output):
+            # Re-open the prompt's ``<think>`` so the engine enters REASONING.
+            model_output = THINK_START + model_output
+        elif not self.thinking_enabled:
             return None, model_output
         return super().extract_reasoning(model_output, request)

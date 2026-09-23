@@ -72,8 +72,13 @@ class TestIsReasoningEnd:
     def test_empty_input(self, parser):
         assert not parser.is_reasoning_end([])
 
-    def test_thinking_disabled(self, no_thinking_parser):
-        assert no_thinking_parser.is_reasoning_end([THINK_S, TEXT])
+    def test_thinking_disabled_prompt_closed(self, no_thinking_parser):
+        assert no_thinking_parser.is_reasoning_end([USER, TEXT, ASSISTANT, THINK_E])
+
+    def test_thinking_disabled_but_template_opened(self, no_thinking_parser):
+        """Templates that ignore ``enable_thinking`` (GLM-5.3) still open
+        ``<think>``; the prompt, not the kwarg, decides."""
+        assert not no_thinking_parser.is_reasoning_end([USER, TEXT, ASSISTANT, THINK_S])
 
 
 class TestExtractContentIds:
@@ -106,3 +111,56 @@ class TestExtractContentIds:
     def test_thinking_disabled(self, no_thinking_parser):
         ids = [THINK_S, TEXT, TOOL_S]
         assert no_thinking_parser.extract_content_ids(ids) == ids
+
+
+class TestTemplateIgnoresThinkingOff:
+    """GLM-5.3's template always opens ``<think>``, even when the request
+    sets ``enable_thinking=False`` (e.g. Anthropic ``thinking: disabled``).
+    The reasoning must still be split from the answer."""
+
+    OUTPUT = f"r{THINK_END}a"
+    OUTPUT_IDS = [ord("r"), THINK_E, ord("a")]
+
+    def _stream(self, parser, request, prompt_ids):
+        reasoning, content = "", ""
+        for i, token_id in enumerate(self.OUTPUT_IDS):
+            delta = parser.parse_delta(
+                parser.model_tokenizer.decode([token_id]),
+                [token_id],
+                request,
+                prompt_ids,
+                finished=i == len(self.OUTPUT_IDS) - 1,
+            )
+            if delta is not None:
+                reasoning += delta.reasoning or ""
+                content += delta.content or ""
+        return reasoning, content
+
+    def test_streaming_prompt_opens_think(self, no_thinking_parser, mock_request):
+        prompt = [USER, TEXT, ASSISTANT, THINK_S]
+        assert self._stream(no_thinking_parser, mock_request, prompt) == ("r", "a")
+
+    def test_streaming_prompt_closes_think(self, no_thinking_parser, mock_request):
+        prompt = [USER, TEXT, ASSISTANT, THINK_E]
+        delta = no_thinking_parser.parse_delta(
+            "a", [ord("a")], mock_request, prompt, finished=True
+        )
+        assert (delta.reasoning, delta.content) == (None, "a")
+
+    def test_parse(self, no_thinking_parser, mock_request):
+        reasoning, content, _ = no_thinking_parser.parse(
+            self.OUTPUT, mock_request, model_output_token_ids=self.OUTPUT_IDS
+        )
+        assert (reasoning, content) == ("r", "a")
+
+    def test_parse_without_think_end_is_content(self, no_thinking_parser, mock_request):
+        reasoning, content, _ = no_thinking_parser.parse(
+            "a", mock_request, model_output_token_ids=[ord("a")]
+        )
+        assert (reasoning, content) == (None, "a")
+
+    def test_extract_reasoning(self, no_thinking_parser, mock_request):
+        assert no_thinking_parser.extract_reasoning(self.OUTPUT, mock_request) == (
+            "r",
+            "a",
+        )
