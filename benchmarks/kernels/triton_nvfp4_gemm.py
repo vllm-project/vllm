@@ -172,29 +172,60 @@ def _triton_nvfp4_gemm_kernel(
     tl.store(c_ptrs, c, mask=mask)
 
 
-def _nvfp4_config(bm: int, bn: int, bk: int, warps: int, stages: int) -> triton.Config:
-    return triton.Config(
-        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk, "GROUP_SIZE_M": 8},
-        num_warps=warps,
-        num_stages=stages,
-    )
-
-
-# Candidate tile configs for autotuning. PROVISIONAL: to be replaced by the
-# short list that a wide sweep on SM120 (RTX 5090) and SM100 (B200) selects.
-# Small BLOCK_M entries cover decode-sized M; configs that do not fit a GPU's
-# shared memory are pruned per device by _prune_configs.
+# Tile configs for autotuning, chosen by a two-pass sweep on an RTX 5090 (SM120):
+# 571 configs that fit, then the 143 closest to the best re-timed at every M,
+# over 10 GEMM shapes (the Llama-3.1-8B and Llama-3.3-70B linear layers at TP1,
+# plus two with K not a multiple of 128) at 11 M values from 1 to 16384.
+# Autotuning over this list reaches a geometric mean of 0.971 of the best config
+# per case, and at least 0.909 in every case. Small BLOCK_M entries serve
+# decode-sized M. Configs that do not fit a GPU's shared memory are pruned per
+# device by _prune_configs. Not yet swept on SM100 (B200).
 NVFP4_GEMM_CONFIGS = [
-    _nvfp4_config(128, 128, 128, 4, 3),
-    _nvfp4_config(128, 256, 128, 8, 3),
-    _nvfp4_config(128, 128, 256, 8, 2),
-    _nvfp4_config(64, 128, 128, 4, 4),
-    _nvfp4_config(32, 128, 128, 4, 4),
-    _nvfp4_config(16, 128, 128, 4, 4),
-    # Narrow N tiles: at M <= 16 only BLOCK_M=16 survives pruning, and with
-    # BLOCK_N=128 an N=4096 GEMM launches 32 programs on a 148 to 170 SM GPU.
-    _nvfp4_config(16, 64, 128, 4, 4),
-    _nvfp4_config(16, 32, 256, 4, 4),
+    triton.Config(
+        {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_SIZE_M": 32},
+        num_warps=8,
+        num_stages=2,
+    ),
+    triton.Config(
+        {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_SIZE_M": 32},
+        num_warps=8,
+        num_stages=3,
+    ),
+    triton.Config(
+        {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 256, "GROUP_SIZE_M": 1},
+        num_warps=8,
+        num_stages=3,
+    ),
+    triton.Config(
+        {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 256, "GROUP_SIZE_M": 8},
+        num_warps=4,
+        num_stages=4,
+    ),
+    triton.Config(
+        {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "GROUP_SIZE_M": 8},
+        num_warps=4,
+        num_stages=4,
+    ),
+    triton.Config(
+        {"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 256, "GROUP_SIZE_M": 8},
+        num_warps=4,
+        num_stages=5,
+    ),
+    triton.Config(
+        {"BLOCK_M": 16, "BLOCK_N": 64, "BLOCK_K": 256, "GROUP_SIZE_M": 1},
+        num_warps=4,
+        num_stages=4,
+    ),
+    triton.Config(
+        {"BLOCK_M": 16, "BLOCK_N": 64, "BLOCK_K": 256, "GROUP_SIZE_M": 1},
+        num_warps=8,
+        num_stages=3,
+    ),
+    triton.Config(
+        {"BLOCK_M": 16, "BLOCK_N": 32, "BLOCK_K": 256, "GROUP_SIZE_M": 8},
+        num_warps=4,
+        num_stages=4,
+    ),
 ]
 
 
