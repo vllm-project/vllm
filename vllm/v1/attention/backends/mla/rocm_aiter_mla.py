@@ -94,6 +94,9 @@ def _fp8_mla_prefill_supported() -> bool:
     Requires gfx950 plus an AITER build that exports both kernels.  When
     either is missing we silently fall back to ``flash_attn_varlen_func``.
     """
+    import vllm.envs as envs
+    if not envs.VLLM_ROCM_USE_AITER_FP8_MLA_PREFILL:
+        return False
     try:
         from vllm.platforms.rocm import on_gfx950
     except Exception:  # noqa: BLE001
