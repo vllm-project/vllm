@@ -50,7 +50,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+    ReadSpec,
+    TPMapping,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
@@ -344,6 +347,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         )
 
         w._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        w._send_failures = set()
         w._sending_transfers_lock = threading.Lock()
         w._push_finished_blocks = {}
         w._pending_d_registrations = {}
@@ -941,9 +945,10 @@ class TestPushWriterNotifs:
         assert request_id not in w._sending_transfers
 
     @pytest.mark.parametrize(("pp_size", "is_hma"), [(1, False), (2, True)])
-    def test_completed_push_send_waits_for_consumer_notif(self, pp_size, is_hma):
-        """P-side sends are completed by consumer notifs / lease expiry,
-        not by local WRITE-handle completion."""
+    def test_completed_push_send_releases_blocks_without_consumer_notif(
+        self, pp_size, is_hma
+    ):
+        """All WRITEs completing lets P reclaim its blocks without a D ACK."""
         w = self._pollable_worker()
         w.pp_size = pp_size
         w._is_hma_required = is_hma
@@ -951,20 +956,14 @@ class TestPushWriterNotifs:
         w.nixl_wrapper.check_xfer_state.side_effect = ["DONE", "PROC", "DONE"]
 
         results = w.get_transfer_results()
+
         assert request_id not in results.finished_sending
+        assert request_id in w._reqs_to_send
         assert w._sending_transfers[request_id] == [102]
-        assert request_id in w._reqs_to_send
+        assert w._evict_finished_inbox.empty()
 
         results = w.get_transfer_results()
-
-        assert request_id not in results.finished_sending
-        assert request_id in w._reqs_to_send
-        assert request_id not in w._sending_transfers
-
-        # The consumer notif is what completes the send.
-        w._pending_completion_notifs.put(f"{request_id}:1".encode())
-        results = w.get_transfer_results()
-        assert request_id in results.finished_sending
+        assert results.finished_sending == {request_id}
         assert request_id not in w._reqs_to_send
         assert request_id not in w._reqs_to_process
         assert w._evict_finished_inbox.get_nowait() == request_id
@@ -972,6 +971,91 @@ class TestPushWriterNotifs:
         assert w._evict_finished_inbox.empty()
         assert w.nixl_wrapper.release_xfer_handle.call_count == 2
         w.xfer_stats.record_kv_expired_req.assert_not_called()
+
+    @pytest.mark.parametrize("sibling_state", ["ERR", "DONE"])
+    def test_push_failure_survives_until_lease_expiry(self, sibling_state):
+        """A later sibling completion must not turn a failed send into success."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "PROC", sibling_state]
+
+        assert w.get_transfer_results().finished_sending == set()
+        assert w._sending_transfers[request_id] == [102]
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id not in w._sending_transfers
+        assert request_id in w._reqs_to_send
+        assert w._evict_finished_inbox.empty()
+
+        w.expected_consumer_notifications_by_req = {}
+        w._reqs_to_send[request_id] = time.perf_counter() - 1
+        assert w.get_transfer_results().finished_sending == {request_id}
+        assert request_id not in w._send_failures
+        assert w._evict_finished_inbox.get_nowait() == request_id
+
+    @pytest.mark.parametrize("release_fails", [False, True])
+    def test_push_submission_failure_is_remembered_after_sibling_success(
+        self, release_fails
+    ):
+        """A submission error remains a failure even if later polls succeed."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.transfer_topo.block_size_ratio.return_value = 1
+        w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
+        w._compute_desc_ids = MagicMock(return_value=[0])
+        w.dst_num_blocks = {w.engine_id: 8}
+        w.dst_region_num_blocks[w.engine_id] = [8]
+        w.dst_region_group_ids[w.engine_id] = [0]
+        w.dst_uses_region_group_mapping[w.engine_id] = False
+        w.nixl_wrapper.make_prepped_xfer.return_value = 101
+        w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
+        if release_fails:
+            w.nixl_wrapper.release_xfer_handle.side_effect = [
+                RuntimeError("release"),
+                None,
+                None,
+            ]
+
+        handle = w._xfer_blocks(
+            read_spec=ReadSpec(0, [[1]], [[1]]),
+            dst_engine_id=w.engine_id,
+            request_id=request_id,
+            remote_request_id="decode-request",
+            local_xfer_side_handle=1,
+            remote_xfer_side_handle=2,
+        )
+        assert handle == (101 if release_fails else None)
+        w._sending_transfers[request_id] = [102]
+        if handle is not None:
+            w._sending_transfers[request_id].append(handle)
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id in w._reqs_to_send
+        assert request_id not in w._sending_transfers
+        assert w._evict_finished_inbox.empty()
+
+    @pytest.mark.parametrize("first_state", ["ERR", "DONE"])
+    def test_push_completion_after_expiry_is_not_reported_twice(self, first_state):
+        """A WRITE finishing after lease expiry must not complete the request again."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.side_effect = [
+            first_state,
+            "PROC",
+            "PROC",
+            "DONE",
+        ]
+        assert w.get_transfer_results().finished_sending == set()
+
+        w.expected_consumer_notifications_by_req = {}
+        w._reqs_to_send[request_id] = time.perf_counter() - 1
+        assert w.get_transfer_results().finished_sending == {request_id}
+        assert w._evict_finished_inbox.get_nowait() == request_id
+
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id not in w._sending_transfers
+        assert request_id not in w._send_failures
+        assert w._evict_finished_inbox.empty()
 
 
 # ----------------------------------------------------------------- #
