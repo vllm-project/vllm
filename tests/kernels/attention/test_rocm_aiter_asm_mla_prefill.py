@@ -246,5 +246,6 @@ def test_kernel_head_width_is_aligned(num_heads: int) -> None:
         num_head_k=width,
         max_qlen=seq_len,
         qlen_granularity=_FP8_PREFILL_TILE_Q,
+        total_qlen=seq_len,
     )[5][0]
     assert backend._new_tokens_ps["reduce_partial_map"].numel() == expected_tiles
