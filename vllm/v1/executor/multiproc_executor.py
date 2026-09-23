@@ -337,6 +337,17 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
+    def _fail_executor(self) -> None:
+        self.is_failed = True
+        while self.futures_queue:
+            future = self.futures_queue.pop()
+            with suppress(InvalidStateError):
+                future.set_exception(RuntimeError("Executor failed."))
+        callback = self.failure_callback
+        if callback is not None:
+            self.failure_callback = None
+            callback()
+
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
@@ -387,11 +398,11 @@ class MultiprocExecutor(Executor):
     ) -> Any:
         """Returns single result if unique_reply_rank and/or an output
         aggregator is provided, otherwise list."""
+        if self.is_failed:
+            raise RuntimeError("Executor failed.")
         assert self.rpc_broadcast_mq is not None, (
             "collective_rpc should not be called on follower node"
         )
-        if self.is_failed:
-            raise RuntimeError("Executor failed.")
 
         deadline = None if timeout is None else time.monotonic() + timeout
         kwargs = kwargs or {}
@@ -426,21 +437,42 @@ class MultiprocExecutor(Executor):
             response_mqs = (response_mqs[output_rank],)
 
         def get_response():
+            if self.is_failed:
+                raise RuntimeError("Executor failed.")
             responses = []
+            first_error = None
+            response_deadline = deadline
+            # Consume this RPC's replies before allowing the next RPC to read.
             for mq in response_mqs:
                 dequeue_timeout = (
-                    None if deadline is None else max(0.0, deadline - time.monotonic())
+                    None
+                    if response_deadline is None
+                    else max(0.0, response_deadline - time.monotonic())
                 )
                 try:
                     status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
+                    self._fail_executor()
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
-                if status != WorkerProc.ResponseStatus.SUCCESS:
-                    raise RuntimeError(
+                except Exception:
+                    self._fail_executor()
+                    raise
+                if status != WorkerProc.ResponseStatus.SUCCESS and first_error is None:
+                    first_error = RuntimeError(
                         f"Worker failed with error '{result}', please check the"
                         " stack trace above for the root cause"
                     )
+                    drain_deadline = (
+                        time.monotonic() + envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+                    )
+                    response_deadline = (
+                        drain_deadline
+                        if response_deadline is None
+                        else min(response_deadline, drain_deadline)
+                    )
                 responses.append(result)
+            if first_error is not None:
+                raise first_error
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
