@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Batch-sharded sampling must be a drop-in for replicated sampling.
 
-The comparison is tolerance-based, not bitwise: engine boots land in
-slightly different kernel/collective states (measured: same-state boots are
-bitwise identical across the two modes; cross-state boots differ by up to
-~0.25 logprob and can flip a near-tie token). A real sharding bug — rows
-routed to the wrong request, misaligned gathers — produces many-nats
-divergence and scrambled top-k sets, far outside these bounds."""
+The two boots are compared token for token, which is only meaningful because
+both schedule the same batches. With the engine in the caller's process every
+request is queued before the first step, so the first prefill has the same
+shape in both runs. Give the engine its own process and the comparison turns
+into a coin toss: prefill starts before the last requests arrive over IPC, so
+one boot batches two requests where the other batches one. The batch shape
+sets the GEMM reduction order, logprobs shift by up to ~0.25, and near-ties
+flip — measured at up to 5 of 16 completions, with sharding disabled on both
+sides. A real sharding bug — rows routed to the wrong request, misaligned
+gathers — produces many-nats divergence and scrambled top-k sets."""
 
 import pytest
 
@@ -17,11 +21,10 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
-# Boot-state numeric noise bound (measured <= 0.25 on identical contexts).
+# Misrouted rows move logprobs by nats; anything under this is float noise.
+# With matched batches the two boots agreed bitwise over 320 positions, so the
+# bound is not expected to be reached.
 LOGPROB_TOL = 0.5
-# Near-tie greedy/seeded flips from boot-state noise; measured <= 1 per
-# engine boot across ~16 completions, plus one of headroom.
-MAX_DIVERGENT_PROMPTS = 3
 
 PROMPTS = [
     "The capital of France is",
@@ -89,13 +92,35 @@ def _generate(monkeypatch: pytest.MonkeyPatch, disable_sharding: bool):
         cleanup_dist_env_and_memory()
 
 
+def _requested_top_k(lps) -> set[int]:
+    """The token ids of the requested top-k, without the sampled token.
+
+    vLLM appends the sampled token when it misses the top-k, so the dict holds
+    k or k+1 entries. The top-k occupy ranks 1..k with no gaps and the extra
+    entry lands at its own rank, so the first gap ends the top-k. Rank is
+    optional on Logprob, and without it there is nothing to split on.
+    """
+    by_rank = sorted(lps.items(), key=lambda kv: (kv[1].rank is None, kv[1].rank))
+    top = set()
+    for expected_rank, (token_id, logprob) in enumerate(by_rank, start=1):
+        if logprob.rank != expected_rank:
+            break
+        top.add(token_id)
+    return top or set(lps)
+
+
 def _assert_logprob_dicts_close(ref_lps, out_lps, what: str) -> None:
-    # Allow one boundary entry of the top-k set to swap at a near-tie.
-    common = set(ref_lps) & set(out_lps)
-    assert len(common) >= max(len(ref_lps), len(out_lps)) - 1, (
-        f"{what}: top-k token sets diverge: {sorted(ref_lps)} vs {sorted(out_lps)}"
+    # Allow one boundary entry of the top-k set to swap at a near-tie. Compare
+    # the top-k alone: counting the sampled token would spend that allowance
+    # on the extra entry itself whenever only one side carries one.
+    ref_top = _requested_top_k(ref_lps)
+    out_top = _requested_top_k(out_lps)
+    shared_top = ref_top & out_top
+    assert len(shared_top) >= max(len(ref_top), len(out_top)) - 1, (
+        f"{what}: top-k token sets diverge: {sorted(ref_top)} vs {sorted(out_top)}"
     )
-    for token_id in common:
+    # Values are comparable for every shared token, sampled one included.
+    for token_id in set(ref_lps) & set(out_lps):
         diff = abs(ref_lps[token_id].logprob - out_lps[token_id].logprob)
         assert diff <= LOGPROB_TOL, (
             f"{what}[{token_id}]: logprob diff {diff} "
@@ -106,16 +131,19 @@ def _assert_logprob_dicts_close(ref_lps, out_lps, what: str) -> None:
 @multi_gpu_test(num_gpus=2)
 def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
     """Generation, logprobs, and prompt logprobs match between batch-sharded
-    sampling and the replicated fallback, up to measured boot-state noise."""
+    sampling and the replicated fallback."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Required for the collective_rpc mode check below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    # Queue every request before the first step, so both boots schedule the
+    # same batches -- see the module docstring.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     ref_outputs = _generate(monkeypatch, disable_sharding=True)
     shard_outputs = _generate(monkeypatch, disable_sharding=False)
 
     assert len(ref_outputs) == len(shard_outputs) == 2 * len(PROMPTS)
-    num_divergent = 0
+    divergent = []
     for i, (ref, out) in enumerate(zip(ref_outputs, shard_outputs)):
         ref_completion = ref.outputs[0]
         out_completion = out.outputs[0]
@@ -131,7 +159,7 @@ def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
                 break
             prefix += 1
         if ref_ids != out_ids:
-            num_divergent += 1
+            divergent.append((i, prefix))
 
         if ref_completion.logprobs is not None:
             assert out_completion.logprobs is not None
@@ -156,7 +184,9 @@ def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
                     ref_lps, out_lps, f"prompt {i} prompt_logprobs[{pos}]"
                 )
 
-    assert num_divergent <= MAX_DIVERGENT_PROMPTS, (
-        f"{num_divergent}/{2 * len(PROMPTS)} prompts diverged: beyond near-tie "
-        "boot-state noise; sharded sampling is likely misrouting requests"
+    assert not divergent, (
+        f"{len(divergent)}/{2 * len(PROMPTS)} completions diverged at "
+        f"(prompt, position) {divergent}; with both boots scheduling the same "
+        "batches the two sampling modes must agree token for token, so this "
+        "points at sharded sampling misrouting requests"
     )
