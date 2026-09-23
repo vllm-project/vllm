@@ -79,9 +79,8 @@ def _qsa_localize_dcp_kernel(
     dest = tl.cumsum(owned.to(tl.int32), axis=0) - 1
     kept = tl.sum(owned.to(tl.int32), axis=0)
 
-    # Clear first, then scatter, so a stale id from a reused buffer cannot
-    # survive past the new count.
-    tl.store(dst + columns, -1, mask=in_range)
+    # Disjoint ranges: the two stores are unordered across warps.
+    tl.store(dst + columns, -1, mask=in_range & (columns >= kept))
     tl.store(dst + dest, local, mask=owned)
     tl.store(dst + SELECTION_WIDTH, kept)
 
@@ -154,7 +153,7 @@ def qsa_dcp_empty_owner_rows(packed_indices: torch.Tensor) -> torch.Tensor:
     return packed_indices[:, -1] <= 0
 
 
-def qsa_neutralize_empty_owner_lse_(
+def qsa_dcp_mask_empty_rows_(
     lse: torch.Tensor,
     empty_rows: torch.Tensor,
 ) -> None:

@@ -68,7 +68,7 @@ STEP0 = [
 
 @pytest.mark.parametrize("world", [2, 4])
 @pytest.mark.parametrize("interleave", [1, 4])
-def test_the_shared_selection_survives_every_rank(world, interleave):
+def test_shared_selection_is_not_modified_in_place(world, interleave):
     """Localizing must not disturb the buffer the next MTP step reads."""
     source = _pack(STEP0)
     frozen = source.clone()
@@ -80,7 +80,7 @@ def test_the_shared_selection_survives_every_rank(world, interleave):
 
 @pytest.mark.parametrize("world", [2, 4])
 @pytest.mark.parametrize("interleave", [1, 4])
-def test_the_ranks_partition_each_frozen_row_once(world, interleave):
+def test_ranks_partition_each_frozen_row_once(world, interleave):
     source = _pack(STEP0)
 
     for row, expected in enumerate(STEP0):
@@ -92,7 +92,7 @@ def test_the_ranks_partition_each_frozen_row_once(world, interleave):
 
 
 @pytest.mark.parametrize("world", [2, 4])
-def test_a_later_step_does_not_inherit_the_earlier_scratch(world):
+def test_later_step_does_not_inherit_earlier_scratch(world):
     """The claim under attack: reusing one scratch buffer makes steps couple."""
     interleave = 4
     step0 = _pack(STEP0)
@@ -113,7 +113,7 @@ def test_a_later_step_does_not_inherit_the_earlier_scratch(world):
 
 
 @pytest.mark.parametrize("world", [2, 4])
-def test_a_shrinking_batch_cannot_read_a_stale_tail(world):
+def test_shrinking_batch_does_not_read_a_stale_tail(world):
     """Fewer rows next step: the tail stays, and must never be read.
 
     The count column is the kernel's loop bound, so a stale row past the batch

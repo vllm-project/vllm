@@ -699,6 +699,11 @@ def qsa_sparse_paged_attention(
         assert output_gate.is_contiguous()
         output_gate_view = output_gate.view_as(q)
     if not q.shape[0]:
+        if return_lse:
+            empty_lse = torch.empty(
+                (0, q.shape[1]), dtype=torch.float32, device=q.device
+            )
+            return out, empty_lse
         return out
 
     group_size = q.shape[1] // k_cache.shape[2]

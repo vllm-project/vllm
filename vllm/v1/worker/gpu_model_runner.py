@@ -2311,7 +2311,6 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
-        is_dummy_batch: bool = False,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """Returns:
         tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -2471,7 +2470,6 @@ class GPUModelRunner(
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
-            is_dummy_batch=is_dummy_batch,
             is_prefilling=is_prefilling,
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
@@ -6112,7 +6110,6 @@ class GPUModelRunner(
                     ),
                     slot_mappings=slot_mappings_by_group,
                     use_spec_decode=self.speculative_config is not None,
-                    is_dummy_batch=True,
                 )
 
         with self.maybe_dummy_run_with_lora(

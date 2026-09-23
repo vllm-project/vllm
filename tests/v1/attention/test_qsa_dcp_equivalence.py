@@ -73,8 +73,8 @@ def test_sharded_ranks_reproduce_the_single_rank_result(world, interleave, seq_l
     from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
         qsa_dcp_empty_owner_rows,
+        qsa_dcp_mask_empty_rows_,
         qsa_localize_dcp_indices,
-        qsa_neutralize_empty_owner_lse_,
     )
 
     torch.manual_seed(1234 + seq_len)
@@ -142,7 +142,7 @@ def test_sharded_ranks_reproduce_the_single_rank_result(world, interleave, seq_l
             False,
             return_lse=True,
         )
-        qsa_neutralize_empty_owner_lse_(lse, empty)
+        qsa_dcp_mask_empty_rows_(lse, empty)
         outs.append(out.float())
         lses.append(lse.float())
 
@@ -155,13 +155,13 @@ def test_sharded_ranks_reproduce_the_single_rank_result(world, interleave, seq_l
 
 
 @requires_gpu
-def test_a_rank_owning_none_of_the_selection_contributes_nothing():
+def test_rank_owning_none_of_the_selection_contributes_nothing():
     """The sparse-only case: a rank holds KV but none of what was selected."""
     from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
         qsa_dcp_empty_owner_rows,
+        qsa_dcp_mask_empty_rows_,
         qsa_localize_dcp_indices,
-        qsa_neutralize_empty_owner_lse_,
     )
 
     device, world, interleave = "cuda", 2, 1
@@ -184,7 +184,7 @@ def test_a_rank_owning_none_of_the_selection_contributes_nothing():
     out, lse = qsa_sparse_paged_attention(
         q, k, v, local, table, token_to_req, False, return_lse=True
     )
-    qsa_neutralize_empty_owner_lse_(lse, empty)
+    qsa_dcp_mask_empty_rows_(lse, empty)
     assert torch.isneginf(lse).all()
 
     # Merging it against a real partial must leave that partial untouched.

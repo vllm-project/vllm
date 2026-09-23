@@ -295,12 +295,8 @@ def _build_qsa_metadata_kernel(
         compressed_position = tl.maximum(logical_position, 0) // compress_ratio
         logical_block = compressed_position // storage_block_size
         # No ownership term: this cache is replicated, so every rank stores
-        # every state. The raw key ring above is gated the same way.
-        #
-        # This holds for the ordinary slot mapping, where PAD means the padding
-        # tail or another rank's position. A speculative builder that PADs a
-        # rejected or evicted row would need its own validity signal here,
-        # because such a row must not become a committed state.
+        # every state. A speculative builder that PADs a rejected row would
+        # need its own validity signal here.
         valid = (
             mapped
             & (logical_position >= 0)
@@ -461,9 +457,8 @@ def build_qsa_metadata_triton(
     if circular_buffer_size == 0 and compress_ratio == 1:
         slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
     elif common_attn_metadata.is_dummy_batch:
-        # A profile or capture batch writes to no cache. Read the flag rather
-        # than the slot mapping: PAD there also means another rank owns the
-        # position, and this cache is replicated, so it must write those.
+        # PAD in the slot mapping also means another rank owns the position,
+        # which this replicated cache must still write. So read the flag.
         slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
@@ -565,9 +560,7 @@ def _build_qsa_metadata_torch(
             torch.where(active, work_in_request, -1).to(torch.int32)
         )
     if compress_ratio != 1 and common_attn_metadata.is_dummy_batch:
-        # Same reason as the fused path: a dummy batch writes to no cache, and
-        # the slot mapping cannot say so without also hiding another rank's
-        # positions from this replicated cache.
+        # Same reason as the fused path above.
         slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
@@ -858,6 +851,8 @@ class QSAKeyStateCache(_QSAStateCache):
         )
         return CircularBufferSpec(
             block_size=capacity,
+            # Every rank writes every token, so all rings are identical.
+            dcp_sharded=False,
             num_kv_heads=1,
             head_size=self.head_size,
             head_size_v=0,
@@ -874,29 +869,16 @@ class QSACompressedKeyCache(_QSAStateCache):
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
-            # Replicated under DCP, for two reasons. This cache addresses its
-            # slots globally through `_logical_to_physical_qsa_slots`, which
-            # has no notion of ownership, so sharding it would shift every row
-            # within its virtual block. And the selector has to score the whole
-            # sequence: a sharded rank would choose from its own slice only,
-            # which changes the selection rather than distributing it.
-            #
-            dcp_transparent=True,
-            # Span the same tokens as the sharded main KV block, so both block
-            # tables are 168 entries wide and the two share one group. The main
-            # KV keeps its physical 784-slot block, which is what the slot
-            # mapper needs, and this block is a whole multiple of it.
-            #
-            # `dcp_shard_count=1` says the span is stated here and must not be
-            # scaled again. `storage_block_size` must EQUAL block_size: it is
-            # what pins the builder, the layer view and the store kernel to the
-            # same 196 states. If the two ever drift, writes are misplaced with
-            # no error at all.
-            dcp_shard_count=1,
+            # The selector scores the whole sequence, and addresses its slots
+            # globally through `_logical_to_physical_qsa_slots`.
+            dcp_sharded=False,
+            # Span the sharded main KV block, so both share one block table.
             block_size=(
                 self.cache_config.block_size
                 * vllm_config.parallel_config.decode_context_parallel_size
             ),
+            # Must equal block_size: it pins the builder, the layer view and
+            # the store kernel to one state count.
             storage_block_size=(
                 self.cache_config.block_size
                 * vllm_config.parallel_config.decode_context_parallel_size

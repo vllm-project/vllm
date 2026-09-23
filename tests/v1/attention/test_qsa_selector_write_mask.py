@@ -100,14 +100,14 @@ def test_every_rank_stores_every_compressed_state(builder, world, interleave):
 
 
 @pytest.mark.parametrize("builder", BUILDERS, ids=["triton", "torch"])
-def test_one_rank_is_unchanged(builder):
+def test_single_rank_output_is_unchanged(builder):
     """The fix must be a no-op without DCP, where nothing is PAD anyway."""
     whole = torch.arange(NUM_TOKENS, dtype=torch.int64, device="cuda")
     slots = _slot_mapping(builder, whole)
     assert int((slots >= 0).sum()) == NUM_TOKENS // RATIO
 
 
-def test_the_states_land_on_distinct_slots():
+def test_states_land_on_distinct_slots():
     """A wrong block index would collide rather than drop, so count the slots."""
     slots = _slot_mapping(build_qsa_metadata_triton, _sharded_main_slots(2, 0))
     stored = slots[slots >= 0]
@@ -115,7 +115,7 @@ def test_the_states_land_on_distinct_slots():
     assert torch.unique(stored).numel() == stored.numel(), "two states collided"
 
 
-def test_the_padding_tail_is_still_excluded():
+def test_padding_tail_is_excluded():
     """`mapped` is what excludes padding, and the fix must not weaken it.
 
     A cudagraph-padded batch has more actual tokens than mapped ones. States
@@ -151,7 +151,7 @@ def test_the_padding_tail_is_still_excluded():
 
 
 @pytest.mark.parametrize("builder", BUILDERS, ids=["triton", "torch"])
-def test_a_dummy_batch_stays_inert_under_dcp(builder):
+def test_dummy_batch_stays_inert_under_dcp(builder):
     """The two signals must not be confused, in either direction.
 
     A dummy batch writes nothing even though every rank owns real positions.

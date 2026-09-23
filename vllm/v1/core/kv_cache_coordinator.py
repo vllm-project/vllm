@@ -11,7 +11,6 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
-    dcp_world_size_for_kv_cache_spec,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -20,7 +19,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -30,14 +29,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-# Group spec types that decode context parallelism knows how to place.
-# FullAttentionSpec shards across ranks. The other two are replicated:
-# dcp_world_size_for_kv_cache_spec gives them 1, so their groups keep an
-# unsharded slot mapping and every rank holds the whole state. For the QSA raw
-# key ring that is required, not merely allowed -- every rank must write every
-# token so the replicated selector reads identical rings.
-DCP_AWARE_SPECS = (FullAttentionSpec, MambaSpec, CircularBufferSpec)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -149,9 +140,7 @@ class KVCacheCoordinator(ABC):
                 role=kv_cache_group.role,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size_for_kv_cache_spec(
-                    kv_cache_group.kv_cache_spec, dcp_world_size
-                ),
+                dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
@@ -673,15 +662,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             f"hash_block_size. block_sizes={cacheable_block_sizes}, "
             f"hash_block_size={hash_block_size}"
         )
-        assert pcp_world_size == 1, "PCP not support hybrid attn now."
-        if dcp_world_size > 1:
-            # Reject a spec type with no DCP-aware placement (e.g. sliding
-            # window) rather than let it pick a policy by accident.
-            for g in kv_cache_config.kv_cache_groups:
-                assert isinstance(g.kv_cache_spec, DCP_AWARE_SPECS), (
+        for g in kv_cache_config.kv_cache_groups:
+            spec = g.kv_cache_spec
+            replicated = not spec.dcp_sharded
+            if pcp_world_size > 1:
+                assert isinstance(spec, FullAttentionSpec) or (
+                    isinstance(spec, AttentionSpec) and replicated
+                ), "PCP only supports full attention and replicated draft groups."
+            if dcp_world_size > 1:
+                assert isinstance(spec, FullAttentionSpec) or replicated, (
                     "DCP with hybrid KV cache layouts only supports "
-                    "full-attention, Mamba and circular-buffer groups, got: "
-                    f"{type(g.kv_cache_spec).__name__}."
+                    "full-attention, Mamba, and replicated draft groups, got: "
+                    f"{type(spec).__name__}."
                 )
         # Fine-grained hash hits require Mamba "align" and compatible cache
         # managers in every group. TP needs hashing finer than the Mamba block;

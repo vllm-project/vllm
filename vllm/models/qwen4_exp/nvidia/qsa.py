@@ -63,11 +63,8 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # No reordering: QSA runs one varlen path over the whole batch, and
-        # under DCP that path is still one kernel over this rank's share of the
-        # selection. Saying so is the point. The base class leaves the
-        # threshold at None, which reads the same but decides nothing, and the
-        # DCP guard would otherwise force decode-only batches if that default
-        # ever changed.
+        # under DCP still one kernel over this rank's share of the selection.
+        # State it, or the DCP guard forces decode-only batches.
         self._init_reorder_batch_threshold(None, supports_dcp_with_varlen=True)
 
 
@@ -195,12 +192,9 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             self.cp_kv_cache_interleave_size = (
                 config.parallel_config.cp_kv_cache_interleave_size
             )
-            # The compact-local id in ops/qsa_dcp.py agrees with the slot
-            # mapping only when the interleave divides the block the mapper
-            # shards in. That block is a whole multiple of this one, so this is
-            # the stricter test, and it is the same one vllm/config/vllm.py
-            # makes for DCP. Repeat it here because that check is skipped for
-            # NIXL P/D, and a mismatch reads the wrong keys with no other sign.
+            # ops/qsa_dcp.py agrees with the slot mapping only when the
+            # interleave divides the sharded block. vllm/config/vllm.py asserts
+            # this too, but skips it for NIXL P/D.
             block_size = config.cache_config.block_size
             if block_size % self.cp_kv_cache_interleave_size:
                 raise NotImplementedError(
@@ -332,18 +326,16 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         from .ops.qsa import qsa_sparse_paged_attention
         from .ops.qsa_dcp import (
             qsa_dcp_empty_owner_rows,
+            qsa_dcp_mask_empty_rows_,
             qsa_localize_dcp_indices,
-            qsa_neutralize_empty_owner_lse_,
         )
 
         group = get_dcp_group()
 
         if self._dcp_local_indices is None:
             self._dcp_local_indices = torch.empty_like(topk_buffer)
-        # The selector ran on a replicated cache, so this selection is the same
-        # on every rank. Keep only what this rank owns, as compact-local ids.
-        # Into scratch: the source buffer is the layer's, and MTP draft steps
-        # read it again after this one.
+        # The selection is identical on every rank; keep what this rank owns.
+        # Into scratch, because MTP draft steps re-read the source buffer.
         local_indices = qsa_localize_dcp_indices(
             topk_buffer[:num_tokens],
             self._dcp_local_indices[:num_tokens],
@@ -369,10 +361,9 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             return_lse=True,
         )
 
-        # A rank that owns none of the selection contributes the identity of
-        # the merge. The reducer zeroes any row whose weight comes out zero, so
-        # the -inf is the whole fix; the NaN payload behind it cannot escape.
-        qsa_neutralize_empty_owner_lse_(partial_lse, empty_rows)
+        # A rank owning none of the selection contributes the merge identity.
+        # The reducer zeroes zero-weight rows, so the NaN payload cannot escape.
+        qsa_dcp_mask_empty_rows_(partial_lse, empty_rows)
 
         merged, _merged_lse = cp_lse_ag_out_rs(
             partial_out.float(),
@@ -382,9 +373,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             is_lse_base_on_e=False,
         )
 
-        # The gate is query-derived and identical on every rank, so it commutes
-        # with the merge. Apply it once here rather than once per rank. Round to
-        # the output dtype before the gate, as the fused kernel does, so a
+        # The gate is identical on every rank, so it commutes with the merge:
+        # apply it once. Round before it, as the fused kernel does, so a
         # one-rank run matches the non-DCP path bit for bit.
         gated = merged.to(output.dtype).float() * torch.sigmoid(
             output_gate.view_as(merged).float()

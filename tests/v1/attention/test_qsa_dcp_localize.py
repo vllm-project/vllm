@@ -74,14 +74,14 @@ def test_padding_is_ignored():
     assert PAD not in kept
 
 
-def test_a_rank_can_own_nothing():
+def test_rank_can_own_nothing():
     """The empty-owner row. Short contexts produce these routinely."""
     kept, count = _reference_localize([0, 1, 2, 3], world := 4, 3, 4)
     assert kept == [] and count == 0, "rank 3 owns none of positions 0-3"
     assert world == 4
 
 
-def test_count_bounds_the_kernel_not_the_width():
+def test_count_bounds_the_kernel_loop():
     """The trailing count is the tile bound. Stale ids past it must not matter."""
     width = 8
     packed = _pack([[0, 4, 8, 12]], width)
@@ -119,7 +119,7 @@ def test_kernel_matches_the_reference(world, rank, interleave):
 # --- empty-owner rows -------------------------------------------------------
 
 
-def test_empty_owner_comes_from_the_count_not_a_scan():
+def test_empty_owner_derives_from_the_count():
     """A reused buffer holds stale ids past its count.
 
     The attention kernel bounds its tile loop by the count, so a row with
@@ -147,14 +147,14 @@ def test_empty_owner_mask_tracks_the_count():
     assert got == [False, True, False]
 
 
-def test_the_neutral_value_is_negative_infinity():
+def test_empty_owner_lse_is_negative_infinity():
     """The identity of the LSE merge."""
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
-        qsa_neutralize_empty_owner_lse_,
+        qsa_dcp_mask_empty_rows_,
     )
 
     lse = torch.full((3, 2), 1.5)
-    qsa_neutralize_empty_owner_lse_(lse, torch.tensor([False, True, False]))
+    qsa_dcp_mask_empty_rows_(lse, torch.tensor([False, True, False]))
 
     assert torch.isneginf(lse[1]).all()
     assert torch.equal(lse[0], torch.full_like(lse[0], 1.5)), "row 0 untouched"
@@ -188,7 +188,7 @@ def _reduce_like_correct_attn_out(outs, lses):
     return total
 
 
-def test_the_reducer_clears_an_empty_ranks_poisoned_payload():
+def test_reducer_zeroes_an_empty_ranks_payload():
     """Why the caller only has to fix the LSE.
 
     A sparse kernel leaves an unwritten row undefined, and `NaN * 0` is still
@@ -208,7 +208,7 @@ def test_the_reducer_clears_an_empty_ranks_poisoned_payload():
     torch.testing.assert_close(merged, good_out)
 
 
-def test_every_rank_empty_still_reduces_to_a_finite_row():
+def test_all_ranks_empty_reduces_to_a_finite_row():
     """A padding row: no rank owns anything, and nothing may become NaN."""
     outs = torch.stack([torch.full((1, 1, 2), float("nan"))] * 2)
     lses = torch.stack([torch.tensor([[-torch.inf]])] * 2)
@@ -229,7 +229,7 @@ def test_localize_refuses_a_mismatched_output():
             qsa_localize_dcp_indices(packed, bad, 2, 0, 1)
 
 
-def test_localize_leaves_the_source_alone_without_dcp():
+def test_localize_is_a_no_op_without_dcp():
     """World size 1 still copies, so one call site covers both paths."""
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
 
@@ -241,7 +241,7 @@ def test_localize_leaves_the_source_alone_without_dcp():
     assert torch.equal(local, source)
 
 
-def test_the_kernel_wrapper_rejects_a_gate_with_return_lse():
+def test_kernel_rejects_a_gate_with_return_lse():
     """Guards the one error that has no symptom: sigmoid applied twice."""
     from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 

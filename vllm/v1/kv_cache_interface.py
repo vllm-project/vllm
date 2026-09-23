@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
@@ -158,6 +158,8 @@ class KVCacheSpec:
 
     # number of tokens in a block
     block_size: int
+    dcp_sharded: bool = field(default=False, kw_only=True)
+    """Whether DCP shards this cache's token positions across ranks."""
 
     @property
     def prefix_cacheable(self) -> bool:
@@ -474,6 +476,7 @@ class HiSparseResidentSpec(KVCacheSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
+    dcp_sharded: bool = True
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -526,45 +529,12 @@ class AttentionSpec(KVCacheSpec):
         """
         return self.unpadded_page_size_bytes
 
-    dcp_shard_count: int | None = None
-    """How many ways DCP splits this cache, when ``block_size`` counts stored
-    slots rather than token positions.
-
-    ``None`` means unresolved: ``stamp_dcp_shard_counts`` fills it from the spec
-    type before grouping. A spec whose ``block_size`` already counts token
-    positions sets it to 1 itself and is left alone.
-
-    Carried as a field rather than read from the config, because grouping needs
-    the token span of a block and has no config in scope."""
-
-    @property
-    def logical_block_span(self) -> int:
-        """Token positions one block-table entry covers.
-
-        Two caches can share a block table only when these agree, whatever
-        their ownership. A sharded block holding ``block_size`` slots covers
-        ``block_size * shard count`` positions; a replicated one covers
-        ``block_size``.
-        """
-        return self.block_size * (self.dcp_shard_count or 1)
-
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        del vllm_config
-        return cdiv(max_len, self.logical_block_span)
-
-
-def _one_shard_count(specs: list) -> int | None:
-    """The DCP shard count a merged group carries.
-
-    Resolved before grouping, so it is a real field and the trailing
-    ``fields(AttentionSpec)`` equality check compares it. A merge that drops it
-    leaves ``None`` against a stamped member and asserts.
-    """
-    counts = {spec.dcp_shard_count for spec in specs}
-    assert len(counts) == 1, (
-        f"One DCP shard count per group, got {sorted(map(str, counts))}."
-    )
-    return counts.pop()
+        parallel_config = vllm_config.parallel_config
+        kv_shard_count = (
+            parallel_config.decode_context_parallel_size if self.dcp_sharded else 1
+        )
+        return cdiv(max_len, self.block_size * kv_shard_count)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -593,12 +563,10 @@ class FullAttentionSpec(AttentionSpec):
     """
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        return (
-            self.max_num_blocks_per_req(
-                vllm_config, vllm_config.model_config.max_model_len
-            )
-            * self.page_size_bytes
+        max_blocks = self.max_num_blocks_per_req(
+            vllm_config, vllm_config.model_config.max_model_len
         )
+        return max_blocks * self.page_size_bytes
 
     @classmethod
     def merge_window_sizes(cls, window_sizes: set[int]) -> int | None:
@@ -648,7 +616,7 @@ class FullAttentionSpec(AttentionSpec):
             # If any layer in the group is non-causal, treat the group as
             # non-causal so the engine core disables incompatible scheduling.
             non_causal=any(spec.non_causal for spec in specs),
-            dcp_shard_count=_one_shard_count(specs),
+            dcp_sharded=specs[0].dcp_sharded,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -694,17 +662,6 @@ class MLAAttentionSpec(FullAttentionSpec):
     # Group capability enabled when any member flattens a non-causal query block
     # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
-    dcp_transparent: bool = False
-    """Replicate this cache on every DCP rank instead of sharding it.
-
-    Full-attention KV shards across DCP ranks, and a cache that shares that spec
-    type inherits the behaviour. A cache whose addressing is global cannot: its
-    write path and its read path would disagree about ownership, and every row
-    would shift within its virtual block.
-
-    Set this when a cache must stay whole on each rank -- for example a selector
-    cache that has to score the entire sequence, where sharding would make each
-    rank choose from only its own slice."""
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
 
@@ -733,10 +690,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
         storage_block_size_set = set(spec.storage_block_size for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
-        # A group gets one ownership policy, so a replicated and a sharded cache
-        # cannot share one. Mixing them silently shards the replicated cache.
-        dcp_transparent_set = {spec.dcp_transparent for spec in specs}
-
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -745,12 +698,10 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(index_group_leader_set) == 1
             and len(storage_block_size_set) == 1
             and len(block_stride_alignment_set) == 1
-            and len(dcp_transparent_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, storage block size, block stride alignment and "
-            "DCP ownership."
+            "index-sharing role, storage block size and block stride alignment."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -771,8 +722,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
-            dcp_transparent=dcp_transparent_set.pop(),
-            dcp_shard_count=_one_shard_count(specs),
+            dcp_sharded=specs[0].dcp_sharded,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -821,6 +771,7 @@ class RSWASpec(FullAttentionSpec):
             head_size_v=base.head_size_v,
             dtype=base.dtype,
             kv_quant_mode=base.kv_quant_mode,
+            dcp_sharded=base.dcp_sharded,
             page_size_padded=base.page_size_padded,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
@@ -911,9 +862,10 @@ class SlidingWindowSpec(AttentionSpec):
         return cdiv(num_tokens, self.block_size) + 1
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
-            "DCP not support sliding window."
-        )
+        assert (
+            not self.dcp_sharded
+            or vllm_config.parallel_config.decode_context_parallel_size == 1
+        ), "DCP not support sliding window."
         max_blocks = self.max_admission_blocks_per_request(
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             max_model_len=vllm_config.model_config.max_model_len,
@@ -1010,6 +962,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         sliding_window_set = set(spec.sliding_window for spec in specs)
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
+        assert len({spec.dcp_sharded for spec in specs}) == 1
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -1027,6 +980,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
+            dcp_sharded=specs[0].dcp_sharded,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -1248,7 +1202,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
-            dcp_shard_count=_one_shard_count(specs),
+            dcp_sharded=specs[0].dcp_sharded,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -1274,6 +1228,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
 
     kv_cache_specs: dict[str, KVCacheSpec]
+
+    def __post_init__(self):
+        if self.kv_cache_specs:
+            object.__setattr__(self, "dcp_sharded", self.first_spec.dcp_sharded)
 
     @property
     def prefix_cacheable(self) -> bool:
@@ -1307,39 +1265,31 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         # Metadata builders are constructed from the per-layer spec, so the base
         # cdiv(max_len, block_size) would drop its DCP sharding and size the
         # block table wider than those builders expect.
-        per_layer = {
-            name: spec.max_num_blocks_per_req(vllm_config, max_len)
-            for name, spec in self.kv_cache_specs.items()
+        widths = {
+            spec.max_num_blocks_per_req(vllm_config, max_len)
+            for spec in self.kv_cache_specs.values()
         }
-        widths = set(per_layer.values())
-        if len(widths) != 1:
-            # Name a layer per width. Two bare numbers leave the reader with no
-            # way to find which layers disagree, and a group can hold dozens.
-            examples = {
-                width: next(n for n, v in per_layer.items() if v == width)
-                for width in sorted(widths)
-            }
-            raise AssertionError(
-                "All layers in the same KV cache group must need the same "
-                f"number of block table entries, got {sorted(widths)}. "
-                f"One layer per width: {examples}."
-            )
+        assert len(widths) == 1, (
+            "All layers in the same KV cache group must need the same number "
+            f"of block table entries, got {sorted(widths)}."
+        )
         return next(iter(widths))
 
     @classmethod
-    def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+    def is_uniform_type(
+        cls, kv_cache_specs: dict[str, KVCacheSpec], dcp_world_size: int = 1
+    ) -> bool:
         """Whether all layers have the same type of KV cache spec.
 
         Uses the registry to determine grouping base classes, so custom specs
         that inherit from FullAttentionSpec are treated as full attention.
         """
-        # Compare the token span, not the raw block size. A group carries one
-        # block table, and what has to match is how many positions an entry
-        # covers. Ownership may differ: a sharded cache holding half the slots
-        # of a wider span tiles the same range as a replicated cache holding
-        # all of a narrower one.
+        # A group carries one block table, so what must match is the token span
+        # of an entry, not the stored slot count: a sharded cache holding half
+        # the slots of a wider span tiles the same range as a replicated cache
+        # holding all of a narrower one.
         spans = {
-            getattr(spec, "logical_block_span", spec.block_size)
+            spec.block_size * (dcp_world_size if spec.dcp_sharded else 1)
             for spec in kv_cache_specs.values()
         }
         if len(spans) > 1:
@@ -1348,33 +1298,25 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         return first_spec.is_uniform_with_collection(kv_cache_specs)
 
     @classmethod
-    def from_specs(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> Self | None:
+    def from_specs(
+        cls, kv_cache_specs: dict[str, KVCacheSpec], dcp_world_size: int = 1
+    ) -> Self | None:
         """Return a SameTypeKVCacheSpecs object if all layers have the same type
         of KV cache spec. Return None if not.
         """
-        if cls.is_uniform_type(kv_cache_specs):
-            # The manager block size. The slot mapper multiplies it by the DCP
-            # world size itself, so it must be the SHARDED member's block. Put
-            # the span here instead and the world size is counted twice, and
-            # every write lands in the wrong slot.
-            #
-            # A gcd is not enough. It equals the sharded member's block only by
-            # luck of the member set, and a third member with a smaller block
-            # would drag it down and break the mapper the same way.
-            specs = list(kv_cache_specs.values())
-            sharded = {
-                spec.block_size
-                for spec in specs
-                if not getattr(spec, "dcp_transparent", False)
-            }
-            block_size = sharded.pop() if len(sharded) == 1 else specs[0].block_size
-            assert all(spec.block_size % block_size == 0 for spec in specs), (
-                "A KV cache group's block must divide every member's, got "
-                f"{sorted({spec.block_size for spec in specs})} -> {block_size}."
-            )
-            return cls(block_size=block_size, kv_cache_specs=kv_cache_specs)
-        else:
+        if not cls.is_uniform_type(kv_cache_specs, dcp_world_size):
             return None
+        specs = list(kv_cache_specs.values())
+        # The slot mapper scales this by the DCP world size itself, so it must
+        # be the sharded member's block: the span counts the world size twice,
+        # and a gcd can fall below it once a third member joins.
+        sharded = {spec.block_size for spec in specs if spec.dcp_sharded}
+        block_size = sharded.pop() if len(sharded) == 1 else specs[0].block_size
+        assert all(spec.block_size % block_size == 0 for spec in specs), (
+            "A KV cache group's block must divide every member's, got "
+            f"{sorted({spec.block_size for spec in specs})} -> {block_size}."
+        )
+        return cls(block_size=block_size, kv_cache_specs=kv_cache_specs)
 
     def get_max_layers_per_page_size(self) -> int:
         """Max number of layers sharing a page size. For a balanced bucket
