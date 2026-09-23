@@ -618,7 +618,7 @@ def test_synchronize_input_prep_lands_prior_d2h_before_batch_mutation():
         pinned[0] = pinned[3]
         pinned[3] = 1
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert pinned.tolist() == [1, 3, 2, 1]
 
 
