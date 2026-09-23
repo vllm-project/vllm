@@ -91,6 +91,12 @@ VLLM_LOGGING_CONFIG_PATH=/path/to/logging_config.json \
     vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
 
+Worker and engine processes decorate console output with a process name and
+PID prefix. Lines that are JSON objects (as emitted by a structured formatter
+like `python-json-logger`) are passed through unprefixed so the output remains
+parseable NDJSON, and each `LogRecord` carries `vllm_process_name` and
+`vllm_pid` so process identity is available to structured-log consumers.
+
 ### Example 2: Silence a particular vLLM logger
 
 To silence a particular vLLM logger, it is necessary to provide custom logging

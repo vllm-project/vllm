@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import multiprocessing
 import os
 import signal
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 import psutil
 
@@ -197,6 +198,17 @@ def set_process_title(
     setproctitle.setproctitle(f"{prefix}::{name}")
 
 
+def _is_json_object_line(s: str) -> bool:
+    """Return True if the text looks like a JSON object payload (NDJSON).
+
+    Structured log formatters emit one JSON object per LogRecord. Prefixing
+    those lines with a human-readable process tag makes them unparseable, so
+    they are passed through untouched. Default text log lines start with the
+    log level (or a logging prefix), not ``{``, and still get the tag.
+    """
+    return s.lstrip().startswith("{")
+
+
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     """Add colored prefix to file output for log decoration."""
     is_tty = hasattr(file, "isatty") and file.isatty()
@@ -215,7 +227,8 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
         if not s:
             return
         if file.start_new_line:  # type: ignore[attr-defined]
-            file_write(prefix)
+            if not _is_json_object_line(s):
+                file_write(prefix)
         idx = 0
         while (next_idx := s.find("\n", idx)) != -1:
             next_idx += 1
@@ -223,7 +236,8 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
             if next_idx == len(s):
                 file.start_new_line = True  # type: ignore[attr-defined]
                 return
-            file_write(prefix)
+            if not _is_json_object_line(s[next_idx:]):
+                file_write(prefix)
             idx = next_idx
         file_write(s[idx:])
         file.start_new_line = False  # type: ignore[attr-defined]
@@ -233,10 +247,33 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
+def _set_process_record_factory(process_name: str, pid: int) -> None:
+    """Attach vLLM process identity to every LogRecord.
+
+    Exposed as ``vllm_process_name`` / ``vllm_pid`` so structured (JSON)
+    formatters can include process identity without a text prefix on the
+    line. Chains whatever factory is already installed.
+    """
+    previous_factory = logging.getLogRecordFactory()
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = previous_factory(*args, **kwargs)
+        record.vllm_process_name = process_name
+        record.vllm_pid = pid
+        return record
+
+    logging.setLogRecordFactory(factory)
+
+
 def decorate_logs(
     process_name: str | None = None, *, skip_if_decorated: bool = False
 ) -> None:
-    """Decorate stdout/stderr with process name and PID prefix."""
+    """Decorate stdout/stderr with process name and PID prefix.
+
+    JSON object lines are left unprefixed so structured-log output stays
+    parseable. Process identity is also attached to every LogRecord as
+    ``vllm_process_name`` / ``vllm_pid`` for structured consumers.
+    """
     # Respect VLLM_CONFIGURE_LOGGING environment variable
     if not envs.VLLM_CONFIGURE_LOGGING:
         return
@@ -248,6 +285,7 @@ def decorate_logs(
         process_name = get_mp_context().current_process().name
 
     pid = os.getpid()
+    _set_process_record_factory(process_name, pid)
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
 
@@ -309,7 +347,7 @@ def find_loaded_library(lib_name: str) -> str | None:
     """
     According to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
-    shared libraries loaded by the process. We can use this file to find the path of the
+    shared libraries loaded by the process. We can use this file to find the name of the
     loaded library.
     """  # noqa
     # Match the mapped file's name, not the whole line: an unrelated library

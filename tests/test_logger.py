@@ -26,6 +26,7 @@ from vllm.logger import (
 )
 from vllm.logging_utils import NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
+from vllm.utils.system_utils import decorate_logs
 
 
 def f1(x):
@@ -335,3 +336,56 @@ def test_caplog_mp_spawn(caplog_mp_spawn):
 
     assert "AAAA" in log_holder.text
     assert "BBBBB" in log_holder.text
+
+
+def _decorate_capture(monkeypatch):
+    """Redirect stdio and decorate logs with a fixed process name.
+
+    Returns the stdout capture and the previous log record factory so tests
+    can restore the process-wide factory afterwards.
+    """
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    monkeypatch.setattr("vllm.utils.system_utils.envs.VLLM_CONFIGURE_LOGGING", True)
+    monkeypatch.setattr("vllm.utils.system_utils.envs.NO_COLOR", True)
+    monkeypatch.setattr("vllm.utils.system_utils.envs.VLLM_LOGGING_COLOR", "0")
+
+    previous_factory = logging.getLogRecordFactory()
+    decorate_logs("Worker_DP0")
+    return out, previous_factory
+
+
+def test_decorate_logs_keeps_json_lines_parseable(monkeypatch):
+    """JSON formatter output must stay valid NDJSON (issue #57955)."""
+    out, previous_factory = _decorate_capture(monkeypatch)
+    try:
+        sys.stdout.write('{"message": "Engine started"}\n')
+        line = out.getvalue().splitlines()[0]
+        assert json.loads(line) == {"message": "Engine started"}
+    finally:
+        logging.setLogRecordFactory(previous_factory)
+
+
+def test_decorate_logs_still_prefixes_text_lines(monkeypatch):
+    """Default human-readable console logging retains its process prefix."""
+    out, previous_factory = _decorate_capture(monkeypatch)
+    try:
+        sys.stdout.write("INFO hello\n")
+        line = out.getvalue().splitlines()[0]
+        assert line.startswith("(Worker_DP0 pid=")
+        assert line.endswith(") INFO hello")
+    finally:
+        logging.setLogRecordFactory(previous_factory)
+
+
+def test_decorate_logs_exposes_process_identity_on_records(monkeypatch):
+    """Structured consumers get process identity from the LogRecord itself."""
+    _, previous_factory = _decorate_capture(monkeypatch)
+    try:
+        factory = logging.getLogRecordFactory()
+        record = factory("vllm.test", logging.INFO, __file__, 1, "hi", None, None)
+        assert record.vllm_process_name == "Worker_DP0"
+        assert record.vllm_pid == os.getpid()
+    finally:
+        logging.setLogRecordFactory(previous_factory)
