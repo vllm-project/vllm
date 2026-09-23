@@ -59,6 +59,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
+    """Gated delta-rule recurrence; an invalid state index zeroes the output."""
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)

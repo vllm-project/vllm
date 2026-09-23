@@ -805,6 +805,7 @@ def _causal_conv1d_update_kernel(
     BLOCK_N: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
+    """Causal conv1d decode step; an invalid accepted count zeroes the output."""
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
 

@@ -59,6 +59,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
+    """Sigmoid-gated delta-rule update; an invalid state index zeroes the output."""
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
