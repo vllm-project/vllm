@@ -24,9 +24,17 @@ Scope of one observation:
 - validation failures (malformed JSON, missing/invalid fields) never enter the
   recorder, so they do not touch any of these series; endpoint-level 4xx already
   has the HTTP metrics;
-- an exception or a cancellation (client disconnect) inside the block is recorded
-  as ``status="error"``;
+- anything but a clean exit is ``status="error"``: an engine exception, an
+  ``HTTPException``, or an explicit cancellation of the awaiting task
+  (``asyncio.CancelledError``, e.g. server shutdown);
 - durations cover one operation, not a transfer session.
+
+Cancellation is not the same as a client disconnect. These routes do not watch
+the connection, so closing the socket does not necessarily cancel the engine
+await: the operation may still complete and be recorded as ``success``. The Rust
+frontend owns its recorder via RAII, so there a dropped handler future (client
+disconnect included) records ``error``. Both are correct for their own lifecycle;
+this PR does not change either frontend's disconnect handling.
 
 Collectors are instantiated lazily, on first use, so that metric objects are
 created after multiprocess Prometheus setup has run (``PROMETHEUS_MULTIPROC_DIR``

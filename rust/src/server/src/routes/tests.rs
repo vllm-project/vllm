@@ -6522,6 +6522,15 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
         ("/finish_weight_update", r#"{"weight_version":1}"#),
         ("/update_weight_version", "{}"),
         ("/update_weight_version", r#"{"new_version":null}"#),
+        // Top-level positional arrays: serde can deserialize a struct from a
+        // sequence, so these must be rejected as "not a JSON object" instead of
+        // reaching the recorder as a successful operation.
+        ("/init_weight_transfer_engine", "[{}]"),
+        ("/init_weight_transfer_engine", "[1]"),
+        ("/update_weights", "[{}]"),
+        ("/finish_weight_update", r#"["array-version"]"#),
+        ("/update_weight_version", r#"["array-version-2"]"#),
+        ("/init_weight_transfer_engine", r#"[{"init_info":{}}]"#),
     ] {
         let response = app
             .call(
