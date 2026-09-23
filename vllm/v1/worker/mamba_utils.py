@@ -35,7 +35,7 @@ logger = init_logger(__name__)
 _TEMPORAL_TILES = 16
 
 
-@triton.jit(do_not_specialize=["num_requests"])
+@triton.jit(do_not_specialize=["num_requests", "num_mapping_rows"])
 def get_aligned_state_indices_multi_group_kernel(
     block_table_ptrs_ptr,
     seq_lens_ptr,
@@ -45,6 +45,9 @@ def get_aligned_state_indices_multi_group_kernel(
     # the table row must be resolved through this mapping; seq_lens and the
     # output stay in batch order.
     idx_mapping_ptr,
+    # Entries in idx_mapping (real requests). Graph-capture batches pass a
+    # padded row count, so rows past this must not index into the mapping.
+    num_mapping_rows,
     block_table_stride_req: tl.int64,
     seq_lens_stride: tl.constexpr,
     state_indices_stride_0: tl.constexpr,
@@ -63,7 +66,14 @@ def get_aligned_state_indices_multi_group_kernel(
     valid_row = rows < num_requests
 
     if HAS_IDX_MAPPING:
-        table_row = tl.load(idx_mapping_ptr + rows, mask=valid_row, other=0).to(tl.int64)
+        # idx_mapping only covers real requests; padded rows resolve to slot 0
+        # (the gathered-table path read a zeroed padding row there). The load
+        # index is clamped so the padded rows never read past the mapping.
+        safe_rows = tl.minimum(rows, tl.maximum(num_mapping_rows - 1, 0))
+        table_row = tl.load(
+            idx_mapping_ptr + safe_rows, mask=valid_row, other=0
+        ).to(tl.int64)
+        table_row = tl.where(rows < num_mapping_rows, table_row, 0)
         active_row = valid_row & (table_row >= 0)
     else:
         table_row = rows
@@ -1124,18 +1134,24 @@ class MambaSpecDecodeGPUContext:
 
         Args:
             seq_lens: [num_reqs] batch-ordered sequence lengths.
-            num_reqs: number of real requests in the batch.
-            idx_mapping: optional [num_reqs] batch_idx -> req_state_idx. The block
-                tables bound to this context are the source request-state-slot
-                tables (see ``initialize_from_forward_context``), so the table row
-                is resolved through this mapping; None means the batch order
-                already equals the request-state order (V1).
+            num_reqs: rows to fill. FULL-graph batches pass the padded request
+                count, which may exceed the number of real requests.
+            idx_mapping: optional [num_reqs_real] batch_idx -> req_state_idx,
+                covering real requests only. The block tables bound to this
+                context are the source request-state-slot tables (see
+                ``initialize_from_forward_context``), so the table row is resolved
+                through this mapping; None means the batch order already equals
+                the request-state order (V1).
         """
         assert self.is_initialized
         assert seq_lens.is_cuda
         assert 0 <= num_reqs <= seq_lens.shape[0]
         assert self.aligned_state_indices is not None
         assert num_reqs <= self.aligned_state_indices.shape[1]
+        if idx_mapping is not None:
+            assert idx_mapping.numel() <= num_reqs, (
+                "idx_mapping covers real requests; num_reqs counts padded rows"
+            )
         if num_reqs == 0:
             return self.aligned_state_indices[:, :0]
 
@@ -1147,6 +1163,7 @@ class MambaSpecDecodeGPUContext:
             seq_lens,
             self.aligned_state_indices,
             idx_mapping,
+            0 if idx_mapping is None else idx_mapping.numel(),
             self.block_table_stride_req,
             seq_lens.stride(0),
             self.aligned_state_indices.stride(0),
