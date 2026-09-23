@@ -386,6 +386,53 @@ def select_common_block_size(
     raise ValueError(f"No common block size for {kv_manager_block_size}.")
 
 
+def _resize_kv_cache_to_free_memory(
+    kv_cache_config: KVCacheConfig,
+    raw_size: int,
+    buf_size: int,
+    page_size: int,
+    device: torch.device,
+    headroom: int = 4 * 1024**3,
+) -> int:
+    """Shrink the KV cache so it fits in actual free GPU memory.
+
+    Post-profiling initialization (attention backends, metadata builders,
+    JIT warmup) may consume GPU memory the profiler did not measure.
+    Re-check actual free memory and resize ``kv_cache_config`` in-place,
+    synchronising across TP ranks so every worker uses the same block count.
+
+    Returns the (page-aligned) buffer size to allocate.
+    """
+    free_mem, _ = torch.cuda.mem_get_info(device)
+    if buf_size <= free_mem - headroom:
+        return buf_size
+
+    old_num_blocks = kv_cache_config.num_blocks
+    bytes_per_block = raw_size // old_num_blocks if old_num_blocks > 0 else 1
+    new_num_blocks = max(1, int((free_mem - headroom) // bytes_per_block))
+    if torch.distributed.is_initialized():
+        t = torch.tensor([new_num_blocks], dtype=torch.long, device=device)
+        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MIN)
+        new_num_blocks = int(t.item())
+    new_size = bytes_per_block * new_num_blocks
+    kv_cache_config.num_blocks = new_num_blocks
+    for tensor in kv_cache_config.kv_cache_tensors:
+        if tensor.layer_stride > tensor.block_stride and old_num_blocks > 0:
+            tensor.layer_stride = tensor.layer_stride // old_num_blocks * new_num_blocks
+        tensor.size = new_size
+    new_buf_size = ((new_size + page_size - 1) // page_size) * page_size
+    logger.warning(
+        "ROCm: resized KV cache to fit available memory: "
+        "%d -> %d blocks (%.1f -> %.1f GiB, free=%.1f GiB)",
+        old_num_blocks,
+        new_num_blocks,
+        raw_size / 1024**3,
+        new_size / 1024**3,
+        free_mem / 1024**3,
+    )
+    return new_buf_size
+
+
 def allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -418,6 +465,15 @@ def allocate_kv_cache(
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
     else:
         buf_size = raw_size
+    if current_platform.is_rocm():
+        buf_size = _resize_kv_cache_to_free_memory(
+            kv_cache_config,
+            raw_size,
+            buf_size,
+            page_size,
+            device,
+        )
+
     buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
@@ -535,7 +591,10 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     that the current amount of free memory is sufficient for that.
     """
     requested_memory = math.ceil(
-        init_snapshot.total_memory * cache_config.gpu_memory_utilization
+        min(
+            init_snapshot.total_memory * cache_config.gpu_memory_utilization,
+            init_snapshot.free_memory,
+        )
     )
 
     if init_snapshot.free_memory < requested_memory:
