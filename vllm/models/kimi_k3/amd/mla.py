@@ -12,11 +12,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.platforms import current_platform
 
-# AITER dispatch constants, mirrored from csrc/kernels/cache_kernels.cu. With all
-# three satisfied the `_opt` decode kernel is selected, which clamps `pos` into
-# the cos/sin cache; below MIN_SIZE the *general* kernel is chosen, which does
-# not clamp and would read past the single-row identity cache below. At TP=8 K3
-# has 12 heads/rank so 512 * 12 = 6144 clears it; at TP=32 it would be 3 heads.
 _OPT_KV_LORA_RANK = 512
 _OPT_ROT_DIM = 64
 _OPT_MIN_SIZE = 2048
@@ -24,11 +19,7 @@ _OPT_MIN_SIZE = 2048
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm fusion and a fused
-    decode Q-prep path.
-
-    Both fusions are kept here rather than in the shared MLA layer so only AMD
-    Kimi-K3 changes, mirroring the q/kv RMSNorm fusion this class already owns.
-    """
+    decode Q-prep path."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -37,17 +28,10 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self._identity_rope: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def _fused_qk_prep_supported(self) -> bool:
-        """Whether this layer can ever take the fused decode path.
-
-        Everything checked here is fixed at load time, so the per-batch test in
-        ``forward`` is only about the shape of the batch itself.
-        """
         attn = self.mla_attn
         if not (
-            current_platform.is_rocm()
-            and rocm_aiter_ops.is_mla_enabled()
+            rocm_aiter_ops.is_mla_enabled()
             and attn.kv_cache_dtype.startswith("fp8")
-            and attn.kv_cache_dtype != "fp8_ds_mla"
             and self.kv_lora_rank == _OPT_KV_LORA_RANK
             and self.qk_rope_head_dim == _OPT_ROT_DIM
             and self.kv_lora_rank * self.num_heads >= _OPT_MIN_SIZE
@@ -62,9 +46,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             return False
         # Only the W_UK variants reproduced in _fused_decode are supported.
         return attn.is_aiter_triton_fp4_bmm_enabled or (
-            not attn.is_aiter_triton_fp8_bmm_enabled
-            and not attn.is_amx_bmm_enabled
-            and attn.W_UK_T is not None
+            not attn.is_aiter_triton_fp8_bmm_enabled and attn.W_UK_T is not None
         )
 
     def _normalize_q_kv(
