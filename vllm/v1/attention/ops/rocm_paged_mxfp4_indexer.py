@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerPrefillChunkMetadata,
     )
-    from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import (
+    from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
         DeepseekV41RocmMxfp4IndexerMetadata,
         RocmMxfp4NativeDecode,
         RocmMxfp4PrefillPlan,
@@ -298,7 +298,7 @@ def _layer(
     candidate_blocks: torch.Tensor | None,
     candidate_block_size: int,
 ) -> _Layer:
-    from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import (
+    from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
         DeepseekV41RocmMxfp4IndexerMetadata,
     )
 

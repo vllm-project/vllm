@@ -1023,7 +1023,7 @@ class SparseAttnIndexer(CustomOp):
         weights: torch.Tensor,
     ):
         if self.use_fp4_cache:
-            from vllm.v1.attention.ops.rocm_mxfp4_indexer import (
+            from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
                 rocm_mxfp4_sparse_attn_indexer,
             )
 

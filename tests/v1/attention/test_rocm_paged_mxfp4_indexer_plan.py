@@ -12,7 +12,7 @@ import torch
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
 )
-from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import (
+from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     native_decode,
     plan_prefill_chunks,
 )

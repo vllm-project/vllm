@@ -23,7 +23,6 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.rocm_sparse_mqa_indexer import RocmSparseMQAIndexer
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
@@ -36,6 +35,9 @@ from vllm.models.deepseek_v41.common.ops import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.model_executor.layers.rocm_paged_mxfp4_sparse_mqa_indexer import (
+        RocmSparseMQAIndexer,
+    )
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -1206,7 +1208,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         if self.rocm_mxfp4:
-            from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import (
+            from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
                 DeepseekV41RocmMxfp4IndexerBackend,
             )
 
@@ -1332,7 +1334,11 @@ class DeepseekV4Indexer(nn.Module):
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
             if current_platform.is_rocm():
-                self.indexer_op = RocmSparseMQAIndexer(
+                from vllm.model_executor.layers import (
+                    rocm_paged_mxfp4_sparse_mqa_indexer as rocm_mqa,
+                )
+
+                self.indexer_op = rocm_mqa.RocmSparseMQAIndexer(
                     self.k_cache,
                     self.topk_tokens,
                     self.head_dim,
@@ -1341,7 +1347,7 @@ class DeepseekV4Indexer(nn.Module):
                     candidate_block_buffer,
                     candidate_block_size,
                 )
-                self.indexer_weights_dtype = RocmSparseMQAIndexer.weights_dtype
+                self.indexer_weights_dtype = rocm_mqa.RocmSparseMQAIndexer.weights_dtype
             else:
                 self.indexer_op = SparseMQAIndexer(
                     self.k_cache,
@@ -1373,7 +1379,7 @@ class DeepseekV4Indexer(nn.Module):
         # The ROCm MXFP4 cache is stored in the scorer's dot-operand order.
         self.k_cache_n_per_tile = 0
         if self.use_fp4_kv and current_platform.is_rocm():
-            from vllm.v1.attention.ops.rocm_mxfp4_indexer import (
+            from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
                 rocm_mxfp4_n_per_tile,
             )
 

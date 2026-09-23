@@ -30,7 +30,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
     DeepseekV41IndexerBackend,
 )
-from vllm.v1.attention.ops.rocm_mxfp4_indexer import (
+from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     build_rocm_mxfp4_decode_schedule,
     check_rocm_mxfp4_cache_geometry,
     rocm_mxfp4_decode_schedule_words,

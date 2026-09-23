@@ -26,12 +26,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
 )
-from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import (
+from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     DeepseekV41RocmMxfp4IndexerMetadata,
     native_decode,
     plan_prefill_chunks,
 )
-from vllm.v1.attention.ops import rocm_mxfp4_indexer as ops
+from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 if (_reason := ops.rocm_mxfp4_indexer_unsupported_reason()) is not None:

@@ -11,7 +11,7 @@ the `DeepseekV41RocmMxfp4IndexerBackend` metadata
 import torch
 from torch import nn
 
-from vllm.v1.attention.ops.rocm_mxfp4_indexer import (
+from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     rocm_mxfp4_indexer_unsupported_reason,
     rocm_mxfp4_sparse_mqa_indexer,
 )

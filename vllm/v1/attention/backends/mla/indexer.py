@@ -65,7 +65,7 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         )
     use_fp4 = kv_dtype == "mxfp4"
     if use_fp4 and current_platform.is_rocm():
-        from vllm.v1.attention.ops.rocm_mxfp4_indexer import (
+        from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
             rocm_mxfp4_indexer_unsupported_reason,
         )
 
