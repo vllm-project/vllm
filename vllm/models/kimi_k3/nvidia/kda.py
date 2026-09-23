@@ -724,7 +724,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         self.gemm_rs_ar = None
         if run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
@@ -809,7 +809,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
-            return self.gemm_rs_ar(core_attn_out, self.o_proj.weight)
+            return self.gemm_rs_ar.apply(core_attn_out, self.o_proj)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture

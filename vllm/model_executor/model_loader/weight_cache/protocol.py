@@ -291,6 +291,8 @@ class WeightCacheKey:
     vllm_version: str
     is_draft: bool = False
     """Daemon group the weights come from; False is the target model."""
+    dp_size: int = 1
+    dp_rank: int = 0
 
     @classmethod
     def from_model_config(
@@ -300,6 +302,8 @@ class WeightCacheKey:
         tp_rank: int,
         *,
         is_draft: bool = False,
+        dp_size: int = 1,
+        dp_rank: int = 0,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -327,6 +331,8 @@ class WeightCacheKey:
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
             is_draft=is_draft,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
