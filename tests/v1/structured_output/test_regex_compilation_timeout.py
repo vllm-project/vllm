@@ -78,9 +78,7 @@ class TestCompileRegexWithTimeout:
     """Unit tests for the compile_regex_with_timeout utility."""
 
     def test_normal_regex_compiles_successfully(self):
-        result = compile_regex_with_timeout(
-            _fast_compile, r"[a-z]+", pattern=r"[a-z]+"
-        )
+        result = compile_regex_with_timeout(_fast_compile, r"[a-z]+", pattern=r"[a-z]+")
         assert result == "compiled:[a-z]+"
 
     def test_timeout_raises_value_error(self):
@@ -89,9 +87,7 @@ class TestCompileRegexWithTimeout:
             pytest.raises(ValueError, match="timed out"),
         ):
             monkeypatch.setattr("vllm.envs.VLLM_REGEX_COMPILATION_TIMEOUT_S", 0.5)
-            compile_regex_with_timeout(
-                _slow_compile, r"(a+)+b", pattern=r"(a+)+b"
-            )
+            compile_regex_with_timeout(_slow_compile, r"(a+)+b", pattern=r"(a+)+b")
 
     def test_timeout_disabled_when_zero(self):
         with pytest.MonkeyPatch.context() as monkeypatch:
@@ -166,7 +162,9 @@ class TestNoLingeringProcesses:
     def test_fast_compilation_reuses_worker(self):
         with pytest.MonkeyPatch.context() as monkeypatch:
             monkeypatch.setattr("vllm.envs.VLLM_REGEX_COMPILATION_TIMEOUT_S", 5)
-            first = compile_regex_with_timeout(_fast_compile, "fast_0", pattern="fast_0")
+            first = compile_regex_with_timeout(
+                _fast_compile, "fast_0", pattern="fast_0"
+            )
             pid = _worker().last_pid
             second = compile_regex_with_timeout(
                 _fast_compile, "fast_1", pattern="fast_1"
@@ -188,9 +186,7 @@ class TestNoLingeringProcesses:
                     "vllm.utils.system_utils.cuda_is_initialized",
                     lambda: True,
                 )
-                monkeypatch.setattr(
-                    "vllm.envs.VLLM_REGEX_COMPILATION_TIMEOUT_S", 0.5
-                )
+                monkeypatch.setattr("vllm.envs.VLLM_REGEX_COMPILATION_TIMEOUT_S", 0.5)
                 compile_regex_with_timeout(
                     _slow_compile, "spawn_kill", pattern="spawn_kill"
                 )
