@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 
 import torch
@@ -148,17 +147,3 @@ class MambaPrefillCheckpointBuilder:
             request_rows=request_rows_tensor,
             block_cols=checkpoint_cols_tensor,
         )
-
-
-class MambaPrefillCheckpointExporter(ABC):
-    """Export a mid-prefill checkpoint into backend-specific paged states."""
-
-    @abstractmethod
-    def export(
-        self,
-        checkpoint: MambaPrefillCheckpointMetadata,
-        *args,
-        **kwargs,
-    ) -> None:
-        """Write checkpoint state into the paged cache."""
-        raise NotImplementedError
