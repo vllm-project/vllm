@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
+    KVPPPlacementPlan,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -1588,10 +1589,118 @@ def _get_per_layer_spec(
     return spec
 
 
+def compute_kv_pp_placement_plan(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_pp_size: int,
+    rank: int = 0,
+) -> KVPPPlacementPlan:
+    """Compute the physical layer ownership and memory budget for KV-PP.
+
+    Partitions target layers into balanced contiguous partitions across
+    `kv_pp_size` ranks while keeping draft-model caches rank-local and
+    budgeting two scratch buffers for double-buffered layer prefetching.
+
+    Args:
+        kv_cache_groups: All KV cache groups reported for the stage.
+        kv_pp_size: KV pipeline parallel degree.
+        rank: Local rank index within the KV-PP group (0 <= rank < kv_pp_size).
+
+    Returns:
+        KVPPPlacementPlan containing layer assignments and per-block budgeting.
+
+    """
+    if kv_pp_size <= 0:
+        raise ValueError(f"kv_pp_size must be positive, got {kv_pp_size}")
+    if not 0 <= rank < kv_pp_size:
+        raise ValueError(f"rank {rank} out of range [0, {kv_pp_size})")
+
+    # Draft-model caches (e.g. EAGLE/MTP) and host-resident caches remain rank-local.
+    target_groups = [
+        g for g in kv_cache_groups if not g.is_eagle_group and not g.host_resident
+    ]
+    draft_groups = [
+        g for g in kv_cache_groups if g.is_eagle_group and not g.host_resident
+    ]
+
+    target_layers: list[str] = []
+    layer_spec_map: dict[str, KVCacheSpec] = {}
+    for group in target_groups:
+        for layer_name in group.layer_names:
+            target_layers.append(layer_name)
+            layer_spec_map[layer_name] = _get_per_layer_spec(group, layer_name)
+
+    draft_bytes = sum(
+        _get_per_layer_spec(group, layer_name).page_size_bytes
+        for group in draft_groups
+        for layer_name in group.layer_names
+    )
+
+    num_target_layers = len(target_layers)
+    if num_target_layers == 0:
+        return KVPPPlacementPlan(
+            kv_pp_size=kv_pp_size,
+            rank=rank,
+            owned_layer_names=[],
+            owned_layers_by_rank={r: [] for r in range(kv_pp_size)},
+            scratch_buffer_bytes=0,
+            bytes_for_owned_layers=0,
+            bytes_for_local_draft_caches=draft_bytes,
+            bytes_per_logical_block=draft_bytes,
+        )
+
+    largest_target_layer_bytes = max(
+        layer_spec_map[layer_name].page_size_bytes for layer_name in target_layers
+    )
+    scratch_buffer_bytes = 2 * largest_target_layer_bytes
+
+    base_count = num_target_layers // kv_pp_size
+    remainder = num_target_layers % kv_pp_size
+
+    owned_layers_by_rank: dict[int, list[str]] = {}
+    current_idx = 0
+    for r in range(kv_pp_size):
+        count = base_count + (1 if r < remainder else 0)
+        owned_layers_by_rank[r] = target_layers[current_idx : current_idx + count]
+        current_idx += count
+
+    rank_owned = owned_layers_by_rank[rank]
+    bytes_for_owned = sum(
+        layer_spec_map[layer_name].page_size_bytes for layer_name in rank_owned
+    )
+
+    bytes_per_logical_block = bytes_for_owned + draft_bytes + scratch_buffer_bytes
+
+    return KVPPPlacementPlan(
+        kv_pp_size=kv_pp_size,
+        rank=rank,
+        owned_layer_names=rank_owned,
+        owned_layers_by_rank=owned_layers_by_rank,
+        scratch_buffer_bytes=scratch_buffer_bytes,
+        bytes_for_owned_layers=bytes_for_owned,
+        bytes_for_local_draft_caches=draft_bytes,
+        bytes_per_logical_block=bytes_per_logical_block,
+    )
+
+
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
+    kv_pp_size: int = 1,
 ) -> int:
-    """Return the largest cache group's bytes per block."""
+    """Return the bytes per logical block.
+
+    When kv_pp_size > 1 (KV-PP / LayerSplit), calculates the common decoupled
+    per-logical-block byte cost across all ranks, accounting for owned target
+    layers, rank-local draft caches, and 2x largest scratch prefetch buffers.
+    """
+    if kv_pp_size > 1:
+        plans = [
+            compute_kv_pp_placement_plan(kv_cache_groups, kv_pp_size, r)
+            for r in range(kv_pp_size)
+        ]
+        bytes_per_block = max(plan.bytes_per_logical_block for plan in plans)
+        assert bytes_per_block > 0
+        return bytes_per_block
+
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
         return len(mla_names) * mla_page + len(idx_names) * idx_page
@@ -1756,12 +1865,69 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
+    kv_pp_size = getattr(vllm_config.cache_config, "kv_pipeline_parallel_size", 1)
+    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, kv_pp_size)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     size = bytes_per_block * num_blocks
+
+    if kv_pp_size > 1:
+        placement_plan = compute_kv_pp_placement_plan(
+            kv_cache_groups, kv_pp_size, rank=0
+        )
+        active_layers = set(placement_plan.owned_layer_names)
+
+        kv_cache_tensors = []
+        for group in kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                for layer_name, spec in group_spec.kv_cache_specs.items():
+                    if group.is_eagle_group or layer_name in active_layers:
+                        layers_by_spec[spec].append(layer_name)
+            elif group.layer_names:
+                for layer_name in group.layer_names:
+                    if group.is_eagle_group or layer_name in active_layers:
+                        layers_by_spec[group_spec].append(layer_name)
+
+            byte_offset = 0
+            for spec, layer_names in layers_by_spec.items():
+                if not layer_names:
+                    continue
+                layer_stride, block_stride, _, _, _ = compute_layout_strides(
+                    spec,
+                    num_blocks,
+                    len(layer_names),
+                    layout,
+                    fixed_strides=(None, interleaved_block_stride, None, None, None),
+                )
+                offset = (
+                    byte_offset
+                    * max(layer_stride, spec.page_size_bytes)
+                    // spec.page_size_bytes
+                )
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=size,
+                        layers=layer_names,
+                        layer_stride=layer_stride,
+                        block_stride=block_stride,
+                        offset=offset,
+                    )
+                )
+                byte_offset += len(layer_names) * spec.page_size_bytes
+
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=(
+                vllm_config.cache_config.prefix_cache_retention_interval
+            ),
+            kv_pp_placement=placement_plan,
+        )
 
     # Groups alias from byte 0. Spec regions are laid out differently:
     #

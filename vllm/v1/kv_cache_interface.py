@@ -1427,6 +1427,43 @@ class KVCacheGroupSpec:
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
 
 
+@dataclass(frozen=True)
+class KVPPPlacementPlan:
+    """Physical KV cache placement plan for KV-PP (LayerSplit).
+
+    Maps target model layers to owner ranks while preserving decoupled logical
+    KV-cache planning and budgeting across workers.
+    """
+
+    # KV pipeline parallel group size
+    kv_pp_size: int
+    # Local worker rank within the KV-PP group
+    rank: int
+    # Layer names persistently owned by this rank
+    owned_layer_names: list[str]
+    # Complete map of rank -> list of owned layer names across the KV-PP group
+    owned_layers_by_rank: dict[int, list[str]]
+    # Byte size budgeted for scratch transit buffers (2x largest target bundle)
+    scratch_buffer_bytes: int
+    # Total persistent page bytes for layers owned by this rank
+    bytes_for_owned_layers: int
+    # Total persistent page bytes for rank-local draft caches (e.g. EAGLE/MTP)
+    bytes_for_local_draft_caches: int
+    # Total bytes per logical block budgeted on this rank
+    bytes_per_logical_block: int
+
+    def is_layer_owned(self, layer_name: str) -> bool:
+        """Whether the specified layer is owned by this rank."""
+        return layer_name in self.owned_layer_names
+
+    def get_layer_owner_rank(self, layer_name: str) -> int:
+        """Return the owner rank for a given layer name."""
+        for r, layers in self.owned_layers_by_rank.items():
+            if layer_name in layers:
+                return r
+        raise KeyError(f"Layer {layer_name!r} not found in KV-PP placement plan.")
+
+
 @dataclass
 class KVCacheConfig:
     """The KV cache configuration of a model."""
@@ -1455,6 +1492,23 @@ class KVCacheConfig:
 
     hisparse_shared_host_pool: bool = False
     """Whether local TP ranks share one physical HiSparse host pool."""
+
+    kv_pp_placement: KVPPPlacementPlan | None = None
+    """Physical placement plan for KV-PP (LayerSplit)."""
+
+    @property
+    def is_kv_pp_enabled(self) -> bool:
+        """Whether KV-PP (LayerSplit) is enabled."""
+        return self.kv_pp_placement is not None and self.kv_pp_placement.kv_pp_size > 1
+
+    def is_layer_owned_by_rank(self, layer_name: str, rank: int | None = None) -> bool:
+        """Whether layer_name is persistently owned by the specified rank."""
+        if self.kv_pp_placement is None or self.kv_pp_placement.kv_pp_size <= 1:
+            return True
+        target_rank = rank if rank is not None else self.kv_pp_placement.rank
+        return layer_name in self.kv_pp_placement.owned_layers_by_rank.get(
+            target_rank, []
+        )
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
