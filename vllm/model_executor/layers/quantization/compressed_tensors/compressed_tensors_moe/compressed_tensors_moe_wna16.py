@@ -11,7 +11,6 @@ from compressed_tensors.quantization import (
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoEExpertsModular,
     RoutedExperts,
     SharedExperts,
 )
@@ -36,7 +35,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_config,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -466,18 +464,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                     torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
                 )
 
-            # Marlin workspace — only needed for Marlin-family backends, not emulation.
-            if (
-                self.experts_cls is not None
-                and issubclass(self.experts_cls, FusedMoEExpertsModular)
-                and self.wna16_backend != WNA16MoEBackend.EMULATION
-            ):
-                layer.workspace = marlin_make_workspace_new(
-                    layer.w13_weight_packed.device,
-                    4,
-                    existing=getattr(layer, "workspace", None),
-                )
-
         # Alias packed weights to w13_weight/w2_weight for the modular kernel interface
         layer.w13_weight = layer.w13_weight_packed
         layer.w2_weight = layer.w2_weight_packed
@@ -488,7 +474,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         if self.wna16_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            from vllm.model_executor.layers.quantization.utils.humming import (
                 get_humming_moe_quant_config,
             )
 
