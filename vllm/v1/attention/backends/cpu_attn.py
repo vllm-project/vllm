@@ -406,6 +406,15 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 kv_cache_dtype=self.kv_cache_dtype,
             )
 
+        # The CPU kernel executes attention sinks natively in bf16. If the
+        # sinks tensor is anything other than bf16, cast it to fp32 so it is
+        # executed in full float precision (done lazily here, after weights
+        # are loaded, rather than at __init__ time).
+        if self.sinks is not None and self.sinks.dtype not in [
+            torch.bfloat16,
+            torch.float32,
+        ]:
+            self.sinks = self.sinks.to(torch.float32)
         ops.cpu_attention_with_kv_cache(
             query=query[:num_actual_tokens],
             key_cache=key_cache,
@@ -512,11 +521,10 @@ def _get_attn_isa(
         )
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
+    elif supports_arm:
+        return "neon"
     elif block_size % 32 == 0:
-        if supports_arm:
-            # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
-            return "neon"
-        elif supports_riscv and _riscv_supports_rvv():
+        if supports_riscv and _riscv_supports_rvv():
             return "rvv"
         elif supports_vxe:
             return "vxe"
