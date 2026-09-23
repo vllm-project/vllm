@@ -58,6 +58,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     export DNNL_ARCH_OPT_FLAGS="-mcpu=power10 -mtune=power10" && \
     export C_INCLUDE_PATH=/usr/local/include:$C_INCLUDE_PATH && \
     export CPLUS_INCLUDE_PATH=/usr/local/include:$CPLUS_INCLUDE_PATH && \
+    uv pip install 'setuptools==78.1.1' && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/OpenBLAS/lib/:/usr/local/lib64:/usr/local/lib && \
     export LIBGOMP=/opt/rh/gcc-toolset-14/root/usr/lib/gcc/ppc64le-redhat-linux/14/libgomp.so && \
 
