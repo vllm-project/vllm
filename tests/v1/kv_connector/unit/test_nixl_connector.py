@@ -671,8 +671,8 @@ class TestNixlHandshake:
         with (
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
-                "base_worker.get_current_attn_backends",
-                return_value=[FlashAttentionBackend],
+                "base_worker.get_current_attn_backends_and_specs",
+                return_value=([FlashAttentionBackend], [None]),
             ),
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
@@ -2221,9 +2221,11 @@ def test_register_kv_caches(
         patch(f"{nixl_worker}.NixlWrapper") as mock_nixl_wrapper,
         patch(f"{nixl_worker}.threading.Event"),
         patch(f"{nixl_worker}.threading.Thread") as mock_thread,
-        patch(f"{nixl_worker}.get_current_attn_backends") as mock_get_attn_backends,
+        patch(
+            f"{nixl_worker}.get_current_attn_backends_and_specs"
+        ) as mock_get_attn_backends,
     ):
-        mock_get_attn_backends.return_value = [backend_cls]
+        mock_get_attn_backends.return_value = ([backend_cls], [None])
         block_size = 16
         num_blocks = 8
         num_heads = 4
@@ -2361,9 +2363,9 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         patch(f"{nixl_worker}.NixlWrapper") as mock_nixl_wrapper,
         patch(f"{nixl_worker}.threading.Event"),
         patch(f"{nixl_worker}.threading.Thread") as mock_thread,
-        patch(f"{nixl_worker}.get_current_attn_backends") as mock_backends,
+        patch(f"{nixl_worker}.get_current_attn_backends_and_specs") as mock_backends,
     ):
-        mock_backends.return_value = [TritonAttentionBackend]
+        mock_backends.return_value = ([TritonAttentionBackend], [None])
         num_blocks = 2
         num_layers = 4
         block_size = 256

@@ -349,7 +349,11 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(
+            bw,
+            "get_current_attn_backends_and_specs",
+            return_value=([fake_backend], [None]),
+        ),
         patch.object(bw, "current_platform", fake_platform),
         patch(
             "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
@@ -384,6 +388,79 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
     worker._test_tensors_2d = tensors
     worker._test_unified_page = unified_page
     return worker
+
+
+@pytest.mark.cpu_test
+def test_flashmla_manager_block_is_preserved_for_nixl():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        NixlBaseConnectorWorker,
+    )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        FlashMLASparseBackend,
+    )
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    worker = object.__new__(NixlBaseConnectorWorker)
+    worker.block_size = 1152
+    worker.num_blocks = 2
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.attn_backends = [FlashMLASparseBackend]
+    worker.attn_backend_specs = [
+        MLAAttentionSpec(
+            block_size=1152,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+        )
+    ]
+
+    worker._sync_block_size_with_kernel()
+
+    assert worker.block_size == 1152
+    assert worker.num_blocks == 2
+    assert worker._physical_blocks_per_logical_kv_block == 1
+
+
+@pytest.mark.cpu_test
+def test_host_staging_copies_only_each_cache_group():
+    from types import SimpleNamespace
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        NixlBaseConnectorWorker,
+    )
+
+    worker = object.__new__(NixlBaseConnectorWorker)
+    worker.use_host_buffer = True
+    worker.copy_blocks = MagicMock()
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.device_kv_caches = {"full": MagicMock(), "sliding": MagicMock()}
+    worker.host_xfer_buffers = {"full": MagicMock(), "sliding": MagicMock()}
+    worker.kv_cache_config = SimpleNamespace(
+        transfer_groups=[
+            SimpleNamespace(layer_names=["full"]),
+            SimpleNamespace(layer_names=["sliding"]),
+        ]
+    )
+
+    block_ids = ([0], [1])
+    worker.sync_recved_kv_to_device(
+        "request", SimpleNamespace(local_physical_block_ids=block_ids)
+    )
+    assert [set(call.args[0]) for call in worker.copy_blocks.call_args_list] == [
+        {"full"},
+        {"sliding"},
+    ]
+
+    worker.copy_blocks.reset_mock()
+    worker.save_kv_to_host(
+        SimpleNamespace(
+            reqs_to_save={"request": SimpleNamespace(local_block_ids=block_ids)}
+        )
+    )
+    assert [set(call.args[0]) for call in worker.copy_blocks.call_args_list] == [
+        {"full"},
+        {"sliding"},
+    ]
 
 
 def _make_remote_meta(
@@ -830,11 +907,7 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
         worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
 
 
-def _make_csa_linear_ple_worker(
-    scratch_aliases: str = "compressed",
-    kv_buffer_device: str = "cuda",
-    packed: bool = False,
-):
+def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
     """``scratch_aliases`` selects which pages the compressor ring overlays."""
     from unittest.mock import MagicMock
 
@@ -855,13 +928,11 @@ def _make_csa_linear_ple_worker(
         UniformTypeKVCacheSpecs,
     )
 
-    num_blocks = 4 if packed else 2
-    main_spec_cls = MLAAttentionSpec if packed else FullAttentionSpec
     main_kv_specs = {
-        f"main_kv.{index}": main_spec_cls(
+        f"main_kv.{index}": FullAttentionSpec(
             block_size=4,
             num_kv_heads=1,
-            head_size=32 if packed else 16,
+            head_size=16,
             dtype=torch.float16,
         )
         for index in range(2)
@@ -917,11 +988,7 @@ def _make_csa_linear_ple_worker(
     tensor_regions: tuple[tuple[str, ...], ...]
     if scratch_aliases == "compressed":
         tensor_regions = (
-            (
-                "main_kv.0",
-                "mamba.sharded",
-                *(("mamba.ple",) if not packed else ()),
-            ),
+            ("main_kv.0", "mamba.sharded", "mamba.ple"),
             ("main_kv.1",),
             ("compressed.0", "compressor_state.0"),
             ("compressed.1", "compressor_state.1"),
@@ -934,19 +1001,17 @@ def _make_csa_linear_ple_worker(
             ("compressed.0",),
             ("compressed.1",),
         )
+    region_size = 512
     page_size = 256
-    region_size = num_blocks * page_size
     kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
+        num_blocks=2,
         kv_cache_tensors=[
             KVCacheTensor(
                 size=len(tensor_regions) * region_size,
                 layers=[layer_name],
-                layer_stride=page_size if packed else region_size,
-                block_stride=4 * page_size if packed else page_size,
-                offset=(
-                    region_index * page_size if packed else region_index * region_size
-                ),
+                layer_stride=region_size,
+                block_stride=page_size,
+                offset=region_index * region_size,
             )
             for region_index, layer_names in enumerate(tensor_regions)
             for layer_name in layer_names
@@ -955,7 +1020,7 @@ def _make_csa_linear_ple_worker(
             group(compressed_sparse_specs),
             group(compressor_state_specs),
             KVCacheGroupSpec(["mamba.sharded"], sharded_mamba_spec),
-            *([] if packed else [KVCacheGroupSpec(["mamba.ple"], ple_spec)]),
+            KVCacheGroupSpec(["mamba.ple"], ple_spec),
         ],
     )
 
@@ -963,7 +1028,7 @@ def _make_csa_linear_ple_worker(
     # The config is created for the host before the fake CUDA platform is active.
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     vllm_config.cache_config.enable_prefix_caching = False
-    vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [4]
     fake_backend.get_name.return_value = "TEST_ATTN"
@@ -976,7 +1041,11 @@ def _make_csa_linear_ple_worker(
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(
+            bw,
+            "get_current_attn_backends_and_specs",
+            return_value=([fake_backend], [None]),
+        ),
         patch.object(bw, "current_platform", fake_platform),
         patch(
             "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
@@ -985,30 +1054,14 @@ def _make_csa_linear_ple_worker(
         set_current_vllm_config(vllm_config),
     ):
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
-        if packed:
-            backing = torch.zeros((num_blocks, 4 * 256), dtype=torch.uint8)
-            tensors = [
-                backing[:, index * 256 : (index + 1) * 256] for index in range(4)
-            ]
-            worker.use_mla = True
-        else:
-            tensors = [
-                torch.zeros((num_blocks, 256), dtype=torch.uint8) for _ in range(4)
-            ]
-        caches = {
-            layer_name: (
-                tensors[region_index][:, : sharded_mamba_spec.state_content_size_bytes]
-                if packed and layer_name == "mamba.sharded"
-                else (
-                    tensors[region_index]
-                    if not packed or layer_name.startswith("mamba.")
-                    else tensors[region_index].view(torch.float16)
-                )
-            )
-            for region_index, layer_names in enumerate(tensor_regions)
-            for layer_name in layer_names
-        }
-        worker.register_kv_caches(caches)
+        tensors = [torch.zeros((2, 256), dtype=torch.uint8) for _ in range(4)]
+        worker.register_kv_caches(
+            {
+                layer_name: tensors[region_index]
+                for region_index, layer_names in enumerate(tensor_regions)
+                for layer_name in layer_names
+            }
+        )
     return worker
 
 
@@ -1021,72 +1074,6 @@ def test_csa_linear_registration_discovers_shared_regions():
     assert worker._ple_region_index == 0
     assert worker._region_is_mla == [False, False, True, True]
     assert worker._scratch_region_indices == [2, 3]
-
-
-@pytest.mark.cpu_test
-def test_glm_style_mamba_ring_host_staging_preserves_geometry_and_copy_groups():
-    from types import SimpleNamespace
-
-    worker = _make_csa_linear_ple_worker(kv_buffer_device="cpu", packed=True)
-
-    assert (
-        len(
-            {
-                cache.untyped_storage().data_ptr()
-                for cache in worker.host_xfer_buffers.values()
-            }
-        )
-        == 1
-    )
-    assert [
-        (cache.storage_offset(), cache.stride())
-        for cache in worker.host_xfer_buffers.values()
-    ] == [
-        (cache.storage_offset(), cache.stride())
-        for cache in worker.device_kv_caches.values()
-    ]
-
-    def raw_backing(caches):
-        storage = next(iter(caches.values())).untyped_storage()
-        return torch.empty(0, dtype=torch.uint8).set_(
-            storage, 0, (4, 4 * 256), (4 * 256, 1)
-        )
-
-    device_raw = raw_backing(worker.device_kv_caches)
-    host_raw = raw_backing(worker.host_xfer_buffers)
-    mamba_state_bytes = sum(worker._mamba_ssm_size)
-    for block_id in range(4):
-        device_raw[block_id].fill_(0x10 + block_id)
-    host_raw.fill_(0xEE)
-
-    def copy_blocks(src, dst, src_ids, dst_ids, _direction):
-        for name in src:
-            dst[name][dst_ids] = src[name][src_ids]
-
-    worker.copy_blocks = copy_blocks
-    worker.save_kv_to_host(
-        SimpleNamespace(
-            reqs_to_save={"request": SimpleNamespace(local_block_ids=([0], [1], [2]))}
-        )
-    )
-
-    # Attention owns every region of block 0, the ring owns regions 2/3 of
-    # block 1, and KDA owns region 0 of block 2. Block 3 stays untouched.
-    expected = torch.full_like(host_raw, 0xEE)
-    expected[0].fill_(0x10)
-    expected[1, 2 * 256 :].fill_(0x11)
-    expected[2, :mamba_state_bytes].fill_(0x12)
-    assert torch.equal(host_raw, expected)
-
-    device_raw.fill_(0xDD)
-    worker.sync_recved_kv_to_device(
-        "request", SimpleNamespace(local_physical_block_ids=([0], [1], [2]))
-    )
-    expected_device = torch.full_like(device_raw, 0xDD)
-    expected_device[0].fill_(0x10)
-    expected_device[1, 2 * 256 :].fill_(0x11)
-    expected_device[2, :mamba_state_bytes].fill_(0x12)
-    assert torch.equal(device_raw, expected_device)
 
 
 @pytest.mark.cpu_test
@@ -1225,7 +1212,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
         )
 
 
-def _make_ring_worker(kv_buffer_device: str = "cuda"):
+def _make_ring_worker():
     """Paged MLA group plus a per-layer ring group, no Mamba: the shape of a
     model whose sliding-window KV lives in per-request rings."""
     from unittest.mock import MagicMock
@@ -1291,7 +1278,7 @@ def _make_ring_worker(kv_buffer_device: str = "cuda"):
 
     vllm_config = create_vllm_config(block_size=4)
     vllm_config.cache_config.enable_prefix_caching = False
-    vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [4]
     fake_backend.get_name.return_value = "TEST_ATTN"
@@ -1304,13 +1291,15 @@ def _make_ring_worker(kv_buffer_device: str = "cuda"):
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(
+            bw,
+            "get_current_attn_backends_and_specs",
+            return_value=([fake_backend], [None]),
+        ),
         patch.object(bw, "current_platform", fake_platform),
         set_current_vllm_config(vllm_config),
     ):
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
-        if kv_buffer_device == "cpu":
-            worker.use_mla = True
         tensors = [torch.zeros((2, page_size), dtype=torch.uint8) for _ in range(2)]
         worker.register_kv_caches(
             {
@@ -1337,55 +1326,3 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
     )
     # Paged block 1 in both regions; ring block 0 only in its scratch region.
     assert sorted(desc_ids.tolist()) == sorted([0 * 2 + 1, 1 * 2 + 1, 1 * 2 + 0])
-
-
-@pytest.mark.cpu_test
-def test_ring_scratch_without_mamba_supports_host_staging():
-    from types import SimpleNamespace
-
-    worker = _make_ring_worker(kv_buffer_device="cpu")
-
-    assert len({tensor.data_ptr() for tensor in worker.host_xfer_buffers.values()}) == 4
-    assert [region[0] for region in worker.nixl_wrapper.registered[0][0]] == [
-        worker.host_xfer_buffers[name].data_ptr() for name in worker.region_names
-    ]
-    for address, length, _ in worker.src_blocks_data:
-        assert any(
-            start <= address and address + length <= start + size
-            for start, size, _, _ in worker.nixl_wrapper.registered[0][0]
-        )
-
-    desc_ids = worker._compute_desc_ids(
-        block_ids=([1], [0]),
-        dst_num_blocks=2,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-    )
-    assert desc_ids.tolist() == [1, 3, 4, 6]
-
-    for buffer in worker.host_xfer_buffers.values():
-        buffer.fill_(0xEE)
-    worker.host_xfer_buffers["paged.0"][1].fill_(0x11)
-    worker.host_xfer_buffers["paged.1"][1].fill_(0x11)
-    worker.host_xfer_buffers["ring.0"][0].fill_(0x22)
-    worker.host_xfer_buffers["ring.1"][0].fill_(0x22)
-
-    paged_0 = worker.device_kv_caches["paged.0"]
-    shared = worker.device_kv_caches["paged.1"]
-    paged_0[0].fill_(0xA0)
-    paged_0[1].fill_(0xA1)
-    shared[0].fill_(0xB0)
-    shared[1].fill_(0xB1)
-
-    def copy_blocks(src, dst, src_ids, dst_ids, direction):
-        for name in src:
-            dst[name][dst_ids] = src[name][src_ids]
-
-    worker.copy_blocks = copy_blocks
-    worker.sync_recved_kv_to_device(
-        "request", SimpleNamespace(local_physical_block_ids=([1], [0]))
-    )
-    assert torch.all(paged_0[0] == 0xA0)
-    assert torch.all(paged_0[1] == 0x11)
-    assert torch.all(shared[0] == 0x22)
-    assert torch.all(shared[1] == 0x11)

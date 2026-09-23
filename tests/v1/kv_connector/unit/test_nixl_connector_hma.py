@@ -2182,7 +2182,11 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         patch.object(bw, "NixlWrapper"),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(
+            bw,
+            "get_current_attn_backends_and_specs",
+            return_value=([fake_backend], [None]),
+        ),
         patch.object(bw, "current_platform", fake_platform),
         set_current_vllm_config(vllm_config),
     ):
@@ -2248,7 +2252,11 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
         patch.object(bw, "NixlWrapper"),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(
+            bw,
+            "get_current_attn_backends_and_specs",
+            return_value=([fake_backend], [None]),
+        ),
         patch.object(bw, "current_platform", fake_platform),
         patch(
             "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",

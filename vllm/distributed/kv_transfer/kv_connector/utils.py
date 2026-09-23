@@ -20,6 +20,12 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -369,6 +375,37 @@ def get_current_attn_backends(
                 use_mla=vllm_config.model_config.use_mla,
             )
         ]
+
+
+def get_current_attn_backends_and_specs(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
+    """Get attention backends paired with their resolved cache specs."""
+    layer_specs: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.transfer_groups:
+        group_spec = group.kv_cache_spec
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            layer_specs.update(group_spec.kv_cache_specs)
+        else:
+            layer_specs.update(dict.fromkeys(group.layer_names, group_spec))
+
+    layer_type = cast(type[Any], AttentionLayerBase)
+    layers = get_layers_from_vllm_config(vllm_config, layer_type, list(layer_specs))
+    if not layers:
+        backends = get_current_attn_backends(vllm_config)
+        return backends, [None] * len(backends)
+
+    pairs: list[tuple[type[AttentionBackend], AttentionSpec | None]] = []
+    for layer_name, layer in layers.items():
+        backend = layer.get_attn_backend()
+        spec = layer_specs.get(layer_name)
+        attention_spec = spec if isinstance(spec, AttentionSpec) else None
+        if not any(
+            existing_backend is backend and existing_spec == attention_spec
+            for existing_backend, existing_spec in pairs
+        ):
+            pairs.append((backend, attention_spec))
+    return [backend for backend, _ in pairs], [spec for _, spec in pairs]
 
 
 def get_current_attn_backend(

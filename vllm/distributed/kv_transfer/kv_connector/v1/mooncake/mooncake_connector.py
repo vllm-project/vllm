@@ -24,7 +24,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
-    get_current_attn_backends,
+    get_current_attn_backends_and_specs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -1069,9 +1069,11 @@ class MooncakeConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
         self._physical_blocks_per_logical_kv_block = 1
+        self.attn_backends, self.attn_backend_specs = (
+            get_current_attn_backends_and_specs(vllm_config, kv_cache_config)
+        )
         self._sync_block_size_with_kernel()
 
-        self.attn_backends = get_current_attn_backends(vllm_config)
         logger.debug(
             "Detected attention backends %s",
             [backend.get_name() for backend in self.attn_backends],
@@ -1107,8 +1109,9 @@ class MooncakeConnectorWorker:
         # and draft model may use different attention backends with different
         # physical block sizes. Pick the common (smallest) block size so that
         # KV-cache registration and transfer work correctly for both models.
-        backends = get_current_attn_backends(self.vllm_config)
-        kernel_block_size = select_common_block_size(self.block_size, backends)
+        kernel_block_size = select_common_block_size(
+            self.block_size, self.attn_backends, self.attn_backend_specs
+        )
         if self.block_size != kernel_block_size:
             logger.info_once(
                 "User-specified logical block size (%s) does not match"

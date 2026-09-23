@@ -72,6 +72,12 @@ class AttentionBackend(ABC):
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
+    @classmethod
+    def get_supported_kernel_block_sizes_for_spec(
+        cls, spec: "AttentionSpec"
+    ) -> list[int | MultipleOf]:
+        return cls.get_supported_kernel_block_sizes()
+
     @staticmethod
     def get_kernel_page_rows() -> int | None:
         """Rows per page the kernel addresses when a manager block larger than

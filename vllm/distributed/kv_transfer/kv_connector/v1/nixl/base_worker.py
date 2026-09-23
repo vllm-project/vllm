@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     EngineTransferInfo,
     TransferTopology,
-    get_current_attn_backends,
+    get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
@@ -847,7 +847,9 @@ class NixlBaseConnectorWorker:
 
         # Get the attention backend from the first layer
         # NOTE (NickLucche) models with multiple backends are not supported yet
-        self.attn_backends = get_current_attn_backends(vllm_config)
+        self.attn_backends, self.attn_backend_specs = (
+            get_current_attn_backends_and_specs(vllm_config, kv_cache_config)
+        )
         self.backend_name = self.attn_backends[0].get_name()
 
         self.kv_cache_layout = (
@@ -934,8 +936,9 @@ class NixlBaseConnectorWorker:
             )
 
     def _sync_block_size_with_kernel(self) -> None:
-        backends = get_current_attn_backends(self.vllm_config)
-        kernel_block_size = select_common_block_size(self.block_size, backends)
+        kernel_block_size = select_common_block_size(
+            self.block_size, self.attn_backends, self.attn_backend_specs
+        )
         # Number of blocks not accounting for kernel block mismatches
         self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
@@ -1154,30 +1157,6 @@ class NixlBaseConnectorWorker:
         """
         xfer_buffers: dict[str, torch.Tensor] = {}
         try:
-            if self._has_mamba and self._is_csa_linear:
-                # Mamba and ring views overlay attention pages in one HMA
-                # allocation; preserve those aliases in the staging mirror.
-                host_storages: dict[int, torch.Tensor] = {}
-                for layer_name, kv_cache in kv_caches.items():
-                    storage = kv_cache.untyped_storage()
-                    storage_key = storage.data_ptr()
-                    host_storage = host_storages.get(storage_key)
-                    if host_storage is None:
-                        host_storage = torch.empty(
-                            storage.nbytes(), dtype=torch.uint8, device="cpu"
-                        )
-                        host_storages[storage_key] = host_storage
-                    xfer_buffers[layer_name] = torch.empty(
-                        0, dtype=kv_cache.dtype, device="cpu"
-                    ).set_(
-                        host_storage.untyped_storage(),
-                        kv_cache.storage_offset(),
-                        kv_cache.shape,
-                        kv_cache.stride(),
-                    )
-                self.host_xfer_buffers = xfer_buffers
-                return
-
             for layer_name, kv_cache in kv_caches.items():
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
@@ -1396,6 +1375,11 @@ class NixlBaseConnectorWorker:
             self.backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
+
+        if self._is_csa_linear and self.use_host_buffer:
+            raise NotImplementedError(
+                "NIXL host staging does not preserve CSA-linear shared tensors."
+            )
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
