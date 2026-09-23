@@ -29,6 +29,7 @@ from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
@@ -475,6 +476,13 @@ class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV4"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # The ROCm sparse MLA and V4.1 indexer paths both consume 128-token
+        # manager blocks. Do not inherit the SM90-specific 64-token choice:
+        # block-major mixed-page layouts cannot split an interleaved block.
+        return [128]
 
     @staticmethod
     def get_builder_cls() -> type[DeepseekV4SparseMLAMetadataBuilder]:

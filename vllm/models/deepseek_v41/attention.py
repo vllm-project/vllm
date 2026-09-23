@@ -1193,6 +1193,11 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             block_stride_alignment=(
                 math.lcm(512, page_alignment) if self.sparse_logits else None
             ),
+            storage_block_size=(
+                self.cache_config.block_size
+                if dsa_indexer_uses_fp4(vllm_config)
+                else None
+            ),
         )
 
     def forward(self): ...

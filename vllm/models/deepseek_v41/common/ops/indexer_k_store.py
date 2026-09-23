@@ -18,7 +18,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-from . import MXFP4_BLOCK_SIZE, _fp32x2_to_fp4x2
+from . import MXFP4_BLOCK_SIZE, _fp32x2_to_fp4x2, _fp32x2_to_fp4x2_rocm
 
 # ROCm tiled ("SHUFFLE") indexer K value layout, mirroring
 # indexer_k_quant_and_cache_triton's defaults: 16 positions x 16 bytes.
@@ -70,26 +70,17 @@ def indexer_k_norm_rope_store(
         token_stride = head_dim
         scale_dim = 4  # single float32 scale
 
-    # ROCm reads this cache back with the 16x16-tiled ("SHUFFLE") value
-    # layout: cp_gather_indexer_k_quant_cache_triton on prefill and aiter's
-    # deepgemm_fp8_paged_mqa_logits(Preshuffle=True) on decode both select it
-    # from ``block_size > 1``, matching the v4.0 writer
-    # (indexer_k_quant_and_cache_triton). Writing row-major here would hand
-    # both readers permuted key bytes.
+    # ROCm readers use AITER's preshuffled page layout whenever block_size > 1.
     block_size = k_cache.shape[1]
     shuffle = current_platform.is_rocm() and block_size > 1
-    if shuffle:
-        if use_fp4_cache:
-            raise NotImplementedError(
-                "MXFP4 indexer K cache has no tiled ROCm layout; "
-                "the ROCm readers only implement the FP8 one."
-            )
-        if block_size % _BLOCK_TILE_SIZE != 0 or head_dim % _HEAD_TILE_SIZE != 0:
-            raise ValueError(
-                f"ROCm tiled indexer K cache needs block_size "
-                f"({block_size}) % {_BLOCK_TILE_SIZE} == 0 and head_dim "
-                f"({head_dim}) % {_HEAD_TILE_SIZE} == 0."
-            )
+    if shuffle and (
+        block_size % _BLOCK_TILE_SIZE != 0 or head_dim % _HEAD_TILE_SIZE != 0
+    ):
+        raise ValueError(
+            f"ROCm tiled indexer K cache needs block_size "
+            f"({block_size}) % {_BLOCK_TILE_SIZE} == 0 and head_dim "
+            f"({head_dim}) % {_HEAD_TILE_SIZE} == 0."
+        )
 
     launch_kwargs = {"launch_pdl": False} if current_platform.is_cuda() else {}
     _indexer_k_norm_rope_quant_store_kernel[(num_tokens,)](
@@ -227,13 +218,37 @@ def _indexer_k_norm_rope_quant_store_kernel(
         ue8m0 = (log2_ratio + 127.0).to(tl.uint8)  # [N_QUANT_BLOCKS]
 
         inv_scale_col = tl.reshape(inv_scale, (N_QUANT_BLOCKS, 1))
-        packed = _fp32x2_to_fp4x2(
-            even_2d * inv_scale_col, odd_2d * inv_scale_col
-        )  # (N_BLOCKS, HALF_BLOCK) uint8
+        if SHUFFLE:
+            packed = _fp32x2_to_fp4x2_rocm(
+                even_2d * inv_scale_col, odd_2d * inv_scale_col
+            )
+        else:
+            packed = _fp32x2_to_fp4x2(even_2d * inv_scale_col, odd_2d * inv_scale_col)
         packed_flat = tl.reshape(packed, (TOKEN_STRIDE,))
 
-        tl.store(val_ptr + tl.arange(0, TOKEN_STRIDE), packed_flat)
-        tl.store(scale_ptr + tl.arange(0, SCALE_DIM), ue8m0)
+        if SHUFFLE:
+            packed_idx = tl.arange(0, TOKEN_STRIDE)
+            # AITER layout: [K tile, K chunk, page token, 16 packed bytes].
+            value_offset = (
+                (packed_idx // HEAD_TILE_SIZE) * kv_cache_block_size * HEAD_TILE_SIZE
+                + kv_pos_in_block * HEAD_TILE_SIZE
+                + packed_idx % HEAD_TILE_SIZE
+            )
+            # Interleave four equally sized token groups so one dword carries
+            # the four scale bytes consumed together by a 64-token warp tile.
+            scale_group_size = kv_cache_block_size // SCALE_DIM
+            scale_idx = tl.arange(0, SCALE_DIM)
+            scale_offset = (
+                kv_cache_block_size * TOKEN_STRIDE
+                + scale_idx * kv_cache_block_size
+                + (kv_pos_in_block % scale_group_size) * SCALE_DIM
+                + kv_pos_in_block // scale_group_size
+            )
+            tl.store(cache_block_ptr + value_offset, packed_flat)
+            tl.store(cache_block_ptr + scale_offset, ue8m0)
+        else:
+            tl.store(val_ptr + tl.arange(0, TOKEN_STRIDE), packed_flat)
+            tl.store(scale_ptr + tl.arange(0, SCALE_DIM), ue8m0)
     else:
         # Per-token FP8 (single 128-wide block) with one float32 scale.
         result = tl.interleave(new_even, new_odd)  # [HEAD_SIZE] fp32

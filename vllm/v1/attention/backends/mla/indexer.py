@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -51,8 +53,39 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 # The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
-# and mxfp4 is the opt-in Blackwell path.
+# and mxfp4 is opt-in on Blackwell datacenter GPUs and ROCm gfx950.
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
+
+
+@lru_cache(maxsize=1)
+def aiter_mxfp4_available() -> bool:
+    """Whether installed AITER exposes stride-capable FlyDSL FP4 kernels."""
+    try:
+        from aiter.ops.flydsl.kernels.mqa_logits import (
+            pa_mqa_logits_fp4 as decode,
+        )
+        from aiter.ops.flydsl.kernels.mqa_logits import (
+            pa_mqa_logits_fp4_common as common,
+        )
+        from aiter.ops.flydsl.kernels.mqa_logits import (
+            pa_mqa_logits_fp4_prefill as prefill,
+        )
+
+        if "byte_offset" not in inspect.signature(common._i32_buffer).parameters:
+            return False
+        required = {"kv_page_stride", "kv_scale_page_stride", "block_table_stride"}
+        for module, name in (
+            (decode, "pa_mqa_logits_fp4"),
+            (prefill, "pa_mqa_logits_fp4_prefill"),
+        ):
+            for prefix in ("build_", "compile_"):
+                suffix = "_module" if prefix == "build_" else ""
+                function = getattr(module, prefix + name + suffix)
+                if not required.issubset(inspect.signature(function).parameters):
+                    return False
+        return True
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return False
 
 
 def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
@@ -64,6 +97,25 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
             f"sparse indexer (expected one of {DSA_INDEXER_KV_DTYPES})."
         )
     use_fp4 = kv_dtype == "mxfp4"
+    if use_fp4 and current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            raise ValueError("ROCm indexer_kv_dtype='mxfp4' requires gfx950")
+        parallel = vllm_config.parallel_config
+        if (
+            parallel.decode_context_parallel_size != 1
+            or parallel.prefill_context_parallel_size != 1
+        ):
+            raise ValueError("ROCm MXFP4 indexer requires DCP=PCP=1")
+        if not aiter_mxfp4_available():
+            logger.warning(
+                "indexer_kv_dtype='mxfp4' was requested, but the installed "
+                "AITER build lacks stride-capable FlyDSL FP4 kernels; "
+                "falling back to the fp8 indexer."
+            )
+            return False
+        return True
     if use_fp4 and not current_platform.is_device_capability_family(100):
         raise ValueError(
             "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "
@@ -275,7 +327,12 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64 if current_platform.is_device_capability_family(90) else 128]
+        return [
+            64
+            if current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+            else 128
+        ]
 
 
 @dataclass(frozen=True)
@@ -382,6 +439,8 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
+    query_slice_start: int = 0
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -628,6 +687,9 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    # Views into builder-owned storage, refreshed before each graph replay.
+    fp4_cta_info: torch.Tensor | None = None
+    fp4_total_ctas: int | None = None
 
 
 @dataclass
@@ -841,6 +903,9 @@ def _supports_native_decode(next_n: int) -> bool:
 
 
 def _use_flattening(vllm_config: VllmConfig) -> bool:
+    if current_platform.is_rocm() and dsa_indexer_uses_fp4(vllm_config):
+        # Expand uncompressed causal bounds before dividing each by C4.
+        return True
     speculative_config = vllm_config.speculative_config
     next_n = 1 + vllm_config.num_speculative_tokens
     return not _supports_native_decode(next_n) or (
@@ -974,6 +1039,38 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             raise NotImplementedError(
                 "DCP is not supported with sparse indexer KV compression "
                 f"(compress_ratio={self.compress_ratio})."
+            )
+
+        if current_platform.is_rocm() and self.indexer_uses_fp4:
+            if self.compress_ratio not in (1, 2, 4):
+                raise ValueError(
+                    "ROCm MXFP4 indexer requires compression ratio 1, 2, or 4"
+                )
+            if self.kv_cache_spec.num_states <= 0 or self.kv_cache_spec.num_states % 16:
+                raise ValueError(
+                    "ROCm MXFP4 indexer requires a positive 16-token-aligned "
+                    f"page; got num_states={self.kv_cache_spec.num_states}, "
+                    f"block_size={self.kv_cache_spec.block_size}, "
+                    f"compress_ratio={self.compress_ratio}"
+                )
+
+        self.fp4_cta_info_buffer: torch.Tensor | None = None
+        if current_platform.is_rocm() and self.indexer_uses_fp4:
+            compilation_config = self.vllm_config.compilation_config
+            max_decode_tokens = max(
+                scheduler_config.max_num_batched_tokens,
+                compilation_config.max_cudagraph_capture_size or 0,
+                max(compilation_config.cudagraph_capture_sizes or (), default=0),
+            )
+            # Stable storage shared by every indexer layer in this attention group.
+            # build() refreshes its contents before eager execution or graph replay.
+            self.fp4_cta_info_buffer = torch.empty(
+                (max(512, max_decode_tokens), 4),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.fp4_max_seq_len = (
+                self.vllm_config.model_config.max_model_len // self.compress_ratio
             )
 
         # Pre-allocate buffers for CUDA graph compatibility when
@@ -1601,6 +1698,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
                 schedule_metadata[:] = metadata
 
+            fp4_cta_info = None
+            fp4_total_ctas = None
+            if self.fp4_cta_info_buffer is not None and num_decode_tokens > 0:
+                from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
+                    compute_varctx_schedule,
+                )
+
+                # FP4 flattens speculative rows before C4 length conversion, so
+                # AITER sees next_n=1 and one exact context bound per output row.
+                assert seq_lens.shape == (num_decode_tokens, 1)
+                parallel_unit_num = max(512, num_decode_tokens)
+                assert parallel_unit_num <= self.fp4_cta_info_buffer.shape[0]
+                _, fp4_cta_info, fp4_total_ctas = compute_varctx_schedule(
+                    seq_lens[:, 0],
+                    block_k=256,
+                    parallel_unit_num=parallel_unit_num,
+                    max_seq_len=self.fp4_max_seq_len,
+                    next_n=1,
+                    cta_info_out=self.fp4_cta_info_buffer[:parallel_unit_num],
+                )
+
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
@@ -1612,6 +1730,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                fp4_cta_info=fp4_cta_info,
+                fp4_total_ctas=fp4_total_ctas,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -1760,6 +1880,8 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
+        query_start_loc=query_start_loc,
+        query_slice_start=qs_start,
     )
 
 

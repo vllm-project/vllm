@@ -317,6 +317,237 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def _rocm_fp4_cache_views(
+    kv_cache: torch.Tensor, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert head_dim == 128 and kv_cache.ndim == 3
+    assert kv_cache.dtype == torch.uint8 and kv_cache.shape[2] == 68
+    num_blocks, block_size, _ = kv_cache.shape
+    assert kv_cache.stride(2) == 1 and kv_cache.stride(1) == 68
+    page_stride = kv_cache.stride(0)
+    assert page_stride >= block_size * 68
+    values = torch.as_strided(
+        kv_cache,
+        (num_blocks, 1, 4, block_size, 16),
+        (page_stride, block_size * 64, block_size * 16, 16, 1),
+    )
+    scales = torch.as_strided(
+        kv_cache,
+        (num_blocks, 1, 4, block_size),
+        (page_stride, block_size * 4, block_size, 1),
+        storage_offset=kv_cache.storage_offset() + block_size * 64,
+    )
+    return values, scales
+
+
+@triton.jit(do_not_specialize=["ROWS", "REQUESTS", "QUERY_OFFSET", "SEARCH_STEPS"])
+def _rocm_fp4_prefill_windows_kernel(
+    query_starts,
+    row_starts,
+    row_ends,
+    row_to_batch,
+    local_starts,
+    local_ends,
+    ROWS,
+    REQUESTS,
+    QUERY_OFFSET,
+    SEARCH_STEPS,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = row < ROWS
+    query = row + QUERY_OFFSET
+    lo = tl.full((BLOCK,), 0, tl.int32)
+    hi = tl.full((BLOCK,), 0, tl.int32) + REQUESTS
+    for _ in range(SEARCH_STEPS):
+        mid = (lo + hi) // 2
+        end = tl.load(query_starts + tl.minimum(mid + 1, REQUESTS))
+        right = (mid < REQUESTS) & (end <= query)
+        lo = tl.where(right, mid + 1, lo)
+        hi = tl.where(right, hi, mid)
+    real_end = tl.load(query_starts + REQUESTS)
+    start = tl.load(row_starts + row, mask=valid, other=0)
+    end = tl.load(row_ends + row, mask=valid, other=0)
+    tl.store(row_to_batch + row, tl.minimum(lo, REQUESTS - 1), mask=valid)
+    tl.store(local_starts + row, 0, mask=valid)
+    tl.store(
+        local_ends + row,
+        tl.where(query < real_end, tl.maximum(end - start, 0), 0),
+        mask=valid,
+    )
+
+
+def _rocm_fp4_prefill_windows(chunk):
+    assert chunk.query_start_loc is not None
+    rows = chunk.token_end - chunk.token_start
+    windows = torch.empty((3, rows), dtype=torch.int32, device=chunk.block_table.device)
+    row_to_batch, starts, ends = windows.unbind(0)
+    if rows:
+        _rocm_fp4_prefill_windows_kernel[(triton.cdiv(rows, 256),)](
+            chunk.query_start_loc,
+            chunk.cu_seqlen_ks,
+            chunk.cu_seqlen_ke,
+            row_to_batch,
+            starts,
+            ends,
+            rows,
+            chunk.num_reqs,
+            chunk.query_slice_start,
+            (chunk.num_reqs + 1).bit_length(),
+            BLOCK=256,
+        )
+    return row_to_batch, starts, ends
+
+
+def _rocm_fp4_sparse_attn_indexer(
+    kv_cache,
+    q_quant,
+    q_scale,
+    weights,
+    head_dim,
+    max_model_len,
+    topk_tokens,
+    topk_indices_buffer,
+    metadata,
+    candidate_blocks=None,
+    candidate_block_size=0,
+    candidate_write=False,
+):
+    from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
+        flydsl_pa_mqa_logits_fp4,
+    )
+    from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
+        flydsl_pa_mqa_logits_fp4_prefill,
+    )
+
+    assert q_quant.dtype == torch.uint8
+    assert q_quant.ndim == 3 and q_quant.shape[1] % 16 == 0
+    assert q_quant.shape[2] * 2 == head_dim
+    assert q_scale is not None and q_scale.dtype == torch.uint8
+    m_tiles = q_quant.shape[1] // 16
+    q_scale_words = ((m_tiles + 3) // 4) * 4
+    assert q_scale.shape == (
+        q_quant.shape[0],
+        head_dim // 128,
+        4,
+        16,
+        q_scale_words,
+    )
+    values, scales = _rocm_fp4_cache_views(kv_cache, head_dim)
+    block_size = kv_cache.shape[1]
+    block_k = 256
+    weights_bf16 = weights.to(torch.bfloat16)
+    topk_indices_buffer[: q_quant.shape[0]].fill_(-1)
+
+    if metadata.num_prefills:
+        assert metadata.prefill is not None
+        for chunk in metadata.prefill.chunks:
+            if chunk.local_total_seq_lens == 0 or chunk.token_start == chunk.token_end:
+                continue
+            row_to_batch, starts, ends = _rocm_fp4_prefill_windows(chunk)
+            rows = slice(chunk.token_start, chunk.token_end)
+            logits = flydsl_pa_mqa_logits_fp4_prefill(
+                q_quant[rows],
+                q_scale[rows],
+                values,
+                scales,
+                chunk.block_table,
+                weights_bf16[rows],
+                row_to_batch,
+                starts,
+                ends,
+                min(max_model_len, chunk.local_total_seq_lens),
+                block_k=block_k,
+                kv_block_size=block_size,
+                parallel_unit_num=max(512, chunk.token_end - chunk.token_start),
+            )
+            if candidate_blocks is not None:
+                chunk_candidates = candidate_blocks[rows]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        starts,
+                        ends,
+                        chunk_candidates.shape[1],
+                        candidate_block_size,
+                        chunk_candidates,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        starts,
+                        ends,
+                        chunk_candidates,
+                        candidate_block_size,
+                    )
+            ops.top_k_per_row_prefill(
+                logits,
+                starts,
+                ends,
+                topk_indices_buffer[rows, :topk_tokens],
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+
+    if metadata.num_decodes:
+        decode = metadata.decode
+        assert decode is not None and not decode.requires_padding
+        assert decode.seq_lens.ndim == 2 and decode.seq_lens.shape[1] == 1
+        rows = metadata.num_decode_tokens
+        if rows:
+            assert decode.fp4_cta_info is not None
+            assert decode.fp4_total_ctas is not None
+            logits = flydsl_pa_mqa_logits_fp4(
+                q_quant[:rows].unsqueeze(1),
+                q_scale[:rows].unsqueeze(1),
+                values,
+                scales,
+                decode.block_table[:rows],
+                weights_bf16[:rows],
+                decode.seq_lens[:rows, 0],
+                max_model_len,
+                next_n=1,
+                block_k=block_k,
+                kv_block_size=block_size,
+                parallel_unit_num=max(512, rows),
+                cta_info=decode.fp4_cta_info,
+                total_ctas=decode.fp4_total_ctas,
+            )
+            if candidate_blocks is not None:
+                decode_candidates = candidate_blocks[:rows]
+                visible = decode.seq_lens[:rows, 0]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        visible,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        None,
+                        visible,
+                        decode_candidates,
+                        candidate_block_size,
+                    )
+            ops.top_k_per_row_decode(
+                logits,
+                1,
+                decode.seq_lens[:rows],
+                topk_indices_buffer[:rows, :topk_tokens],
+                rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+    return topk_indices_buffer
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -470,6 +701,24 @@ def sparse_attn_indexer(
                 # consume top-k indices for this batch; clearing it would be
                 # unnecessary work.
                 return topk_indices_buffer
+
+    if use_fp4_cache and current_platform.is_rocm():
+        assert skip_k_cache_insert and not use_pcp and dcp_world_size == 1
+        assert q_scale is not None
+        return _rocm_fp4_sparse_attn_indexer(
+            kv_cache,
+            q_quant,
+            q_scale,
+            weights,
+            head_dim,
+            max_model_len,
+            topk_tokens,
+            topk_indices_buffer,
+            attn_metadata_narrowed,
+            candidate_blocks=candidate_blocks,
+            candidate_block_size=candidate_block_size,
+            candidate_write=candidate_write,
+        )
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
@@ -899,6 +1148,19 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self._cp_kv_cache_interleave_size: int | None = None
+        if use_fp4_cache and current_platform.is_rocm():
+            from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
+
+            dsa_indexer_uses_fp4(vllm_config)
+            if (
+                head_dim != 128
+                or compress_ratio not in (1, 2, 4)
+                or not skip_k_cache_insert
+            ):
+                raise ValueError(
+                    "ROCm MXFP4 indexer requires fused K, D=128, and "
+                    "compression ratio 1, 2, or 4"
+                )
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -1022,7 +1284,8 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor | None,
         weights: torch.Tensor,
     ):
-        assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
+        if self.use_fp4_cache:
+            return self.forward_cuda(hidden_states, q_quant, k, weights)
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
