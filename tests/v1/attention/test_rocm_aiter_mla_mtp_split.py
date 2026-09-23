@@ -384,6 +384,62 @@ def test_asm_preferred_qlen_at_cprr_floor_stays_on_cprr(monkeypatch):
     assert get_mla_metadata_v1.call_args.kwargs.get("is_cp_round_robin") is True
 
 
+def test_cprr_capable_single_token_decode_keeps_persistent_metadata(monkeypatch):
+    """The CPRR qlen floor must not suppress the ordinary qlen-1 schedule."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+
+    metadata = _cprr_decode_batch(
+        _builder(
+            mtp_decode_qlen=5,
+            dcp_world_size=8,
+            num_heads=12,
+            asm_dcp_verify=True,
+        ),
+        qlen=1,
+    )
+
+    assert metadata.g_kv_indptr is None
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.kwargs.get("is_cp_round_robin") is None
+
+
+def test_non_causal_dcp_block_uses_plain_mask0_metadata(monkeypatch):
+    """A non-causal block needs no CPRR global-position window or head pad."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    builder = _builder(
+        mtp_decode_qlen=5,
+        dcp_world_size=8,
+        num_heads=12,
+        asm_dcp_verify=True,
+    )
+    builder._decode_causal = False
+
+    metadata = _cprr_decode_batch(builder, qlen=4)
+
+    assert metadata.dcp_verify is None
+    assert metadata.g_kv_indptr is None
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.args[3] == 96
+    assert get_mla_metadata_v1.call_args.args[5] is False
+    assert get_mla_metadata_v1.call_args.kwargs.get("is_cp_round_robin") is None
+
+
 def test_asm_qlen2_without_segmented_builds_no_cprr_metadata(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
@@ -450,9 +506,61 @@ def test_asm_qlen2_without_segmented_fails_fast(monkeypatch):
     layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
     q = torch.zeros(2, 96, 576, dtype=torch.bfloat16)
 
-    with pytest.raises(RuntimeError, match="no segmented DCP-verify fallback"):
+    with pytest.raises(RuntimeError, match="requires either segmented MLA"):
         impl.forward_mqa(q, torch.zeros(1, 1, 576), attn_metadata, layer)
     assert not captured
+
+
+def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
+    """Process-level CPRR capability must not pad or route a non-causal batch."""
+    captured = {}
+
+    def fake_aiter_decode(q, kv_buffer, out, *args, **kwargs):
+        captured["q_heads"] = q.shape[1]
+        captured["kwargs"] = kwargs
+        return None, torch.zeros(q.shape[0], q.shape[1])
+
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_get_aiter_mla_decode", lambda: fake_aiter_decode
+    )
+
+    impl = object.__new__(AiterMLAImpl)
+    impl.num_heads = 12
+    impl.dcp_world_size = 8
+    impl.kv_cache_dtype = "auto"
+    impl.kv_lora_rank = 512
+    impl.qk_rope_head_dim = 64
+    impl.scale = 576**-0.5
+    decode = SimpleNamespace(
+        max_qo_len=4,
+        qo_indptr=torch.tensor([0, 4], dtype=torch.int32),
+        paged_kv_indptr=torch.tensor([0, 1], dtype=torch.int32),
+        paged_kv_indices=torch.zeros(1, dtype=torch.int32),
+        paged_kv_last_page_len=torch.ones(1, dtype=torch.int32),
+        use_gluon_decode=False,
+        use_gluon_verify=False,
+        dcp_verify=None,
+        g_kv_indptr=None,
+        has_persistent_metadata=False,
+        attn_out_dtype=torch.bfloat16,
+        asm_decode_num_heads=128,
+        mla_num_kv_splits=256,
+        cp_world_size=8,
+        cp_rank=0,
+        min_kv_seq_len=1,
+    )
+    attn_metadata = SimpleNamespace(decode=decode, causal=False, work_meta_data=None)
+    layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
+    q = torch.zeros(4, 96, 576, dtype=torch.bfloat16)
+
+    output, lse = impl.forward_mqa(q, torch.zeros(1, 1, 576), attn_metadata, layer)
+
+    assert captured["q_heads"] == 96
+    assert captured["kwargs"]["causal"] is False
+    assert "g_kv_indptr" not in captured["kwargs"]
+    assert "num_kv_splits" not in captured["kwargs"]
+    assert output.shape[1] == 96
+    assert lse is not None and lse.shape == (4, 96)
 
 
 def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
@@ -499,6 +607,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         # 0 == the round-robin (cprr) asm route is off, this rank's decode takes
         # the existing path. Mirrors the AiterMLADecodeMetadata default.
         asm_decode_num_heads=0,
+        g_kv_indptr=None,
     )
     attn_metadata = SimpleNamespace(decode=decode, causal=True, work_meta_data=None)
     layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))

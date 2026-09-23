@@ -236,6 +236,7 @@ def test_min_cprr_qlen_is_above_two():
         (True, True, 4, True, False),
         (True, True, 4, False, True),
         (True, False, 2, True, False),
+        (True, False, 4, False, False),
         (False, True, 2, True, False),
     ],
 )
