@@ -115,6 +115,14 @@ class BlockTable:
             self.max_num_reqs, self.max_num_blocks_per_req, dtype=torch.int32
         )
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        # Conservative [lo, hi] interval of rows whose CPU-side contents have
+        # changed since the last commit that covered them; empty when lo > hi.
+        # A row only changes when a request is admitted, moved, removed, or
+        # crosses a KV-block boundary, so at steady-state decode most steps
+        # dirty no row at all and the H2D copy can be skipped. Start fully
+        # dirty so the first commit (a warmup dummy run) still does the copy.
+        self._dirty_lo = 0
+        self._dirty_hi = max_num_reqs - 1
 
         self.slot_mapping = self._make_buffer(
             self.max_num_batched_tokens, dtype=torch.int64
@@ -171,6 +179,7 @@ class BlockTable:
         start = self.num_blocks_per_row[row_idx]
         self.num_blocks_per_row[row_idx] += num_blocks
         self.block_table.np[row_idx, start : start + num_blocks] = block_ids
+        self._mark_row_dirty(row_idx)
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
@@ -180,6 +189,7 @@ class BlockTable:
         num_blocks = self.num_blocks_per_row[row_idx]
         if num_blocks > 0:
             self.block_table.np[row_idx, :num_blocks] = 0
+            self._mark_row_dirty(row_idx)
         self.num_blocks_per_row[row_idx] = 0
 
     def move_row(self, src: int, tgt: int) -> None:
@@ -192,11 +202,15 @@ class BlockTable:
         # after the blocks have been freed and reallocated.
         block_table_np[src, :num_blocks] = 0
         self.num_blocks_per_row[src] = 0
+        self._mark_row_dirty(src)
+        self._mark_row_dirty(tgt)
 
     def swap_row(self, src: int, tgt: int) -> None:
         src_tgt, tgt_src = [src, tgt], [tgt, src]
         self.num_blocks_per_row[src_tgt] = self.num_blocks_per_row[tgt_src]
         self.block_table.np[src_tgt] = self.block_table.np[tgt_src]
+        self._mark_row_dirty(src)
+        self._mark_row_dirty(tgt)
 
     def compute_slot_mapping(
         self,
@@ -228,12 +242,39 @@ class BlockTable:
             self.cp_kv_cache_interleave_size,
         )
 
+    def _mark_row_dirty(self, row_idx: int) -> None:
+        if row_idx < self._dirty_lo:
+            self._dirty_lo = row_idx
+        if row_idx > self._dirty_hi:
+            self._dirty_hi = row_idx
+
+    def mark_dirty(self) -> None:
+        """Mark every row dirty.
+
+        Callers that write `block_table.np`/`block_table.cpu` directly rather
+        than through this class must call this, otherwise the next commit has
+        no way to know the host buffer changed and will skip the copy.
+        """
+        self._dirty_lo = 0
+        self._dirty_hi = self.max_num_reqs - 1
+
     def commit_block_table(self, num_reqs: int) -> None:
+        # Only the first `num_reqs` rows are transferred, so rows dirtied
+        # beyond them must stay dirty until a commit that covers them.
+        if self._dirty_lo >= num_reqs:
+            return
         self.block_table.copy_to_gpu(num_reqs)
+        if self._dirty_hi >= num_reqs:
+            self._dirty_lo = num_reqs
+        else:
+            self._dirty_lo = self.max_num_reqs
+            self._dirty_hi = -1
 
     def clear(self) -> None:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
+        self._dirty_lo = self.max_num_reqs
+        self._dirty_hi = -1
 
     @staticmethod
     def map_to_kernel_blocks(
@@ -381,6 +422,10 @@ class MultiGroupBlockTable:
     ) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+
+    def mark_dirty(self) -> None:
+        for block_table in self.block_tables:
+            block_table.mark_dirty()
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:

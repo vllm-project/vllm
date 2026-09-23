@@ -717,3 +717,5 @@ class ElasticEPScalingExecutor:
         ):
             bt.block_table.gpu.copy_(saved_gpu)
             bt.block_table.cpu.copy_(saved_cpu)
+        # The host buffer was restored behind the block table's back.
+        multi_block_table.mark_dirty()
