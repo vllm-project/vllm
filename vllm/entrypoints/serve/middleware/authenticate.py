@@ -25,7 +25,8 @@ class AuthenticationMiddleware:
     -----
     There are two cases in which authentication is skipped:
         1. The HTTP method is OPTIONS.
-        2. The request path is one of UNGUARDED_PATHS (e.g. /health).
+        2. The request path, ignoring a trailing slash, is one of
+           UNGUARDED_PATHS (e.g. /health).
 
     """
 
@@ -60,9 +61,14 @@ class AuthenticationMiddleware:
             return self.app(scope, receive, send)
         root_path = scope.get("root_path", "")
         url_path = scope["path"].removeprefix(root_path)
+        # This middleware runs ahead of the router, so a path that differs from
+        # an allowlisted one only by a trailing slash never reaches FastAPI's
+        # redirect_slashes: match on the normalized path, or a liveness probe
+        # configured as /health/ is answered with 401.
+        probe_path = url_path.rstrip("/") or "/"
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path not in UNGUARDED_PATHS and not self.verify_token(headers):
+        if probe_path not in UNGUARDED_PATHS and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
