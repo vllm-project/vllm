@@ -91,6 +91,7 @@ class SimpleCPUOffloadWorker:
                 tensor (attention layers) or a list of tensors (Mamba layers
                 in hybrid models). All values are included for offloading
                 by resolving to their underlying raw storage.
+
         """
         if not kv_caches:
             logger.warning("No KV caches to offload.")
@@ -313,6 +314,7 @@ class SimpleCPUOffloadWorker:
             tuple of (finished_sending, finished_recving).
             - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
+
         """
         metadata = self._connector_metadata
         finished_recving: set[str] = set()

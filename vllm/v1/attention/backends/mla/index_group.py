@@ -10,6 +10,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.forward_context import in_piecewise_cudagraph
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -56,8 +57,16 @@ class SparseMLAIndexGroup:
         return layer_index
 
     def set_logical_topk_ready(self, layer_index: int) -> None:
-        if layer_index == 0 and self.has_indexer:
-            self.logical_topk_ready.record(current_stream())
+        if layer_index != 0 or not self.has_indexer:
+            return
+        # In piecewise cudagraph mode the consumer converts on the side stream
+        # from an eager break; an event recorded inside a captured segment is
+        # graph-local and any eager wait on it raises cudaErrorInvalidValue.
+        # The convert side falls back to wait_stream there instead (and never
+        # touches this event), so skip the record as well.
+        if in_piecewise_cudagraph():
+            return
+        self.logical_topk_ready.record(current_stream())
 
     def prepare_for_batch(self, layer_index: int, attn_metadata: Any | None) -> None:
         pass
@@ -129,7 +138,7 @@ class SparseMLAIndexGroup:
         valid_topk_counts = self.valid_topk_counts[:num_tokens]
         compute_stream = current_stream()
         if layer_index == 0:
-            if self.has_indexer:
+            if self.has_indexer and not in_piecewise_cudagraph():
                 self.side_stream.wait_event(self.logical_topk_ready)
             else:
                 self.side_stream.wait_stream(compute_stream)

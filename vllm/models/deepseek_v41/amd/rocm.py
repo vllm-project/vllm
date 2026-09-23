@@ -13,7 +13,10 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.attention import (
+    DeepseekV4Attention,
+    _replace_layer_index,
+)
 from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
@@ -34,6 +37,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
+    rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
@@ -391,6 +395,10 @@ def _copy_ragged_to_graph_buffers(
     return ragged_out, indptr_out
 
 
+# (ragged_indices, ragged_indptr, lens) as consumed by rocm_sparse_attn_decode.
+_TopkRagged = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+
+
 @dataclass
 class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
     decode_swa_ragged_indices: torch.Tensor | None = None
@@ -425,11 +433,13 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBu
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
     ) -> DeepseekV4ROCMAiterSparseSWAMetadata:
         base = super().build(
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
             fast_build=fast_build,
+            replay_start=replay_start,
         )
 
         ragged_indices = None
@@ -498,6 +508,23 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
+        # Decode ragged topk metadata is a pure function of the indices its
+        # index source published, so every consumer of a source rebuilds the
+        # same thing. The source owns one cache per compress ratio, refreshed
+        # when it runs; consumers below it read through.
+        self._topk_ragged_cache: dict[int, _TopkRagged] = {}
+        self._index_source_prefix: str | None = None
+        if self.compress_ratio > 0:
+            assert self.index_source_layer_id is not None
+            self._index_source_prefix = _replace_layer_index(
+                self.prefix, self.index_source_layer_id
+            )
+            if self._index_source_prefix not in self._static_forward_context:
+                raise NotImplementedError(
+                    f"Index source {self._index_source_prefix} not found on "
+                    "this rank; PP splits inside a v4.1 index-sharing group "
+                    "are not supported."
+                )
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -636,7 +663,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             transpose_scale=False,
         )
 
-    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        o = attn_out[:, : self.n_local_heads, :]
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
         z = rocm_inv_rope_einsum(
             self.rotary_emb,
@@ -646,6 +674,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             self.n_local_groups,
             self.o_lora_rank,
             self.wo_a,
+            inverse_rope=False,
         )
         zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
@@ -720,25 +749,76 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
             )
+        rotated = 0
         if num_decodes > 0:
-            self._forward_decode(
+            rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
+                positions=positions[:num_decode_tokens],
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
                 attn_metadata=rocm_metadata,
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
             )
+        # Only the decode reduce rotates its own rows, and only the leading
+        # `rotated` of them; prefill rows and any decode path that did not
+        # fuse still owe the standalone pass. Settle that here rather than in
+        # _o_proj: the split is batch-dependent and _o_proj runs compiled,
+        # where such a value freezes at its trace-time value.
+        rocm_inverse_rope_rows_(
+            output[rotated:, : self.n_local_heads, :],
+            positions[rotated:],
+            self.rotary_emb.cos_sin_cache,
+            self.rope_head_dim,
+        )
+
+    def _decode_topk_ragged(
+        self,
+        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        num_decodes: int,
+        num_decode_tokens: int,
+    ) -> _TopkRagged:
+        """Ragged form of the topk indices this layer's index source published.
+
+        The packing depends only on the shared ``topk_indices_buffer`` and
+        per-step metadata, apart from the layer's own compress ratio, so the
+        source memoizes one result per ratio for all the layers below it.
+        """
+        assert attn_metadata is not None
+        assert swa_metadata.is_valid_token is not None
+        assert self.topk_indices_buffer is not None
+        assert self._index_source_prefix is not None
+
+        source = self._static_forward_context[self._index_source_prefix]
+        if source is self:
+            # Fresh indices as of this layer; drop what the last step cached.
+            source._topk_ragged_cache = {}
+        cached = source._topk_ragged_cache.get(self.compress_ratio)
+        if cached is not None:
+            return cached
+
+        built = compute_global_topk_ragged_indices_and_indptr(
+            self.topk_indices_buffer[:num_decode_tokens],
+            swa_metadata.token_to_req_indices,
+            attn_metadata.block_table[:num_decodes],
+            attn_metadata.block_size // self.compress_ratio,
+            swa_metadata.is_valid_token[:num_decode_tokens],
+        )
+        source._topk_ragged_cache[self.compress_ratio] = built
+        return built
 
     def _forward_decode(
         self,
         q: torch.Tensor,
+        positions: torch.Tensor,
         kv_cache: torch.Tensor | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
-    ) -> None:
+    ) -> int:
+        """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -746,25 +826,18 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         topk_ragged_indices = None
         topk_ragged_indptr = None
         if not swa_only:
-            # Local indices filled by the index-source layer's indexer.
-            assert attn_metadata is not None
-            assert swa_metadata.is_valid_token is not None
-            assert self.topk_indices_buffer is not None
-            block_size = attn_metadata.block_size // self.compress_ratio
-            is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
             (
                 topk_ragged_indices,
                 topk_ragged_indptr,
                 topk_lens,
-            ) = compute_global_topk_ragged_indices_and_indptr(
-                self.topk_indices_buffer[:num_decode_tokens],
-                swa_metadata.token_to_req_indices,
-                attn_metadata.block_table[:num_decodes],
-                block_size,
-                is_valid,
+            ) = self._decode_topk_ragged(
+                swa_metadata=swa_metadata,
+                attn_metadata=attn_metadata,
+                num_decodes=num_decodes,
+                num_decode_tokens=num_decode_tokens,
             )
 
-        rocm_sparse_attn_decode(
+        return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
@@ -783,6 +856,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             output=output,
+            inv_rope_positions=positions,
+            inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,

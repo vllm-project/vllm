@@ -11,6 +11,7 @@ import torch.distributed as dist
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators import custom_all_reduce as car
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
+from vllm.platforms import current_platform
 
 from ..utils import (
     ensure_model_parallel_initialized,
@@ -22,6 +23,116 @@ random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
 for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        mhc_post_tilelang,
+        mhc_pre_delayed_tilelang,
+    )
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        comm = get_tp_group().device_communicator.ca_comm
+        assert comm is not None and comm.mnnvl_lamport_ag_multicast_ptr
+        fn = torch.zeros(24, 20480, device=device)
+        scale = torch.ones(3, device=device)
+        base = torch.zeros(24, device=device)
+
+        # Changing shapes and interleaving all-gather exercise the shared
+        # Lamport stages, including cleanup of a larger previous payload.
+        def run(n):
+            torch.manual_seed(42 + rank)
+            x = torch.randn(n, 5120, device=device, dtype=torch.bfloat16)
+            # Packed +0/-0 pairs collide with the Lamport sentinel.
+            x[:, :16] = 0
+            x[:, 9:16:2] = -0.0
+            torch.manual_seed(123)
+            residual = torch.randn(n, 4, 5120, device=device, dtype=torch.bfloat16)
+            post = torch.rand(n, 4, device=device)
+            comb = torch.randn(n, 4, 4, device=device) * 0.1
+            pre = torch.rand(n, 4, device=device)
+            weight = torch.randn(5120, device=device, dtype=torch.bfloat16)
+            output = torch.empty_like(residual)
+            normalized = torch.empty_like(x)
+
+            def fused():
+                torch.ops._C_custom_ar.all_reduce_mhc(
+                    x,
+                    residual,
+                    post,
+                    comb,
+                    pre,
+                    weight,
+                    output,
+                    normalized,
+                    comm.mnnvl_lamport_ag_local_ptr,
+                    comm.mnnvl_lamport_ag_multicast_ptr,
+                    comm.mnnvl_lamport_epochs[0],
+                    rank,
+                    comm.mnnvl_buffer_size,
+                    1e-6,
+                )
+
+            def check():
+                gathered = comm.custom_all_gather(x)
+                assert gathered is not None
+                peers = gathered.view(tp_size, n, 5120).float()
+                reduced = peers[0].clone()
+                for peer in peers[1:]:
+                    reduced.add_(peer)
+                expected = mhc_post_tilelang(
+                    reduced.bfloat16(), residual, post.unsqueeze(-1), comb
+                )
+                expected_norm = mhc_pre_delayed_tilelang(
+                    expected,
+                    fn,
+                    scale,
+                    base,
+                    1e-6,
+                    1e-6,
+                    1e-6,
+                    2.0,
+                    20,
+                    pre_mix=pre,
+                    norm_weight=weight,
+                )[2]
+                torch.testing.assert_close(output, expected, rtol=0.008, atol=1e-6)
+                torch.testing.assert_close(
+                    normalized, expected_norm, rtol=0.008, atol=0.008
+                )
+
+            fused()
+            check()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for _ in range(6):
+                    fused()
+            for _ in range(20):
+                graph.replay()
+            check()
+            x.mul_(0.5)
+            residual.mul_(2)
+            graph.replay()
+            check()
+
+        # Cover fixed Q6 and shrinking/growing adaptive verification batches.
+        for n in (1, 6, 12, 8, 16, 3, 5, 2, 4, 1):
+            run(n)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+)
+def test_all_reduce_mhc_preserves_bf16_boundaries_and_graph_replay(monkeypatch):
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("Requires four GPUs with NVLink multicast")
+    multi_process_parallel(monkeypatch, 4, 1, _all_reduce_mhc)
 
 
 @pytest.mark.parametrize(

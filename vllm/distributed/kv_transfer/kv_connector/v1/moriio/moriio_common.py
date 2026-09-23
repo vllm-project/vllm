@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import math
 import os
 import threading
 import time
@@ -43,6 +44,13 @@ EngineId = str
 ReqId = str
 TransferId = str
 TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype]
+
+
+def _positive_finite_timeout(name: str, value: Any) -> float:
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"{name} must be finite and greater than zero")
+    return timeout
 
 
 class MoRIIOTransferAck(NamedTuple):
@@ -160,6 +168,20 @@ class MoRIIOMode(Enum):
     WRITE = "write"
 
 
+class TransferBatchState(Enum):
+    """Verdict for a group of transfer statuses that belong to one request.
+
+    A request's KV transfer is spread over one status per layer (two for a KDA
+    layer), so a single status never decides the request: PENDING means at
+    least one is still in flight and none has failed, FAILED means at least
+    one failed, DONE means all succeeded.
+    """
+
+    DONE = "done"
+    FAILED = "failed"
+    PENDING = "pending"
+
+
 class MoRIIOError(Exception):
     """Base exception for MoRIIO operations."""
 
@@ -260,6 +282,7 @@ class MoRIIOConfig:
     tp_size: int
     transfer_timeout: float
     defer_timeout: float
+    recv_abort_timeout: float
     read_mode: bool = False
     qp_per_transfer: int = 1
     post_batch_size: int = -1
@@ -284,6 +307,8 @@ class MoRIIOConfig:
         #                     raising TransferError (sec).
         # defer_timeout    -> Timeout before a deferred send with no finished_sending
         #                     notification is reaped and its blocks force-freed (sec).
+        # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
+        #                     completion never arrived is aborted (sec).
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -315,13 +340,29 @@ class MoRIIOConfig:
                 "must be one of 'rdma' or 'xgmi'."
             )
 
-        transfer_timeout = float(
+        transfer_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.transfer_timeout",
             extra_config.get(
                 "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
-            )
+            ),
         )
-        defer_timeout = float(
-            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
+        defer_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.defer_timeout",
+            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT),
+        )
+        legacy_recv_abort_timeout = os.environ.get("VLLM_MORIIO_TRANSFER_TIMEOUT_S")
+        if legacy_recv_abort_timeout is not None:
+            logger.warning_once(
+                "The environment variable VLLM_MORIIO_TRANSFER_TIMEOUT_S is "
+                "deprecated. Set 'recv_abort_timeout' inside "
+                "kv_transfer_config.kv_connector_extra_config instead."
+            )
+        recv_abort_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.recv_abort_timeout",
+            extra_config.get(
+                "recv_abort_timeout",
+                legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
+            ),
         )
 
         return cls(
@@ -347,6 +388,7 @@ class MoRIIOConfig:
             backend=backend,
             transfer_timeout=transfer_timeout,
             defer_timeout=defer_timeout,
+            recv_abort_timeout=recv_abort_timeout,
         )
 
 
@@ -374,6 +416,10 @@ class MoRIIOConstants:
     # notification is reaped and its blocks force-freed.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
+    # Timeout (seconds) before an in-flight recv whose RDMA completion was lost
+    # is aborted, so the decode worker does not hang on it forever.
+    # Overridable via kv_connector_extra_config["recv_abort_timeout"].
+    DEFAULT_RECV_ABORT_TIMEOUT = 120.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -567,9 +613,12 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
             # Remote peer TP degree (used as remote_tp_size downstream). The
-            # proxy advertises it under "remote_tp_size"; #46332 read "tp_size"
-            # which is absent on WRITE producer requests -> defaulted to 1 ->
-            # rank collapse. Read the right key; 0 == unknown (== homogeneous).
+            # decode side must know the prefiller's TP degree to map producer
+            # ranks onto the correct decode rank (and vice versa). The old plain
+            # "tp_size" key (#46332) is absent on WRITE producer requests and
+            # defaulted to 1, collapsing every producer rank onto decode rank 0
+            # and corrupting the transfer; prefer "remote_tp_size". 0 == unknown
+            # (treated as homogeneous downstream).
             tp_size=int(
                 kv_transfer_params.get("remote_tp_size")
                 or kv_transfer_params.get("tp_size")
@@ -588,8 +637,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
+    """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")
 

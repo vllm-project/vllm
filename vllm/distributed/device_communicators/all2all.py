@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,7 +21,12 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.func_utils import supports_kw
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.utils.import_utils import (
+    check_moonep_system_support,
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+)
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -44,8 +50,7 @@ logger = init_logger(__name__)
 
 
 class AgRsAll2AllManager(All2AllManagerBase):
-    """
-    An implementation of all2all communication based on
+    """An implementation of all2all communication based on
     all-gather (dispatch) and reduce-scatter (combine).
     """
 
@@ -79,9 +84,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Gather hidden_states and router_logits from all dp ranks.
-        """
+        """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -111,9 +114,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Gather hidden_states and router_logits from all dp ranks.
-        """
+        """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -140,9 +141,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Reduce-scatter hidden_states across all dp ranks.
-        """
+        """Reduce-scatter hidden_states across all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(
             hidden_states.shape[0] // dist_group.world_size,
@@ -156,9 +155,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
 
 class DeepEPAll2AllManagerBase(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
+    """All2All communication based on DeepEP High-Throughput kernels."""
 
     def __init__(self, cpu_group, tcp_store_group=None):
         assert has_deep_ep(), (
@@ -210,9 +207,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
 
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
+    """All2All communication based on DeepEP High-Throughput kernels."""
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
@@ -271,9 +266,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP Low-Latency kernels.
-    """
+    """All2All communication based on DeepEP Low-Latency kernels."""
 
     _buffer: Any = None
     _mask: torch.Tensor | None = None
@@ -293,8 +286,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: int,
         num_local_experts: int,
     ) -> dict[Any, Any]:
-        """
-        max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
+        """max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
           can dispatch all the ranks must hold the same value.
         token_hidden_size: the hidden dimension of each token.
         num_ep_ranks: the number of EP group ranks.
@@ -330,8 +322,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return kwargs
 
     def get_handle(self, kwargs):
-        """
-        The kwargs for DeepEPLLAll2AllManager is dictated by
+        """The kwargs for DeepEPLLAll2AllManager is dictated by
         _make_all2all_kwargs.
         """
         import deep_ep  # type: ignore[import-not-found]
@@ -385,8 +376,7 @@ class _NixlEPBufferState:
 
 
 class NixlEPAll2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on NIXL EP kernels.
+    """All2All communication based on NIXL EP kernels.
     This backend supports elastic EP with dynamic rank connection/disconnection.
     """
 
@@ -612,9 +602,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
-    """
-    All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
-    """
+    """All2All communication based on flashinfer all2allv/two-sided NVLink kernels."""
 
     # This type lint could be removed after all of the work in
     # https://github.com/vllm-project/vllm/issues/26533 done.
@@ -640,7 +628,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         rank: int,
         gpus_per_node: int,
     ):
-        """Initialize workspace"""
+        """Initialize workspace."""
         if self.initialized:
             return
 
@@ -681,7 +669,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         )
 
     def ensure_alltoall_workspace_initialized(self):
-        """Ensure workspace is initialized"""
+        """Ensure workspace is initialized."""
         if not has_flashinfer_nvlink_two_sided():
             return False
 
@@ -700,7 +688,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         return self
 
     def cleanup(self):
-        """Clean up workspace"""
+        """Clean up workspace."""
         if (
             self.initialized
             and self.workspace_tensor is not None
@@ -719,8 +707,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
-    """
-    All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
+    """All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
     This is a newer kernel from trtllm that should perform better than the kernel
     used by flashinfer_nvlink_two_sided.
     """
@@ -1023,8 +1010,7 @@ class MoriAll2AllManager(All2AllManagerBase):
 
 
 class DeepEPV2All2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP v2 ElasticBuffer (unified API).
+    """All2All communication based on DeepEP v2 ElasticBuffer (unified API).
     Uses NCCL Gin backend with analytical SM calculation.
     """
 
@@ -1068,6 +1054,9 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         # missing GIN support.
         probe = torch.zeros(1, device="cuda")
         torch.distributed.all_reduce(probe, group=group)
+        # DeepEPv2 respects EP_DISABLE_GIN, so skip the GIN requirement check.
+        if os.environ.get("EP_DISABLE_GIN", "0") != "0":
+            return
 
         gin_type = query_nccl_gin_type(group)
         if gin_type is None:
@@ -1104,6 +1093,74 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
 
     def max_sms_used(self) -> int | None:
         return self._num_sms
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+            self.handle_cache._cache.clear()
+
+
+class MoonEPAll2AllManager(All2AllManagerBase):
+    """All2All communication based on MoonEP
+    (https://github.com/MoonshotAI/MoonEP).
+
+    MoonEP keeps token loads perfectly balanced across EP ranks by planning
+    a small number of dynamically redundant experts online and prefetching
+    their weights before expert compute. Every rank receives exactly
+    S x K token slots regardless of router skew, so all communication and
+    compute shapes are static.
+
+    Requires NVLink symmetric-memory / multicast capable topologies
+    (single node NVSwitch, e.g. H100/H200/B200/GB300 class).
+    """
+
+    def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
+        check_moonep_system_support()
+        super().__init__(cpu_group, tcp_store_group)
+        self._device_group = device_group
+        self.handle_cache = Cache()
+
+    def _make_buffer_kwargs(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_topk: int,
+        num_global_experts: int,
+        num_prefetch_slots: int,
+        token_padding: int,
+        num_sms: int,
+    ) -> dict:
+        return dict(
+            S=max_num_tokens_per_dp_rank,
+            H=token_hidden_size,
+            K=num_topk,
+            E=num_global_experts,
+            num_ep_ranks=self.world_size,
+            num_sms=num_sms,
+            token_padding=token_padding,
+            B=num_prefetch_slots,
+            group=self._device_group
+            if self._device_group is not None
+            else self.cpu_group,
+            explicitly_destroy=True,
+        )
+
+    def get_handle(self, kwargs):
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
+            MoonEPBufferPool,
+        )
+
+        buffer_kwargs = self._make_buffer_kwargs(**kwargs)
+        logger.debug("MoonEP all2all args %s", buffer_kwargs)
+
+        def make_pool(**kw):
+            return MoonEPBufferPool(kw, max_tokens_per_rank=kw["S"])
+
+        handle: MoonEPBufferPool = self.handle_cache.get_or_create(
+            buffer_kwargs, make_pool
+        )
+        return handle
 
     def destroy(self):
         with self.handle_cache._lock:

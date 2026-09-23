@@ -41,7 +41,9 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -125,6 +127,45 @@ def _make_kv_cache_config(
     )
 
 
+def _make_scratch_kv_cache_config(
+    num_blocks: int, scratch_block_size: int = 4
+) -> KVCacheConfig:
+    """FullAttention group plus a non-prefix-cacheable scratch group.
+
+    Mirrors GLM-5.3-Flash, whose kpool-tail group holds one per-request
+    scratch block of ``index_kpool`` tokens: it is excluded from prefix
+    caching, so its block size neither divides nor is divided by the
+    hash block size in general.
+    """
+    register_all_kvcache_specs(vllm_config=None)
+    fa_config = _make_kv_cache_config(num_blocks, num_groups=1)
+    scratch_layers = ["layer_scratch"]
+    scratch_spec = KpoolTailSpec(
+        block_size=scratch_block_size,
+        num_kv_heads=2,
+        head_size=HEAD_SIZE,
+        head_size_v=0,
+        dtype=DTYPE,
+        sliding_window=scratch_block_size,
+    )
+    assert not scratch_spec.prefix_cacheable
+    scratch_bytes = scratch_spec.page_size_bytes * num_blocks
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=fa_config.kv_cache_tensors
+        + [
+            KVCacheTensor(
+                size=scratch_bytes,
+                layers=scratch_layers,
+                layer_stride=scratch_bytes,
+                block_stride=scratch_spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=fa_config.kv_cache_groups
+        + [KVCacheGroupSpec(scratch_layers, scratch_spec)],
+    )
+
+
 def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
     """Minimal VllmConfig for scheduler tests (no GPU)."""
     model_config = ModelConfig(
@@ -174,9 +215,13 @@ def make_scheduler(
     num_gpu_blocks: int = 16,
     num_groups: int = 1,
     lazy: bool = False,
+    kv_cache_config: KVCacheConfig | None = None,
 ) -> SchedulerFixture:
     """Build a SimpleCPUOffloadScheduler with small block pools."""
-    kv_cache_config = _make_kv_cache_config(num_gpu_blocks, num_groups)
+    if kv_cache_config is None:
+        kv_cache_config = _make_kv_cache_config(num_gpu_blocks, num_groups)
+    else:
+        num_groups = len(kv_cache_config.kv_cache_groups)
     vllm_config = _make_vllm_config()
     cpu_capacity_bytes = _BYTES_PER_BLOCK * num_cpu_blocks * num_groups
 
@@ -250,6 +295,7 @@ def make_scheduler_output(
         cached_req_new_blocks: For returning (cached) requests, maps
             req_id -> new_block_ids (incremental) or None.
             These are placed into ``scheduled_cached_reqs``.
+
     """
     scheduled_new_reqs: list[NewRequestData] = []
     if new_reqs:
@@ -1389,6 +1435,63 @@ def test_multi_group_null_blocks_skipped() -> None:
     assert null_block_id not in meta2.load_gpu_blocks, (
         f"Null block id {null_block_id} should not appear in load transfer pairs"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 8b: Non-prefix-cacheable scratch groups take no part in store or load
+# ---------------------------------------------------------------------------
+def test_scratch_group_excluded_from_store_and_load() -> None:
+    """A scratch group (GLM-5.3-Flash kpool tail) is never stored or loaded.
+
+    Its single per-request block carries no hash, so the store must offload
+    only the attention blocks and the load must pair only attention blocks.
+    """
+    fix = make_scheduler(
+        num_cpu_blocks=8,
+        num_gpu_blocks=16,
+        kv_cache_config=_make_scratch_kv_cache_config(16),
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    num_blocks = 2
+
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    scratch_block = gpu_pool.get_new_blocks(1)
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, scratch_block))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert sorted(meta.store_gpu_blocks) == sorted(b.block_id for b in fa_blocks)
+    simulate_store_completion(sched, meta.store_event)
+
+    req2 = Request(
+        request_id="req-scratch-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == num_blocks * BLOCK_SIZE
+    assert is_async is True
+
+    fa_blocks2 = gpu_pool.get_new_blocks(num_blocks)
+    scratch_block2 = gpu_pool.get_new_blocks(1)
+    kv_blocks2 = KVCacheBlocks(blocks=(fa_blocks2, scratch_block2))
+    sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+    sched_out2 = make_scheduler_output(
+        {req2.request_id: 1},
+        new_reqs={req2.request_id: kv_blocks2.get_block_ids()},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert sorted(meta2.load_gpu_blocks) == sorted(b.block_id for b in fa_blocks2)
+    assert len(meta2.load_cpu_blocks) == num_blocks
 
 
 # ---------------------------------------------------------------------------
@@ -2843,3 +2946,122 @@ def test_finished_eager_store_recovers_nulled_window_tail() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
     assert hit_tokens == num_blocks * BLOCK_SIZE
     assert is_async is True
+
+
+QSA_RING_BLOCK_SIZE = 4
+
+
+def _make_qsa_hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
+    register_all_kvcache_specs(vllm_config=None)
+    full_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    ring_spec = CircularBufferSpec(
+        block_size=QSA_RING_BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        head_size_v=0,
+        dtype=DTYPE,
+    )
+    groups = [
+        KVCacheGroupSpec(["layer_0"], full_spec),
+        KVCacheGroupSpec(["qsa_ring"], ring_spec),
+    ]
+    tensors = [
+        KVCacheTensor(
+            size=group.kv_cache_spec.page_size_bytes * num_blocks,
+            layers=list(group.layer_names),
+            layer_stride=group.kv_cache_spec.page_size_bytes * num_blocks,
+            block_stride=group.kv_cache_spec.page_size_bytes,
+        )
+        for group in groups
+    ]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+    )
+
+
+def _make_qsa_scheduler(
+    lazy: bool = False,
+) -> tuple[SimpleCPUOffloadScheduler, BlockPool]:
+    kv_cache_config = _make_qsa_hybrid_kv_cache_config(num_blocks=16)
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=_make_vllm_config(),
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=_BYTES_PER_BLOCK * 8 * 2,
+        scheduler_block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
+        lazy_offload=lazy,
+    )
+    gpu_pool = BlockPool(
+        num_gpu_blocks=16, enable_caching=True, hash_block_size=BLOCK_SIZE
+    )
+    sched.bind_gpu_block_pool(gpu_pool)
+    return sched, gpu_pool
+
+
+def test_qsa_ring_group_is_never_stored_or_loaded() -> None:
+    sched, gpu_pool = _make_qsa_scheduler()
+    assert sched.prefix_cacheable_group_ids == (0,)
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    ring_block = gpu_pool.get_new_blocks(1)[0]
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, [ring_block]))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert set(meta.store_gpu_blocks) == {block.block_id for block in fa_blocks}
+    assert ring_block.block_id not in meta.store_gpu_blocks
+    assert meta.store_event >= 0
+    simulate_store_completion(sched, meta.store_event)
+
+    req2 = Request(
+        request_id="req-qsa-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == num_blocks * BLOCK_SIZE
+    assert is_async is True
+
+    fa_blocks2 = gpu_pool.get_new_blocks(num_blocks)
+    ring_block2 = gpu_pool.get_new_blocks(1)[0]
+    kv_blocks2 = KVCacheBlocks(blocks=(fa_blocks2, [ring_block2]))
+    sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+
+    meta2 = sched.build_connector_meta(make_scheduler_output({req2.request_id: 1}))
+    assert set(meta2.load_gpu_blocks) == {block.block_id for block in fa_blocks2}
+    assert ring_block2.block_id not in meta2.load_gpu_blocks
+    assert len(meta2.load_cpu_blocks) == num_blocks
+
+
+def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
+    with_ring = _make_qsa_hybrid_kv_cache_config(num_blocks=16)
+    without_ring = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=with_ring.kv_cache_tensors[:1],
+        kv_cache_groups=with_ring.kv_cache_groups[:1],
+    )
+    max_batched = 64
+    target_with = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
+        with_ring, max_batched
+    )
+    target_without = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
+        without_ring, max_batched
+    )
+    assert target_with == target_without

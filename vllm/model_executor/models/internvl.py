@@ -17,7 +17,7 @@ import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -70,13 +70,12 @@ from .utils import (
 
 
 class InternVLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height of each image patch
-        - w: Width of each image patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - bnp: Batch size * number of images * (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height of each image patch
+    - w: Width of each image patch
     """
 
     type: Literal["pixel_values"]
@@ -85,11 +84,10 @@ class InternVLImagePixelInputs(TensorSchema):
 
 
 class InternVLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of images
-        - f: Total image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of images
+    - f: Total image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -100,13 +98,12 @@ InternVLImageInputs: TypeAlias = InternVLImagePixelInputs | InternVLImageEmbeddi
 
 
 class InternVLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bvf: Batch size * number of videos * num_frames
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each video frame
-        - w: Width of each video frame
+    """Dimensions:
+    - bvf: Batch size * number of videos * num_frames
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each video frame
+    - w: Width of each video frame
     """
 
     type: Literal["pixel_values_videos"]
@@ -115,11 +112,10 @@ class InternVLVideoPixelInputs(TensorSchema):
 
 
 class InternVLVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of videos
-        - f: Total video feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of videos
+    - f: Total video feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["video_embeds"]
@@ -207,19 +203,16 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -327,7 +320,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
 
 class InternVLProcessingInfo(BaseInternVLProcessingInfo):
-    """InternVL ProcessingInfo extended for video processing"""
+    """InternVL ProcessingInfo extended for video processing."""
 
     def get_image_processor(self, **kwargs):
         config = self.get_hf_config()
@@ -418,7 +411,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 class InternVLDummyInputsBuilder(
     BaseInternVLDummyInputsBuilder[InternVLProcessingInfo]
 ):
-    """InternVL DummyInputsBuilder extended for video support"""
+    """InternVL DummyInputsBuilder extended for video support."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_videos = mm_counts.get("video", 0)
@@ -429,7 +422,7 @@ class InternVLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(seq_len, mm_counts, mm_options)
         if self.info.ctx_video_token:
@@ -440,9 +433,6 @@ class InternVLDummyInputsBuilder(
             )
             num_videos = mm_counts.get("video", 0)
             video_overrides = mm_options.get("video")
-            assert video_overrides is None or isinstance(
-                video_overrides, VideoDummyOptions
-            )
             dummy_video = {
                 "video": self._get_dummy_videos(
                     width=image_size,
@@ -460,7 +450,7 @@ class InternVLDummyInputsBuilder(
 class InternVLMultiModalProcessor(
     BaseInternVLMultiModalProcessor[InternVLProcessingInfo]
 ):
-    """InternVL MultiModalProcessor extended for video support"""
+    """InternVL MultiModalProcessor extended for video support."""
 
     def _postprocess_hf_mm_data(
         self,
@@ -906,9 +896,7 @@ class InternVLChatModel(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="mlp1",

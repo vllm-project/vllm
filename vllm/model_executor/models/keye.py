@@ -17,7 +17,7 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPo
 from transformers.utils import torch_int
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
@@ -125,13 +125,12 @@ def smart_resize(
 
 
 class KeyeImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * Number of patches
-        - c: Number of channels
-        - ps: Patch size
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - bnp: Batch size * Number of patches
+    - c: Number of channels
+    - ps: Patch size
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["pixel_values"]
@@ -142,13 +141,12 @@ class KeyeImagePixelInputs(TensorSchema):
 
 
 class KeyeImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of image features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - nf: Number of image features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["image_embeds"]
@@ -160,13 +158,12 @@ KeyeImageInputs: TypeAlias = KeyeImagePixelInputs | KeyeImageEmbeddingInputs
 
 
 class KeyeVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * Number of patches
-        - c: Number of channels
-        - ps: Patch size
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - bnp: Batch size * Number of patches
+    - c: Number of channels
+    - ps: Patch size
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["pixel_values_videos"]
@@ -177,13 +174,12 @@ class KeyeVideoPixelInputs(TensorSchema):
 
 
 class KeyeVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of video features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
-        - nv: Number of videos
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - nf: Number of video features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
+    - nv: Number of videos
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["video_embeds"]
@@ -1128,30 +1124,24 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(seq_len)
-
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
 
         mm_data = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1163,7 +1153,7 @@ class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]):
 
 
 class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_prompt_updates(
@@ -1465,6 +1455,9 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
                 otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -1588,8 +1581,7 @@ class KeyeForConditionalGeneration(
     def _split_video_grid_thw(
         grid_thw: torch.Tensor | list[list[int]] | list[int],
     ) -> list[list[int]]:
-        """
-        Split video grid_thw along the t dimension into per-frame rows.
+        """Split video grid_thw along the t dimension into per-frame rows.
 
         This preserves Keye's current M-RoPE behavior, where a video is emitted
         as consecutive frame-level multimodal blocks rather than a single block

@@ -110,7 +110,6 @@
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @aarnphm @arpera
 /tests/v1/structured_output @mgoin @aarnphm @arpera
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
-/tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91
 /tests/v1/kv_connector/nixl_integration @NickLucche

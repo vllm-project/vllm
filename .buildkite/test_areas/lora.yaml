@@ -54,13 +54,14 @@ steps:
     - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py
     - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py
     - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
   mirror:
     amd:
       label: ":amd: (MI300) LoRA TP (Distributed) %N"
       dind: false
       device: mi300_4
       working_dir: "/vllm-workspace/tests"
-      timeout_in_minutes: 25
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -72,10 +73,11 @@ steps:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       # expandable_segments breaks custom all-reduce IPC on ROCm.
       - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
-      - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_chatglm3_tp.py
-      - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_llama_tp.py
-      - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_qwen3_with_multi_loras.py
-      - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_olmoe_tp.py
-      - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py
-      - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py
-      - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "3" ]; then pytest -v -s -x lora/test_chatglm3_tp.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s -x lora/test_llama_tp.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "3" ]; then pytest -v -s -x lora/test_qwen3_with_multi_loras.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s -x lora/test_olmoe_tp.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s -x lora/test_gptoss_tp.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s -x lora/test_qwen35_densemodel_lora.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s -x lora/test_gemma4_tp.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp; fi

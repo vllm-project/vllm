@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for DecodeBenchConnector.
+"""Unit tests for DecodeBenchConnector.
 
 Tests the functionality of the DecodeBenchConnector which fills KV cache
 with dummy values for decode performance benchmarking.

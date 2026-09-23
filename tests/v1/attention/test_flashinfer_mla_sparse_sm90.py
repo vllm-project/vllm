@@ -151,32 +151,44 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
         assert kwargs == {}
 
 
-def test_builder_attaches_its_state(monkeypatch):
+@pytest.mark.parametrize("use_mha", [False, True])
+@pytest.mark.parametrize("num_decodes", [0, 1])
+def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_decodes):
+    """MHA prefill rows must not make the MQA kernel read beyond its query."""
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._index_topk = 2048
     builder._index_kpool = 4
     builder._async_scheduling = False
     builder.state = FakeState(TOPK)
+    builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: use_mha)
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
     metadata.state = None
+    metadata.num_prefills = 1
+    metadata.num_decode_tokens = num_decodes
     monkeypatch.setattr(
         sm90_mod.FlashInferMLASparseMetadataBuilder,
         "build",
         lambda *_args, **_kwargs: metadata,
     )
     cam = SimpleNamespace(
-        num_reqs=1,
-        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
-        seq_lens=torch.tensor([1], dtype=torch.int32),
-        seq_lens_cpu_upper_bound=torch.tensor([1], dtype=torch.int32),
+        num_reqs=num_decodes + 1,
+        query_start_loc_cpu=torch.tensor(
+            [0, 1, 6] if num_decodes else [0, 5], dtype=torch.int32
+        ),
+        seq_lens_cpu_upper_bound=torch.tensor(
+            [1402, 5] if num_decodes else [5], dtype=torch.int32
+        ),
         positions=None,
     )
 
     result = builder.build(0, cam)
 
     assert result.state is builder.state
-    assert builder.state.plan_calls[0][0] == 1
-    assert builder.state.plan_calls[0][1].tolist() == [1]
+    expected_lens = [1402] if num_decodes else []
+    if not use_mha:
+        expected_lens += [1, 2, 3, 4, 5]
+    assert builder.state.plan_calls[0][0] == len(expected_lens)
+    assert builder.state.plan_calls[0][1].tolist() == expected_lens
 
 
 def test_plan_uses_state_params(monkeypatch):

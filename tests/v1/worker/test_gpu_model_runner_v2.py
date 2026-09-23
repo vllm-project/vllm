@@ -21,6 +21,20 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
+def test_prepare_padding_mask_marks_sequence_parallel_padding():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.input_buffers = SimpleNamespace(is_padding=torch.empty(8, dtype=torch.bool))
+
+    mask = runner._prepare_padding_mask(1, 8)
+
+    assert mask.tolist() == [False, True, True, True, True, True, True, True]
+    assert mask.data_ptr() == runner.input_buffers.is_padding.data_ptr()
+
+    mask = runner._prepare_padding_mask(0, 8)
+
+    assert mask.all()
+
+
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_model_len = 262144
@@ -126,7 +140,6 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     expected: int,
 ):
     """Mamba/GDN block-table rows index global positions, unlike DCP KV."""
-
     max_model_len = 1_048_576
     attention_block_size = 1_536
     mamba_block_size = 16

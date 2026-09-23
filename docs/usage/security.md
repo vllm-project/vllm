@@ -170,7 +170,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
 - `/v1/messages/count_tokens` - Count tokens for Anthropic messages
 - `/v1/responses` - Create a response
-- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render` unless explicitly disabled)
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API

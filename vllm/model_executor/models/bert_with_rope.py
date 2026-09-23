@@ -18,7 +18,11 @@ from vllm.model_executor.layers.activation import get_act_and_mul_fn, get_act_fn
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.fused_moe import activation_without_mul, fused_topk
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    activation_without_mul,
+    fused_topk,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -254,9 +258,7 @@ class NomicMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.router = ReplicatedLinear(
-            self.hidden_size, self.num_total_experts, bias=False
-        )
+        self.router = GateLinear(self.hidden_size, self.num_total_experts)
         self.w1 = nn.Parameter(
             torch.empty(
                 self.num_total_experts,

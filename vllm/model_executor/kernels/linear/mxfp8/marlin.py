@@ -46,7 +46,7 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
-            workspace=layer.workspace,
+            workspace=None,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
             bias=bias,

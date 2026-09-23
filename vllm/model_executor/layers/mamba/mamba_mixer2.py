@@ -252,8 +252,7 @@ def mamba_v2_sharded_weight_loader(
 # --8<-- [start:mamba_mixer2]
 @PluggableLayer.register("mamba_mixer2")
 class MambaMixer2(MambaBase, PluggableLayer):
-    """
-    Compute ∆, A, B, C, and D the state space parameters and compute
+    """Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
     (see Mamba paper [1] Section 3.5.2 "Interpretation of A"
     for why A isn't selective) ∆, B, C are input-dependent
@@ -1221,7 +1220,6 @@ def share_replayssm_ring_trackers(
     The final local layer in each group advances its cursors after every layer
     in that group has consumed the previous values.
     """
-
     replayssm_mixers: dict[str, MambaMixer2] = {}
     for layer_name in ordered_layer_names:
         layer = forward_context[layer_name]

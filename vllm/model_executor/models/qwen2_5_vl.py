@@ -41,12 +41,14 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
     Qwen2_5_VLVisionConfig,
 )
+from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
 from vllm.config import VllmConfig
+from vllm.config.multimodal import VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
@@ -72,9 +74,11 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+    VideoItem,
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
@@ -102,8 +106,9 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
-from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (
+    Qwen2VLDummyInputsBuilder,
+    Qwen2VLMultiModalDataParser,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
 )
@@ -161,8 +166,7 @@ def _pad_flashinfer_cu_seqlens_buffer(
 
 
 class Qwen2_5_VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - np: Number of patches
         - ni: Number of images
         - cps: Number of channels * patch_size * patch_size
@@ -188,8 +192,7 @@ class Qwen2_5_VLImagePixelInputs(TensorSchema):
 
 
 class Qwen2_5_VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - nf: Number of image features
         - hs: Hidden size
         - ni: Number of images
@@ -222,8 +225,7 @@ Qwen2_5_VLImageInputs: TypeAlias = (
 
 
 class Qwen2_5_VLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - np: Number of patches
         - nv: Number of videos
         - ctps: Number of channels * temporal_patch_size * patch_size *
@@ -262,8 +264,7 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
 
 
 class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - nf: Number of video features
         - hs: Hidden size
         - nv: Number of videos
@@ -916,8 +917,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 cu_window_seqlens (needed for CUDA graph capture to
                 cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
-        """
 
+        """
         if device is None:
             device = self.device
         metadata: dict[str, torch.Tensor] = {}
@@ -1141,6 +1142,40 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class Qwen2_5_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+        overrides: VideoDummyOptions | None = None,
+    ) -> list[VideoItem]:
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
+        video_items = []
+        for video in videos:
+            video_num_frames = video.shape[0]
+            video_metadata = {
+                "fps": 2.0,
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
+                "video_backend": "opencv",
+                "do_sample_frames": False,
+            }
+            video_items.append((video, video_metadata))
+        return video_items
+
+
 class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5_VLConfig)
@@ -1150,6 +1185,14 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
             Qwen2_5_VLProcessor,
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
+        )
+
+    def get_data_parser(self):
+        return Qwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
 
@@ -1163,6 +1206,25 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
             second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
+
+    def _get_hf_mm_inputs(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
+
+        if videos := hf_data.get("videos"):
+            # HF expects video metadata as a separate argument.
+            hf_data["videos"] = [video for video, _ in videos]
+            hf_data["video_metadata"] = [
+                VideoMetadata(
+                    **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
+                )
+                for _, metadata in videos
+            ]
+        return hf_inputs
 
     def _get_prompt_updates(
         self,
@@ -1261,14 +1323,14 @@ class Qwen2_5_VLForConditionalGeneration(
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int, int, float]]:
-        """
-        Iterate over multimodal features and yield grid information.
+        """Iterate over multimodal features and yield grid information.
 
         Args:
             mm_features: List of multimodal feature specifications
 
         Yields:
             Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
+
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
@@ -1445,7 +1507,7 @@ class Qwen2_5_VLForConditionalGeneration(
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
-                    pixel_values.type(self.visual.dtype),
+                    pixel_values,
                     grid_thw_list,
                     rope_type="rope_3d",
                 )
@@ -1462,8 +1524,7 @@ class Qwen2_5_VLForConditionalGeneration(
         image_embeds_split: tuple[torch.Tensor, ...],
         image_input: Qwen2_5_VLImageInputs,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Append mrope positions for each for images.
+        """Append mrope positions for each for images.
         This is necessary to recover correct mrope
         positions after video pruning
 
@@ -1476,6 +1537,7 @@ class Qwen2_5_VLForConditionalGeneration(
             Tuple of image embeddings for each image item.
             Resulting embeddings will have extra 4 channels for
             computed mrope positions.
+
         """
         merge_size = self.visual.spatial_merge_size
         grid_thw = image_input["image_grid_thw"]
@@ -1505,7 +1567,7 @@ class Qwen2_5_VLForConditionalGeneration(
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
-                    pixel_values_videos.type(self.visual.dtype),
+                    pixel_values_videos,
                     grid_thw_list,
                     rope_type="rope_3d",
                 )
@@ -1522,8 +1584,7 @@ class Qwen2_5_VLForConditionalGeneration(
         video_embeds_split: tuple[torch.Tensor, ...],
         video_input: Qwen2_5_VLVideoInputs,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Prunes video embeddings via Efficient Video Sampling (EVS)
+        """Prunes video embeddings via Efficient Video Sampling (EVS)
         and then appends mrope positions for each retained embeddings
 
         Args:
@@ -1534,6 +1595,7 @@ class Qwen2_5_VLForConditionalGeneration(
             Tuple of video embeddings for each video item.
             Resulting embeddings will have extra 4 channels for
             computed mrope positions.
+
         """
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
@@ -1584,8 +1646,7 @@ class Qwen2_5_VLForConditionalGeneration(
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
-        """
-        Update part of input mrope positions (starting with
+        """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
         for unpruned sequence and becomes incorrect once pruning occurs,
         so once we prune media tokens we should reflect this in the
@@ -1602,6 +1663,7 @@ class Qwen2_5_VLForConditionalGeneration(
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,
                 mrope_position_delta).
+
         """
         image_token_id = self.config.image_token_id
         video_token_id = self.config.video_token_id
@@ -2018,8 +2080,10 @@ class Qwen2_5_VLForConditionalGeneration(
                 batch. **NOTE**: If mrope is enabled (default setting for
                 Qwen2.5-VL opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-        """
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -2042,9 +2106,7 @@ class Qwen2_5_VLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger.",

@@ -11,7 +11,9 @@ use serde_json::{Map, Value, json};
 use vllm_tokenizer::Tokenizer;
 
 use super::super::MediaPartSource;
+use crate::EffortValue;
 use crate::error::{Error, Result};
+use crate::reasoning::ReasoningControl;
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
 };
@@ -76,9 +78,10 @@ impl<'a> K3TokenWriter<'a> {
 pub(super) fn render_request_with_media_order(
     request: &ChatRequest,
     tokenizer: &dyn Tokenizer,
+    reasoning: &ReasoningControl,
 ) -> Result<(Vec<u32>, Vec<MediaPartSource>)> {
-    let thinking = thinking_enabled(request)?;
-    let thinking_effort = thinking.then(|| thinking_effort(request)).transpose()?;
+    let thinking = reasoning.is_enabled();
+    let thinking_effort = reasoning.effort().and_then(EffortValue::as_str);
     let tools = request_tools(request);
     let mut out = K3TokenWriter::new(tokenizer);
 
@@ -244,58 +247,26 @@ fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     request.initial_tools()
 }
 
-fn thinking_enabled(request: &ChatRequest) -> Result<bool> {
-    if let Some(thinking) = request.parse_template_bool("thinking")? {
-        return Ok(thinking);
-    }
-    if let Some(enable_thinking) = request.parse_template_bool("enable_thinking")? {
-        return Ok(enable_thinking);
-    }
-    if let Some(reasoning_effort) = request.chat_options.reasoning_effort {
-        return Ok(reasoning_effort != crate::request::ReasoningEffort::None);
-    }
-    Ok(request
-        .chat_options
-        .template_kwargs
-        .get("reasoning_effort")
-        .and_then(Value::as_str)
-        != Some("none"))
-}
-
-fn thinking_effort(request: &ChatRequest) -> Result<String> {
-    let effort = if let Some(value) = request.chat_options.template_kwargs.get("thinking_effort") {
-        value.as_str().ok_or_else(|| {
-            Error::ChatTemplate(format!(
-                "template kwarg `thinking_effort` must be a string, got {value}"
-            ))
-        })?
-    } else if let Some(effort) = request.chat_options.reasoning_effort {
-        if effort == crate::request::ReasoningEffort::None {
-            DEFAULT_THINKING_EFFORT
-        } else {
-            effort.as_str()
-        }
-    } else if let Some(value) = request.chat_options.template_kwargs.get("reasoning_effort") {
+/// Resolve standard reasoning controls and validate K3's supported effort grades.
+pub(super) fn resolve_reasoning(
+    request: &ChatRequest,
+    defaults: &HashMap<String, Value>,
+) -> Result<ReasoningControl> {
+    let reasoning = ReasoningControl::resolve(request, defaults)?
+        .fallback(ReasoningControl::enabled(DEFAULT_THINKING_EFFORT));
+    if let Some(value) = reasoning.effort() {
         let effort = value.as_str().ok_or_else(|| {
-            Error::ChatTemplate(format!(
-                "template kwarg `reasoning_effort` must be a string, got {value}"
+            Error::InvalidReasoningEffort(format!(
+                "Kimi K3 reasoning_effort must be a string, got {value}"
             ))
         })?;
-        if effort == "none" {
-            DEFAULT_THINKING_EFFORT
-        } else {
-            effort
+        if !VALID_THINKING_EFFORTS.contains(&effort) {
+            return Err(Error::InvalidReasoningEffort(format!(
+                "unsupported reasoning_effort={effort:?}; supported values are `low`, `high`, and `max`"
+            )));
         }
-    } else {
-        DEFAULT_THINKING_EFFORT
-    };
-
-    if !VALID_THINKING_EFFORTS.contains(&effort) {
-        return Err(Error::ChatTemplate(format!(
-            "unsupported thinking_effort={effort:?}; supported values are `low`, `high`, and `max`"
-        )));
     }
-    Ok(effort.to_string())
+    Ok(reasoning)
 }
 
 fn content_is_empty(content: &ChatContent) -> bool {
