@@ -43,6 +43,29 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def compute_draft_seq_lens_cpu_lower_bound(
+    seq_lens_cpu_lower_bound: torch.Tensor,
+    step: int,
+    num_speculative_steps: int,
+    num_reqs: int,
+    num_reqs_padded: int,
+) -> torch.Tensor:
+    """CPU lower bound on seq_lens for draft step ``step``, as a new tensor.
+
+    The target lower bound already allows for the drafts of the step in
+    flight. The verification just run may reject up to num_speculative_steps
+    more, which the target bounds still count. Padded entries are zero.
+    """
+    draft_lower_bound = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
+    torch.add(
+        seq_lens_cpu_lower_bound[:num_reqs],
+        step - num_speculative_steps,
+        out=draft_lower_bound[:num_reqs],
+    )
+    draft_lower_bound[:num_reqs].clamp_(min=0)
+    return draft_lower_bound
+
+
 def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
     """Whether the target replaces the drafter's input with its HC residual.
 
@@ -335,18 +358,13 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
         draft_seq_lens_cpu_lower_bound = None
         if seq_lens_cpu_lower_bound is not None:
-            # The target lower bound already allows for the drafts of the step
-            # in flight. The verification just run may reject up to
-            # num_speculative_steps more, which the target bounds still count.
-            draft_seq_lens_cpu_lower_bound = torch.zeros(
-                num_reqs_padded, dtype=torch.int32, device="cpu"
+            draft_seq_lens_cpu_lower_bound = compute_draft_seq_lens_cpu_lower_bound(
+                seq_lens_cpu_lower_bound,
+                step,
+                self.num_speculative_steps,
+                num_reqs,
+                num_reqs_padded,
             )
-            torch.add(
-                seq_lens_cpu_lower_bound[:num_reqs],
-                step - self.num_speculative_steps,
-                out=draft_seq_lens_cpu_lower_bound[:num_reqs],
-            )
-            draft_seq_lens_cpu_lower_bound[:num_reqs].clamp_(min=0)
         if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
