@@ -129,7 +129,18 @@ def _fused_kda_gate_beta(
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["N", "T"])
+@triton.jit(
+    do_not_specialize=[
+        "N",
+        "T",
+        "stride_qkv_token",
+        "stride_g_token",
+        "stride_beta_token",
+        "stride_out_token",
+        "stride_state_token",
+        "stride_indices_seq",
+    ]
+)
 def fused_recurrent_kda_fwd_kernel(
     q,
     k,
@@ -152,12 +163,12 @@ def fused_recurrent_kda_fwd_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_qkv_token: tl.constexpr,
-    stride_g_token: tl.constexpr,
-    stride_beta_token: tl.constexpr,
-    stride_out_token: tl.constexpr,
-    stride_state_token: tl.constexpr,
-    stride_indices_seq: tl.constexpr,
+    stride_qkv_token,
+    stride_g_token,
+    stride_beta_token,
+    stride_out_token,
+    stride_state_token,
+    stride_indices_seq,
     IS_SPEC_DECODING: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
