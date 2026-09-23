@@ -776,6 +776,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_eplb: bool = False,
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
+        randomize_inputs: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -839,6 +840,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_profile=is_profile,
                 context_len=context_len,
                 valid_dummy_state_slots=valid_dummy_state_slots,
+                randomize_inputs=randomize_inputs,
             )
         self.kv_connector.set_disabled(False)
 
@@ -1673,6 +1675,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
+        randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1787,6 +1790,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
             )
+            if randomize_inputs or (
+                envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.dp_size > 1
+            ):
+                # All-zero input_ids route every token to the same experts,
+                # which inflates EP dispatch buffers sized during profiling.
+                input_batch.input_ids.random_(0, self.vocab_size)
             if self.pcp_manager is not None:
                 input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
             if skip_attn_for_dummy_run:
