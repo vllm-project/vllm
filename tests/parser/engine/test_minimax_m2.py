@@ -79,6 +79,21 @@ class TestNonStreaming:
             "city": "Seattle",
         }
 
+    def test_unclosed_last_parameter_is_preserved(self, parser, mock_request):
+        result = parser.extract_tool_calls(
+            '<minimax:tool_call><invoke name="get_weather">'
+            '<parameter name="city">Seattle</parameter>'
+            '<parameter name="unit">celsius'
+            "</invoke></minimax:tool_call>",
+            mock_request,
+        )
+
+        assert result.tools_called is True
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "city": "Seattle",
+            "unit": "celsius",
+        }
+
     def test_multiple_invokes(self, parser, mock_request):
         result = parser.extract_tool_calls(
             "<minimax:tool_call>"
@@ -175,6 +190,24 @@ class TestStreaming:
         assert collect_function_name(results) == "get_weather"
         assert json.loads(collect_tool_arguments(results)) == {
             "city": "Seattle",
+        }
+
+    def test_streaming_unclosed_last_parameter_is_preserved(self, parser, mock_request):
+        results = simulate_tool_streaming(
+            parser,
+            mock_request,
+            [
+                "<minimax:tool_call>",
+                '<invoke name="get_weather">',
+                '<parameter name="city">Seattle</parameter>',
+                '<parameter name="unit">celsius',
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "city": "Seattle",
+            "unit": "celsius",
         }
 
     def test_streaming_multiple_invokes(self, parser, mock_request):
