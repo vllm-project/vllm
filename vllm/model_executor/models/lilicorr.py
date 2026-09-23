@@ -264,9 +264,10 @@ class LiLiCorrHead(nn.Module):
             quant_config=None,
             prefix=maybe_prefix(prefix, "factor_input_proj"),
         )
-        # These are latent edge factors, not vocabulary projections. A candidate's
-        # outgoing vector scores its compatibility with each next-slot candidate's
-        # incoming vector; the anchor supplies the outgoing vector for slot zero.
+        # Each candidate gets outgoing and incoming vectors. After normalization,
+        # their dot product scores a transition from slot s to slot s+1:
+        #   pair_score[s, i, j] = dot(out[s, i], incoming[s+1, j])
+        # The anchor supplies the outgoing vector for the first slot.
         self.out_head = ReplicatedLinear(
             hidden_size,
             self.factor_dim,
@@ -302,10 +303,11 @@ class LiLiCorrHead(nn.Module):
         """Build inference-only views/copies after checkpoint weights are loaded."""
         topk = self.candidate_topk
         self._attn_bias = self._build_attention_bias(device=device, dtype=dtype)
-        # Both edge heads consume the same factor_hidden. Stacking their output
-        # rows computes both projections in one linear call; score() splits and
-        # normalizes each vector separately. Do this once after loading, keeping
-        # the original parameter names for checkpoint compatibility.
+        # Both projections consume the same candidate features f:
+        #   out = W_out @ f + b_out
+        #   incoming = W_in @ f + b_in
+        # Stack weights and biases to compute both in one linear call. score()
+        # splits the result and normalizes the two vectors separately.
         self._fused_edge_weight = (
             torch.cat([self.out_head.weight, self.in_head.weight], dim=0)
             .to(device=device, dtype=dtype)
@@ -316,10 +318,12 @@ class LiLiCorrHead(nn.Module):
             .to(device=device, dtype=dtype)
             .contiguous()
         )
-        # The trained factor input is [x, anchor, x*anchor] for every candidate x.
-        # Splitting W along its input dimension lets score() project the anchor
-        # once per request and broadcast it, without materializing the concatenated
-        # input. The three contributions are summed with the original bias once.
+        # For candidate state x and request anchor a, the trained projection is:
+        #   W @ concat(x, a, x*a) + b
+        # Split W into input blocks to evaluate the same expression as:
+        #   W_x @ x + W_a @ a + W_cross @ (x*a) + b
+        # Here x*a is elementwise. This avoids concatenating inputs and reuses
+        # W_a @ a across candidates, adding the original bias only once.
         weight = self.factor_input_proj.weight
         hdim = self.hidden_size
         self._factor_input_splits = (
@@ -345,12 +349,14 @@ class LiLiCorrHead(nn.Module):
         slot_ids = torch.arange(
             self.num_candidate_slots, device=device, dtype=torch.long
         ).repeat_interleave(topk)
-        # Flattened lattice index = slot * topk + candidate rank. All candidates
-        # in a slot therefore share a position, including distinct candidate pairs
-        # within that slot. Each head learns a relative-slot bias plus an extra
-        # same-slot term; this is an additive score bias, not a causal mask.
-        # Center the lookup at the trained block_size-1 even for shorter drafts;
-        # score() selects the matching prefix of the resulting matrix.
+        # Attention flattens [slot, candidate] into one sequence. With topk=2,
+        # the candidate slot IDs are [0, 0, 1, 1, ...]. Each head learns:
+        #   bias(q, k) = relative_bias[slot(q) - slot(k) + offset]
+        #                + same_slot_bias * (slot(q) == slot(k))
+        # The same-slot term includes distinct candidates at the same position.
+        # This is an additive preference, not a causal mask. Keep the trained
+        # offset = block_size-1 when score() selects a shorter draft's prefix,
+        # so each distance continues to use the same learned weight.
         rel = slot_ids.view(-1, 1) - slot_ids.view(1, -1)
         bias = self.relative_slot_bias[:, rel + self.block_size - 1]
         same_slot = slot_ids.view(-1, 1) == slot_ids.view(1, -1)
