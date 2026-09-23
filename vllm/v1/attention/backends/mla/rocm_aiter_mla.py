@@ -630,8 +630,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # Set from the common metadata every build; a batch is causal unless the
     # drafter says otherwise.
     _decode_causal: bool = True
-    # The round-robin decode applies causal masking on GLOBAL positions inside
-    # the kernel (g_kv_indptr), so a non-causal draft is safe under DCP.
+    # A non-causal draft needs no cross-shard causal window: the ordinary
+    # mask0 decode returns per-row LSE for the DCP merge.
     supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     @staticmethod
@@ -1403,6 +1403,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             int(max_qo_len),
             self._asm_dcp_verify,
         )
+        # CPRR exists to reconstruct a causal window over round-robin KV
+        # shards. A non-causal block has no such window and uses the ordinary
+        # mask0 decode, even when this KV group is CPRR-capable.
+        use_cprr = self._asm_dcp_verify and causal and int(max_qo_len) >= _MIN_CPRR_QLEN
 
         # Segmented DCP verify carries its own per-row subpage table, so the
         # flat per-token view is dead work for it. Leave the buffer alone and
@@ -1470,9 +1474,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # batch below the CPRR kernel floor) must not enter here.
         g_kv_indptr = None
         if (
-            self._asm_dcp_verify
+            use_cprr
             and not use_segmented_dcp_verify
-            and int(max_qo_len) >= _MIN_CPRR_QLEN
             and self.dcp_world_size > 1
             and g_tot_seq_lens is not None
         ):
@@ -1497,8 +1500,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             not use_gluon_decode
             and not use_gluon_verify
             and not use_segmented_dcp_verify
-            # No cprr kernel below the floor; do not build a schedule for it.
-            and not (self._asm_dcp_verify and int(max_qo_len) < _MIN_CPRR_QLEN)
+            # A causal qlen-2 block needs CPRR's global-position window, but
+            # there is no CPRR kernel below qlen 3. Qlen 1 and non-causal
+            # blocks use the ordinary persistent decode schedule.
+            and not (
+                self._asm_dcp_verify and causal and 1 < int(max_qo_len) < _MIN_CPRR_QLEN
+            )
             # A padded rank has no bf16 persistent kernel past qlen 4 where the
             # gfx950 fold is absent; the non-persistent entry covers it. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
@@ -1553,11 +1560,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if g_kv_indptr is not None:
                 is_causal = False
                 cprr_kwargs["is_cp_round_robin"] = True
+            metadata_num_heads = (
+                self._asm_dcp_verify_heads
+                if use_cprr
+                else AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+            )
             get_mla_metadata_v1(
                 qo_indptr,
                 paged_kv_indptr,
                 paged_kv_last_page_len,
-                self._num_attention_heads,
+                metadata_num_heads,
                 1,
                 is_causal,
                 self._mla_work_meta_data,
@@ -2431,19 +2443,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             )
 
         if (
-            self.dcp_world_size > 1
+            attn_metadata.causal
+            and self.dcp_world_size > 1
             and int(decode.max_qo_len) > 1
             and decode.g_kv_indptr is None
         ):
-            batch_qlen = int(decode.max_qo_len)
-            if decode.asm_decode_num_heads and batch_qlen < _MIN_CPRR_QLEN:
-                raise RuntimeError(
-                    f"AITER cprr DCP verify got a batch with max_qo_len="
-                    f"{batch_qlen}, which has no cprr kernel (minimum "
-                    f"{_MIN_CPRR_QLEN}) and no segmented DCP-verify "
-                    f"fallback. The plain kernel cannot be used: its "
-                    f"causality is local to the round-robin shard."
-                )
             raise RuntimeError(
                 "ROCM_AITER_MLA DCP multi-token verify requires either segmented "
                 "MLA or the round-robin asm decode (g_kv_indptr)."
@@ -2468,7 +2472,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # cannot affect heads [0:_decode_num_heads]; they are sliced back off
         # the output below. The pad is a PRE-kernel copy, so unlike a post-kernel
         # un-fold it does not race the symm-mem a2a combine.
-        asm_dcp_heads = decode.asm_decode_num_heads
+        # asm_decode_num_heads records process-level CPRR capability. Apply its
+        # padding only to a batch that actually carries CPRR global-position
+        # metadata; non-causal blocks use the ordinary mask0 decode shape.
+        asm_dcp_heads = (
+            decode.asm_decode_num_heads if decode.g_kv_indptr is not None else 0
+        )
         if asm_dcp_heads > self._decode_num_heads:
             mla_num_heads = asm_dcp_heads
             mla_padded_q = AiterMLAHelper.get_mla_padded_q(
@@ -2524,21 +2533,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             # apply causality on LOCAL indices over a round-robin shard, which
             # is silently wrong. If segmented fallback was not built, fail
             # loudly rather than calling that kernel.
-            if asm_dcp_heads:
-                batch_qlen = int(decode.max_qo_len)
-                if batch_qlen >= _MIN_CPRR_QLEN:
-                    assert decode.g_kv_indptr is not None
-                    mla_kwargs["g_kv_indptr"] = decode.g_kv_indptr
-                    mla_kwargs["cp_world_size"] = decode.cp_world_size
-                    mla_kwargs["cp_rank"] = decode.cp_rank
-                elif batch_qlen > 1 and decode.dcp_verify is None:
-                    raise RuntimeError(
-                        f"AITER cprr DCP verify got a batch with max_qo_len="
-                        f"{batch_qlen}, which has no cprr kernel (minimum "
-                        f"{_MIN_CPRR_QLEN}) and no segmented DCP-verify "
-                        f"fallback. The plain kernel cannot be used: its "
-                        f"causality is local to the round-robin shard."
-                    )
+            if decode.g_kv_indptr is not None:
+                mla_kwargs["g_kv_indptr"] = decode.g_kv_indptr
+                mla_kwargs["cp_world_size"] = decode.cp_world_size
+                mla_kwargs["cp_rank"] = decode.cp_rank
             if asm_dcp_heads:
                 # Must match the schedule get_mla_metadata_v1 was built with.
                 # The builder owns the value and carries it on the metadata.
@@ -2559,16 +2557,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.max_qo_len,
                 sm_scale=self.scale,
                 return_lse=True,
-                # aiter defaults this to True. A non-causal group (a DSpark
-                # draft attends its whole block) would otherwise get the masked
-                # kernel and see only tokens <= its own index. The non-causal
-                # cprr kernels exist (msk0_lse_cprr); they just have to be asked
-                # for. The non-DCP branch below already forwards this.
-                #
-                # Untested: the numerics tests fix causal=True and
-                # non_causal_multi_token_decode=False, and reaching this line
-                # needs a real builder and device tensors. Dropping this kwarg
-                # fails nothing.
+                # aiter defaults this to True. A non-causal DSpark draft uses
+                # the ordinary mask0 decode here; CPRR is reserved for causal
+                # blocks that need a global-position window.
                 causal=attn_metadata.causal,
                 **mla_kwargs,
             )
