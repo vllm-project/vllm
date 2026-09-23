@@ -37,9 +37,7 @@ def _transformers_v4_compatibility_import():
     subset of `ProcessorChatTemplateKwargs` as defined in Transformers v4.
     In Transformers v5 these were merged into `ProcessorChatTemplateKwargs` and
     `ChatTemplateLoadKwargs` was removed. For backward compatibility, we add an alias
-    for `ChatTemplateLoadKwargs` if it doesn't exist.
-
-    This can be removed if `HCXVisionForCausalLM` is upstreamed to Transformers."""
+    for `ChatTemplateLoadKwargs` if it doesn't exist."""
     old_import = getattr(processing_utils, "ChatTemplateLoadKwargs", None)
     new_import = getattr(processing_utils, "ProcessorChatTemplateKwargs", None)
     if old_import is None and new_import is not None:
@@ -82,9 +80,7 @@ _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
 
 class HashableDict(dict):
-    """
-    A dictionary that can be hashed by lru_cache.
-    """
+    """A dictionary that can be hashed by lru_cache."""
 
     # NOTE: pythonic dict is not hashable,
     # we override on it directly for simplicity
@@ -93,9 +89,7 @@ class HashableDict(dict):
 
 
 class HashableList(list):
-    """
-    A list that can be hashed by lru_cache.
-    """
+    """A list that can be hashed by lru_cache."""
 
     def __hash__(self) -> int:  # type: ignore[override]
         return hash(tuple(self))

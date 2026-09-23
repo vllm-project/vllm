@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -42,6 +42,9 @@ from vllm.v1.attention.ops.pcp import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+    from vllm.v1.attention.backends.mla.index_group import (
+        SparseMLAIndexGroupBuilder,
+    )
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -118,8 +121,7 @@ class DeepseekV32Indexer(nn.Module):
 class DeepseekV32Attention(MLAAttention):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
-
-    supports_dense_mha_prefill = False
+    supports_pcp_dcp: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -128,6 +130,7 @@ class DeepseekV32Attention(MLAAttention):
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
         attn_backend: "type | None" = None,
+        index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -150,9 +153,9 @@ class DeepseekV32Attention(MLAAttention):
         # DSA checkpoints may use plain ("default") or yarn-scaled RoPE.
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
         if config.rope_parameters["rope_type"] == "deepseek_yarn":
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
@@ -211,6 +214,7 @@ class DeepseekV32Attention(MLAAttention):
             use_sparse=True,
             indexer=indexer,
             topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
             attn_backend=attn_backend,
         )
 
@@ -233,7 +237,9 @@ class DeepseekV32Attention(MLAAttention):
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
-        self._fp8_kv_needs_view = fp8_attention and self.kv_cache_dtype != "fp8_ds_mla"
+        self._fp8_kv_needs_view = fp8_attention and not self.kv_cache_dtype.endswith(
+            "_ds_mla"
+        )
 
         self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
 
@@ -303,18 +309,17 @@ class DeepseekV32Attention(MLAAttention):
             device=hidden_states.device,
         )
         forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-        if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw.get(self.layer_name)
-        elif isinstance(attn_metadata_raw, list):
-            attn_metadata = attn_metadata_raw[0].get(self.layer_name)
-        else:
-            attn_metadata = attn_metadata_raw
-        attn_metadata = cast("MLACommonMetadata | None", attn_metadata)
-
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
+        indexer_slot = (
+            slot_mapping.get(self.indexer.k_cache.prefix)
+            if self.indexer is not None
+            else None
+        )
+        hisparse_cache = self.hisparse_cache
+        layer_attn_metadata, _, _, _ = get_attention_context(self.layer_name)
+        self.impl.prepare_for_batch(layer_attn_metadata)
 
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
@@ -322,6 +327,7 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_norm_bias = self.indexer.k_norm.bias
             indexer_k_norm_eps = self.indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
+            indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
             indexer_k_cache = None if self.use_pcp else self.indexer.k_cache.kv_cache
             index_k_out = torch.empty_like(index_k) if self.use_pcp else None
             indexer_softmax_scale = self.indexer.softmax_scale
@@ -333,21 +339,27 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_norm_eps = 1e-6
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
+            indexer_cache_shuffled = False
             index_k_out = None
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
-        if attn_metadata is None or self.use_pcp:
+        if forward_context.attn_metadata is None or self.use_pcp:
             mla_kv_cache = None
             mla_k_scale = None
             indexer_k_cache = None
             mla_slot = None
+            indexer_slot = None
         else:
-            mla_kv_cache = self.kv_cache
+            mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
 
-        kv_c_out = torch.empty_like(kv_c) if self.use_pcp else None
-        k_pe_out = torch.empty_like(k_pe) if self.use_pcp else None
+        if self.use_pcp or hisparse_cache is None:
+            kv_c_out = torch.empty_like(kv_c)
+            k_pe_out = torch.empty_like(k_pe)
+        else:
+            kv_c_out = torch.empty_like(kv_c)
+            k_pe_out = torch.empty_like(k_pe)
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -365,7 +377,9 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_rope_cos_sin_cache,
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
+            indexer_slot_mapping=indexer_slot,
             indexer_k_cache=indexer_k_cache,
+            indexer_cache_shuffled=indexer_cache_shuffled,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
@@ -375,6 +389,18 @@ class DeepseekV32Attention(MLAAttention):
             k_pe_out=k_pe_out,
             index_k_out=index_k_out,
         )
+
+        if hisparse_cache is not None and mla_slot is not None:
+            assert kv_c_out is not None and k_pe_out is not None
+            self.update_kv_cache(
+                kv_c_out,
+                k_pe_out,
+                self.kv_cache,
+                mla_slot,
+                layer_attn_metadata,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -403,7 +429,10 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         self._sparse_indexer_and_attn(
+            positions,
             q_c,
+            q_nope,
+            q_pe,
             index_q_fp8,
             index_k_out,
             index_weights_out,
@@ -418,7 +447,10 @@ class DeepseekV32Attention(MLAAttention):
     @eager_break_during_capture
     def _sparse_indexer_and_attn(
         self,
+        positions: torch.Tensor,
         q_c: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
         index_q_fp8: torch.Tensor | None,
         index_k: torch.Tensor | None,
         index_weights_out: torch.Tensor | None,
@@ -464,6 +496,7 @@ class DeepseekV32Attention(MLAAttention):
                 ),
                 skip_topk_buffer_clear=True,
             )
+        self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
             self.layer_name
@@ -472,6 +505,7 @@ class DeepseekV32Attention(MLAAttention):
             output.zero_()
             return
         attn_metadata = cast("MLACommonMetadata", attn_metadata)
+        self.impl.prepare_for_batch(attn_metadata)
 
         if self.use_pcp:
             assert kv_c is not None and k_pe is not None
@@ -498,8 +532,22 @@ class DeepseekV32Attention(MLAAttention):
             output.zero_()
             return
 
+        if self._use_sparse_mha(attn_metadata):
+            assert kv_c is not None and k_pe is not None
+            mha_q_pe = self.rotary_emb(positions, q_pe)[0] if self._fp8_query else mqa_q
+            mha_q = torch.cat((q_nope, mha_q_pe), dim=-1)
+            self.forward_impl(
+                mha_q,
+                kv_c,
+                k_pe.unsqueeze(1),
+                kv_cache,
+                attn_metadata,
+                output,
+            )
+            return
+
         if self._fp8_kv_needs_view:
-            kv_cache = kv_cache.view(torch.float8_e4m3fn)
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
         if self._fp8_query:
             # FlashInfer sparse: single packed fp8 query.
             mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = mqa_q[
@@ -512,29 +560,57 @@ class DeepseekV32Attention(MLAAttention):
             if isinstance(mqa_q_arg, tuple):
                 mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
             mqa_q_arg = get_tp_group().all_gather(mqa_q_arg, dim=1)
+        elif not self.use_pcp and self.impl.dcp_world_size > 1:
+            assert self.dcp_manager is not None
+            if isinstance(mqa_q_arg, tuple):
+                mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
+            assert self.dcp_manager.query_gather is not None
+            mqa_q_arg = self.dcp_manager.query_gather(mqa_q_arg)
         attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
             mqa_q_arg, kv_cache, attn_metadata, self
         )
 
-        if self.use_pcp and self.impl.dcp_world_size > 1:
+        if self.impl.dcp_world_size > 1:
             assert lse is not None and self.dcp_manager is not None
-            seq_lens = (
-                attn_metadata.decode.seq_lens
-                if attn_metadata.decode is not None
-                else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
-                    : attn_metadata.num_decodes
+            seq_lens: torch.Tensor | None
+            query_start_loc: torch.Tensor | None
+            if self.use_pcp:
+                decode_metadata = getattr(attn_metadata, "decode", None)
+                if decode_metadata is not None:
+                    seq_lens = decode_metadata.seq_lens
+                else:
+                    all_seq_lens = cast(
+                        torch.Tensor,
+                        attn_metadata.seq_lens,  # type: ignore[attr-defined]
+                    )
+                    seq_lens = all_seq_lens[: attn_metadata.num_decodes]
+                query_start_loc = attn_metadata.query_start_loc[
+                    : attn_metadata.num_decodes + 1
                 ]
-            )
-            query_start_loc = attn_metadata.query_start_loc[
-                : attn_metadata.num_decodes + 1
-            ]
-            attn_out = self.dcp_manager.combine(
-                attn_out,
-                lse,
-                seq_lens=seq_lens,
-                query_start_loc=query_start_loc,
-            )
-            attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
+            else:
+                # The backend emits (0, -inf) for empty local shards, so no
+                # PCP-only empty-shard metadata is needed.
+                seq_lens = None
+                query_start_loc = None
+            # Under PCP+DCP the prefill rows attended over the gathered KV, so
+            # only the decode rows carry an LSE and take part in the merge.
+            num_merge_rows = lse.shape[0]
+            if num_merge_rows == attn_out.shape[0]:
+                attn_out = self.dcp_manager.combine(
+                    attn_out,
+                    lse,
+                    seq_lens=seq_lens,  # type: ignore[arg-type]
+                    query_start_loc=query_start_loc,  # type: ignore[arg-type]
+                )
+            elif num_merge_rows > 0:
+                attn_out[:num_merge_rows] = self.dcp_manager.combine(
+                    attn_out[:num_merge_rows],
+                    lse,
+                    seq_lens=seq_lens,  # type: ignore[arg-type]
+                    query_start_loc=query_start_loc,  # type: ignore[arg-type]
+                )
+            if self.use_pcp:
+                attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
         # NOTE(woosuk): While the below does not need to be in the eager region,
         # we put it here to avoid copying the attention output. Move this back to the

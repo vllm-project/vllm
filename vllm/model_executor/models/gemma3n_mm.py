@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Sized
 from typing import Annotated, Any, Literal
 
 import torch
@@ -18,7 +18,7 @@ from transformers.models.gemma3n import (
 from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
@@ -74,12 +74,11 @@ TOKENS_PER_AUDIO = 188
 
 
 class Gemma3nImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each patch
-        - w: Width of each patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each patch
+    - w: Width of each patch
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -113,10 +112,13 @@ def batch_audio_features(
 
     Returns:
         The `(bn, s_max, f)` features and their `(bn, s_max)` mask.
+
     """
     if isinstance(input_features, torch.Tensor):
+        assert isinstance(input_features_mask, torch.Tensor)
         return input_features.squeeze(1), input_features_mask.squeeze(1)
 
+    assert isinstance(input_features_mask, list)
     max_len = max(features.shape[0] for features in input_features)
     batched_features = input_features[0].new_zeros(
         (len(input_features), max_len, input_features[0].shape[-1])
@@ -133,11 +135,10 @@ def batch_audio_features(
 
 
 class Gemma3nAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of audios
-        - s: seq_length
-        - f: num_features
+    """Dimensions:
+    - bn: Batch size * number of audios
+    - s: seq_length
+    - f: num_features
     """
 
     type: Literal["audio"] = "audio"
@@ -185,8 +186,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Gemma3nProcessor,
     ) -> PromptUpdateDetails:
-        """
-        Get the replacement metadata for image tokens.
+        """Get the replacement metadata for image tokens.
 
         For Gemma3n, this should return the full_image_sequence which includes
         BOI token, repeated image tokens, and EOI token.
@@ -203,8 +203,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         *,
         processor: Gemma3nProcessor,
     ) -> PromptUpdateDetails:
-        """
-        Get the replacement metadata for audio tokens.
+        """Get the replacement metadata for audio tokens.
 
         For Gemma3n, this should return the full_audio_sequence which includes
         BOA token, repeated audio tokens, and EOA token.
@@ -233,10 +232,8 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_audios = mm_counts.get("audio", 0)
         processor = self.info.get_hf_processor()
         audio_feature_extractor: Gemma3nAudioFeatureExtractor = (
             processor.feature_extractor
@@ -246,38 +243,24 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         img_width = image_processor.size.get("width", 224)
         img_height = image_processor.size.get("height", 224)
 
-        image_overrides = mm_options.get("image")
-        audio_overrides = mm_options.get("audio")
-
         return {
             "image": self._get_dummy_images(
                 width=img_width,
                 height=img_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             ),
         }
 
 
 class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
-
-    def _preprocess_hf_mm_data(
-        self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        mm_data = dict(mm_data)
-        if "audios" in mm_data:
-            mm_data["audio"] = mm_data.pop("audios")
-
-        return mm_data, hf_processor_mm_kwargs
 
     def _postprocess_hf_mm_data(
         self,
@@ -293,10 +276,14 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
             # output (and thus its cache entry) is independent of the other
             # items in the batch. `batch_audio_features` re-pads the
             # per-item features so audio_tower can still run batched.
-            num_frames = [
-                self._get_num_audio_frames_alone(len(audio))
-                for audio in mm_data["audio"]
-            ]
+            audios = mm_data["audio"]
+            if not isinstance(audios, Sequence):
+                raise TypeError("audio data must be a sequence")
+            num_frames = []
+            for audio in audios:
+                if not isinstance(audio, Sized):
+                    raise TypeError("each audio item must have a length")
+                num_frames.append(self._get_num_audio_frames_alone(len(audio)))
             processed_data["input_features_padded"] = [
                 features[:n]
                 for features, n in zip(processed_data.pop("input_features"), num_frames)
@@ -309,8 +296,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         return processed_data
 
     def _get_num_audio_frames_alone(self, num_samples: int) -> int:
-        """
-        Get the number of mel frames that the feature extractor produces
+        """Get the number of mel frames that the feature extractor produces
         for a single audio clip of the given length, independent of batch
         padding.
         """
@@ -564,6 +550,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
 
         Returns:
             A torch.Tensor of embeddings with  shape `[batch_size, seq_len, self.config.text_config.hidden_size]`.
+
         """  # noqa: E501
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -685,7 +672,9 @@ class Gemma3nForConditionalGeneration(
         )
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        mm_input_by_modality = {}
+        mm_input_by_modality: dict[
+            str, Gemma3nImageInputs | Gemma3nAudioInputs | None
+        ] = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -852,7 +841,13 @@ class Gemma3nForConditionalGeneration(
         # select a chunk of pre-allocated PLEs. During normal execution,
         # `embed_input_ids` is called before forward, hence this slice
         # will contain PLEs computed from the actual input_ids.
-        per_layer_inputs = self.per_layer_embeddings[: inputs_embeds.shape[0]]
+        if inputs_embeds is not None:
+            num_tokens = inputs_embeds.shape[0]
+        elif intermediate_tensors is not None:
+            num_tokens = intermediate_tensors["hidden_states"].shape[0]
+        else:
+            raise ValueError("inputs_embeds is required on the first PP rank")
+        per_layer_inputs = self.per_layer_embeddings[:num_tokens]
 
         hidden_states = self.language_model.model(
             input_ids,
@@ -876,9 +871,7 @@ class Gemma3nForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",
@@ -896,8 +889,7 @@ class Gemma3nForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        """
-        Gemma3n supports "free-form" transcription.
+        """Gemma3n supports "free-form" transcription.
         We fix its prompt here to standardize transcriptions/translations
         requests.
         """
@@ -913,9 +905,15 @@ class Gemma3nForConditionalGeneration(
         prompt += " this audio"
 
         # We assume the language is a valid ISO 639-1 code.
-        full_lang_name = cls.supported_languages.get(language, "")
+        full_lang_name = (
+            cls.supported_languages.get(language, "") if language is not None else ""
+        )
         # Translation only for now
-        full_lang_name_to = cls.supported_languages.get(to_language, "")
+        full_lang_name_to = (
+            cls.supported_languages.get(to_language, "")
+            if to_language is not None
+            else ""
+        )
 
         if task_type == "transcribe" and full_lang_name:
             prompt += f" into {full_lang_name}"

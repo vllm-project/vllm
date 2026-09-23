@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-End-to-end accuracy test for GPT-OSS model quantization.
+"""End-to-end accuracy test for GPT-OSS model quantization.
 
 Config:
     Task:   gsm8k_platinum
@@ -31,6 +30,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
     aiter_triton_kernel_w4a8_moe_forward,
+)
+from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
     aiter_triton_kernel_w4a16_moe_forward,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -168,8 +169,7 @@ def test_aiter_mxfp4_moe_ignores_padded_rows(
     monkeypatch: pytest.MonkeyPatch,
     dist_init,
 ) -> None:
-    """
-    Garbage in cudagraph padding rows must not reach the unpadded outputs.
+    """Garbage in cudagraph padding rows must not reach the unpadded outputs.
 
     A cudagraph replay of a size-`TOKENS_PADDED` graph driven by
     `TOKENS_UNPADDED` real tokens leaves the trailing padding row containing

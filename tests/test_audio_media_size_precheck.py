@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -18,7 +19,7 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 class _SyncResponse:
     def __init__(self, chunks: list[bytes], content_length: int | None = None):
         self.headers = (
-            {} if content_length is None else {"content-length": str(content_length)}
+            {} if content_length is None else {"Content-Length": str(content_length)}
         )
         self._chunks = chunks
         self.iterated = 0
@@ -77,6 +78,25 @@ def test_audio_base64_rejects_before_decode(monkeypatch: pytest.MonkeyPatch):
         AudioMediaIO().load_base64("audio/wav", "A" * (max_encoded_chars + 1))
 
     decode.assert_not_called()
+
+
+def test_audio_load_bytes_rejects_oversized(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        AudioMediaIO().load_bytes(b"\x00" * (MiB_bytes + 1))
+
+
+def test_audio_load_file_rejects_oversized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+
+    oversized = tmp_path / "big.wav"
+    oversized.write_bytes(b"\x00" * (MiB_bytes + 1))
+
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        AudioMediaIO().load_file(oversized)
 
 
 def test_sync_http_reader_rejects_from_content_length_before_body_read():

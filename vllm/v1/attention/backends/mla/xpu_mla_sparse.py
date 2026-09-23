@@ -13,7 +13,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SharedTopkIndicesBuffer,
+)
+from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -88,6 +91,23 @@ class XPUMLASparseMetadata(AttentionMetadata):
     block_size: int = 1
     topk_tokens: int = 2048
 
+    # The shared MLA layer (`mla_attention.py::forward_impl`) reads these
+    # decode/prefill counts unconditionally for every MLA metadata (it asserts
+    # `num_decodes`/`num_prefills`/`num_decode_tokens is not None` and uses
+    # `num_decode_tokens` to split MQA vs dense-MHA tokens). The CUDA sparse
+    # backends carry them via `SparseMLACommonMetadataBuilder`; this XPU backend
+    # builds its own metadata and previously omitted them, so a sparse-MLA
+    # (DeepSeek / GLM DSA) run on XPU crashed with
+    # `'XPUMLASparseMetadata' object has no attribute 'num_decode_tokens'`.
+    # This backend serves both prefill and decode through the top-k sparse MQA
+    # path (see `forward_mqa`), so all tokens are routed as "decode"
+    # (`num_decode_tokens == num_actual_tokens`, `num_prefills == 0`); that keeps
+    # the shared layer's `num_mha_tokens` at 0 and never enters the dense-MHA
+    # prefill branch (which needs prefill-only fields this backend lacks).
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
+
 
 @dataclass
 class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]):
@@ -108,7 +128,7 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
+        self.topk_tokens = vllm_config.model_config.hf_text_config.index_topk
         self.topk_tokens_tensor = torch.tensor(
             [self.topk_tokens], device=device, dtype=torch.int32
         )
@@ -141,7 +161,7 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
         # Zero-fill for cudagraphs
         self.req_id_per_token_buffer.fill_(0)
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
+            np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
@@ -157,11 +177,16 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            # Route every token through the sparse MQA path (see the field
+            # definitions above); this backend has no dense-MHA prefill.
+            num_decodes=common_attn_metadata.num_reqs,
+            num_prefills=0,
+            num_decode_tokens=common_attn_metadata.num_actual_tokens,
         )
         return metadata
 
 
-class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
+class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata], SharedTopkIndicesBuffer):
     is_sparse = True
 
     def __init__(
@@ -188,12 +213,7 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
-        )
+        self.init_topk_indices_buffer(indexer, topk_indices_buffer)
 
     def _forward_bf16_kv(
         self,
