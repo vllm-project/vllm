@@ -3,6 +3,8 @@
 
 //! Shared helpers for streaming parsers.
 
+use std::fmt::Debug;
+
 use vllm_tokenizer::DecodedText;
 use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult, Needed, StrContext, StrContextValue};
@@ -13,7 +15,10 @@ use crate::tool::{Result, ToolParserError};
 pub(crate) mod marker;
 pub(crate) mod recursion;
 
-pub use marker::{Attributed, Marker, MarkerLike, MarkerStream, SpecialToken, attributed};
+pub use marker::{
+    Attributed, AttributedExt, Marker, MarkerLike, MarkerStream, SpecialToken,
+    attributed_with_markers,
+};
 
 /// Return the byte length of the longest proper prefix of `token` that is also
 /// a suffix of `buffer`.
@@ -417,12 +422,13 @@ pub fn parse_buffered_event<E>(
 /// Parse one event from a buffered [`DecodedText`], for token-aware parsers.
 ///
 /// Same contract as [`parse_buffered_event`]; the input also carries the
-/// buffer's token anchors ([`Attributed`]).
-pub fn parse_buffered_event_attributed<E>(
+/// buffer's token anchors and the parser's `markers` ([`Attributed`]).
+pub fn parse_buffered_event_attributed<M: Debug, E>(
     buffer: &DecodedText,
-    parse: impl FnOnce(&mut Attributed<'_>) -> ModalResult<E>,
+    markers: &M,
+    parse: impl FnOnce(&mut Attributed<'_, M>) -> ModalResult<E>,
 ) -> Result<Option<(E, usize)>> {
-    parse_buffered_stream_event(attributed(buffer), parse)
+    parse_buffered_stream_event(attributed_with_markers(buffer, markers), parse)
 }
 
 fn parse_buffered_stream_event<'i, I: MarkerStream<'i>, E>(

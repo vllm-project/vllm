@@ -23,9 +23,11 @@
 //! - [`MarkerStream`] abstracts over `Partial<&str>` (text-only parsers) and
 //!   [`Attributed`], letting one generic scanner serve both.
 
+use std::fmt::Debug;
 use std::ops::Range;
 
 use auto_impl::auto_impl;
+use educe::Educe;
 use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
 use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult};
@@ -40,17 +42,42 @@ use super::partial_prefix_len;
 ///
 /// `LocatingSlice` reports the cursor's byte offset from the buffer start, which
 /// is the coordinate system of the anchors; `Partial` keeps the incomplete-input
-/// semantics streaming parsers rely on; `Stateful` carries the immutable anchors,
-/// sorted by byte offset. winnow forwards `Compare`, `FindSlice`, `Location`, and
+/// semantics streaming parsers rely on; `Stateful` carries the immutable
+/// [`AttributedState`]. winnow forwards `Compare`, `FindSlice`, `Location`, and
 /// `UpdateSlice` through all three, so `literal`, `alt`, `seq!`, `take_until`,
 /// and `rest` work unchanged.
-pub type Attributed<'i> = Stateful<Partial<LocatingSlice<&'i str>>, &'i [TokenAttribution]>;
+pub type Attributed<'i, M = ()> = Stateful<Partial<LocatingSlice<&'i str>>, AttributedState<'i, M>>;
 
-/// Create an [`Attributed`] input over `buffer`.
-pub fn attributed(buffer: &DecodedText) -> Attributed<'_> {
+/// Immutable state of an [`Attributed`] input.
+#[derive(Debug, Educe)]
+#[educe(Clone, Copy)]
+pub struct AttributedState<'i, M = ()> {
+    /// Token anchors of the buffer, sorted by byte offset.
+    anchors: &'i [TokenAttribution],
+    /// The parser's markers; see [`AttributedExt::markers`].
+    markers: &'i M,
+}
+
+#[easy_ext::ext(AttributedExt)]
+pub impl<'i, M> Attributed<'i, M> {
+    /// The parser's markers, reachable from every grammar function through the
+    /// input instead of an extra parameter.
+    fn markers(&self) -> &'i M {
+        self.state.markers
+    }
+}
+
+/// Create an [`Attributed`] input over `buffer`, carrying `markers`.
+pub fn attributed_with_markers<'i, M>(
+    buffer: &'i DecodedText,
+    markers: &'i M,
+) -> Attributed<'i, M> {
     Stateful {
         input: Partial::new(LocatingSlice::new(buffer.text.as_str())),
-        state: &buffer.attributions,
+        state: AttributedState {
+            anchors: &buffer.attributions,
+            markers,
+        },
     }
 }
 
@@ -122,7 +149,7 @@ impl<'i> MarkerStream<'i> for Partial<&'i str> {
     }
 }
 
-impl<'i> MarkerStream<'i> for Attributed<'i> {
+impl<'i, M: Debug> MarkerStream<'i> for Attributed<'i, M> {
     fn remaining(&self) -> &'i str {
         ****self
     }
@@ -132,7 +159,7 @@ impl<'i> MarkerStream<'i> for Attributed<'i> {
     }
 
     fn anchors(&self) -> &'i [TokenAttribution] {
-        self.state
+        self.state.anchors
     }
 }
 
@@ -393,7 +420,9 @@ mod tests {
     use winnow::error::ErrMode;
     use winnow::stream::{Partial, Stream};
 
-    use super::{Marker, MarkerLike, MarkerStream, SpecialToken, attributed};
+    use super::{
+        Attributed, Marker, MarkerLike, MarkerStream, SpecialToken, attributed_with_markers,
+    };
     use crate::utils::safe_text_len_mul;
 
     const CLOSE_ID: u32 = 256;
@@ -420,6 +449,11 @@ mod tests {
             text: text.to_string(),
             id,
         }
+    }
+
+    /// An input over `buffer` without parser markers.
+    fn attributed(buffer: &DecodedText) -> Attributed<'_> {
+        attributed_with_markers(buffer, &())
     }
 
     fn close() -> Marker {
