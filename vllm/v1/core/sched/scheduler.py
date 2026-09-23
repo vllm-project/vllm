@@ -2007,6 +2007,8 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if model_runner_output.thinking_loop_breaks:
+            self._record_thinking_loop_breaks(model_runner_output.thinking_loop_breaks)
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -2409,6 +2411,21 @@ class Scheduler(SchedulerInterface):
 
         self._enqueue_waiting_request(request)
         return False
+
+    def _record_thinking_loop_breaks(self, loop_breaks: dict[str, int]) -> None:
+        """Log each reasoning loop the model runner broke, naming its request."""
+        for req_id, num_reasoning_tokens in loop_breaks.items():
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            logger.info(
+                "Breaking a repeating reasoning loop after %d reasoning tokens "
+                "in request %s.",
+                num_reasoning_tokens,
+                req_id,
+            )
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.THINKING_LOOP_BREAK)
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False

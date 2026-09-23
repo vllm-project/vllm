@@ -20,6 +20,8 @@ class SamplerOutput:
     num_sampled: torch.Tensor
     num_rejected: torch.Tensor
     sampling_mask_tensors: SamplingMaskTensors | None = None
+    # [num_requests] reasoning tokens at a detected reasoning loop, else 0.
+    thinking_loop_breaks: torch.Tensor | None = None
 
 
 @triton.jit

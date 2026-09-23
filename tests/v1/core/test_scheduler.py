@@ -48,7 +48,7 @@ from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreEventType, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -1924,6 +1924,41 @@ def test_per_request_spec_decode_acceptance_disabled_by_default():
     assert scheduler.spec_decode_metrics_level == "none"
     req = _run_spec_verify_steps(scheduler, [([1, 2, 3], [1, 2, 3, 4])])
     assert scheduler.requests[req.request_id].spec_decode_metrics is None
+
+
+def test_thinking_loop_break_is_recorded_on_its_request():
+    """The model runner reports which requests broke a reasoning loop; the
+    event rides that request's output to the frontend, which counts it in
+    ``vllm:thinking_loop_breaks``."""
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=2, num_tokens=4)
+    for request in requests:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    req_ids = [request.request_id for request in requests]
+    calm, looping = req_ids
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[0], [0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        thinking_loop_breaks={looping: 300},
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+
+    loop_breaks = {
+        out.request_id: [
+            event
+            for event in out.events or []
+            if event.type == EngineCoreEventType.THINKING_LOOP_BREAK
+        ]
+        for out in engine_core_outputs[0].outputs
+    }
+    assert len(loop_breaks[looping]) == 1
+    assert loop_breaks[calm] == []
 
 
 def test_spec_decoding_stats_empty_output():

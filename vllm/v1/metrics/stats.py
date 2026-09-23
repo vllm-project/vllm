@@ -237,6 +237,8 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    num_thinking_loop_breaks: int = 0
+
 
 @dataclass
 class FinishedRequestStats:
@@ -439,6 +441,7 @@ class IterationStats:
         self.time_to_first_tokens_iter: list[float] = []
         self.inter_token_latencies_iter: list[float] = []
         self.num_corrupted_reqs: int = 0
+        self.num_thinking_loop_breaks: int = 0
 
     def __repr__(self) -> str:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
@@ -528,6 +531,9 @@ class IterationStats:
                 self.num_preempted_reqs += 1
                 req_stats.num_preemptions += 1
                 lora_states.request_waiting(req_id, lora_name)
+            elif event.type == EngineCoreEventType.THINKING_LOOP_BREAK:
+                self.num_thinking_loop_breaks += 1
+                req_stats.num_thinking_loop_breaks += 1
 
     def update_from_finished_request(
         self,

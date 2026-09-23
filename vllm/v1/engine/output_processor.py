@@ -844,6 +844,10 @@ class OutputProcessor:
             )
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
+        if metrics.num_thinking_loop_breaks:
+            attributes[SpanAttributes.GEN_AI_THINKING_LOOP_BREAKS] = (
+                metrics.num_thinking_loop_breaks
+            )
 
         instrument_manual(
             span_name="llm_request",

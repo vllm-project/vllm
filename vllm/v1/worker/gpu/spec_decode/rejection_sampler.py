@@ -327,4 +327,7 @@ class RejectionSampler:
             num_nans=num_nans,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
+            thinking_loop_breaks=self.sampler.thinking_budget_state.take_loop_breaks(
+                input_batch.idx_mapping, input_batch.idx_mapping_np
+            ),
         )
