@@ -82,16 +82,14 @@ class GateLinear(ReplicatedLinear):
         )
         can_use_aiter_tuned_gemm = (
             not bias
-            and current_platform.is_rocm()
+            and not force_fp32_compute
             and bool(rocm_aiter_ops.is_tgemm_enabled())
         )
 
         # If fp32 compute is required and no specialized kernel is available,
         # store weights in fp32 so the fallback linear path computes in fp32.
-        # The AITER tier is the exception: it needs bf16 weights and casts the
-        # logits instead, so fp32 weights here would silently disable it.
         if force_fp32_compute and not can_use_specialized_kernels:
-            params_dtype = torch.bfloat16 if can_use_aiter_tuned_gemm else torch.float32
+            params_dtype = torch.float32
 
         super().__init__(
             input_size,
