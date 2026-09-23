@@ -32,16 +32,13 @@ rebuild the snapshot from the repository root:
 python -m tests.watermarking.generate_goldens
 ```
 
-`--check` evaluates the current implementation in memory, prints every differing
-field and exits 1 without writing; `--candidate ID` updates only the named ids.
-Never hand-edit the JSON. The `environment` block records Python, torch, platform
-and CPU capability, and is never compared.
+The script regenerates every candidate. Never hand-edit the JSON.
 
 ## Comparison policy
 
-`score` and `p_value` are stored as hexadecimal floats, which round-trip
-exactly, yet they and `p_value_ratio` are compared with a relative tolerance of
-1e-9 (`GOLDEN_FLOAT_RTOL`): the detector reaches them via `log1p`, `exp` and
+`score`, `p_value` and `p_value_ratio` are stored as plain JSON floats, which
+round-trip exactly, but are compared with a relative tolerance of 1e-9
+(`GOLDEN_FLOAT_RTOL`): the detector reaches them via `log1p`, `exp` and
 `gammaincc`, which differ by a unit in the last place between libm builds.
 Everything else is exact: tokens, counts, booleans, configuration, resolved
 state, trace. Fixture-quality guards run in both pytest and the regeneration

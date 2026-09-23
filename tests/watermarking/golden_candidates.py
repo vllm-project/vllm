@@ -5,11 +5,10 @@
 
 import json
 import math
-import platform
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TypedDict, TypeVar, cast, get_args
+from typing import get_args
 
 import torch
 
@@ -30,13 +29,9 @@ from vllm.v1.watermarking import (
 )
 from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
-_T = TypeVar("_T")
+GOLDEN_SCHEMA_VERSION = 3
 
-REGENERATE_COMMAND = "python -m tests.watermarking.generate_goldens"
-
-GOLDEN_SCHEMA_VERSION = 2
-
-# Hex round-trips exactly, but libm differs by an ULP across builds.
+# JSON floats round-trip exactly, but libm differs by an ULP across builds.
 GOLDEN_FLOAT_RTOL = 1e-9
 GOLDEN_FLOAT_ATOL = 1e-300
 
@@ -44,6 +39,16 @@ P_VALUE_RATIO_MIN_DISTANCE = 1e-6
 REPETITIVE_MIN_KEY_PERTURBATION_TOKENS = 8
 REPETITIVE_MAX_P_VALUE_RATIO = 0.5
 ROUTING_BOUNDARY_MIN_DISTANCE = 1e-6
+
+WATERMARK_CONFIG_FIELDS = (
+    "algorithm",
+    "alpha",
+    "context_width",
+    "deduplicate_contexts",
+    "deduplicate_contexts_max_history",
+    "prf",
+    "allow_target_only_watermarking",
+)
 
 # round(((i + 1) * (5**0.5 - 1) / 2) % 1.0, 4) for i in range(64)
 ROUTING_UNIFORMS: tuple[float, ...] = (
@@ -64,36 +69,6 @@ class GoldenFormatError(ValueError):
 
 class GoldenGuardError(ValueError):
     """A candidate is too weak or too unstable to be frozen as a golden."""
-
-
-class GoldenDetectionPayload(TypedDict):
-    score: str
-    p_value: str
-    p_value_ratio: float
-    num_scored_tokens: int
-    is_watermarked: bool
-
-
-class GoldenTracePayload(TypedDict):
-    routing_draws: int
-    key_b_routed: int | None
-    key_b_effective: int | None
-    dedup_skips: int
-    partial_context_skips: int
-
-
-class GoldenCandidatePayload(TypedDict):
-    configuration: dict[str, object]
-    resolved: dict[str, object]
-    generation: list[int]
-    trace: GoldenTracePayload
-    detection: GoldenDetectionPayload
-
-
-class GoldenPayload(TypedDict):
-    schema_version: int
-    environment: dict[str, str]
-    candidates: dict[str, GoldenCandidatePayload]
 
 
 @dataclass(frozen=True)
@@ -239,7 +214,6 @@ class WatermarkingCandidate:
                 "dominant_token": self.fixture.dominant_token,
                 "dominant_bias": self.fixture.dominant_bias,
                 "prompt": list(self.fixture.prompt),
-                "routing_uniforms": list(self.fixture.routing_uniforms),
             },
         }
 
@@ -247,7 +221,7 @@ class WatermarkingCandidate:
         """Return the vLLM-side state this candidate resolves to.
 
         An allowlist rather than the whole dataclass, so a new production field
-        is a deliberate golden change: WATERMARK_CONFIG_SPECS names the fields
+        is a deliberate golden change: WATERMARK_CONFIG_FIELDS names the fields
         recorded here and test_goldens.py checks it still covers
         WatermarkConfig. Keys exceed 2**53 and are decimal strings.
         """
@@ -257,7 +231,7 @@ class WatermarkingCandidate:
         dual_key = self.scheme == "dual_key_gumbel"
         return {
             "watermark_config": {
-                field: getattr(config, field) for field in WATERMARK_CONFIG_SPECS
+                field: getattr(config, field) for field in WATERMARK_CONFIG_FIELDS
             },
             "derived_keys": {
                 "key_a": str(derive_watermark_key(self.key, b"key_a"))
@@ -326,7 +300,7 @@ class WatermarkingCandidate:
     def golden_entry(
         self,
         detection_token_ids: list[int] | None = None,
-    ) -> GoldenCandidatePayload:
+    ) -> dict:
         """Generate, detect and trace this candidate into one golden entry.
 
         ``detection_token_ids`` runs detection over stored tokens instead of
@@ -343,8 +317,8 @@ class WatermarkingCandidate:
             "generation": token_ids,
             "trace": _trace_payload(trace),
             "detection": {
-                "score": detection.score.hex(),
-                "p_value": detection.p_value.hex(),
+                "score": detection.score,
+                "p_value": detection.p_value,
                 "p_value_ratio": detection.p_value / threshold,
                 "num_scored_tokens": detection.num_scored_tokens,
                 "is_watermarked": detection.is_watermarked,
@@ -406,7 +380,7 @@ class WatermarkingCandidate:
         )
 
 
-def _trace_payload(trace: GenerationTrace) -> GoldenTracePayload:
+def _trace_payload(trace: GenerationTrace) -> dict:
     return {
         "routing_draws": trace.routing_draws,
         "key_b_routed": trace.key_b_routed,
@@ -653,24 +627,6 @@ WATERMARKING_CANDIDATES = (
     ),
 )
 
-MAX_HISTORY_TWINS = (
-    (
-        "gumbel-philox-key42-cw4-mid-history8",
-        "gumbel-philox-key42-cw4-mid-history-none",
-    ),
-)
-PROMPT_TWINS = (
-    (
-        "gumbel-philox-key42-cw4-all",
-        "gumbel-philox-key42-cw4-all-prompt",
-    ),
-)
-SKIP_PARTIAL_TWINS = (
-    (
-        "gumbel-philox-key42-cw4-mid-history-none",
-        "gumbel-philox-key42-cw4-mid-all",
-    ),
-)
 DEDUPLICATION_TWINS = (
     (
         "gumbel-philox-key42-cw4-mid-history-none",
@@ -679,24 +635,7 @@ DEDUPLICATION_TWINS = (
 )
 
 
-def environment_block() -> dict[str, str]:
-    """Return informational build details; these are recorded, never compared."""
-    return {
-        "python": platform.python_version(),
-        "torch": str(torch.__version__),
-        "platform": platform.platform(),
-        "cpu_capability": str(torch.backends.cpu.get_cpu_capability()),
-    }
-
-
-def frozen_entry(candidate: WatermarkingCandidate) -> GoldenCandidatePayload:
-    """Build the entry to freeze for one candidate."""
-    return candidate.golden_entry()
-
-
-def validate_golden_guards(
-    entries: Mapping[str, GoldenCandidatePayload],
-) -> None:
+def validate_golden_guards(entries: Mapping[str, dict]) -> None:
     candidates_by_id = {
         candidate.id: candidate for candidate in WATERMARKING_CANDIDATES
     }
@@ -804,13 +743,12 @@ def validate_golden_guards(
             )
 
 
-def golden_payload() -> GoldenPayload:
+def golden_payload() -> dict:
     candidates = {
-        candidate.id: frozen_entry(candidate) for candidate in WATERMARKING_CANDIDATES
+        candidate.id: candidate.golden_entry() for candidate in WATERMARKING_CANDIDATES
     }
     return {
         "schema_version": GOLDEN_SCHEMA_VERSION,
-        "environment": environment_block(),
         "candidates": candidates,
     }
 
@@ -853,22 +791,6 @@ def _compare_exact(
         differences.append(f"{field}: expected {expected!r}, got {actual!r}")
 
 
-def _compare_hex_float(
-    field: str,
-    actual_hex: str,
-    expected_hex: str,
-    differences: list[str],
-) -> None:
-    actual = float.fromhex(actual_hex)
-    expected = float.fromhex(expected_hex)
-    if not floats_match(actual, expected):
-        differences.append(
-            f"{field}: expected {expected_hex} ({expected!r}), "
-            f"got {actual_hex} ({actual!r}), relative difference "
-            f"{_relative_difference(actual, expected):.3e}"
-        )
-
-
 def _compare_mapping(
     field: str,
     actual: Mapping[str, object],
@@ -883,16 +805,12 @@ def _compare_mapping(
             )
 
 
-def compare_entries(
-    produced: GoldenCandidatePayload,
-    golden: GoldenCandidatePayload,
-) -> list[str]:
+def compare_entries(produced: dict, golden: dict) -> list[str]:
     """Return one line per field that differs, empty when the two agree.
 
     Configuration, resolved state, tokens, trace,
     num_scored_tokens and is_watermarked are compared exactly; score, p_value
-    and p_value_ratio are compared with GOLDEN_FLOAT_RTOL. The environment
-    block is informational and is never looked at.
+    and p_value_ratio are compared with GOLDEN_FLOAT_RTOL.
     """
     differences: list[str] = []
     for field in ("configuration", "resolved", "trace"):
@@ -918,294 +836,37 @@ def compare_entries(
 
     detection = produced["detection"]
     expected_detection = golden["detection"]
-    _compare_hex_float(
-        "detection.score",
-        detection["score"],
-        expected_detection["score"],
-        differences,
-    )
-    _compare_hex_float(
-        "detection.p_value",
-        detection["p_value"],
-        expected_detection["p_value"],
-        differences,
-    )
-    _compare_float(
-        "detection.p_value_ratio",
-        detection["p_value_ratio"],
-        expected_detection["p_value_ratio"],
-        differences,
-    )
-    _compare_exact(
-        "detection.num_scored_tokens",
-        detection["num_scored_tokens"],
-        expected_detection["num_scored_tokens"],
-        differences,
-    )
-    _compare_exact(
-        "detection.is_watermarked",
-        detection["is_watermarked"],
-        expected_detection["is_watermarked"],
-        differences,
-    )
+    for field in ("score", "p_value", "p_value_ratio"):
+        _compare_float(
+            f"detection.{field}",
+            detection[field],
+            expected_detection[field],
+            differences,
+        )
+    for field in ("num_scored_tokens", "is_watermarked"):
+        _compare_exact(
+            f"detection.{field}",
+            detection[field],
+            expected_detection[field],
+            differences,
+        )
     return differences
 
 
-def compare_golden(
-    candidate: WatermarkingCandidate,
-    golden: GoldenCandidatePayload,
-) -> list[str]:
+def compare_golden(candidate: WatermarkingCandidate, golden: dict) -> list[str]:
     """Return one line per field of ``candidate`` that drifted from ``golden``."""
     return compare_entries(candidate.golden_entry(golden["generation"]), golden)
 
 
-def _format_error(where: str, problem: str) -> str:
-    return f"{where}: {problem}"
-
-
-def _require_mapping(value: object, where: str) -> dict[str, object]:
-    if type(value) is not dict:
+def read_goldens(path: Path) -> dict[str, dict]:
+    """Read the goldens file and return its candidate mapping."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    version = payload.get("schema_version")
+    if version != GOLDEN_SCHEMA_VERSION:
         raise GoldenFormatError(
-            _format_error(where, f"expected a mapping, got {type(value).__name__}")
+            f"{path}: schema_version {version!r}, expected {GOLDEN_SCHEMA_VERSION}"
         )
-    return value
-
-
-def _require_keys(
-    mapping: Mapping[str, object], expected: frozenset[str], where: str
-) -> None:
-    problems = []
-    missing = sorted(expected - set(mapping))
-    unexpected = sorted(set(mapping) - expected)
-    if missing:
-        problems.append(f"missing {missing}")
-    if unexpected:
-        problems.append(f"unexpected {unexpected}")
-    if problems:
-        raise GoldenFormatError(_format_error(where, " and ".join(problems)))
-
-
-def _require_type(value: object, expected: type[_T], where: str) -> _T:
-    if type(value) is not expected:
-        raise GoldenFormatError(
-            _format_error(
-                where,
-                f"expected {expected.__name__}, got {type(value).__name__}",
-            )
-        )
-    return cast(_T, value)
-
-
-_FieldSpec = tuple[type, bool, type | None]
-
-_ENVIRONMENT_SPECS: dict[str, _FieldSpec] = {
-    "python": (str, False, None),
-    "torch": (str, False, None),
-    "platform": (str, False, None),
-    "cpu_capability": (str, False, None),
-}
-_CANDIDATE_KEYS = frozenset(
-    {"configuration", "resolved", "generation", "trace", "detection"}
-)
-_CONFIGURATION_SPECS: dict[str, _FieldSpec] = {
-    "scheme": (str, False, None),
-    "scheme_config": (dict, False, None),
-    "prf": (str, False, None),
-    "prf_version": (str, False, None),
-    "key": (str, False, None),
-    "detection_key": (str, False, None),
-    "fixture": (dict, False, None),
-}
-_SCHEME_CONFIG_SPECS: dict[str, _FieldSpec] = {
-    "context_width": (int, False, None),
-    "generation_alpha": (float, False, None),
-    "detection_alpha": (float, False, None),
-    "generation_deduplicate_contexts": (str, False, None),
-    "generation_deduplicate_contexts_max_history": (int, True, None),
-    "detection_deduplicate_contexts": (bool, False, None),
-    "p_value_threshold": (float, False, None),
-}
-_FIXTURE_SPECS: dict[str, _FieldSpec] = {
-    "vocabulary_size": (int, False, None),
-    "num_tokens": (int, False, None),
-    "logit_denominator": (int, False, None),
-    "logit_modulus": (int, False, None),
-    "dominant_token": (int, True, None),
-    "dominant_bias": (int, False, None),
-    "prompt": (list, False, int),
-    "routing_uniforms": (list, False, float),
-}
-_RESOLVED_SPECS: dict[str, _FieldSpec] = {
-    "watermark_config": (dict, False, None),
-    "derived_keys": (dict, False, None),
-    "detector": (dict, False, None),
-}
-WATERMARK_CONFIG_SPECS: dict[str, _FieldSpec] = {
-    "algorithm": (str, False, None),
-    "alpha": (float, False, None),
-    "context_width": (int, False, None),
-    "deduplicate_contexts": (str, False, None),
-    "deduplicate_contexts_max_history": (int, True, None),
-    "prf": (str, False, None),
-    "allow_target_only_watermarking": (bool, False, None),
-}
-_DERIVED_KEYS_SPECS: dict[str, _FieldSpec] = {
-    "key_a": (str, True, None),
-    "key_b": (str, True, None),
-}
-_DETECTOR_SPECS: dict[str, _FieldSpec] = {
-    "type": (str, False, None),
-    "context_width": (int, False, None),
-    "p_value_threshold": (float, False, None),
-    "deduplicate_contexts": (bool, False, None),
-    "alpha": (float, True, None),
-    "prf_key": (str, False, None),
-    "key_b_prf_key": (str, True, None),
-}
-_TRACE_SPECS: dict[str, _FieldSpec] = {
-    "routing_draws": (int, False, None),
-    "key_b_routed": (int, True, None),
-    "key_b_effective": (int, True, None),
-    "dedup_skips": (int, False, None),
-    "partial_context_skips": (int, False, None),
-}
-_DETECTION_SPECS: dict[str, _FieldSpec] = {
-    "score": (str, False, None),
-    "p_value": (str, False, None),
-    "p_value_ratio": (float, False, None),
-    "num_scored_tokens": (int, False, None),
-    "is_watermarked": (bool, False, None),
-}
-
-
-def _validate_fields(
-    value: object,
-    specs: dict[str, _FieldSpec],
-    where: str,
-) -> dict[str, object]:
-    mapping = _require_mapping(value, where)
-    _require_keys(mapping, frozenset(specs), where)
-    for field, (expected, optional, element) in specs.items():
-        location = f"{where}.{field}"
-        item = mapping[field]
-        if optional and item is None:
-            continue
-        _require_type(item, expected, location)
-        if element is not None:
-            for index, entry in enumerate(cast("list[object]", item)):
-                _require_type(entry, element, f"{location}[{index}]")
-    return mapping
-
-
-def _validate_candidate(value: object, where: str) -> None:
-    candidate = _require_mapping(value, where)
-    _require_keys(candidate, _CANDIDATE_KEYS, where)
-
-    configuration = _validate_fields(
-        candidate["configuration"], _CONFIGURATION_SPECS, f"{where}.configuration"
-    )
-    _validate_fields(
-        configuration["scheme_config"],
-        _SCHEME_CONFIG_SPECS,
-        f"{where}.configuration.scheme_config",
-    )
-    _validate_fields(
-        configuration["fixture"],
-        _FIXTURE_SPECS,
-        f"{where}.configuration.fixture",
-    )
-
-    resolved = _validate_fields(
-        candidate["resolved"], _RESOLVED_SPECS, f"{where}.resolved"
-    )
-    _validate_fields(
-        resolved["watermark_config"],
-        WATERMARK_CONFIG_SPECS,
-        f"{where}.resolved.watermark_config",
-    )
-    _validate_fields(
-        resolved["derived_keys"],
-        _DERIVED_KEYS_SPECS,
-        f"{where}.resolved.derived_keys",
-    )
-    _validate_fields(
-        resolved["detector"], _DETECTOR_SPECS, f"{where}.resolved.detector"
-    )
-
-    generation = _require_type(candidate["generation"], list, f"{where}.generation")
-    for index, token_id in enumerate(generation):
-        _require_type(token_id, int, f"{where}.generation[{index}]")
-
-    _validate_fields(candidate["trace"], _TRACE_SPECS, f"{where}.trace")
-    detection = _validate_fields(
-        candidate["detection"], _DETECTION_SPECS, f"{where}.detection"
-    )
-    for field in ("score", "p_value"):
-        try:
-            float.fromhex(cast(str, detection[field]))
-        except ValueError:
-            raise GoldenFormatError(
-                _format_error(
-                    f"{where}.detection.{field}",
-                    f"{detection[field]!r} is not a hexadecimal float",
-                )
-            ) from None
-
-
-def load_goldens(
-    payload: object,
-    *,
-    source: str,
-) -> dict[str, GoldenCandidatePayload]:
-    """Validate a decoded goldens payload and return its candidate mapping."""
-    top_level = _require_mapping(payload, source)
-    schema_version = top_level.get("schema_version")
-    if schema_version is not None:
-        _require_type(schema_version, int, f"{source}: schema_version")
-    if schema_version != GOLDEN_SCHEMA_VERSION:
-        raise GoldenFormatError(
-            _format_error(
-                f"{source}: schema_version",
-                f"expected {GOLDEN_SCHEMA_VERSION}, got {schema_version}",
-            )
-        )
-    _require_keys(
-        top_level, frozenset({"schema_version", "environment", "candidates"}), source
-    )
-    _validate_fields(
-        top_level["environment"], _ENVIRONMENT_SPECS, f"{source}: environment"
-    )
-
-    candidates = _require_mapping(top_level["candidates"], f"{source}: candidates")
-    for candidate_id, candidate in candidates.items():
-        _validate_candidate(candidate, f"{source}: candidate {candidate_id}")
-    return cast("dict[str, GoldenCandidatePayload]", candidates)
-
-
-def _reject_duplicate_keys(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    # The path is not known here; read_goldens puts it in front of the message.
-    mapping: dict[str, object] = {}
-    for key, value in pairs:
-        if key in mapping:
-            raise GoldenFormatError(f"key {key!r} appears more than once")
-        mapping[key] = value
-    return mapping
-
-
-def read_goldens(path: Path) -> dict[str, GoldenCandidatePayload]:
-    """Read and validate the goldens file, returning its candidate mapping."""
-    try:
-        payload = json.loads(
-            path.read_text(encoding="utf-8"),
-            object_pairs_hook=_reject_duplicate_keys,
-        )
-    except json.JSONDecodeError as error:
-        raise GoldenFormatError(_format_error(str(path), str(error))) from None
-    except GoldenFormatError as error:
-        raise GoldenFormatError(_format_error(str(path), str(error))) from None
-    return load_goldens(payload, source=str(path))
+    return payload["candidates"]
 
 
 def configured_algorithms() -> set[str]:
