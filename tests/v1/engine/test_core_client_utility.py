@@ -42,6 +42,8 @@ async def utility_client(monkeypatch):
         self.resources = BackgroundResources(ctx=ctx)
         self._finalizer = weakref.finalize(self, self.resources)
         self.input_socket = self.resources.input_socket = self.ctx.socket(zmq.ROUTER)
+        self.input_socket.setsockopt(zmq.RCVTIMEO, 5000)
+        self.input_socket.setsockopt(zmq.SNDTIMEO, 5000)
         self.resources.output_socket = self.ctx.socket(zmq.PULL)
         self.input_socket.bind("inproc://utility-input")
         self.resources.output_socket.bind("inproc://utility-output")
@@ -53,14 +55,16 @@ async def utility_client(monkeypatch):
         peer_input, peer_output = ctx.socket(zmq.DEALER), ctx.socket(zmq.PUSH)
         peer_input.setsockopt(zmq.IDENTITY, self.core_engine)
         peer_input.setsockopt(zmq.RCVTIMEO, 5000)
+        peer_input.setsockopt(zmq.SNDTIMEO, 5000)
+        peer_output.setsockopt(zmq.SNDTIMEO, 5000)
         peer_input.connect("inproc://utility-input")
         peer_output.connect("inproc://utility-output")
+        clients.append((self, peer_input, peer_output))
         peer_input.send(b"ready")
         assert zmq.Socket.shadow(self.input_socket).recv_multipart() == [
             self.core_engine,
             b"ready",
         ]
-        clients.append((self, peer_input, peer_output))
 
     monkeypatch.setattr(MPClient, "__init__", init)
 
@@ -77,24 +81,31 @@ async def utility_client(monkeypatch):
     yield create
 
     for client, peer_input, peer_output in clients:
-        # Release waiters even when testing the broken implementation.
-        for future in list(client.utility_results.values()):
-            if not future.done():
-                future.cancel()
-        if isinstance(client, SyncMPClient):
-            if not client.output_queue_thread.is_alive():
-                client.resources.shutdown_path = None
+        try:
+            # Release waiters even when testing the broken implementation.
+            for future in list(client.utility_results.values()):
+                if not future.done():
+                    future.cancel()
             client.shutdown()
-            await asyncio.to_thread(client.output_queue_thread.join, 5)
-            assert not client.output_queue_thread.is_alive()
-        else:
-            client.shutdown()
-            await asyncio.gather(
-                client.resources.output_queue_task, return_exceptions=True
-            )
-        peer_input.close(linger=0)
-        peer_output.close(linger=0)
-        client.resources.ctx.term()
+        finally:
+            peer_input.close(linger=0)
+            peer_output.close(linger=0)
+            # Wait for the receiver before closing any of its sockets.
+            if isinstance(client, SyncMPClient):
+                thread = getattr(client, "output_queue_thread", None)
+                if thread is not None:
+                    await asyncio.to_thread(thread.join, 5)
+                    assert not thread.is_alive()
+            else:
+                task = client.resources.output_queue_task
+                if task is not None:
+                    _, pending = await asyncio.wait({task}, timeout=5)
+                    assert not pending, "Output receiver did not stop"
+                    await asyncio.gather(task, return_exceptions=True)
+            client.input_socket.close(linger=0)
+            if client.resources.output_socket is not None:
+                client.resources.output_socket.close(linger=0)
+            client.resources.ctx.term()
 
 
 async def _receive_call(peer_input):
@@ -120,6 +131,18 @@ async def test_receiver_stop_fails_pending_utility(utility_client, asyncio_mode,
             return await client.call_utility_async("echo")
         return await asyncio.to_thread(client.call_utility, "echo")
 
+    failed = asyncio.create_task(call())
+    failure = EngineCoreOutputs(
+        utility_output=UtilityOutput(
+            call_id=await _receive_call(peer_input),
+            failure_message="recoverable worker error",
+        )
+    )
+    peer_output.send_multipart(MsgpackEncoder().encode(failure))
+    with pytest.raises(Exception, match="recoverable worker error"):
+        await asyncio.wait_for(failed, 5)
+    assert not client.resources.engine_dead
+
     completed = asyncio.create_task(call())
     _reply(peer_output, await _receive_call(peer_input))
     assert await asyncio.wait_for(completed, 5) == "ok"
@@ -137,11 +160,39 @@ async def test_receiver_stop_fails_pending_utility(utility_client, asyncio_mode,
         with pytest.raises(error):
             await asyncio.wait_for(asyncio.shield(pending), 5)
         assert not client.utility_results
+        with pytest.raises(EngineDeadError):
+            await asyncio.wait_for(call(), 5)
+        assert not client.utility_results
+        if not asyncio_mode:
+            await asyncio.to_thread(client.output_queue_thread.join, 5)
+            assert not client.output_queue_thread.is_alive()
     finally:
         for future in list(client.utility_results.values()):
             if not future.done():
                 future.cancel()
         await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_sync_shutdown_survives_concurrent_receiver_exit(
+    utility_client, monkeypatch
+):
+    """Finish shutdown even if the receiver exits before the cancel socket connects."""
+    client, peer_input, peer_output = utility_client(False)
+    pending = asyncio.create_task(asyncio.to_thread(client.call_utility, "echo"))
+    _reply(peer_output, await _receive_call(peer_input))
+    assert await asyncio.wait_for(pending, 5) == "ok"
+    original_socket = client.ctx.socket
+
+    def create_socket(*args, **kwargs):
+        # Let the receiver exit after shutdown_path was checked, before connect().
+        peer_output.send(b"ENGINE_CORE_DEAD")
+        client.output_queue_thread.join(5)
+        assert not client.output_queue_thread.is_alive()
+        return original_socket(*args, **kwargs)
+
+    monkeypatch.setattr(client.ctx, "socket", create_socket)
+    client.shutdown()
 
 
 @pytest.mark.asyncio
