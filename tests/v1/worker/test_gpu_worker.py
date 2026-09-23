@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -14,6 +15,42 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
+    """Profiling must use serving's thread count to keep Dynamo guards valid."""
+    from torch._dynamo.testing import CompileCounter
+
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
+    monkeypatch.setattr(
+        gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
+    )
+    loading_threads = []
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(weight_transfer_config=None),
+        model_runner=SimpleNamespace(
+            load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
+        ),
+        _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    original_threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(2)
+        gpu_worker.Worker.load_model(worker)
+        assert loading_threads == [2]
+
+        counter = CompileCounter()
+        compiled = torch.compile(lambda x: x + 1, backend=counter, fullgraph=True)
+        x = torch.ones(2)
+        compiled(x)
+        gpu_worker.set_torch_threads_for_runtime()
+        torch.testing.assert_close(compiled(x), x + 1)
+        assert counter.frame_count == 1
+    finally:
+        torch.set_num_threads(original_threads)
+
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
