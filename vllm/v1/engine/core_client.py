@@ -1961,9 +1961,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Pending coordinator snapshots must use the surviving ranks too.
         self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
-        pause_modes = [self._eep_commit_pause_mode()] * new_data_parallel_size + [
-            "abort"
-        ] * removed_dp_size
+        eep_mode = self._eep_commit_pause_mode()
+        pause_modes = [eep_mode] * new_data_parallel_size + ["abort"] * removed_dp_size
         pause_futures = [
             self._call_utility_async("pause_scheduler", mode, False, engine=engine)
             for mode, engine in zip(pause_modes, old_core_engines)
