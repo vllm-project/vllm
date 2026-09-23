@@ -409,7 +409,7 @@ def _skip_if_backend_unavailable(backend_cls, kv_cache_dtype: str, block_size: i
         and kv_cache_dtype != "fp8_ds_mla"
     ):
         pytest.skip("FlashMLA Sparse fp8 only supports fp8_ds_mla kv-cache dtype")
-    if block_size not in backend_cls.get_supported_kernel_block_sizes():
+    if not backend_cls.supports_block_size(block_size):
         pytest.skip(
             f"{backend_cls.get_name()} does not support block_size={block_size}"
         )

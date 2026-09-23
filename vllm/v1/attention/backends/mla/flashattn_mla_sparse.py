@@ -41,7 +41,13 @@ class FlashAttnMLASparseBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64]
+        # The kernel consumes token-row indices, so larger manager blocks do
+        # not need to be split into physical 64-token pages.
+        return [MultipleOf(64)]
+
+    @staticmethod
+    def get_kernel_page_rows() -> int:
+        return 1
 
     @staticmethod
     def get_name() -> str:

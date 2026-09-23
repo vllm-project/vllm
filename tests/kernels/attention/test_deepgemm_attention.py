@@ -313,3 +313,58 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
             ref_logits = ref_logits.masked_fill(~mask, 0)
             diff = calc_diff(logits, ref_logits)
             assert diff < 1e-3, f"{diff=}"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
+)
+def test_deepgemm_paged_mqa_packed_manager_block_stride():
+    from vllm.models.glm5next.common.sparse_indexer import _kpool_flat_page_view
+    from vllm.v1.attention.backends.mla.indexer import kpool_page_geometry
+
+    torch.manual_seed(0)
+    num_blocks, block_size, packed_rows = 4, 256, 320
+    num_heads, head_dim, row_bytes = 64, 128, 132
+    page_size, pages_per_block, dense_stride = kpool_page_geometry(
+        block_size, None, row_bytes
+    )
+    compact_pages = kv_cache_cast_to_fp8(
+        torch.randn(
+            num_blocks, block_size, 1, head_dim, device="cuda", dtype=torch.bfloat16
+        ).view(num_blocks * pages_per_block, page_size, 1, head_dim)
+    )
+    packed_backing = torch.zeros(
+        num_blocks,
+        packed_rows,
+        row_bytes,
+        device="cuda",
+        dtype=torch.uint8,
+    )
+    packed_manager = packed_backing[:, :block_size]
+    packed_manager.copy_(compact_pages.squeeze(2).view(num_blocks, block_size, -1))
+    packed_stride = kpool_page_geometry(
+        block_size,
+        packed_manager.stride(0) * packed_manager.element_size(),
+        row_bytes,
+    )[2]
+    packed_pages = _kpool_flat_page_view(packed_manager).unsqueeze(2)
+    offsets = torch.arange(pages_per_block, device="cuda", dtype=torch.int32)
+    tables = [
+        (stride + offsets).unsqueeze(0) for stride in (dense_stride, packed_stride)
+    ]
+
+    q = torch.randn(1, 1, num_heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
+        torch.float8_e4m3fn
+    )
+    weights = torch.randn(1, num_heads, device="cuda", dtype=torch.float32)
+    context_lens = torch.full((1, 1), block_size, device="cuda", dtype=torch.int32)
+    schedule = get_paged_mqa_logits_metadata(context_lens, page_size, get_num_sms())
+    logits = [
+        fp8_fp4_paged_mqa_logits(
+            (q, None), cache, weights, context_lens, table, schedule, block_size, False
+        )
+        for cache, table in zip((compact_pages, packed_pages), tables)
+    ]
+    torch.testing.assert_close(*logits, rtol=0, atol=0)

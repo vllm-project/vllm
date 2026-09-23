@@ -64,7 +64,7 @@ from vllm.v1.spec_decode.utils import (
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, group_block_stride_bytes
 
 logger = init_logger(__name__)
 
@@ -1759,6 +1759,9 @@ class SpecDecodeBaseProposer:
                         self.vllm_config,
                         self.device,
                         kernel_block_size=kernel_block_size,
+                        block_stride_bytes=group_block_stride_bytes(
+                            kv_cache_config, self.kv_cache_gid
+                        ),
                     )
                     attention_groups[backend_key] = attn_group
                 else:

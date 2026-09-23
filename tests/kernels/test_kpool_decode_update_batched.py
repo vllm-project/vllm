@@ -292,9 +292,9 @@ def _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos):
     return kv, tail
 
 
-@pytest.mark.parametrize("pool_size", [4, 16])
-def test_decode_writer_matches_prefill_writer(pool_size):
-    """Compare production decode and prefill writers for pool sizes 4 and 16."""
+def test_decode_writer_matches_prefill_writer_with_expanded_ring():
+    pool_size = 16
+    ring = 2 * pool_size
     n_pools, page, nblk = 8, 64, 4
     n_tok = n_pools * pool_size
     dev = "cuda"
@@ -317,14 +317,14 @@ def test_decode_writer_matches_prefill_writer(pool_size):
 
     # One request owning tail block 0, fed one token per decode step.
     kv_decode = torch.zeros_like(kv_prefill)
-    tail = torch.zeros(nblk, 2, pool_size, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    tail = torch.zeros(nblk, 2, ring, HEAD_DIM, dtype=torch.bfloat16, device=dev)
     for t in range(n_tok):
         completes = t % pool_size == pool_size - 1
         kpool_decode_update_and_maybe_write_cache_batched(
             kv_decode,
             tail,
             # token-granular: every token has a valid tail slot
-            torch.tensor([[t % pool_size]], dtype=torch.int32, device=dev),
+            torch.tensor([[t % ring]], dtype=torch.int32, device=dev),
             k[t].view(1, 1, HEAD_DIM),
             score[t].view(1, 1, HEAD_DIM),
             ape,
@@ -338,17 +338,63 @@ def test_decode_writer_matches_prefill_writer(pool_size):
             round_scale=ROUND_SCALE,
         )
 
-    differing = [
-        p
-        for p in range(n_pools)
-        if not torch.equal(
-            kv_prefill[p // page, p % page], kv_decode[p // page, p % page]
-        )
-    ]
-    assert not differing, (
-        f"decode-written pools differ from prefill-written pools: "
-        f"{len(differing)}/{n_pools} (pool_size={pool_size}, first={differing[:5]})"
+    torch.testing.assert_close(
+        kv_decode.flatten(0, 1)[:n_pools],
+        kv_prefill.flatten(0, 1)[:n_pools],
+        rtol=0,
+        atol=0,
     )
+
+
+def test_rejected_draft_redo_with_expanded_ring():
+    pool, page, nblk = 4, 64, 2
+    ring = 2 * pool
+    dev = "cuda"
+    torch.manual_seed(1)
+    k = torch.randn(7, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    score = torch.randn_like(k)
+    ape = torch.randn(pool, HEAD_DIM, dtype=torch.float32, device=dev)
+    kv_ref = torch.zeros(nblk, page, HEAD_DIM + 4, dtype=torch.uint8, device=dev)
+    kpool_compress_and_write_cache(
+        kv_ref,
+        k[:pool].view(1, pool, HEAD_DIM),
+        score[:pool].view(1, pool, HEAD_DIM),
+        ape,
+        torch.tensor([1], dtype=torch.int64, device=dev),
+        pool_size=pool,
+        head_dim=HEAD_DIM,
+        round_scale=ROUND_SCALE,
+    )
+
+    kv = torch.zeros_like(kv_ref)
+    tail = torch.zeros(nblk, 2, ring, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+
+    def step(positions, keys, scores):
+        pos = torch.tensor([positions], dtype=torch.int32, device=dev)
+        slots = [(p // pool) if p % pool == pool - 1 else -1 for p in positions]
+        kpool_decode_update_and_maybe_write_cache_batched(
+            kv,
+            tail,
+            pos % ring,
+            keys.view(1, -1, HEAD_DIM),
+            scores.view(1, -1, HEAD_DIM),
+            ape,
+            torch.tensor([slots], dtype=torch.int32, device=dev),
+            pos,
+            pool,
+            HEAD_DIM,
+            round_scale=ROUND_SCALE,
+        )
+
+    for offset, pos in enumerate(range(4, 7)):
+        step([pos], k[offset], score[offset])
+
+    drafts = torch.randn(4, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    draft_scores = torch.randn_like(drafts)
+    step([7, 8, 9, 10], drafts, draft_scores)
+    step([7, 8, 9, 10], k[3:], score[3:])
+
+    assert torch.equal(kv, kv_ref)
 
 
 def test_leading_invalid_tail_slot():

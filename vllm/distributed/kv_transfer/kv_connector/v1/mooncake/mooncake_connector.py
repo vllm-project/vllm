@@ -24,7 +24,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
-    get_current_attn_backends,
+    get_current_attn_backends_and_specs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -59,7 +59,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -1064,9 +1063,11 @@ class MooncakeConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
         self._physical_blocks_per_logical_kv_block = 1
+        self.attn_backends, self.attn_backend_specs = (
+            get_current_attn_backends_and_specs(vllm_config, kv_cache_config)
+        )
         self._sync_block_size_with_kernel()
 
-        self.attn_backends = get_current_attn_backends(vllm_config)
         logger.debug(
             "Detected attention backends %s",
             [backend.get_name() for backend in self.attn_backends],
@@ -1102,8 +1103,9 @@ class MooncakeConnectorWorker:
         # and draft model may use different attention backends with different
         # physical block sizes. Pick the common (smallest) block size so that
         # KV-cache registration and transfer work correctly for both models.
-        backends = get_current_attn_backends(self.vllm_config)
-        kernel_block_size = select_common_block_size(self.block_size, backends)
+        kernel_block_size = select_common_block_size(
+            self.block_size, self.attn_backends, self.attn_backend_specs
+        )
         if self.block_size != kernel_block_size:
             logger.info_once(
                 "User-specified logical block size (%s) does not match"
@@ -1745,9 +1747,7 @@ class MooncakeConnectorWorker:
                 block_len = region_cache.stride(0) * region_cache.element_size()
                 region_base_addresses.append(base_addr)
 
-                if isinstance(layer_spec, KpoolTailSpec):
-                    kv_block_len = layer_spec.unpadded_page_size_bytes // 2
-                elif isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
+                if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
                     assert (
                         layer_spec.page_size_bytes
                         % self._physical_blocks_per_logical_kv_block
@@ -1757,6 +1757,8 @@ class MooncakeConnectorWorker:
                         layer_spec.page_size_bytes
                         // self._physical_blocks_per_logical_kv_block
                     )
+                elif isinstance(layer_spec, MambaSpec) and block_is_contiguous:
+                    kv_block_len = layer_spec.page_size_bytes
                 else:
                     kv_block_len = block_len
                 if kv_block_len > block_len:

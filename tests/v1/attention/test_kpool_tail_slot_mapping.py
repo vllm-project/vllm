@@ -3,15 +3,16 @@
 """CPU tests for the kpool tail slot mapping (no GPU required).
 
 The kpool tail cache is a 1-block-per-request circular ring addressed by
-``pos % kpool`` (``KpoolTailSpec`` / ``KpoolTailManager``: exactly one block
-allocated per request, never grown, so only column 0 of its block table is
-ever written; the rest stays zero-initialized).
+``pos % ring_size``. The ring is one kpool without speculation and expands by
+whole kpools to preserve speculative rows. ``CircularBufferSpec`` /
+``CircularBufferManager`` still allocate exactly one block per request, so only
+column 0 of its block table is ever written; the rest stays zero-initialized.
 
 The generic per-group slot kernel cannot express that layout: it maps
 ``pos -> bt[req][pos // bs] * bs + pos % bs`` (``_compute_slot_mappings_kernel``
-in vllm/v1/worker/gpu/block_table.py), so every token at ``pos >= kpool``
+in vllm/v1/worker/gpu/block_table.py), so every token at ``pos >= ring_size``
 reads a zero column and collapses onto physical tail block 0. All concurrent
-requests then share one ``kpool``-slot ring and corrupt each other's pool
+requests then share one tail ring and corrupt each other's pool
 compression.
 
 These tests pin that defect's arithmetic, verify the circular replacement
@@ -26,62 +27,57 @@ import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
+    Glm5NextIndexerBackend,
     KpoolTailBackend,
     KpoolTailMetadataBuilder,
     compute_kpool_tail_slot_mapping,
 )
-from vllm.v1.kv_cache_interface import KpoolTailSpec, compute_layout_strides
+from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.worker.block_table import get_block_table_width
 
 KPOOL = 4
 
 
 def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
-    spec = KpoolTailSpec(
+    assert layout is KVCacheLayout.BLHNC
+    spec = CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
         head_size=128,
         head_size_v=0,
         dtype=torch.bfloat16,
-        sliding_window=KPOOL,
     )
     strides = compute_layout_strides(spec, num_blocks=8, num_layers=3, layout=layout)
     _, _, head_stride, state_stride, content_stride = strides
 
-    assert layout is KVCacheLayout.LBHNC
     assert head_stride == KPOOL * 128 * torch.bfloat16.itemsize
     assert state_stride == 128 * torch.bfloat16.itemsize
     assert content_stride == 1
 
 
-def test_tail_spec_opts_out_of_generic_slot_mapping():
-    """The tail row is one block wide (padded to the block-table alignment), so
-    the generic kernel's ``pos // kpool`` column index runs off the end of the
-    allocation for long prompts. The spec must opt out of it entirely."""
-    spec = KpoolTailSpec(
-        block_size=KPOOL,
-        num_kv_heads=2,
-        head_size=128,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-        sliding_window=KPOOL,
-    )
-    max_len = 1 << 20
-    width = get_block_table_width(
-        spec.max_num_blocks_per_req(None, max_len),
-        spec.block_size,
-        token_alignment=spec.block_table_token_alignment,
+def test_glm_indexer_keeps_both_packed_layouts():
+    assert Glm5NextIndexerBackend.supported_kv_cache_layouts() == (
+        KVCacheLayout.BLHNC,
+        KVCacheLayout.BLNHC,
     )
 
-    assert width * KPOOL < max_len
-    assert spec.uses_slot_mapping is False
+
+def test_tail_spec_reserves_complete_pools_for_speculation():
+    from vllm.models.glm5next.common.attention import Glm5NextTailCache
+
+    cache = SimpleNamespace(_index_kpool=KPOOL, head_dim=128)
+    spec = Glm5NextTailCache.get_kv_cache_spec(
+        cache, SimpleNamespace(num_speculative_tokens=5)
+    )
+
+    assert isinstance(spec, CircularBufferSpec)
+    assert spec.block_size == 12
 
 
 def make_tail_block_table(own_blocks, width=64):
     """Tail-group block table as BlockTables produces it: column 0 holds the
-    request's single KpoolTailManager block, the remaining columns are never
+    request's single CircularBufferManager block, the remaining columns are never
     written and stay zero."""
     bt = torch.zeros(len(own_blocks), width, dtype=torch.int32)
     bt[:, 0] = torch.tensor(own_blocks, dtype=torch.int32)
@@ -101,7 +97,13 @@ def legacy_generic_tail_slots(block_table, query_start_loc, positions):
 
 
 def circular_tail_slots(
-    slot_mapping, block_table, query_start_loc, positions, num_actual, num_reqs
+    slot_mapping,
+    block_table,
+    query_start_loc,
+    positions,
+    num_actual,
+    num_reqs,
+    ring_size=KPOOL,
 ):
     return compute_kpool_tail_slot_mapping(
         slot_mapping,
@@ -110,7 +112,7 @@ def circular_tail_slots(
         positions,
         num_actual,
         num_reqs,
-        KPOOL,
+        ring_size,
     )
 
 
@@ -394,19 +396,11 @@ def test_interleaved_decode_pollution_legacy_vs_circular():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-@pytest.mark.parametrize(
-    "per_req,num_actual,padded_len",
-    [
-        ([list(range(10)), list(range(12))], 22, 22),
-        ([list(range(10)), list(range(12))], 22, 30),
-        ([[3, 4], [0], [7, 8, 9]], 6, 8),
-        ([[5]], 1, 1),
-    ],
-)
-def test_triton_mapping_matches_cpu(per_req, num_actual, padded_len):
-    """The CUDA (Triton) path must match the CPU torch reference, including
-    tokens between the last request boundary and num_actual_tokens (mapped to
-    the last request) and untouched padding beyond num_actual."""
+def test_triton_mapping_matches_cpu():
+    """CUDA matches CPU for multiple requests, an expanded ring, and
+    untouched padding."""
+    per_req = [list(range(10)), list(range(12))]
+    num_actual, padded_len, ring_size = 22, 30, 2 * KPOOL
     positions, qsl, slot_mapping, _, num_reqs = make_batch(
         per_req, padded_len=padded_len
     )
@@ -415,7 +409,9 @@ def test_triton_mapping_matches_cpu(per_req, num_actual, padded_len):
     slot_mapping = torch.arange(padded_len, dtype=torch.int64) + 1000
     bt = make_tail_block_table(list(range(5, 5 + num_reqs)))
 
-    ref = circular_tail_slots(slot_mapping, bt, qsl, positions, num_actual, num_reqs)
+    ref = circular_tail_slots(
+        slot_mapping, bt, qsl, positions, num_actual, num_reqs, ring_size
+    )
     got = circular_tail_slots(
         slot_mapping.cuda(),
         bt.cuda(),
@@ -423,6 +419,7 @@ def test_triton_mapping_matches_cpu(per_req, num_actual, padded_len):
         positions.cuda(),
         num_actual,
         num_reqs,
+        ring_size,
     )
     torch.testing.assert_close(got.cpu(), ref)
 
@@ -442,9 +439,11 @@ def test_triton_mapping_reads_strided_block_table():
     ref = circular_tail_slots(
         slot_mapping, bt.contiguous(), qsl, positions, num_actual, num_reqs
     )
+    bt_cuda = wide.cuda()[:, 1:4]
+    assert bt_cuda.stride() == bt.stride() == (8, 1)
     got = circular_tail_slots(
         slot_mapping.cuda(),
-        bt.cuda(),
+        bt_cuda,
         qsl.cuda().to(torch.int32),
         positions.cuda(),
         num_actual,

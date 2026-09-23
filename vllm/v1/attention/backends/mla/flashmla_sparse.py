@@ -52,7 +52,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -141,6 +141,22 @@ class FlashMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [64]
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_spec(
+        cls, spec: AttentionSpec
+    ) -> list[int | MultipleOf]:
+        if (
+            spec.head_size == 512
+            and spec.dtype == torch.bfloat16
+            and spec.kv_quant_mode == KVQuantMode.NONE
+        ):
+            return [MultipleOf(64)]
+        return cls.get_supported_kernel_block_sizes()
+
+    @staticmethod
+    def get_kernel_page_rows() -> int:
+        return 1
 
     @staticmethod
     def get_name() -> str:

@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     EngineTransferInfo,
     TransferTopology,
-    get_current_attn_backends,
+    get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
@@ -81,7 +81,6 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
@@ -595,11 +594,13 @@ class NixlBaseConnectorWorker:
                     for spec in iter_layer_specs(group.kv_cache_spec)
                 )
             ]
-            if len(ple_groups) > 1 or any(
-                len(group.layer_names) != 1 for _, group in ple_groups
+            # A ring without a PLE table (e.g. GLM-5.3-Flash's kpool tail) is
+            # allowed; Qwen CSA-linear carries exactly one single-layer PLE owner.
+            if len(ple_groups) > 1 or (
+                ple_groups and len(ple_groups[0][1].layer_names) != 1
             ):
                 raise ValueError(
-                    "CSA-linear NIXL requires at most one PLE cache owner."
+                    "CSA-linear NIXL requires at most one single-layer PLE cache owner."
                 )
             self._ple_group_index = ple_groups[0][0] if ple_groups else None
 
@@ -846,7 +847,9 @@ class NixlBaseConnectorWorker:
 
         # Get the attention backend from the first layer
         # NOTE (NickLucche) models with multiple backends are not supported yet
-        self.attn_backends = get_current_attn_backends(vllm_config)
+        self.attn_backends, self.attn_backend_specs = (
+            get_current_attn_backends_and_specs(vllm_config, kv_cache_config)
+        )
         self.backend_name = self.attn_backends[0].get_name()
 
         self.kv_cache_layout = (
@@ -933,8 +936,9 @@ class NixlBaseConnectorWorker:
             )
 
     def _sync_block_size_with_kernel(self) -> None:
-        backends = get_current_attn_backends(self.vllm_config)
-        kernel_block_size = select_common_block_size(self.block_size, backends)
+        kernel_block_size = select_common_block_size(
+            self.block_size, self.attn_backends, self.attn_backend_specs
+        )
         # Number of blocks not accounting for kernel block mismatches
         self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
@@ -1440,7 +1444,6 @@ class NixlBaseConnectorWorker:
             self._supports_pp_hma and self._is_hma_required and not self._has_mamba
         )
         region_layers: list[list[str]] = []
-
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
@@ -1521,7 +1524,7 @@ class NixlBaseConnectorWorker:
                     region_device_id,
                 )
 
-            if isinstance(layer_spec, KpoolTailSpec):
+            if isinstance(layer_spec, CircularBufferSpec):
                 compressed_owner = compressed_region_owners.get(cache.data_ptr())
                 if compressed_owner is not None:
                     owner_storage = compressed_owner.untyped_storage()
@@ -2624,10 +2627,15 @@ class NixlBaseConnectorWorker:
         # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
         # The h2d block copies below are intentionally synchronous.
         with gpu_sync_allowed():
-            for group_block_ids in local_block_ids:
+            for group, group_block_ids in zip(
+                self.kv_cache_config.transfer_groups,
+                local_block_ids,
+                strict=True,
+            ):
+                layer_names = group.layer_names
                 self.copy_blocks(
-                    self.host_xfer_buffers,
-                    self.device_kv_caches,
+                    {name: self.host_xfer_buffers[name] for name in layer_names},
+                    {name: self.device_kv_caches[name] for name in layer_names},
                     group_block_ids,
                     group_block_ids,
                     "h2d",
@@ -2659,10 +2667,15 @@ class NixlBaseConnectorWorker:
                         ",".join(map(str, meta.local_physical_block_ids)),
                     )
                 # blocking
-                for group_block_ids in meta.local_physical_block_ids:
+                for group, group_block_ids in zip(
+                    self.kv_cache_config.transfer_groups,
+                    meta.local_physical_block_ids,
+                    strict=True,
+                ):
+                    layer_names = group.layer_names
                     self.copy_blocks(
-                        self.device_kv_caches,
-                        self.host_xfer_buffers,
+                        {name: self.device_kv_caches[name] for name in layer_names},
+                        {name: self.host_xfer_buffers[name] for name in layer_names},
                         group_block_ids,
                         group_block_ids,
                         "d2h",

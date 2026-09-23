@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
-from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -27,7 +26,6 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
-    KpoolTailSpec,
     KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
@@ -44,8 +42,6 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
-
-logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -1280,10 +1276,6 @@ class CircularBufferManager(FullAttentionManager):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         return 0
-
-
-class KpoolTailManager(CircularBufferManager):
-    """One-block circular scratch manager for ``KpoolTailSpec``."""
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
@@ -2678,11 +2670,6 @@ def register_all_kvcache_specs(vllm_config):
         SlidingWindowMLASpec,
         SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
-    )
-    KVCacheSpecRegistry.register(
-        KpoolTailSpec,
-        KpoolTailManager,
-        uniform_type_base_spec=KpoolTailSpec,
     )
 
     KVCacheSpecRegistry.register(

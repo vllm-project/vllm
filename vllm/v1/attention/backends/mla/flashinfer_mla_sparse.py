@@ -84,7 +84,14 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [32, 64]
+        # Larger manager blocks are re-paged in forward_mqa (_kernel_paged_view).
+        return [MultipleOf(32)]
+
+    @staticmethod
+    def get_kernel_page_rows() -> int:
+        # 32 rather than 64 keeps the packed-stride lcm with 132-byte indexer
+        # rows small.
+        return 32
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -173,7 +180,12 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64, 256]
+        # Larger manager blocks are re-paged in forward_mqa (_kernel_paged_view).
+        return [MultipleOf(64)]
+
+    @staticmethod
+    def get_kernel_page_rows() -> int:
+        return 64
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -409,6 +421,33 @@ def _get_workspace_buffer(
     return _fi_sparse_workspace
 
 
+def _kernel_paged_view(
+    kv_cache: torch.Tensor,
+    kv_rows: torch.Tensor,
+    block_size: int,
+    block_stride_rows: int,
+    page_rows: int,
+) -> torch.Tensor:
+    """``[pages, 1, page_rows, D]`` view for the TRT-LLM kernels.
+
+    Top-k indices are flat row ids, so a dense block of the kernel's native
+    32/64 rows passes through and everything else (larger blocks, or blocks
+    strided apart by other layers' pages) is re-paged into whole
+    ``page_rows``-row pages.
+    """
+    if block_size in (32, 64) and block_stride_rows == block_size:
+        return kv_cache.unsqueeze(1)
+    assert block_size % page_rows == 0 and block_stride_rows % page_rows == 0, (
+        f"block_size {block_size} / block stride {block_stride_rows} rows are not "
+        f"whole {page_rows}-row kernel pages"
+    )
+    num_rows, head_dim = kv_rows.shape
+    return kv_rows.as_strided(
+        (num_rows // page_rows, 1, page_rows, head_dim),
+        (page_rows * head_dim, page_rows * head_dim, head_dim, 1),
+    )
+
+
 class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     """FlashInfer MLA Sparse implementation.
 
@@ -572,8 +611,15 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             assert prefill_lse is not None
             return output, torch.cat((decode_lse, prefill_lse))
 
-        _, block_stride_rows = flat_kv_row_view(
+        kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
+        kernel_kv_cache = _kernel_paged_view(
+            kv_c_and_k_pe_cache,
+            kv_rows,
+            attn_metadata.block_size,
+            block_stride_rows,
+            FlashInferMLASparseTRTLLMBackend.get_kernel_page_rows(),
         )
 
         if self.dcp_world_size > 1:
@@ -599,7 +645,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         return self._run_mqa_kernel(
             q,
-            kv_c_and_k_pe_cache,
+            kernel_kv_cache,
             topk_indices_physical,
             seq_lens,
         )
@@ -678,6 +724,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
         kv_cache = kv_cache.view(q.dtype)
+        if kv_cache.ndim == 3:
+            kv_cache = kv_cache.unsqueeze(1)
 
         # Single-token sparse decode. trtllm-gen requires the q_len_per_request
         # dim, but the sparse attention mask is fully per-token (each query token
@@ -711,7 +759,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
-            kv_cache=kv_cache.unsqueeze(1),
+            kv_cache=kv_cache,
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,

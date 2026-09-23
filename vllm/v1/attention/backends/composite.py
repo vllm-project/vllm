@@ -295,11 +295,6 @@ def create_composite_attention_backend(
             )
             self.routing = routing_policy(layer_names, vllm_config)
 
-        def set_kernel_block_size(self, kernel_block_size):
-            super().set_kernel_block_size(kernel_block_size)
-            for builder in self._builders:
-                builder.set_kernel_block_size(kernel_block_size)
-
         @classmethod
         def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
             return min(

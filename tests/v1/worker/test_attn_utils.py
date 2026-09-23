@@ -41,6 +41,7 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
+    group_block_stride_bytes,
 )
 
 
@@ -78,6 +79,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         backend = SimpleNamespace(
             customize_spec=AttentionBackend.customize_spec,
             get_supported_kernel_block_sizes=lambda sizes=sizes: sizes,
+            get_supported_kernel_block_sizes_for_spec=lambda _, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
@@ -407,22 +409,15 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
 
 
 @pytest.mark.parametrize(
-    (
-        "kernel_block_sizes",
-        "storage_block_size",
-        "expected_num_blocks",
-        "expected_num_states",
-    ),
+    ("kernel_block_sizes", "expected_num_blocks", "expected_num_states"),
     [
-        (None, None, 4, 64),
-        ([256], None, 4, 64),
-        ([64], None, 16, 16),
-        ([64], 256, 4, 64),
+        (None, 4, 64),
+        ([256], 4, 64),
+        ([64], 16, 16),
     ],
 )
 def test_allocate_compressed_mla_cache(
     kernel_block_sizes: list[int] | None,
-    storage_block_size: int | None,
     expected_num_blocks: int,
     expected_num_states: int,
 ):
@@ -432,7 +427,6 @@ def test_allocate_compressed_mla_cache(
         head_size=128,
         dtype=torch.bfloat16,
         tokens_per_state=4,
-        storage_block_size=storage_block_size,
     )
     num_pages = 4
     config = KVCacheConfig(
@@ -453,6 +447,7 @@ def test_allocate_compressed_mla_cache(
     )
 
     assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
+    assert group_block_stride_bytes(config, 0) == spec.page_size_bytes
 
 
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
@@ -593,12 +588,12 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
 
 
 def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
-    """Host tensors get their own backing; view-less specs keep the raw one."""
-    spec = FullAttentionSpec(
-        block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32
+    """Host views use kernel blocks; view-less specs keep the raw backing."""
+    spec = MLAAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=4, dtype=torch.float32
     )
     page = spec.page_size_bytes
-    resident_spec = HiSparseResidentSpec(block_size=2, page_size=page)
+    resident_spec = HiSparseResidentSpec(block_size=4, page_size=page)
     device_size = 4 * page
     config = KVCacheConfig(
         num_blocks=4,
@@ -646,12 +641,12 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
     assert len(config.kv_cache_tensors) == 3
 
     assert [buf.numel() for buf in host_buffers] == [3 * page]
-    assert caches["source"].shape[0] == 3
+    assert caches["source"].shape[0] == 6
     assert (
         caches["source"].untyped_storage().data_ptr()
         == host_buffers[0].untyped_storage().data_ptr()
     )
-    assert caches["indexer"].shape[0] == 4
+    assert caches["indexer"].shape[0] == 8
     backing = caches["resident"]
     assert backing.dtype == torch.int8 and backing.numel() >= device_size
     assert (

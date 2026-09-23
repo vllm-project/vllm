@@ -20,9 +20,27 @@ import pytest
 import torch
 
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+    FlashAttnMLASparseBackend,
+)
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
+)
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheLayout,
+    KVCacheTensor,
+    KVQuantMode,
+    MLAAttentionSpec,
+)
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    allocate_kv_cache,
+    prepare_kernel_block_sizes,
+    select_common_block_size,
 )
 
 SM90 = DeviceCapability(major=9, minor=0)
@@ -80,6 +98,70 @@ def rope_carrying_model(monkeypatch):
 
 def test_supported_head_sizes_include_512():
     assert FlashMLASparseBackend.get_supported_head_sizes() == [576, 512]
+
+
+def test_flash_attn_sparse_accepts_manager_blocks():
+    (supported,) = FlashAttnMLASparseBackend.get_supported_kernel_block_sizes()
+    assert isinstance(supported, MultipleOf)
+    assert supported.base == 64
+
+
+def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
+    spec = MLAAttentionSpec(
+        block_size=1152,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        cache_dtype_str="bfloat16",
+        block_stride_alignment=1024,
+    )
+    num_blocks = 2
+    layers = ["layer.0", "layer.1"]
+    page_size = spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * len(layers) * page_size,
+                layers=layers,
+                layer_stride=page_size,
+                block_stride=len(layers) * page_size,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+    )
+    groups = [[AttentionGroup(FlashMLASparseBackend, layers, spec, 0)]]
+
+    kernel_block_sizes = prepare_kernel_block_sizes(config, groups)
+    caches = allocate_kv_cache(
+        config,
+        torch.device("cpu"),
+        KVCacheLayout.BLHNC,
+        kernel_block_sizes,
+    )
+
+    assert kernel_block_sizes == [1152]
+    assert caches["layer.0"].shape == (num_blocks, 1, 1152, 512)
+
+
+def test_flashmla_quantized_cache_keeps_fixed_kernel_pages():
+    spec = MLAAttentionSpec(
+        block_size=1152,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.float8_e4m3fn,
+        cache_dtype_str="fp8_ds_mla",
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        state_content_bytes=656,
+    )
+
+    assert FlashMLASparseBackend.get_supported_kernel_block_sizes_for_spec(spec) == [64]
+    assert select_common_block_size(1152, [FlashMLASparseBackend], [spec]) == 64
+
+
+@pytest.mark.parametrize("backend", [FlashMLASparseBackend, FlashAttnMLASparseBackend])
+def test_flat_sparse_mla_cache_stride_is_row_aligned(backend):
+    assert backend.get_kernel_page_rows() == 1
 
 
 def test_quantized_ds_mla_formats_are_the_envelope_set():

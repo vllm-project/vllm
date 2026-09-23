@@ -20,6 +20,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 
 SCHEDULER_BLOCK_SIZE = 256
 KERNEL_BLOCK_SIZE = 64
+BLOCK_STRIDE_BYTES = 4096
 
 
 class _FakeAttentionGroup:
@@ -29,9 +30,17 @@ class _FakeAttentionGroup:
         self.kv_cache_spec = kv_cache_spec
         self.kv_cache_group_id = kv_cache_group_id
         self.kernel_block_size = None
+        self.block_stride_bytes = None
 
-    def create_metadata_builders(self, vllm_config, device, kernel_block_size=None):
+    def create_metadata_builders(
+        self,
+        vllm_config,
+        device,
+        kernel_block_size=None,
+        block_stride_bytes=None,
+    ):
         self.kernel_block_size = kernel_block_size
+        self.block_stride_bytes = block_stride_bytes
 
     def get_metadata_builder(self):
         return SimpleNamespace(kv_cache_spec=self.kv_cache_spec)
@@ -64,7 +73,8 @@ def _make_proposer(
 def _make_kv_cache_config(layer_names: set[str]) -> SimpleNamespace:
     spec = SimpleNamespace(block_size=SCHEDULER_BLOCK_SIZE)
     group = SimpleNamespace(layer_names=list(layer_names), kv_cache_spec=spec)
-    return SimpleNamespace(kv_cache_groups=[group])
+    tensor = SimpleNamespace(layers=list(layer_names), block_stride=BLOCK_STRIDE_BYTES)
+    return SimpleNamespace(kv_cache_groups=[group], kv_cache_tensors=[tensor])
 
 
 def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
@@ -80,8 +90,8 @@ def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
 
     assert proposer.block_size == KERNEL_BLOCK_SIZE
     assert proposer.block_size != SCHEDULER_BLOCK_SIZE
-    # The metadata builder keeps receiving the kernel block size as well.
     assert proposer.draft_attn_groups[0].kernel_block_size == KERNEL_BLOCK_SIZE
+    assert proposer.draft_attn_groups[0].block_stride_bytes == BLOCK_STRIDE_BYTES
 
 
 def test_block_size_falls_back_to_kv_cache_spec(monkeypatch: pytest.MonkeyPatch):

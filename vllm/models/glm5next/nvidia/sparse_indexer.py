@@ -18,6 +18,7 @@ from vllm.models.glm5next.common.sparse_indexer import (
     _fill_causal_indices,
     _fill_short_decode_causal_indices,
     _gather_workspace_shapes,
+    _kpool_flat_page_view,
     _scatter_decode_tokens_by_request,
     kv_cache_as_quant_view,
 )
@@ -126,6 +127,7 @@ def sparse_attn_indexer_kpool(
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+    kv_cache = _kpool_flat_page_view(kv_cache)
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
@@ -394,22 +396,14 @@ def sparse_attn_indexer_kpool(
             # Kpool writes must recover the original request grouping after the
             # indexer's flattened decode path. Host metadata avoids a CUDA graph
             # sync when choosing the uniform or padded layout.
-            per_req_lens = decode_metadata.per_req_decode_lens
-            if per_req_lens is not None:
-                use_uniform = (
-                    decode_metadata.decode_is_uniform
-                    and num_decode_tokens
-                    == num_requests * decode_metadata.write_max_decode_len
-                )
-                group_lens = per_req_lens
-                lmax = decode_metadata.write_max_decode_len
-            else:
-                # Legacy metadata without per-request lens: fall back to the
-                # host-side requires_padding flag. Unreached now (per-request
-                # lens is always populated for decode), kept defensive.
-                use_uniform = not decode_metadata.requires_padding
-                group_lens = decode_metadata.decode_lens
-                lmax = int(decode_metadata.decode_lens.max().item())
+            group_lens = decode_metadata.per_req_decode_lens
+            assert group_lens is not None
+            use_uniform = (
+                decode_metadata.decode_is_uniform
+                and num_decode_tokens
+                == num_requests * decode_metadata.write_max_decode_len
+            )
+            lmax = decode_metadata.write_max_decode_len
             if not use_uniform:
                 # Non-uniform decode_lens (mixed plain-decode + spec-verify, or
                 # a variable MTP-verify batch): scatter actual tokens into a

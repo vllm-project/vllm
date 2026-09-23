@@ -646,14 +646,12 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     cache_role: SparseCacheRole = SparseCacheRole.SPARSE
     is_index_group_leader: bool = False
-    storage_block_size: int | None = None
-    """Token width used to view storage when it differs from the kernel block."""
     block_stride_alignment: int | None = None
     """Required alignment, in bytes, of the distance between consecutive
     blocks of this cache. In block-major layouts that distance is the whole
     block (all layers' pages), so the allocator rounds the block up to it.
-    DeepGEMM's paged sparse MQA-logits kernels address pages as
-    ``base + page * stride`` and need it 512B-aligned."""
+    Kernels that re-page manager blocks set this to their page size in bytes;
+    DeepGEMM's paged sparse MQA-logits kernels require 512B alignment."""
     # Group capability enabled when any member flattens a non-causal query block
     # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
@@ -674,7 +672,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         model_version_set = set(spec.model_version for spec in specs)
         cache_role_set = {spec.cache_role for spec in specs}
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
-        storage_block_size_set = set(spec.storage_block_size for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
@@ -682,12 +679,11 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(model_version_set) == 1
             and len(cache_role_set) == 1
             and len(index_group_leader_set) == 1
-            and len(storage_block_size_set) == 1
             and len(block_stride_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, storage block size and block stride alignment."
+            "index-sharing role, and block stride alignment."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -703,7 +699,6 @@ class MLAAttentionSpec(FullAttentionSpec):
             model_version=model_version_set.pop(),
             cache_role=cache_role_set.pop(),
             is_index_group_leader=index_group_leader_set.pop(),
-            storage_block_size=storage_block_size_set.pop(),
             block_stride_alignment=block_stride_alignment_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
@@ -982,32 +977,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and spec.bounded_replay == self.bounded_replay
             for spec in kv_cache_specs.values()
         )
-
-
-@dataclass(frozen=True, kw_only=True)
-class KpoolTailSpec(SlidingWindowSpec):
-    """One-block circular scratch cache for a kpool indexer's raw tail."""
-
-    def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
-    ) -> int:
-        return 1
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return 1
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return False
 
 
 @dataclass(frozen=True)
