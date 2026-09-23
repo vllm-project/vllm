@@ -18,7 +18,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdatePayload,
     WeightTransferUpdateRequest,
 )
-from vllm.utils.weight_checksum import merge_finish_checksums
+from vllm.utils.weight_checksum_utils import merge_finish_checksums
 
 if TYPE_CHECKING:
     from ray.actor import ActorHandle

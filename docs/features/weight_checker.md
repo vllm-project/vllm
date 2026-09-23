@@ -62,10 +62,11 @@ curl -X POST 'http://localhost:8000/weight_checker' \
 This randomizes the covered inference tensors. The endpoint stores no baseline
 state, so a reset cannot make a later `compare` use a stale baseline.
 
-`reset` takes effect immediately, so pause the engine first: requests that run
-between `reset` and the weight transfer generate from random weights, and the
-prefix cache keeps those blocks. See
-[Reset is not atomic](#reset-is-not-atomic).
+`reset` takes effect immediately, so pause the engine straight after it:
+requests that run between `reset` and the weight transfer generate from random
+weights, and the prefix cache keeps those blocks. The pause has to come after
+the reset rather than before it, because a paused engine answers every action
+with HTTP 409. See [Reset is not atomic](#reset-is-not-atomic).
 
 ### Compare weights with the baseline
 
@@ -168,9 +169,9 @@ a shared reference rather than against each other. See
 ### RLHF weight-update workflow
 
 The verification sequence is
-`checksum -> pause -> reset -> transfer -> compare -> resume`, with the weight
-transfer or reload occurring between `reset` and the `compare`. Keep the
-checksum client-side and pass it to `compare`:
+`checksum -> reset -> pause -> transfer -> resume -> compare`, with the weight
+transfer or reload occurring while the engine is paused. Keep the checksum
+client-side and pass it to `compare`:
 
 ```bash
 # 1. Hash the original weights and save this result as the baseline.
@@ -178,13 +179,14 @@ curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
   -d '{"action":"checksum"}'
 
-# 2. Stop serving before touching the weights.
-curl -X POST 'http://localhost:8000/pause?mode=abort'
-
-# 3. Randomize the inference weights before transfer.
+# 2. Randomize the inference weights before transfer. This has to happen
+#    before the pause: every action is refused while the engine is paused.
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
   -d '{"action":"reset"}'
+
+# 3. Stop serving before the transfer.
+curl -X POST 'http://localhost:8000/pause?mode=abort'
 
 # Start, perform, and finish the configured weight transfer.
 curl -X POST 'http://localhost:8000/start_weight_update'
@@ -193,14 +195,22 @@ curl -X POST 'http://localhost:8000/finish_weight_update' \
   -H 'Content-Type: application/json' \
   -d '{"weight_version":"step-100"}'
 
-# 4. Compare the transferred weights with the original baseline.
+# 4. Serve again.
+curl -X POST 'http://localhost:8000/resume'
+
+# 5. Compare the transferred weights with the original baseline. Like the
+#    reset, this needs an unpaused engine.
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
   -d '{"action":"compare","baseline":{"...":"..."}}'
-
-# 5. Serve again.
-curl -X POST 'http://localhost:8000/resume'
 ```
+
+`reset` and `compare` sit outside the pause window because a paused engine
+answers every action with HTTP 409. Nothing may serve between the `reset` and
+the `resume` all the same: the weights are random until the transfer restores
+them, so any request in that window generates from random weights and the
+prefix cache keeps those blocks. The pause after `reset` clears the cache, and
+[Reset is not atomic](#reset-is-not-atomic) covers what to do when it does not.
 
 There is no separate `checksum` between the transfer and the `compare`:
 `compare` hashes the current weights itself, so a preceding `checksum` would
@@ -236,11 +246,11 @@ so anything served in that window is meaningless:
   It answers `{"success": false}` while blocks are still held, so retry until
   it succeeds.
 
-Pause, reset, transfer, verify, and resume must therefore stay serialized: do
-not let traffic reach an engine between `reset` and `resume`. In a
-multi-frontend deployment, pause and resume every frontend that can reach the
-engine, since `/pause` only reaches the engines the frontend it lands on
-manages.
+The window therefore opens at the `reset`, before the engine is paused. Nothing
+may serve until the resume, and the caller must not treat a request that slipped
+in as meaningful. In a multi-frontend deployment, pause and resume every
+frontend that can reach the engine, since `/pause` only reaches the engines the
+frontend it lands on manages.
 
 ## HTTP API summary
 

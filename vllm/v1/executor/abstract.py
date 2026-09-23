@@ -19,7 +19,7 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.weight_checksum import combine_weight_checksums
+from vllm.utils.weight_checksum_utils import combine_weight_checksums
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec

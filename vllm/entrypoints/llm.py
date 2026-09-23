@@ -51,7 +51,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
-from vllm.utils.weight_checksum import merge_finish_checksums
+from vllm.utils.weight_checksum_utils import merge_finish_checksums
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
