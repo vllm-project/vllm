@@ -13,7 +13,10 @@ import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.config.kv_events import KVEventsConfig
-from vllm.config.profiler import validate_profile_prefix
+from vllm.config.profiler import (
+    validate_profile_iteration_bounds,
+    validate_profile_prefix,
+)
 from vllm.config.utils import replace
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -1079,8 +1082,8 @@ class AsyncLLM(EngineClient):
         async with self._profile_lock:
             if self._profile_session_active:
                 raise ProfilerAlreadyActiveError()
-            if profile_prefix is not None:
-                validate_profile_prefix(profile_prefix)
+            validate_profile_prefix(profile_prefix)
+            validate_profile_iteration_bounds(delay_iterations, max_iterations)
 
             self._profile_session_active = True
             coros = [

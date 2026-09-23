@@ -28,9 +28,7 @@ class StartProfileRequest(BaseModel):
     @field_validator("profile_prefix")
     @classmethod
     def validate_prefix(cls, value: str | None) -> str | None:
-        if value is not None:
-            validate_profile_prefix(value)
-        return value
+        return validate_profile_prefix(value)
 
     @property
     def has_overrides(self) -> bool:

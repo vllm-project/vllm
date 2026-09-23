@@ -1270,8 +1270,7 @@ class Worker(WorkerBase):
             )
 
         if is_start:
-            if profile_prefix is not None:
-                validate_profile_prefix(profile_prefix)
+            validate_profile_prefix(profile_prefix)
 
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix

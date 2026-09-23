@@ -143,6 +143,12 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
     engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
 
     async def profile():
+        for kwargs in (
+            {"delay_iterations": -1},
+            {"max_iterations": -1},
+        ):
+            with pytest.raises(ValueError):
+                await engine.start_profile(**kwargs)
         await engine.start_profile(
             "session",
             delay_iterations=5,

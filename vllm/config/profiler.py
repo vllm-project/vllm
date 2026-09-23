@@ -22,8 +22,10 @@ ProtonHook = Literal["triton"]
 ProtonOutputFormat = Literal["hatchet", "hatchet_msgpack", "chrome_trace"]
 
 
-def validate_profile_prefix(prefix: str) -> str:
+def validate_profile_prefix(prefix: str | None) -> str | None:
     """Validate a trace filename prefix supplied for one profiling session."""
+    if prefix is None:
+        return None
     if (
         not 1 <= len(prefix) <= 128
         or not prefix.isascii()
@@ -35,6 +37,17 @@ def validate_profile_prefix(prefix: str) -> str:
             "or number, and contain only letters, numbers, '.', '_', or '-'"
         )
     return prefix
+
+
+def validate_profile_iteration_bounds(
+    delay_iterations: int | None,
+    max_iterations: int | None,
+) -> None:
+    """Validate iteration bounds supplied for one profiling session."""
+    if delay_iterations is not None and delay_iterations < 0:
+        raise ValueError("delay_iterations must be greater than or equal to 0")
+    if max_iterations is not None and max_iterations < 0:
+        raise ValueError("max_iterations must be greater than or equal to 0")
 
 
 def _is_uri_path(path: str) -> bool:

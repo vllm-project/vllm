@@ -17,7 +17,6 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.profiler import _is_uri_path
-from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
     ProtonProfilerWrapper,
@@ -476,12 +475,11 @@ def test_delayed_start_and_max_iters(default_profiler_config):
     assert profiler.stop_call_count == 1
 
 
-def test_duplicate_start_is_rejected(default_profiler_config):
+def test_duplicate_start_is_ignored(default_profiler_config):
     profiler = ConcreteWorkerProfiler(default_profiler_config)
 
     profiler.start()
-    with pytest.raises(ProfilerAlreadyActiveError):
-        profiler.start()
+    profiler.start()
     assert profiler.start_call_count == 1
 
     profiler.stop()
@@ -953,8 +951,7 @@ class TestProtonProfilerWrapper:
         wrapper, proton = make_proton_wrapper(tmp_path, proton)
 
         wrapper.start()
-        with pytest.raises(ProfilerAlreadyActiveError):
-            wrapper.start()
+        wrapper.start()
         wrapper.stop()
         wrapper.start()
         wrapper.stop()
@@ -1069,8 +1066,7 @@ class TestProtonProfilerWrapper:
         wrapper.set_output_name("first")
         wrapper.start()
         wrapper.set_output_name("duplicate")
-        with pytest.raises(ProfilerAlreadyActiveError):
-            wrapper.start()
+        wrapper.start()
         for _ in range(delay):
             wrapper.step()
         wrapper.stop()
