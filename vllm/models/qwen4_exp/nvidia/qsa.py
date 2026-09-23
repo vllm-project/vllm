@@ -623,8 +623,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             QSAIndexerMetadata,
             metadata[self.indexer.raw_key_cache.prefix],
         )
-        if indexer_metadata.num_actual_tokens != num_tokens:
-            raise RuntimeError("QSA main and indexer metadata token counts disagree")
         selected, main_outputs = self.indexer(
             projected_qk,
             positions,

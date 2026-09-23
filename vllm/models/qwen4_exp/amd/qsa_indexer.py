@@ -210,12 +210,6 @@ class QSAIndexer(nn.Module):
         compressed = cast(
             QSAIndexerMetadata, metadata[self.compressed_key_cache.prefix]
         )
-        if raw.num_actual_tokens != compressed.num_actual_tokens:
-            raise RuntimeError("QSA indexer cache metadata token counts disagree")
-        if not raw.logical_positions.is_cuda and (
-            not torch.equal(raw.logical_positions, compressed.logical_positions)
-        ):
-            raise RuntimeError("QSA indexer cache metadata positions disagree")
         return raw, compressed
 
     def _update_and_compress(

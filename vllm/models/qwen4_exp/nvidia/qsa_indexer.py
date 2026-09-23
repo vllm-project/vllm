@@ -207,28 +207,6 @@ class QSAIndexer(nn.Module):
         compressed = cast(
             QSAIndexerMetadata, metadata[self.compressed_key_cache.prefix]
         )
-        if raw.num_actual_tokens != compressed.num_actual_tokens:
-            raise RuntimeError("QSA indexer cache metadata token counts disagree")
-        raw_split = (
-            raw.num_decodes,
-            raw.num_decode_tokens,
-            raw.num_prefills,
-            raw.num_prefill_tokens,
-            raw.decode_query_len,
-        )
-        compressed_split = (
-            compressed.num_decodes,
-            compressed.num_decode_tokens,
-            compressed.num_prefills,
-            compressed.num_prefill_tokens,
-            compressed.decode_query_len,
-        )
-        if raw_split != compressed_split:
-            raise RuntimeError("QSA indexer cache metadata batch splits disagree")
-        if not raw.logical_positions.is_cuda and (
-            not torch.equal(raw.logical_positions, compressed.logical_positions)
-        ):
-            raise RuntimeError("QSA indexer cache metadata positions disagree")
         return raw, compressed
 
     def forward(
