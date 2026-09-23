@@ -168,6 +168,7 @@ def fused_recurrent_kda_fwd_kernel(
     SEQUENCE_LENGTH: tl.constexpr,
     num_stages: tl.constexpr,
 ):
+    """Recurrent KDA forward; an invalid state index zeroes the output."""
     pid = tl.program_id(0)
     i_v = pid % tl.cdiv(V, BV)
     i_nh = pid // tl.cdiv(V, BV)
