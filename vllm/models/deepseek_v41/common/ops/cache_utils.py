@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Triton kernels for DeepseekV4 paged K-cache management and sparse-attention index
+"""Triton kernels for DeepseekV4 paged K-cache management and sparse-attention index
 preparation.
 
 - quantize_and_insert_k_cache: quantize bf16 K to UE8M0 FP8 and insert into
@@ -43,10 +42,16 @@ from vllm.utils.math_utils import next_power_of_2
 #                 dims each plus a pad byte.
 #   V4.1 (528 B): all 512 dims as fp8 e4m3 (RoPE included), then 16 UE8M0
 #                 scales of 32 dims each. FlashMLA's ``ModelType::V41``.
+#   V4.1 NVFP4 (288 B): 512 e2m1 values packed two per byte (even element in
+#                 the low nibble), then 32 e4m3 scales of 16 dims each.
+#                 FlashMLA's ``ModelType::V41_FP4``, compressed cache only.
 V4_BYTES_PER_TOKEN = 584
 V41_BYTES_PER_TOKEN = 528
 V41_QUANT_BLOCK = 32
 V41_NUM_SCALES = 512 // V41_QUANT_BLOCK  # 16
+V41_NVFP4_BYTES_PER_TOKEN = 288
+V41_NVFP4_QUANT_BLOCK = 16
+V41_NVFP4_NUM_SCALES = 512 // V41_NVFP4_QUANT_BLOCK  # 32
 
 
 @triton.jit
@@ -70,8 +75,7 @@ def quantize_and_insert_k_kernel(
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
     use_fnuz: tl.constexpr = False,
 ):
-    """
-    Quantize K tensor and insert into paged K cache.
+    """Quantize K tensor and insert into paged K cache.
 
     K Cache block layout (block_size=64 tokens):
     - [0, 64*576): Token data, each token has 448 fp8 + 128 bf16
@@ -245,8 +249,7 @@ def quantize_and_insert_k_cache(
     use_fnuz: bool = False,
     bytes_per_token: int = V4_BYTES_PER_TOKEN,
 ):
-    """
-    Quantize K tensor and insert into paged K cache.
+    """Quantize K tensor and insert into paged K cache.
 
     ``bytes_per_token`` picks the record (see the module header): the V4 one,
     or V4.1's all-dims MXFP8 one.
@@ -496,6 +499,73 @@ def _dequantize_and_gather_k_mxfp8_kernel(
         tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
 
 
+@triton.jit
+def _dequantize_and_gather_k_nvfp4_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    offset,
+    gather_lens_ptr,
+    max_blocks_per_seq: tl.constexpr,
+    head_dim: tl.constexpr,  # 512
+    scale_dim: tl.constexpr,  # 32
+    quant_block: tl.constexpr,  # 16
+    cache_block_size: tl.constexpr,
+    block_stride: tl.constexpr,
+):
+    """Gather and dequantize V4.1 NVFP4 rows into a bf16 workspace."""
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    if gather_lens_ptr is not None:  # noqa: SIM108
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = seq_len
+    start_pos = seq_len - gather_len
+
+    packed_bytes: tl.constexpr = head_dim // 2
+    d = tl.arange(0, head_dim)
+    for i in range(worker_id, gather_len, num_workers):
+        pos = start_pos + i
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+
+        physical_block_idx = tl.load(
+            block_table_ptr + batch_idx * max_blocks_per_seq + block_in_seq
+        )
+        page = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+
+        packed = tl.load(
+            page + pos_in_block * packed_bytes + tl.arange(0, packed_bytes)
+        )
+        # Even element in the low nibble, odd in the high nibble.
+        codes = tl.interleave((packed & 0xF).to(tl.int32), (packed >> 4).to(tl.int32))
+        # e2m1 magnitudes: 0, 0.5, 1, 1.5, 2, 3, 4, 6.
+        mag_code = codes & 7
+        e = (mag_code >> 1).to(tl.float32)
+        m = (mag_code & 1).to(tl.float32)
+        mag = tl.where(mag_code < 2, m * 0.5, (1.0 + m * 0.5) * tl.exp2(e - 1.0))
+        vals = tl.where(codes >= 8, -mag, mag)
+
+        sf = tl.load(
+            page
+            + cache_block_size * packed_bytes
+            + pos_in_block * scale_dim
+            + tl.arange(0, scale_dim)
+        )
+        scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        tiles = tl.reshape(vals, (scale_dim, quant_block))
+        dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (head_dim,))
+
+        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
+
+
 def dequantize_and_gather_k_cache_triton(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
@@ -513,6 +583,29 @@ def dequantize_and_gather_k_cache_triton(
 ) -> None:
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
+    if k_cache.shape[-1] == V41_NVFP4_BYTES_PER_TOKEN:
+        # Keep short gathers unchanged; cap total workers for multi-request chunks.
+        num_workers = min(
+            max(128, 2048 // max(1, num_reqs)), max(128, out.shape[1] - offset)
+        )
+        _dequantize_and_gather_k_nvfp4_kernel[(num_reqs, num_workers)](
+            out,
+            out.stride(0),
+            out.stride(1),
+            k_cache,
+            seq_lens,
+            block_table,
+            offset,
+            gather_lens,
+            max_blocks_per_seq=block_table.shape[-1],
+            head_dim=512,
+            scale_dim=V41_NVFP4_NUM_SCALES,
+            quant_block=V41_NVFP4_QUANT_BLOCK,
+            cache_block_size=block_size,
+            block_stride=k_cache.stride(0),
+        )
+        return
+
     if k_cache.shape[-1] == V41_BYTES_PER_TOKEN:
         _dequantize_and_gather_k_mxfp8_kernel[(num_reqs, NUM_WORKERS)](
             out,
@@ -581,14 +674,16 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
-    The record is read off ``k_cache.shape[-1]``; see the module header.
+    The record is read off ``k_cache.shape[-1]``; see the module header. Only
+    the fp8 records have a CuteDSL gather, so NVFP4 always takes the Triton
+    path.
 
     ``use_fnuz`` MUST match the encoder of the specific cache being read:
     ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
-    if has_cutedsl():
+    if has_cutedsl() and k_cache.shape[-1] != V41_NVFP4_BYTES_PER_TOKEN:
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
@@ -724,16 +819,12 @@ def combine_topk_swa_indices(
     M: int,
     N: int,
     out: tuple[torch.Tensor, torch.Tensor] | None = None,
-    left_visible: torch.Tensor | None = None,
-    right_visible: torch.Tensor | None = None,
-    max_image_tokens: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = topk_indices.shape[0]
-    # max_image_tokens widens the SWA column region for in-image
-    # bidirectional visibility; the width is fixed per model so the
-    # caller-provided workspace stays valid on image-free batches.
+    # The width is fixed per model so the caller-provided workspace stays
+    # valid on every batch.
     combined_topk = (
-        (topk + window_size + max_image_tokens + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
@@ -762,9 +853,6 @@ def combine_topk_swa_indices(
         TOP_K=topk,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
-        left_visible=left_visible,
-        right_visible=right_visible,
-        max_image_tokens=max_image_tokens,
     )
     return combined_indices, combined_lens
 
@@ -833,7 +921,6 @@ class CombineTopkSwaIndicesKernel(
         TOP_K: int
         COMPRESS_RATIO: int
         WINDOW_SIZE: int
-        IMAGE_WIDTH: int
         PADDED_TOP_K: int
         input_variant: TritonPointerInputVariant
 
@@ -855,14 +942,11 @@ class CombineTopkSwaIndicesKernel(
         query_start_loc_ptr,
         seq_lens_ptr,
         gather_lens_ptr,
-        left_visible_ptr,
-        right_visible_ptr,
         M,
         N,
         TOP_K: tl.constexpr,
         COMPRESS_RATIO: tl.constexpr,
         WINDOW_SIZE: tl.constexpr,
-        IMAGE_WIDTH: tl.constexpr,
         PADDED_TOP_K: tl.constexpr,
     ):
         batch_idx = tl.program_id(0)
@@ -897,19 +981,12 @@ class CombineTopkSwaIndicesKernel(
                 # (integer div by constexpr 0 is UB and yields garbage, which
                 # turns the store index below negative).
                 topk_len = 0
-            if IMAGE_WIDTH > 0:
-                # In-image bidirectional visibility: the window starts up to
-                # max(left - (window - 1), 0) positions earlier and extends
-                # `right` positions past the query token (both 0 outside
-                # image spans, reducing to the plain causal window).
-                left = tl.load(left_visible_ptr + token_idx)
-                right = tl.load(right_visible_ptr + token_idx)
-            else:
-                left = 0
-                right = 0
-            left_add = tl.maximum(left - (WINDOW_SIZE - 1), 0)
-            swa_start = tl.maximum(pos - (WINDOW_SIZE - 1) - left_add, 0)
-            swa_len = pos + right - swa_start + 1
+            swa_start = tl.maximum(pos - (WINDOW_SIZE - 1), 0)
+            # gather_len already excludes context below the request's replay
+            # start (SWA bounded replay), so the window cannot start before
+            # the gathered buffer does.
+            swa_start = tl.maximum(swa_start, gather_start)
+            swa_len = pos - swa_start + 1
 
             offset = tl.arange(0, PADDED_TOP_K)
             mask = offset < topk_len
@@ -923,18 +1000,17 @@ class CombineTopkSwaIndicesKernel(
                 mask=mask,
             )
             # Index into gathered buffer: N + (position - gather_start)
-            # For positions [swa_start, pos + right], the buffer indices are:
-            # [N + swa_start - gather_start, N + pos + right - gather_start]
-            for i in range(0, WINDOW_SIZE + IMAGE_WIDTH, WINDOW_SIZE):
-                swa_offset = i + tl.arange(0, WINDOW_SIZE)
-                tl.store(
-                    combined_indices_ptr
-                    + token_idx * combined_indices_stride
-                    + topk_len
-                    + swa_offset,
-                    M * batch_idx + N + swa_start + swa_offset - gather_start,
-                    mask=swa_offset < swa_len,
-                )
+            # For positions [swa_start, pos], the buffer indices are:
+            # [N + swa_start - gather_start, N + pos - gather_start]
+            swa_offset = tl.arange(0, WINDOW_SIZE)
+            tl.store(
+                combined_indices_ptr
+                + token_idx * combined_indices_stride
+                + topk_len
+                + swa_offset,
+                M * batch_idx + N + swa_start + swa_offset - gather_start,
+                mask=swa_offset < swa_len,
+            )
 
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
@@ -950,7 +1026,6 @@ class CombineTopkSwaIndicesKernel(
         topk: int,
         compress_ratio: int,
         WINDOW_SIZE: int,
-        image_width: int = 0,
     ) -> CompileKey:
         padded_topk = next_power_of_2(topk_width)
         input_variant = TritonPointerInputVariant.from_alignment(
@@ -963,7 +1038,6 @@ class CombineTopkSwaIndicesKernel(
             TOP_K=topk,
             COMPRESS_RATIO=compress_ratio,
             WINDOW_SIZE=WINDOW_SIZE,
-            IMAGE_WIDTH=image_width,
             PADDED_TOP_K=padded_topk,
             input_variant=input_variant,
         )
@@ -973,19 +1047,10 @@ class CombineTopkSwaIndicesKernel(
             return []
 
         window_size = _hf_config_int(vllm_config, "sliding_window", 128)
-        image_width = (
-            _hf_config_int(vllm_config, "vision_max_n_token", 0)
-            if _hf_config_int(vllm_config, "vision_n_layers", 0) > 0
-            else 0
-        )
-        # Warm both the plain-window variant (batches without image spans)
-        # and the in-image bidirectional variant.
-        image_widths = [0, image_width] if image_width > 0 else [0]
         return self._trace_dispatch(self.dispatch)(
             _combine_topk_swa_warmup_inputs(vllm_config),
             _COMBINE_TOPK_SWA_POINTER_INPUTS,
             WINDOW_SIZE=window_size,
-            image_width=image_widths,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -1002,14 +1067,11 @@ class CombineTopkSwaIndicesKernel(
             input_variant.pointer("query_start_loc", torch.int32),
             input_variant.pointer("seq_lens", torch.int32),
             input_variant.pointer("gather_lens", torch.int32),
-            int32_ptr,
-            int32_ptr,
             1,  # do not specialize M
             1,  # do not specialize N
             TOP_K=compile_key.TOP_K,
             COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
             WINDOW_SIZE=compile_key.WINDOW_SIZE,
-            IMAGE_WIDTH=compile_key.IMAGE_WIDTH,
             PADDED_TOP_K=compile_key.PADDED_TOP_K,
             grid=(1, _COMBINE_TOPK_SWA_NUM_WORKERS),
         )
@@ -1028,13 +1090,8 @@ class CombineTopkSwaIndicesKernel(
         TOP_K: int,
         COMPRESS_RATIO: int,
         WINDOW_SIZE: int,
-        left_visible: torch.Tensor | None = None,
-        right_visible: torch.Tensor | None = None,
-        max_image_tokens: int = 0,
     ) -> None:
         num_reqs = seq_lens.shape[0]
-        has_image = left_visible is not None
-        image_width = max_image_tokens if has_image else 0
         self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
             combined_indices,
             combined_indices.stride(0),
@@ -1044,14 +1101,11 @@ class CombineTopkSwaIndicesKernel(
             query_start_loc,
             seq_lens,
             gather_lens,
-            left_visible if has_image else topk_indices,
-            right_visible if has_image else topk_indices,
             M,
             N,
             TOP_K=TOP_K,
             COMPRESS_RATIO=COMPRESS_RATIO,
             WINDOW_SIZE=WINDOW_SIZE,
-            IMAGE_WIDTH=image_width,
             PADDED_TOP_K=next_power_of_2(topk_indices.shape[-1]),
         )
 
@@ -1078,9 +1132,8 @@ def build_flashinfer_mixed_sparse_indices(
     decode_is_valid_token: torch.Tensor | None = None,
     swa_block_span: int | None = None,
     compressed_block_span: int | None = None,
-    prefill_left_visible: torch.Tensor | None = None,
-    prefill_right_visible: torch.Tensor | None = None,
-    max_image_tokens: int = 0,
+    *,
+    replay_start: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
@@ -1091,20 +1144,13 @@ def build_flashinfer_mixed_sparse_indices(
     tokens derive their SWA window from the position and translate local
     compressed indices to global slots via the block tables.
 
-    When ``prefill_left_visible``/``prefill_right_visible`` are given (vision
-    variant), the SWA column region widens by ``max_image_tokens`` and prefill
-    tokens inside an image span get a bidirectionally widened window; decode
-    rows are padded with -1 across the extra columns.
+    ``replay_start`` ([num_reqs], SWA bounded replay) lower-bounds every
+    prefill token's window: positions below it hold no window KV.
     """
     assert decode_swa_indices.dtype == torch.int32
     assert decode_swa_indices.dim() == 2
-    swa_index_width = decode_swa_indices.shape[-1]
-    assert swa_index_width >= window_size
-    has_image = prefill_left_visible is not None
-    image_width = max_image_tokens if has_image else 0
-    swa_total_width = swa_index_width + image_width
-    if has_image:
-        assert prefill_right_visible is not None
+    swa_total_width = decode_swa_indices.shape[-1]
+    assert swa_total_width >= window_size
     if decode_compressed_topk_lens is not None:
         assert decode_compressed_topk_lens.dtype == torch.int32
     assert prefill_topk_indices.dtype == torch.int32
@@ -1163,7 +1209,7 @@ def build_flashinfer_mixed_sparse_indices(
     if num_tokens == 0:
         return sparse_indices, sparse_topk_lens
 
-    window_block_size = triton.next_power_of_2(max(swa_index_width, 1))
+    window_block_size = triton.next_power_of_2(max(swa_total_width, 1))
     topk_block_size = triton.next_power_of_2(max(padded_topk, 1))
     max_block_size = max(window_block_size, topk_block_size)
     num_warps = 4 if max_block_size >= 256 else 1
@@ -1187,11 +1233,10 @@ def build_flashinfer_mixed_sparse_indices(
         decode_is_valid_token,
         prefill_topk_indices,
         prefill_topk_indices.stride(0),
-        prefill_left_visible if has_image else token_to_req_indices,
-        prefill_right_visible if has_image else token_to_req_indices,
         query_start_loc,
         seq_lens,
         token_to_req_indices,
+        replay_start,
         swa_block_table,
         swa_block_table.stride(0),
         swa_block_size,
@@ -1202,8 +1247,7 @@ def build_flashinfer_mixed_sparse_indices(
         compressed_span,
         NUM_DECODE_TOKENS=num_decode_tokens,
         WINDOW_SIZE=window_size,
-        SWA_INDEX_WIDTH=swa_index_width,
-        IMAGE_WIDTH=image_width,
+        SWA_INDEX_WIDTH=swa_total_width,
         COMPRESS_RATIO=compress_ratio,
         TOP_K=topk,
         PADDED_TOP_K=padded_topk,
@@ -1258,11 +1302,10 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     decode_is_valid_token_ptr,
     prefill_topk_indices_ptr,
     prefill_topk_stride,
-    left_visible_ptr,
-    right_visible_ptr,
     query_start_loc_ptr,
     seq_lens_ptr,
     token_to_req_indices_ptr,
+    replay_start_ptr,
     swa_block_table_ptr,
     swa_block_table_stride,
     swa_block_size,
@@ -1274,7 +1317,6 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     NUM_DECODE_TOKENS,
     WINDOW_SIZE: tl.constexpr,
     SWA_INDEX_WIDTH: tl.constexpr,
-    IMAGE_WIDTH: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     TOP_K: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
@@ -1286,18 +1328,14 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     TOPK_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    # Total SWA column count; > SWA_INDEX_WIDTH only for in-image
-    # bidirectional visibility (vision variant), where the extra columns are
-    # -1-padded for decode rows.
-    SWA_TOTAL_WIDTH: tl.constexpr = SWA_INDEX_WIDTH + IMAGE_WIDTH
 
     if token_idx < NUM_DECODE_TOKENS:
-        for i in range(0, SWA_TOTAL_WIDTH, WINDOW_BLOCK_SIZE):
+        for i in range(0, SWA_INDEX_WIDTH, WINDOW_BLOCK_SIZE):
             offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
-            mask = offset < SWA_TOTAL_WIDTH
+            mask = offset < SWA_INDEX_WIDTH
             values = tl.load(
                 decode_swa_indices_ptr + token_idx * decode_swa_stride + offset,
-                mask=offset < SWA_INDEX_WIDTH,
+                mask=mask,
                 other=-1,
             )
             values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
@@ -1340,7 +1378,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
             tl.store(
                 sparse_indices_ptr
                 + token_idx * sparse_indices_stride
-                + SWA_TOTAL_WIDTH
+                + SWA_INDEX_WIDTH
                 + offset,
                 values,
                 mask=mask,
@@ -1354,7 +1392,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
             else:
                 compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
 
-        tl.store(sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + compressed_len)
+        tl.store(sparse_topk_lens_ptr + token_idx, SWA_INDEX_WIDTH + compressed_len)
         return
 
     prefill_idx = token_idx - NUM_DECODE_TOKENS
@@ -1366,26 +1404,19 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     start_pos = seq_len - query_len
     token_idx_in_query = token_idx - query_start
     pos = start_pos + token_idx_in_query
-    if IMAGE_WIDTH > 0:
-        # In-image bidirectional visibility: window starts up to
-        # max(left - (window - 1), 0) earlier and extends `right` past pos.
-        left = tl.load(left_visible_ptr + token_idx)
-        right = tl.load(right_visible_ptr + token_idx)
-    else:
-        left = 0
-        right = 0
-    left_add = tl.maximum(left - (WINDOW_SIZE - 1), 0)
-    swa_start_pos = tl.maximum(pos - (WINDOW_SIZE - 1) - left_add, 0)
-    swa_len = pos + right - swa_start_pos + 1
+    swa_start_pos = tl.maximum(pos - (WINDOW_SIZE - 1), 0)
+    # SWA bounded replay: no window KV exists below the request's replay start.
+    swa_start_pos = tl.maximum(swa_start_pos, tl.load(replay_start_ptr + req_idx))
+    swa_len = pos - swa_start_pos + 1
     if COMPRESS_RATIO > 0:
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
     else:
         # SWA-only layers (ratio 0): no indexer topk; div by constexpr 0 is UB.
         topk_len = 0
 
-    for i in range(0, SWA_TOTAL_WIDTH, WINDOW_BLOCK_SIZE):
+    for i in range(0, SWA_INDEX_WIDTH, WINDOW_BLOCK_SIZE):
         offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
-        mask = offset < SWA_TOTAL_WIDTH
+        mask = offset < SWA_INDEX_WIDTH
         pos_offset = swa_start_pos + offset
         block_indices = pos_offset // swa_block_size
         block_numbers = tl.load(
@@ -1429,10 +1460,10 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         tl.store(
             sparse_indices_ptr
             + token_idx * sparse_indices_stride
-            + SWA_TOTAL_WIDTH
+            + SWA_INDEX_WIDTH
             + offset,
             slot_ids,
             mask=mask,
         )
 
-    tl.store(sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + topk_len)
+    tl.store(sparse_topk_lens_ptr + token_idx, SWA_INDEX_WIDTH + topk_len)

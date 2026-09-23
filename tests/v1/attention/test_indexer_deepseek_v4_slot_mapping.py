@@ -14,6 +14,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.compressor_utils import (
     CompressedSlotMappingKernel,
+    get_compressed_slot_mapping,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
@@ -179,6 +180,7 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
             cp_kv_cache_interleave_size=1,
         ),
     )
@@ -193,6 +195,37 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     }
 
 
+def test_indexer_warmup_includes_pcp_normalized_dcp_key(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.indexer.get_dcp_group",
+        lambda: SimpleNamespace(rank_in_group=2),
+    )
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(compress_ratios=[32], index_kpool=32)
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=4,
+            prefill_context_parallel_size=4,
+            cp_kv_cache_interleave_size=1,
+        ),
+    )
+
+    keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
+
+    # Triton's compile key normalizes generic i32 values to 2 and divisible
+    # i32 values (including zero) to 16.
+    assert {(key.dcp_rank, key.dcp_world) for key in keys} == {(2, 2), (16, 1)}
+    assert {
+        (
+            key.input_variant.is_aligned("uncompressed_seq_lens"),
+            key.input_variant.is_aligned("cu_compressed_seq_lens"),
+        )
+        for key in keys
+    } == {(False, False), (False, True), (True, False), (True, True)}
+
+
 def test_compressed_slot_mapping_warmup_includes_index_kpool():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
@@ -201,6 +234,28 @@ def test_compressed_slot_mapping_warmup_includes_index_kpool():
 
     keys = CompressedSlotMappingKernel().get_warmup_keys(config)
     assert {(key.compress_ratio, key.block_size) for key in keys} == {(32, 2)}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compressed_slot_mapping_inherits_padded_token_slots():
+    """A token whose own slot is padded (SWA bounded replay) closes no
+    compressed state either."""
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor([0, 8], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([8], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[3]], dtype=torch.int32, device=device)
+    slot_mapping = torch.arange(8, dtype=torch.int64, device=device)
+    slot_mapping[:4] = -1
+    compressed = get_compressed_slot_mapping(
+        8,
+        slot_mapping,
+        query_start_loc,
+        seq_lens,
+        block_table,
+        block_size=4,
+        compress_ratio=2,
+    )
+    assert compressed.tolist() == [-1, -1, -1, -1, -1, 3 * 4 + 2, -1, 3 * 4 + 3]
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():

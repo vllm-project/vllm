@@ -115,9 +115,7 @@ def backend_to_kernel_cls(
 
 
 def _get_priority_backends() -> list[WNA16MoEBackend]:
-    """
-    Get available backends in priority order based on platform and config.
-    """
+    """Get available backends in priority order based on platform and config."""
     if current_platform.is_cpu():
         return [WNA16MoEBackend.CPU]
     if current_platform.is_xpu():
@@ -241,11 +239,13 @@ def select_wna16_moe_backend(
         quant_config: Quantization structure and checkpoint format description.
         may_have_zp: Whether the integration can provide weight zero points.
         may_have_bias: Whether the integration can provide expert bias.
+        allow_tile_padding: Whether backends that require padding the weights
+            up to a tile boundary may be selected.
 
     Returns:
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
-    """
 
+    """
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -1194,6 +1194,7 @@ def _unpack_and_dequant_int4_gptq(
 
     Returns:
         Dequantized weight tensor in the requested layout.
+
     """
     E, K_packed, N = w_int32.shape
     K = K_packed * 8
@@ -1256,6 +1257,7 @@ def _unpack_and_dequant_int4_awq(
 
     Returns:
         Dequantized weight tensor in the requested layout.
+
     """
     E, K, N_packed = w_int32.shape
     N = N_packed * 8
@@ -1442,10 +1444,19 @@ def convert_to_wna16_moe_kernel_format(
         layer: the ``MoERunner`` layer whose parameters are being prepared.
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
+        w13: fused gate/up expert weights.
+        w2: down-projection expert weights.
+        w13_scale: quantization scales for ``w13``.
+        w2_scale: quantization scales for ``w2``.
+        w13_qzeros: optional zero points for ``w13``.
+        w2_qzeros: optional zero points for ``w2``.
+        w13_bias: optional bias for ``w13``.
+        w2_bias: optional bias for ``w2``.
+
     """
     if backend == WNA16MoEBackend.HUMMING:
         from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 
