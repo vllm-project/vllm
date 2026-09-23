@@ -1279,13 +1279,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for req_id, n in num_tokens_per_req.items()
             )
         )
-        batch_state = batch_state._replace(is_padded_prompt_tail=is_padded_prompt_tail)
         return batch_state, get_uniform_decode_token_count(
             num_reqs,
             num_toks,
             max_query_len,
-            batch_state.has_prefill,
-            is_padded_prompt_tail=is_padded_prompt_tail,
+            has_prefill=batch_state.has_prefill and not is_padded_prompt_tail,
         )
 
     def _prepare_padding_mask(
@@ -1751,7 +1749,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch = self.prepare_inputs(
                 scheduler_output, batch_req_state, batch_desc, num_active_loras
             )
-            input_batch.is_padded_prompt_tail = batch_req_state.is_padded_prompt_tail
+            if uniform_tok_count is not None:
+                # Prompt-tail inputs are now loaded. Share the target's decode
+                # classification with drafters that reuse its DP sync.
+                input_batch.has_prefill = False
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
@@ -2368,7 +2369,6 @@ class BatchReqState(NamedTuple):
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
     has_prefill: bool
-    is_padded_prompt_tail: bool = False
 
 
 def sort_batch_req_ids(

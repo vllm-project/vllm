@@ -293,7 +293,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_padded = prefill.num_tokens_after_padding
         self.hidden_states[:num_tokens_padded].copy_(hidden_states)
 
-        # When all requests are decoding (no true prefills), each has
+        # When all requests are classified as decode, each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         uniform_token_count = get_uniform_decode_token_count(
             num_reqs,
@@ -302,7 +302,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens,
             max_query_len,
             input_batch.has_prefill,
-            is_padded_prompt_tail=input_batch.is_padded_prompt_tail,
         )
         prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,

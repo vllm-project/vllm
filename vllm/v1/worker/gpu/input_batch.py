@@ -84,7 +84,9 @@ class InputBatch:
     num_computed_prefill_tokens_np: np.ndarray
     # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
     is_prefilling_np: np.ndarray
-    # == np.any(is_prefilling_np)
+    # Whether execution needs prefill handling. Eligible padded prompt tails
+    # are classified as decode after loading their prompt-token inputs;
+    # is_prefilling_np still records the original per-request prefill state.
     has_prefill: bool
 
     # [num_tokens_after_padding]
@@ -117,10 +119,6 @@ class InputBatch:
 
     # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
-
-    # Local verifier classification shared with the first draft pass, which
-    # reuses target DP synchronization. This does not change has_prefill.
-    is_padded_prompt_tail: bool = False
 
     @classmethod
     def make_dummy(

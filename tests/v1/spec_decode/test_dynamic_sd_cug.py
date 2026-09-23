@@ -109,10 +109,13 @@ def _create_vllm_config_for_dsd(
             3, True, "async-real-prefill", False, id="sentinels-are-not-padding"
         ),
         pytest.param(3, True, "uncached-tail", True, id="one-token-prompt-with-decode"),
+        pytest.param(
+            3, True, "uncaptured-tail", True, id="decode-without-captured-graph"
+        ),
         pytest.param(0, False, "padded-tail", False, id="no-speculation"),
     ],
 )
-def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
+def test_model_runner_classifies_prompt_tail_after_preparing_prompt_inputs(
     monkeypatch,
     k,
     mixed,
@@ -138,7 +141,7 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
         CUDAGraphMode.FULL_DECODE_ONLY,
         decode_query_len=width,
     )
-    manager._graphs_captured = True
+    manager._graphs_captured = case != "uncaptured-tail"
 
     output = SchedulerOutput.make_empty()
     output.num_scheduled_tokens = {
@@ -199,13 +202,19 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
     runner.pcp_manager = runner.lora_config = runner.adaptive_verification = None
     runner.ubatch_runner = None
     runner.is_encoder_decoder = runner.supports_mm_inputs = False
-    prepared_batch = SimpleNamespace(has_prefill=True, is_padded_prompt_tail=False)
+    prepared_batch = SimpleNamespace(has_prefill=True)
 
     def prepare_inputs(scheduled, state, desc, num_active_loras):
         assert scheduled is output
         assert state.has_prefill
         assert state.is_prefilling_np[state.req_ids.index("tail")]
-        expected_mode = CUDAGraphMode.FULL if expected_full else CUDAGraphMode.NONE
+        prepared_batch.req_ids = state.req_ids
+        prepared_batch.is_prefilling_np = state.is_prefilling_np.copy()
+        expected_mode = (
+            CUDAGraphMode.FULL
+            if expected_full and manager._graphs_captured
+            else CUDAGraphMode.NONE
+        )
         assert desc.cg_mode == expected_mode
         return prepared_batch
 
@@ -214,8 +223,8 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
 
     def prepare_attn(batch):
         assert batch is prepared_batch
-        assert batch.has_prefill
-        assert batch.is_padded_prompt_tail is expected_full
+        assert batch.has_prefill is (not expected_full)
+        assert batch.is_prefilling_np[batch.req_ids.index("tail")]
         raise ReachedAttentionPreparation
 
     runner.prepare_inputs = prepare_inputs

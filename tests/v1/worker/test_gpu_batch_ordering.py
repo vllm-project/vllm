@@ -217,15 +217,12 @@ def test_uniform_decode_uses_state_index_not_batch_position():
 
 
 @pytest.mark.parametrize(
-    ("num_reqs", "num_tokens", "max_query_len", "has_prefill", "padded", "expected"),
+    ("num_reqs", "num_tokens", "max_query_len", "has_prefill", "expected"),
     [
-        (2, 16, 8, False, False, 8),
-        (2, 16, 8, True, False, None),
-        (2, 12, 8, False, False, None),
-        (2, 8, 4, True, True, 4),
-        (2, 16, 8, True, True, 8),
-        (2, 12, 8, True, True, None),
-        (0, 0, 4, True, True, None),
+        (2, 16, 8, False, 8),
+        (2, 16, 8, True, None),
+        (2, 12, 8, False, None),
+        (0, 0, 4, False, None),
     ],
 )
 def test_uniform_decode_predicate(
@@ -233,17 +230,14 @@ def test_uniform_decode_predicate(
     num_tokens,
     max_query_len,
     has_prefill,
-    padded,
     expected,
 ):
-    # Validated padding permits prefill state, but never bypasses the shape test.
     assert (
         get_uniform_decode_token_count(
             num_reqs,
             num_tokens,
             max_query_len,
             has_prefill,
-            is_padded_prompt_tail=padded,
         )
         == expected
     )

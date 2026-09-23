@@ -745,19 +745,9 @@ def get_uniform_decode_token_count(
     num_tokens: int,
     max_query_len: int,
     has_prefill: bool,
-    *,
-    is_padded_prompt_tail: bool = False,
 ) -> int | None:
-    """Per-request token count of a uniform decode batch, or None.
-
-    ``is_padded_prompt_tail`` requires a complete scheduler-provided verifier
-    layout and execution support. It permits prefill input preparation without
-    treating an ordinary same-shaped prompt chunk as decode. Shape must still
-    be uniform.
-    """
-    if (not has_prefill or is_padded_prompt_tail) and is_uniform_query_len(
-        num_reqs, num_tokens, max_query_len
-    ):
+    """Per-request token count of a uniform decode batch, or None."""
+    if not has_prefill and is_uniform_query_len(num_reqs, num_tokens, max_query_len):
         return max_query_len
     return None
 

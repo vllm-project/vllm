@@ -133,12 +133,12 @@ def test_padded_prompt_tail_draft_capability(
     assert speculator.supports_padded_prompt_tail_graph is expected
 
 
-@pytest.mark.parametrize("is_padded_prompt_tail", [False, True])
+@pytest.mark.parametrize("has_prefill", [False, True])
 def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
     monkeypatch,
-    is_padded_prompt_tail,
+    has_prefill,
 ):
-    """A tail classified as prefill must retain the target's verifier DP shape."""
+    """A prepared prompt tail must reuse the target's decode classification."""
     speculator = _make_speculator(monkeypatch, torch.zeros(4, 3))
     speculator.num_speculative_steps = 3
     speculator.max_model_len = 8192
@@ -154,8 +154,7 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
         num_scheduled_tokens=torch.tensor([4]),
         seq_lens_cpu_upper_bound=torch.tensor([4099]),
         idx_mapping=None,
-        has_prefill=True,
-        is_padded_prompt_tail=is_padded_prompt_tail,
+        has_prefill=has_prefill,
     )
     sync = DPSyncState(
         num_tokens_across_dp=torch.tensor([4, 4]),
@@ -182,7 +181,7 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
         raise Dispatched
 
     monkeypatch.setattr(spec_module, "dispatch_cg_and_sync_dp", dispatch)
-    expected = Dispatched if is_padded_prompt_tail else AssertionError
+    expected = AssertionError if has_prefill else Dispatched
     with pytest.raises(expected):
         speculator.propose(
             batch,
@@ -198,7 +197,7 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
             None,
             dp_sync=sync,
         )
-    assert batch.has_prefill
+    assert batch.has_prefill is has_prefill
 
 
 @pytest.mark.parametrize(("hc_mult", "expected"), [(None, 64), (4, 256)])
