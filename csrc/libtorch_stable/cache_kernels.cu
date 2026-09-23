@@ -549,16 +549,20 @@ __global__ void concat_and_cache_ds_mla_kernel(
   scalar_t* kv_cache_16bit =
       reinterpret_cast<scalar_t*>(&kv_cache[dst_idx_start]);
 
-  // The last warp handles the RoPE part
+  // Zero the reserved RoPE tail for NoPE rows.
   if (threadIdx.x >= 64) {
     // Each thread handles two elements of RoPE
     const int8_t pe_idx_start = (threadIdx.x - 64) * 2;
-    const int64_t src_idx = token_idx * k_pe_stride + pe_idx_start;
-    // Vectorized load of two 16-bit values, performed as one 32-bit load
-    const int32_t vals = *reinterpret_cast<const int32_t*>(&k_pe[src_idx]);
     // RoPE values start after the packed 8-bit NoPE values and the
     // 32-bit scales
     const int64_t dst_idx = kv_lora_rank / 2 + 8 + pe_idx_start;
+    if (pe_dim == 0) {
+      *reinterpret_cast<int32_t*>(&kv_cache_16bit[dst_idx]) = 0;
+      return;
+    }
+    const int64_t src_idx = token_idx * k_pe_stride + pe_idx_start;
+    // Vectorized load of two 16-bit values, performed as one 32-bit load
+    const int32_t vals = *reinterpret_cast<const int32_t*>(&k_pe[src_idx]);
     // Vectorized store of two 16-bit values, performed as one 32-bit store
     *reinterpret_cast<int32_t*>(&kv_cache_16bit[dst_idx]) = vals;
     return;
@@ -600,7 +604,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
   }
 
   // Now all threads in the block scale and write their elements
-  // NoPE data is packed in the first kv_lora_rank/2 bytes (first 256 bytes)
+  // NoPE data occupies the first kv_lora_rank bytes (512 bytes).
   const int64_t dst_idx_base = dst_idx_start + (threadIdx.x * 8);
 
   uint8_t result[8];
@@ -936,7 +940,8 @@ void concat_and_cache_mla(
   if (kv_cache_dtype == "fp8_ds_mla") {
     STD_TORCH_CHECK(kv_lora_rank == 512,
                     "kv_lora_rank must be 512 for fp8_ds_mla");
-    STD_TORCH_CHECK(pe_dim == 64, "pe_dim must be 64 for fp8_ds_mla");
+    STD_TORCH_CHECK(pe_dim == 64 || pe_dim == 0,
+                    "pe_dim must be 64 or 0 for fp8_ds_mla");
     STD_TORCH_CHECK(kv_cache.size(2) == 656 / kv_cache.element_size(),
                     "kv_cache.size(2) must be 656 bytes for fp8_ds_mla");
     STD_TORCH_CHECK(kv_c.element_size() == 2,
