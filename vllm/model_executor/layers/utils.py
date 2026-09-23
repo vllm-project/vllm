@@ -303,6 +303,14 @@ def use_aiter_decode_gemm(n, m, k, dtype, bias):
     tuned-config key carries `gfx` and `cu_num`, so a row only ever answers for
     the card it was measured on. On gfx950 the condition is unchanged, since
     `on_gfx950()` is true there anyway.
+
+    The caller asks only while a CUDA graph is being captured. aiter's dispatch
+    costs about 20 us of CPU per call against about 10 us for the skinny
+    kernels, so in eager mode the decode kernel's GPU win is outweighed by host
+    time on every shape whose kernel runs under ~27 us -- most decode shapes.
+    Under capture that host cost is paid once and replay keeps only the faster
+    kernel. Eager execution, including `enforce_eager` and batch sizes outside
+    the captured set, therefore keeps today's path unchanged.
     """
     if not rocm_aiter_ops.is_linear_enabled():
         return False
@@ -364,7 +372,11 @@ def rocm_unquantized_gemm_impl(
 
     # A tuned aiter decode row means somebody measured this exact shape against
     # the skinny kernels below and the decode kernel won, so take it directly.
-    if use_aiter_decode_gemm(n, m, k, x.dtype, bias):
+    # Capture is checked here rather than inside the helper so that eager calls,
+    # which never take this branch, do not pay for a Python function call.
+    if torch.cuda.is_current_stream_capturing() and use_aiter_decode_gemm(
+        n, m, k, x.dtype, bias
+    ):
         from aiter.tuned_gemm import tgemm
 
         return tgemm.mm(x, weight, bias)
