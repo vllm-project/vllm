@@ -289,6 +289,46 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
         VllmConfig.validate_block_size(config)
 
 
+def test_nixl_dcp_check_skipped_for_submodel_config():
+    # with_hf_config() builds a submodule view of the config (e.g. a
+    # multimodal model's text stack) whose architecture list is empty.
+    # Re-running VllmConfig validation on it is unsafe: the NIXL DCP check
+    # reads use_mla, which resolves the architecture registry.
+    model_config = ModelConfig("Qwen/Qwen2-VL-2B-Instruct", max_model_len=2048)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        device_config=DeviceConfig(device="cpu"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+    )
+    submodel_config = vllm_config.with_hf_config(model_config.hf_text_config)
+    assert submodel_config.model_config.is_submodel_config
+    assert submodel_config.model_config.architectures == []
+    assert submodel_config.model_config.use_mla is False
+
+
+def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
+    # Pretend the model has a single KV head so the DCP feasibility checks
+    # pass and the MLA-only assert is what actually fires.
+    monkeypatch.setattr(ModelConfig, "get_total_num_kv_heads", lambda self: 1)
+    with pytest.raises(ValidationError, match="only supported for MLA models"):
+        VllmConfig(
+            model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+                distributed_executor_backend="mp",
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="NixlConnector",
+                kv_role="kv_both",
+            ),
+        )
+
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
