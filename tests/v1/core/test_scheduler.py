@@ -784,9 +784,7 @@ def test_long_prefill_threshold_applies_with_other_requests():
     """The threshold caps the prefill as soon as another request is queued."""
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
-        # Above the fair share (1024 // 2 = 512) so the cap, not the floor,
-        # binds.
-        long_prefill_token_threshold=600,
+        long_prefill_token_threshold=400,
     )
     long_req = create_requests(num_requests=1, num_tokens=2000)[0]
     short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
@@ -794,16 +792,18 @@ def test_long_prefill_threshold_applies_with_other_requests():
         scheduler.add_request(request)
 
     output = scheduler.schedule()
-    assert output.num_scheduled_tokens[long_req.request_id] == 600
+    assert output.num_scheduled_tokens[long_req.request_id] == 400
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
 def test_long_prefill_threshold_floored_by_fair_share():
-    """The effective threshold never falls below the fair share of the token
-    budget: max_num_batched_tokens / num queued + running requests."""
+    """With the adaptive flag, the effective threshold never falls below the
+    fair share of the token budget: max_num_batched_tokens / num queued +
+    running requests."""
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
         long_prefill_token_threshold=100,
+        enable_long_prefill_token_threshold_adaptive=True,
     )
     long_req = create_requests(num_requests=1, num_tokens=2000)[0]
     short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]
