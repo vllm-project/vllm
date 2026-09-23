@@ -325,71 +325,90 @@ fi
 ########################################
 # Xgrammar
 ########################################
-uv pip install \
-    "scikit-build-core==0.11.6" \
-    "pyproject-metadata<0.8" \
-    pathspec \
-    packaging \
-    distro \
-    setuptools_scm \
-    cmake \
-    ninja \
-    pybind11 \
-    nanobind
-uv pip install apache-tvm-ffi==0.1.12 \
-  --no-build-isolation \
-  --no-cache
+XGRAMMAR_FROM_DEVPI=false
 
-TEMP_BUILD_DIR=$(mktemp -d)
+if is_available_on_devpi "xgrammar" "${XGRAMMAR_VERSION}"; then
+    XGRAMMAR_FROM_DEVPI=true
+fi
 
-pushd "${TEMP_BUILD_DIR}"
+if [[ "${XGRAMMAR_FROM_DEVPI}" == "true" ]]; then
+    echo "Installing xgrammar==${XGRAMMAR_VERSION} from DevPI"
 
-export CFLAGS="-fno-lto -mcpu=power9"
-export CXXFLAGS="-fno-lto -mcpu=power9"
-export LDFLAGS="-fno-lto"
-export PATH=/opt/vllm/bin:$PATH
+    uv pip install \
+        --extra-index-url "${IBM_DEVPI_URL}" \
+        --index-strategy unsafe-best-match \
+        --only-binary=:all: \
+        --no-build-isolation \
+        "xgrammar==${XGRAMMAR_VERSION}"
+else
+    echo "Xgrammar wheel not available on DevPI. Building xgrammar==${XGRAMMAR_VERSION} from source."
+    # Install xgrammar build dependencies only when building from source.
+    uv pip install \
+        "scikit-build-core==0.11.6" \
+        "pyproject-metadata<0.8" \
+        pathspec \
+        packaging \
+        distro \
+        setuptools_scm \
+        cmake \
+        ninja \
+        pybind11 \
+        nanobind
+    uv pip install apache-tvm-ffi==0.1.12 \
+    --no-build-isolation \
+    --no-cache
 
-export Python_EXECUTABLE=/opt/vllm/bin/python3
-export Python3_EXECUTABLE=/opt/vllm/bin/python3
-export PYTHON_EXECUTABLE=/opt/vllm/bin/python3
+    TEMP_BUILD_DIR=$(mktemp -d)
 
-export Python_ROOT_DIR=/opt/vllm
-export Python3_ROOT_DIR=/opt/vllm
+    pushd "${TEMP_BUILD_DIR}"
 
-git clone \
-    --recursive \
-    https://github.com/mlc-ai/xgrammar \
-    -b "v${XGRAMMAR_VERSION}"
+    export CFLAGS="-fno-lto -mcpu=power9"
+    export CXXFLAGS="-fno-lto -mcpu=power9"
+    export LDFLAGS="-fno-lto"
+    export PATH=/opt/vllm/bin:$PATH
 
-cd xgrammar
+    export Python_EXECUTABLE=/opt/vllm/bin/python3
+    export Python3_EXECUTABLE=/opt/vllm/bin/python3
+    export PYTHON_EXECUTABLE=/opt/vllm/bin/python3
 
-cp cmake/config.cmake .
-export PYTHONPATH=/opt/vllm/lib64/python3.12/site-packages:/opt/vllm/lib/python3.12/site-packages:${PYTHONPATH:-}
+    export Python_ROOT_DIR=/opt/vllm
+    export Python3_ROOT_DIR=/opt/vllm
 
-uv build \
-    --wheel \
-    --out-dir "${WHEEL_DIR}" \
-    --no-build-isolation
+    git clone \
+        --recursive \
+        https://github.com/mlc-ai/xgrammar \
+        -b "v${XGRAMMAR_VERSION}"
 
-uv pip install "${WHEEL_DIR}"/xgrammar*.whl -v
+    cd xgrammar
 
-popd
+    cp cmake/config.cmake .
+    export PYTHONPATH=/opt/vllm/lib64/python3.12/site-packages:/opt/vllm/lib/python3.12/site-packages:${PYTHONPATH:-}
 
-rm -rf "${TEMP_BUILD_DIR}"
-cd "${REPO_ROOT}"
+    uv build \
+        --wheel \
+        --out-dir "${WHEEL_DIR}" \
+        --no-build-isolation
+
+    uv pip install "${WHEEL_DIR}"/xgrammar*.whl -v
+
+    popd
+
+    rm -rf "${TEMP_BUILD_DIR}"
+    cd "${REPO_ROOT}"
+fi
 
 ########################################
-# RHOAI Binary Downloads
+# DevPI Binary Downloads
 ########################################
 pip download \
-    --index-url "${RHOAI_INDEX_URL}" \
+    --index-url "${IBM_DEVPI_URL}" \
     --only-binary=:all: \
     --no-deps \
     llvmlite==0.47.0 \
     -d "${WHEEL_DIR}"
 
 pip download \
-    --index-url "${RHOAI_INDEX_URL}" \
+    --index-url "${IBM_DEVPI_URL}" \
     --only-binary=:all: \
     --no-deps \
     Numba==0.65.0 \
