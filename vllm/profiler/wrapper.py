@@ -61,6 +61,11 @@ class WorkerProfiler(ABC):
         """Whether worker iterations should receive profiler annotations."""
         return self._running
 
+    @property
+    def is_armed(self) -> bool:
+        """Whether a start request is active, including a delayed start."""
+        return self._active
+
     @abstractmethod
     def _start(self) -> None:
         """Start the profiler."""
