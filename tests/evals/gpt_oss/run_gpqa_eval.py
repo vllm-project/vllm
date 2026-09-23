@@ -25,7 +25,9 @@ def main() -> None:
         max_tokens=args.max_output_tokens,
     )
     result = GPQAEval(n_repeats=8, n_threads=args.n_threads)(sampler)
-    print({"metric": result.score})
+    # gpt-oss returns a NumPy scalar. Convert it so the parent process gets a
+    # stable, dependency-independent representation that its regex can parse.
+    print({"metric": float(result.score)})
 
 
 if __name__ == "__main__":
