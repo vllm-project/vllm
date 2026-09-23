@@ -49,6 +49,7 @@ All2AllBackend = Literal[
     "deepep_v2",
     "mori_high_throughput",
     "mori_low_latency",
+    "moonep",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -206,6 +207,7 @@ class ParallelConfig:
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
+    - "moonep": MoonEP balanced EP with dynamic redundant experts (NVLink)
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
@@ -758,12 +760,30 @@ class ParallelConfig:
 
     @property
     def nnodes_within_dp(self) -> int:
+        """Number of nodes one DP replica spans.
+
+        External LB pins ``data_parallel_size_local`` to 1, so the ratio
+        rounds down to 0 once DP replicas outnumber nodes. A replica that
+        does not span nodes still occupies exactly one.
+        """
         if self.nnodes == 1:
             return 1
         data_parallel_node_size = (
             self.data_parallel_size // self.data_parallel_size_local
         )
-        return self.nnodes // data_parallel_node_size
+        nnodes_within_dp = self.nnodes // data_parallel_node_size
+        if self.data_parallel_external_lb:
+            return max(nnodes_within_dp, 1)
+        if self.nnodes % data_parallel_node_size != 0:
+            raise ValueError(
+                "Invalid data parallel configuration: "
+                f"nnodes ({self.nnodes}) must be divisible by the number of "
+                "data parallel node groups "
+                f"({data_parallel_node_size} = data_parallel_size "
+                f"{self.data_parallel_size} / data_parallel_size_local "
+                f"{self.data_parallel_size_local})"
+            )
+        return nnodes_within_dp
 
     @property
     def local_world_size(self) -> int:

@@ -169,8 +169,6 @@ ENV PKG_CONFIG_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64/pkgconfig:/usr/local/
 ENV PATH="${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}:/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/bin:$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-# Force pure Python protobuf to avoid s390x C++ extension crashes
-ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm
 
@@ -213,10 +211,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
     uv pip install "$(echo dist/*.whl)[tensorizer]"
-
-# Remove protobuf C++ extension that crashes on s390x
-RUN rm -rf /opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/google/_upb/*.so \
-           /opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/google/protobuf/pyext/*.so 2>/dev/null || true
 
 # setup non-root user for vllm
 RUN umask 002 && \
