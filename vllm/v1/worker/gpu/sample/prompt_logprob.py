@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -8,15 +9,25 @@ import torch
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 
+if TYPE_CHECKING:
+    from vllm.lora.punica_wrapper import PunicaWrapperBase
+
 
 class PromptLogprobsWorker:
-    def __init__(self, max_num_reqs: int, logprobs_mode: LogprobsMode = "raw_logprobs"):
+    def __init__(
+        self,
+        max_num_reqs: int,
+        logprobs_mode: LogprobsMode = "raw_logprobs",
+        lora_wrapper: "PunicaWrapperBase | None" = None,
+    ):
         self.max_num_reqs = max_num_reqs
         self.logprobs_mode = logprobs_mode
+        self.lora_wrapper = lora_wrapper
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -85,6 +96,7 @@ class PromptLogprobsWorker:
                 logits_fn,
                 max_num_prompt_logprobs,
                 self.logprobs_mode,
+                self.lora_wrapper,
             )
         )
 
@@ -202,6 +214,7 @@ def compute_prompt_logprobs_with_chunking(
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
+    lora_wrapper: "PunicaWrapperBase | None" = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
@@ -211,24 +224,42 @@ def compute_prompt_logprobs_with_chunking(
     ranks = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
     prompt_token_ids = prompt_token_ids.to(torch.int64)
-    for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
-        end_idx = start_idx + CHUNK_SIZE
-        # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-        requested_num = (
-            prompt_logits.shape[-1]
-            if num_prompt_logprobs == -1
-            else num_prompt_logprobs
-        )
-        result = compute_topk_scores(
-            prompt_logits,
-            requested_num,
-            prompt_token_ids[start_idx:end_idx],
-            logits_mode=logits_mode,
-        )
-        token_ids.append(result.logprob_token_ids)
-        scores.append(result.logprobs)
-        ranks.append(result.selected_token_ranks)
+    # CPU Punica wrappers do not expose prompt_mapping_meta.
+    prompt_mapping_meta = (
+        getattr(lora_wrapper, "prompt_mapping_meta", None)
+        if lora_wrapper is not None
+        else None
+    )
+    try:
+        for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
+            end_idx = start_idx + CHUNK_SIZE
+            # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
+            if prompt_mapping_meta is not None:
+                assert lora_wrapper is not None
+                with gpu_sync_allowed():
+                    prompt_mapping_meta.prepare_tensors(
+                        lora_wrapper.token_lora_indices[start_idx:end_idx]
+                    )
+            prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+            requested_num = (
+                prompt_logits.shape[-1]
+                if num_prompt_logprobs == -1
+                else num_prompt_logprobs
+            )
+            result = compute_topk_scores(
+                prompt_logits,
+                requested_num,
+                prompt_token_ids[start_idx:end_idx],
+                logits_mode=logits_mode,
+            )
+            token_ids.append(result.logprob_token_ids)
+            scores.append(result.logprobs)
+            ranks.append(result.selected_token_ranks)
+    finally:
+        if prompt_mapping_meta is not None:
+            assert lora_wrapper is not None
+            with gpu_sync_allowed():
+                prompt_mapping_meta.prepare_tensors(lora_wrapper.sampler_indices)
 
     token_ids = torch.cat(token_ids, dim=0) if len(token_ids) > 1 else token_ids[0]
     scores = torch.cat(scores, dim=0) if len(scores) > 1 else scores[0]
