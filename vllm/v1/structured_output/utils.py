@@ -53,7 +53,7 @@ CACHE = None
 # against a legitimate pattern. The worker is reused after the first start.
 _WORKER_STARTUP_TIMEOUT_S = 120
 _xgr_tokenizer_cache: LRUCache = LRUCache(maxsize=2)
-_compile_pool: "_RegexCompilePool | None" = None
+_compile_pool: _RegexCompilePool | None = None
 _compile_pool_lock = threading.Lock()
 
 
@@ -87,9 +87,7 @@ def _timeout_error(timeout: float, pattern: str) -> str:
 
 def _process_exit_error(exitcode: int | None, pattern: str) -> str:
     excerpt = _pattern_excerpt(pattern)
-    return (
-        f"Regex compilation process exited with code {exitcode}. Pattern: {excerpt}"
-    )
+    return f"Regex compilation process exited with code {exitcode}. Pattern: {excerpt}"
 
 
 def _regex_compile_worker_main(job_queue: Any, result_queue: Any) -> None:
@@ -198,8 +196,7 @@ class _RegexCompilePool:
     def __init__(self, size: int) -> None:
         if size < 1:
             raise ValueError(
-                "VLLM_REGEX_COMPILATION_MAX_CONCURRENT must be at least 1, "
-                f"got {size}."
+                f"VLLM_REGEX_COMPILATION_MAX_CONCURRENT must be at least 1, got {size}."
             )
         self._size = size
         self._idle: queue.Queue[_CompileWorker] = queue.Queue()
@@ -296,9 +293,7 @@ def shutdown_regex_compile_pool() -> None:
         pool.shutdown()
 
 
-def compile_regex_with_timeout(
-    fn: Callable[..., _T], *args: Any, pattern: str
-) -> _T:
+def compile_regex_with_timeout(fn: Callable[..., _T], *args: Any, pattern: str) -> _T:
     """Run a regex compilation callable with a timeout in a killable process.
 
     The compile runs in a worker started via ``get_mp_context()``, so the
@@ -318,6 +313,7 @@ def compile_regex_with_timeout(
     Raises:
         ValueError: If compilation exceeds the configured timeout or a
             worker cannot be acquired in time.
+
     """
     timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
     if timeout <= 0:
