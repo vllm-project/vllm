@@ -102,6 +102,8 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
+        # specialize_active_lora changes the set of captured cuda graphs
+        factors.append(self.specialize_active_lora)
         factors.append(self.enable_mixed_moe_lora_format)
         factors.append(self.enable_moe_shared_loras)
         # target_modules affects which modules get LoRA applied
