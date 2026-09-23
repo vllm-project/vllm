@@ -258,6 +258,34 @@ steps:
     'cd tests &&
     pytest -v -s v1/tracing'
 
+- label: Distributed XPU Graph Capture (2 GPUs)
+  key: distributed-xpu-graph-capture-2-gpus
+  timeout_in_minutes: 20
+  num_devices: 2
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/distributed/device_communicators/xpu_communicator.py
+  - vllm/distributed/parallel_state.py
+  - tests/distributed/test_xpu_communicator.py
+  - tests/distributed/test_xpu_graph_capture_all_reduce.py
+  - .buildkite/intel_jobs/misc_intel.yaml
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s distributed/test_xpu_communicator.py
+    distributed/test_xpu_graph_capture_all_reduce.py'
+
 - label: Async Engine, Inputs, Utils, Worker
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 55

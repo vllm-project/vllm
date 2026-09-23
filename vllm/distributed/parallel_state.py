@@ -719,6 +719,9 @@ class GroupCoordinator:
         ):
             yield graph_capture_context
 
+        if isinstance(self.device_communicator, XpuCommunicator):
+            self.device_communicator.reset_after_graph_capture()
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """User-facing all-reduce function before we actually call the
         all-reduce operation.
