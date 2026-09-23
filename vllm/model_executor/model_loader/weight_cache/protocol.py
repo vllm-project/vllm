@@ -20,7 +20,7 @@ import stat
 import struct
 import tempfile
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
@@ -29,13 +29,16 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 import vllm.version
 from vllm.config import ModelConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    format_socket_role_suffix,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
 )
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
-SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}.sock"
+SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
 _LEN_STRUCT = struct.Struct("!Q")
@@ -128,9 +131,23 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
     )
 
 
-def get_socket_path(gpu_uuid: str, socket_dir: str | None = None) -> str:
-    directory = get_socket_dir(socket_dir)
-    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_uuid=gpu_uuid))
+def get_socket_path(
+    gpu_uuid: str,
+    socket_dir: str | None = None,
+    *,
+    is_draft: bool = False,
+) -> str:
+    """Socket path of a daemon group; ``is_draft=False`` is the target.
+
+    The GPU uuid is hashed to keep the name well under the AF_UNIX path
+    limit (~108 bytes) even with the draft role suffix.
+    """
+    gpu_id = safe_hash(gpu_uuid.encode()).hexdigest()
+    name = SOCKET_NAME_TEMPLATE.format(
+        gpu_uuid=gpu_id,
+        role=format_socket_role_suffix(is_draft),
+    )
+    return os.path.join(get_socket_dir(socket_dir), name)
 
 
 def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
@@ -272,10 +289,21 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
+    is_draft: bool = False
+    """Daemon group the weights come from; False is the target model."""
+    dp_size: int = 1
+    dp_rank: int = 0
 
     @classmethod
     def from_model_config(
-        cls, model_config: ModelConfig, tp_size: int, tp_rank: int
+        cls,
+        model_config: ModelConfig,
+        tp_size: int,
+        tp_rank: int,
+        *,
+        is_draft: bool = False,
+        dp_size: int = 1,
+        dp_rank: int = 0,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -302,6 +330,9 @@ class WeightCacheKey:
             quant_config_hash=_hash_quant_config(quant_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
+            is_draft=is_draft,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -343,6 +374,17 @@ class TensorEntry:
         # have different CUDA_VISIBLE_DEVICES mappings.
         args[6] = device_index
         return rebuild_cuda_tensor(*args)
+
+
+class WeightCacheState(NamedTuple):
+    """Client-side decode of a daemon's get_state response payload."""
+
+    entries: dict[str, TensorEntry]
+    """Model tensors, exported as CUDA IPC handles or shipped by value."""
+    aliases: dict[str, str]
+    """Duplicate (tied) weight names aliased to their canonical entry."""
+    attrs: dict[str, bool]
+    """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:
