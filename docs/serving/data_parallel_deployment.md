@@ -126,6 +126,14 @@ vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 \
                   --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
 ```
 
+When using `--data-parallel-external-lb` with `--nnodes`, the data parallel rank
+can be inferred from `--node-rank` only when `--nnodes` is evenly divisible by
+`--data-parallel-size`. If it is not evenly divisible, automatic rank inference
+is rejected and `--data-parallel-rank` must be set explicitly. When multiple
+external-LB ranks are co-located on a node, assign each process a disjoint
+device set with `CUDA_VISIBLE_DEVICES` or `--device-ids`; devices are not
+partitioned automatically between processes.
+
 The coordinator process also runs in this scenario, co-located with the DP rank 0 engine.
 
 <figure markdown="1">
