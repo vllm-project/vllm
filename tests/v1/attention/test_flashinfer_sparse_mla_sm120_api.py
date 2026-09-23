@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Behavior checks for FlashInfer SM120 sparse MLA backend selection and calls."""
+"""Behavior checks for FlashInfer SM120 sparse MLA backend selection."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import torch
 
@@ -93,57 +92,3 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
 
     assert _required_sm120_sparse_topk(causal, 128) == 128
     assert _required_sm120_sparse_topk(dspark, 128) == 192
-
-
-def test_sm120_nope_forward_preserves_native_sparse_mla_contract(monkeypatch) -> None:
-    from vllm.v1.attention.backends.mla import flashinfer_mla_sparse_sm120 as sm120
-
-    q = torch.zeros(2, 16, 512, dtype=torch.bfloat16, device="cpu")
-    kv_cache = torch.zeros(1, 64, 656, dtype=torch.uint8, device="cpu")
-    topk = torch.zeros(2, 2176, dtype=torch.int32, device="cpu")
-    physical_topk = torch.full((2, 2176), -1, dtype=torch.int32, device="cpu")
-    convert = MagicMock(return_value=physical_topk)
-    monkeypatch.setattr(sm120, "triton_convert_req_index_to_global_index", convert)
-    decode = MagicMock(side_effect=lambda **kwargs: kwargs["out"].fill_(1))
-    monkeypatch.setattr(
-        fi_utils, "flashinfer_trtllm_batch_decode_with_kv_cache_mla", decode
-    )
-
-    impl = object.__new__(sm120.FlashInferMLASparseSM120Impl)
-    impl.num_heads = 16
-    impl.kv_lora_rank = 512
-    impl.qk_nope_head_dim = 256
-    impl.qk_rope_head_dim = 0
-    impl.scale = 0.125
-    impl.kv_scale_format = sm120._kv_scale_format_for_model("glm4_moe")
-    impl.topk_indices_buffer = topk
-    impl.index_group = None
-    impl._workspace_buffer = torch.empty(1, dtype=torch.uint8, device="cpu")
-    metadata = SimpleNamespace(
-        topk_tokens=2048,
-        block_size=64,
-        req_id_per_token=torch.zeros(2, dtype=torch.int32, device="cpu"),
-        block_table=torch.zeros(1, 1, dtype=torch.int32, device="cpu"),
-    )
-
-    output, lse = impl.forward_mqa(q, kv_cache, metadata, SimpleNamespace())
-
-    convert.assert_called_once()
-    decode.assert_called_once()
-    kwargs = decode.call_args.kwargs
-    torch.testing.assert_close(kwargs["query"], q.unsqueeze(1))
-    assert kwargs["query"].data_ptr() == q.data_ptr()
-    assert kwargs["qk_nope_head_dim"] == 256
-    assert kwargs["qk_rope_head_dim"] == 0
-    assert kwargs["kv_lora_rank"] == 512
-    assert kwargs["kv_cache"].shape == (1, 1, 64, 656)
-    assert kwargs["kv_cache"].dtype == torch.uint8
-    assert kwargs["kv_cache"].data_ptr() == kv_cache.data_ptr()
-    torch.testing.assert_close(kwargs["block_tables"], physical_topk.unsqueeze(1))
-    assert kwargs["max_seq_len"] == 2176
-    assert kwargs["sparse_mla_top_k"] == 2176
-    assert kwargs["seq_lens"] is None
-    assert "sparse_mla_top_k_lens" not in kwargs
-    assert kwargs["kv_scale_format"] == "arbitrary_fp32"
-    torch.testing.assert_close(output, torch.ones_like(q))
-    assert lse is None

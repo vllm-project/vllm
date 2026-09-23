@@ -549,10 +549,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
   scalar_t* kv_cache_16bit =
       reinterpret_cast<scalar_t*>(&kv_cache[dst_idx_start]);
 
-  // The last warp handles the RoPE part. NoPE models (pe_dim == 0) have no
-  // RoPE tail: zero the reserved bytes so any reader of the fixed 656-byte
-  // row sees exact zeros instead of stale memory (a zero rope lane is
-  // bit-exact NoPE for q_pe · k_pe).
+  // Zero the reserved RoPE tail for NoPE rows.
   if (threadIdx.x >= 64) {
     // Each thread handles two elements of RoPE
     const int8_t pe_idx_start = (threadIdx.x - 64) * 2;
@@ -943,9 +940,6 @@ void concat_and_cache_mla(
   if (kv_cache_dtype == "fp8_ds_mla") {
     STD_TORCH_CHECK(kv_lora_rank == 512,
                     "kv_lora_rank must be 512 for fp8_ds_mla");
-    // pe_dim 64 carries the RoPE tail; pe_dim 0 is the NoPE form (e.g.
-    // GLM-5.3 sparse layers), whose packed rows keep bytes 528:656 as
-    // zeroed reserved padding.
     STD_TORCH_CHECK(pe_dim == 64 || pe_dim == 0,
                     "pe_dim must be 64 or 0 for fp8_ds_mla");
     STD_TORCH_CHECK(kv_cache.size(2) == 656 / kv_cache.element_size(),
