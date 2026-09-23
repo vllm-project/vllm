@@ -476,4 +476,7 @@ class RejectionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
             sampling_mask_tensors=sampling_mask_tensors,
+            thinking_loop_breaks=self.sampler.thinking_budget_state.take_loop_breaks(
+                input_batch.idx_mapping, input_batch.idx_mapping_np
+            ),
         )

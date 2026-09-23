@@ -3,7 +3,8 @@
 
 """E2E tests for ``thinking_token_budget`` with reasoning models.
 
-Covers Qwen3-0.6B and Qwen3.5 FP8 + MTP.
+Covers Qwen3-0.6B and Qwen3.5 FP8 + MTP, and the reasoning loop breaking that
+shares the budget's forcing machinery.
 """
 
 import asyncio
@@ -13,6 +14,8 @@ from typing import Literal
 import openai
 import pytest
 import pytest_asyncio
+import requests
+from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer, multi_gpu_only, requires_fp8
 from vllm.platforms import current_platform
@@ -339,3 +342,81 @@ async def test_streaming_with_thinking_disabled_stays_in_content(
 
     assert "".join(content_chunks).strip() != ""
     assert reasoning_chunks == []
+
+
+# Thresholds low enough that a word repeated inside the reasoning trips them.
+LOOP_BREAK_CONFIG = {
+    "reasoning_start_str": REASONING_START_STR,
+    "reasoning_end_str": (
+        "I have to give the solution based on the reasoning directly now.</think>"
+    ),
+    "loop_break_max_pattern_size": 8,
+    "loop_break_min_pattern_size": 1,
+    "loop_break_min_count": 3,
+    "loop_break_min_reasoning_tokens": 16,
+    "loop_break_check_interval": 1,
+}
+LOOP_MESSAGES = [
+    {
+        "role": "user",
+        "content": "Repeat after me inside your thinking, exactly ten times: "
+        "ha ha ha ha ha ha ha ha ha ha. Then answer: what is 2+2?",
+    }
+]
+
+
+@pytest.fixture(scope="module")
+def loop_break_server():
+    args = [
+        "--reasoning-parser",
+        "qwen3",
+        "--reasoning-config",
+        json.dumps(LOOP_BREAK_CONFIG),
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.2",
+        "--no-async-scheduling",
+    ]
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    ) as remote_server:
+        yield remote_server
+
+
+def _thinking_loop_breaks(server: RemoteOpenAIServer) -> float:
+    response = requests.get(server.url_for("metrics"))
+    response.raise_for_status()
+    for family in text_string_to_metric_families(response.text):
+        if family.name == "vllm:thinking_loop_breaks":
+            return sum(
+                sample.value
+                for sample in family.samples
+                if sample.name.endswith("_total")
+            )
+    raise AssertionError("vllm:thinking_loop_breaks is not exported")
+
+
+@pytest.mark.asyncio
+async def test_thinking_loop_breaks_are_counted(loop_break_server):
+    """A broken loop adds one to ``vllm:thinking_loop_breaks_total`` and an
+    opted-out request adds none."""
+    async with loop_break_server.get_async_client() as client:
+        before = _thinking_loop_breaks(loop_break_server)
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=LOOP_MESSAGES,
+            max_tokens=512,
+            temperature=0.0,
+            extra_body={"thinking_loop_break": False},
+        )
+        assert _thinking_loop_breaks(loop_break_server) == before
+
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=LOOP_MESSAGES,
+            max_tokens=512,
+            temperature=0.0,
+        )
+        assert _thinking_loop_breaks(loop_break_server) == before + 1

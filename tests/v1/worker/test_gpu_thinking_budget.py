@@ -377,6 +377,36 @@ def test_v2_loop_break_forces_end_on_repeating_reasoning_tail():
     assert out[0, END] == pytest.approx(1.0e9)
 
 
+def test_v2_loop_break_reports_each_fire_once():
+    """Detection happens on device; each one is handed to the host once, with
+    the section length, for the ``vllm:thinking_loop_breaks`` counter."""
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(tokens)
+    idx_mapping = torch.tensor([3], dtype=torch.int32, device=DEVICE)
+    idx_mapping_np = idx_mapping.cpu().numpy()
+
+    def take() -> list[int]:
+        loop_breaks = state.take_loop_breaks(idx_mapping, idx_mapping_np)
+        assert loop_breaks is not None
+        return loop_breaks.tolist()
+
+    assert take() == [0]
+    _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [8], [0])
+    assert take() == [len(tokens) - 2]
+    # Still forcing the end sequence: the same loop is not reported again.
+    _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [8], [0])
+    assert take() == [0]
+
+
+def test_v2_loop_break_reports_nothing_for_an_opted_out_batch():
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(
+        tokens, params=SamplingParams(thinking_loop_break=False)
+    )
+    idx_mapping = torch.tensor([3], dtype=torch.int32, device=DEVICE)
+    assert state.take_loop_breaks(idx_mapping, idx_mapping.cpu().numpy()) is None
+
+
 def test_v2_loop_break_ignores_non_periodic_reasoning():
     tokens = [1, START, *_filler(26)]
     _, state = _loop_break_state(tokens)
