@@ -1409,18 +1409,19 @@ Just like with offline inference, you can skip sending media if you expect cache
 
     ```
 
-#### Early UUID Cache Lookups
+#### UUID-Only Rendering
 
-When using the HF renderer, vLLM probes the multi-modal processor cache before
-loading an image or video URL with a UUID. Use `skip_early_mm_lookup` to opt out per request.
+The HF renderer first attempts to render a conversation without loading media when
+all its media items are image/video URLs with UUIDs and at least one URL is supplied.
+This is enabled by default. Set `skip_early_mm_lookup=True` to opt out per request.
 
-The first request with an image or video URL and UUID loads and processes the
-media as usual. Repeated requests probe multimodal cache first:
-* ***On a hit***  vLLM skips loading and decoding the URL.
-* ***On a cache miss*** vLLM uses the URL as a fallback and processes the media normally.
+- If every media item is in the processor cache, loading and decoding are skipped.
+- If any item misses, vLLM retries that conversation once with all the original URLs,
+  loading the supplied media normally. Other conversations in the batch are not retried.
 
-If some cached items are evicted between the early lookup and multi-modal processing,
-vLLM loads the retained URLs and retries processing only the missing items.
+This optimization requires the processor cache and is disabled for unified vision
+chunks, audio extracted from video, and conversations containing other media types.
+An item supplied without a URL must still be cached for the request to succeed.
 
 The UUID is authoritative on a cache hit; vLLM does not verify that the URL
-still identifies the cached media (see [Multimodal Media UUID Security](../usage/security.md#multimodal-media-uuid-security))
+still identifies the cached media (see [Multimodal Media UUID Security](../usage/security.md#multimodal-media-uuid-security)).

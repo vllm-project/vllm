@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from copy import deepcopy
 from http import HTTPStatus
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from PIL import Image
@@ -13,6 +15,8 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.serve import create_error_response
 from vllm.multimodal.media import MediaConnector
 from vllm.multimodal.parse import parse_mm_uuids
+from vllm.multimodal.processing.processor import MultiModalProcessorCacheMissError
+from vllm.renderers.base import BaseRenderer
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.params import ChatParams
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -85,6 +89,39 @@ def test_text_only_model_mm_data_maps_to_bad_request():
     assert error_response.error.code == HTTPStatus.BAD_REQUEST
 
 
+def _render_chat(renderer, conversations, params, use_async, **kwargs):
+    if use_async:
+        return asyncio.run(renderer.render_chat_async(conversations, params, **kwargs))
+    return renderer.render_chat(conversations, params, **kwargs)
+
+
+def _mock_media(monkeypatch, modality, media, use_async):
+    fetch = AsyncMock(return_value=media) if use_async else Mock(return_value=media)
+    method = f"fetch_{modality}" + ("_async" if use_async else "")
+    monkeypatch.setattr(MediaConnector, method, fetch)
+    return fetch
+
+
+def _media_messages(name, *items):
+    return [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": name}]
+            + [
+                {
+                    "type": f"{modality}_url",
+                    f"{modality}_url": {
+                        "url": f"https://example.com/{uuid}.{modality}"
+                    },
+                    "uuid": uuid,
+                }
+                for modality, uuid in items
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize(
     ("modality", "media", "skip_early_mm_lookup"),
     [
@@ -103,12 +140,12 @@ def test_cached_uuid_skips_url_loading(
     modality: str,
     media: object,
     skip_early_mm_lookup: bool,
+    use_async: bool,
 ):
     renderer = _build_renderer()
     media_url = f"https://example.com/test.{modality}"
     media_uuid = f"test-{modality}-uuid"
-    fetch_media = Mock(return_value=media)
-    monkeypatch.setattr(MediaConnector, f"fetch_{modality}", fetch_media)
+    fetch_media = _mock_media(monkeypatch, modality, media, use_async)
 
     messages = [
         {
@@ -125,12 +162,14 @@ def test_cached_uuid_skips_url_loading(
     ]
 
     params = ChatParams(skip_early_mm_lookup=skip_early_mm_lookup)
-    _, first_prompts = renderer.render_chat([messages], params)
-    _, second_prompts = renderer.render_chat([messages], params)
+    _, first_prompts = _render_chat(renderer, [messages], params, use_async)
+    _, second_prompts = _render_chat(renderer, [messages], params, use_async)
 
     first_input = first_prompts[0]
     second_input = second_prompts[0]
     assert first_input["mm_hashes"] == second_input["mm_hashes"]
+    assert first_input["prompt_token_ids"] == second_input["prompt_token_ids"]
+    assert first_input["mm_placeholders"] == second_input["mm_placeholders"]
     assert fetch_media.call_count == (2 if skip_early_mm_lookup else 1)
 
 
@@ -150,16 +189,6 @@ def test_uuid_cache_eviction_falls_back_to_url(
     mm_processor_cache = renderer.mm_processor_cache
     assert mm_processor_cache is not None
 
-    first_lookup = True
-
-    def is_cached_once(_mm_hash: str) -> bool:
-        nonlocal first_lookup
-        is_cached = first_lookup
-        first_lookup = False
-        return is_cached
-
-    is_cached_item = Mock(side_effect=is_cached_once)
-    monkeypatch.setattr(mm_processor_cache, "is_cached_item", is_cached_item)
     fetch_media = Mock(return_value=media)
     monkeypatch.setattr(MediaConnector, f"fetch_{modality}", fetch_media)
 
@@ -178,10 +207,168 @@ def test_uuid_cache_eviction_falls_back_to_url(
         }
     ]
 
+    renderer.render_chat([messages], ChatParams())
+    renderer.clear_mm_cache()
+    fetch_media.reset_mock()
+
     _, prompts = renderer.render_chat([messages], ChatParams())
 
     assert len(prompts[0]["mm_hashes"][modality]) == 1
     assert fetch_media.call_count == 1
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_partial_uuid_hit_retries_only_affected_conversation(monkeypatch, use_async):
+    """A miss reloads all URLs in its conversation without rerendering a batch peer."""
+    renderer = _build_renderer()
+    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    fetch_video = _mock_media(monkeypatch, "video", baby_reading_np_ndarrays, use_async)
+    cached = _media_messages("Cached conversation", ("image", "cached-image"))
+    partial = _media_messages("Partial conversation", ("image", "partial-image"))
+    params = ChatParams()
+    _, warm_prompts = _render_chat(renderer, [cached, partial], params, use_async)
+    partial[0]["content"].append(
+        _media_messages("", ("video", "missing-video"))[0]["content"][1]
+    )
+    conversations = [cached, partial]
+    original = deepcopy(conversations)
+    fetch_image.reset_mock()
+    fetch_video.reset_mock()
+    method = "render_messages_async" if use_async else "render_messages"
+    mock_type = AsyncMock if use_async else Mock
+    render_messages = mock_type(wraps=getattr(renderer, method))
+    monkeypatch.setattr(renderer, method, render_messages)
+
+    _, prompts = _render_chat(renderer, conversations, params, use_async)
+
+    assert [
+        call.args[0][0]["content"][0]["text"] for call in render_messages.call_args_list
+    ].count("Cached conversation") == 1
+    assert render_messages.call_count == 3
+    fetch_image.assert_called_once_with("https://example.com/partial-image.image")
+    assert fetch_video.call_count == 1
+    assert prompts[0]["prompt_token_ids"] == warm_prompts[0]["prompt_token_ids"]
+    assert prompts[0]["mm_hashes"] == warm_prompts[0]["mm_hashes"]
+    assert set(prompts[1]["mm_hashes"]) == {"image", "video"}
+    assert conversations == original
+
+    fetch_image.reset_mock()
+    fetch_video.reset_mock()
+    _, cached_prompts = _render_chat(renderer, conversations, params, use_async)
+    fetch_image.assert_not_called()
+    fetch_video.assert_not_called()
+    assert [p["prompt_token_ids"] for p in cached_prompts] == [
+        p["prompt_token_ids"] for p in prompts
+    ]
+
+
+def test_async_uuid_render_preserves_cache_update_order(monkeypatch):
+    """Sender cache updates must follow the order of returned conversations."""
+    renderer = _build_renderer()
+    conversations = [
+        _media_messages("first", ("image", "shared")),
+        _media_messages("second", ("image", "shared")),
+    ]
+    completed = []
+
+    async def render(_self, batch, **kwargs):
+        name = batch[0][0]["content"][0]["text"]
+        if name == "first":
+            await asyncio.sleep(0)
+        completed.append(name)
+        return [[]], [{"prompt": name}]
+
+    monkeypatch.setattr(BaseRenderer, "render_chat_async", render)
+    _, prompts = _render_chat(renderer, conversations, ChatParams(), True)
+
+    assert completed == [prompt["prompt"] for prompt in prompts] == ["first", "second"]
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_missing_uuid_loads_all_media(monkeypatch, use_async):
+    renderer = _build_renderer()
+    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    messages = _media_messages("Describe", ("image", "cached-image"))
+    _render_chat(renderer, [messages], ChatParams(), use_async)
+    messages[0]["content"].append(
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/no-uuid.image"},
+        }
+    )
+    fetch_image.reset_mock()
+
+    _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert fetch_image.call_count == 2
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_uuid_without_url_still_requires_cache_hit(monkeypatch, use_async):
+    renderer = _build_renderer()
+    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    messages = _media_messages("Describe", ("image", "missing-image"))
+    messages[0]["content"][1]["image_url"]["url"] = None
+
+    with pytest.raises(MultiModalProcessorCacheMissError, match="data is not provided"):
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    fetch_image.assert_not_called()
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "case", ["skip-cache", "no-cache", "audio-in-video", "other-media"]
+)
+def test_ineligible_conversation_renders_original_messages(
+    monkeypatch, use_async, case
+):
+    renderer = _build_renderer(mm_cache_gb=0 if case == "no-cache" else 4)
+    messages = _media_messages("Describe", ("image", "image"))
+    params = ChatParams()
+    if case == "audio-in-video":
+        params = ChatParams(mm_processor_kwargs={"use_audio_in_video": True})
+    elif case == "other-media":
+        messages[0]["content"].append(
+            {
+                "type": "audio_url",
+                "audio_url": {"url": "https://example.com/audio.wav"},
+                "uuid": "audio",
+            }
+        )
+    mock_type = AsyncMock if use_async else Mock
+    render = mock_type(return_value=([[]], [{}]))
+    method = "render_chat_async" if use_async else "render_chat"
+    monkeypatch.setattr(BaseRenderer, method, render)
+
+    _render_chat(
+        renderer, [messages], params, use_async, skip_mm_cache=case == "skip-cache"
+    )
+
+    assert render.call_count == 1
+    assert render.call_args.args[0][0] is messages
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "error", [ValueError("invalid media"), MultiModalProcessorCacheMissError("missing")]
+)
+def test_uuid_render_retry_is_bounded_and_only_handles_cache_misses(
+    monkeypatch, use_async, error
+):
+    renderer = _build_renderer()
+    messages = _media_messages("Describe", ("image", "image"))
+    mock_type = AsyncMock if use_async else Mock
+    render = mock_type(side_effect=error)
+    method = "render_chat_async" if use_async else "render_chat"
+    monkeypatch.setattr(BaseRenderer, method, render)
+
+    with pytest.raises(type(error), match=str(error)):
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert render.call_count == (
+        2 if isinstance(error, MultiModalProcessorCacheMissError) else 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -223,10 +410,13 @@ def test_early_uuid_lookup_is_disabled_for_unified_vision_chunks(
         }
     ]
 
-    conversation, prompt = renderer.render_messages(messages, ChatParams())
+    monkeypatch.setattr(
+        renderer, "process_for_engine", lambda prompt, *args, **kwargs: prompt
+    )
+    conversations, prompts = renderer.render_chat([messages], ChatParams())
 
-    assert len(conversation) == 1
-    assert prompt["multi_modal_data"] == {"vision_chunk": [media]}
+    assert len(conversations[0]) == 1
+    assert prompts[0]["multi_modal_data"] == {"vision_chunk": [media]}
     assert fetch_media.call_count == 1
     is_cached_item.assert_not_called()
 
