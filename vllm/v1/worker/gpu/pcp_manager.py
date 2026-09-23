@@ -592,6 +592,7 @@ class PCPManager:
         )
         local_is_prefilling_np = np.zeros(num_reqs_after_padding, dtype=np.bool_)
         local_is_prefilling_np[:num_local_reqs] = real_local_is_prefilling_np
+        local_has_prefill = bool(local_is_prefilling_np.any())
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_after_padding, dtype=np.int32)
         seq_lens_cpu_upper_bound_np[:num_local_reqs] = (
             local_start_pos_np + local_num_scheduled_tokens
@@ -642,8 +643,8 @@ class PCPManager:
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
             is_prefilling_np=local_is_prefilling_np,
-            has_prefill=bool(local_is_prefilling_np.any()),
-            decode_graph_eligible=not local_is_prefilling_np.any(),
+            has_prefill=local_has_prefill,
+            decode_graph_eligible=not local_has_prefill,
             input_ids=input_buffers.input_ids[:num_local_tokens_padded],
             positions=input_buffers.positions[:num_local_tokens_padded],
             is_padding=is_padding,
