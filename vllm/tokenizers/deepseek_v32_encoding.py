@@ -77,7 +77,7 @@ def tool_calls_from_openai_format(tool_calls):
     ]
 
 
-def encode_arguments_to_dsml(tool_call: dict[str, str]) -> str:
+def encode_arguments_to_dsml(tool_call: dict[str, Any]) -> str:
     p_dsml_template = """<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>"""
     P_dsml_strs = []
     arguments = tool_call["arguments"]
