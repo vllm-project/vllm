@@ -665,6 +665,9 @@ class Platform:
             get_layers_from_vllm_config,
             set_current_vllm_config,
         )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import AttentionType, MultipleOf
@@ -672,6 +675,7 @@ class Platform:
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
         if not model_config:
             return
 
@@ -700,10 +704,15 @@ class Platform:
             else model_config.dtype
         )
 
+        primary_page = per_token_page_bytes(
+            primary_dtype,
+            cache_config.cache_dtype,
+            model_config.get_num_kv_heads(parallel_config),
+            model_config.get_head_size(),
+            None,
+        )
         # Per-token page of every real decoder attention layer, split by
-        # whether it kept the configured (primary) dtype or was reset to its
-        # native dtype by --kv-cache-dtype-skip-layers.
-        primary_page = per_token_page_bytes(primary_dtype, cache_config.cache_dtype)
+        # whether it was reset to its native dtype by --kv-cache-dtype-skip-layers.
         padded_pages: list[int] = []
         if cache_config.kv_cache_dtype_skip_layers:
             attn_layers = get_layers_from_vllm_config(
