@@ -3207,8 +3207,8 @@ class Scheduler(SchedulerInterface):
             # invalid block IDs cannot be mapped back to requests.
             raise RuntimeError(
                 "A KV connector reported block-level load failures "
-                "(invalid_block_ids) on a layout with multiple KV cache "
-                "groups, where block IDs are only unique within a group. "
+                "(invalid_block_ids) which is not supported for models "
+                "with multiple KV cache groups. "
                 "Connectors must report failed requests via "
                 "KVConnectorTransferResults.failed_recving instead."
             )

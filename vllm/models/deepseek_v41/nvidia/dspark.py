@@ -58,6 +58,7 @@ from .model import (
     _linear_scale_param_name,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
+    maybe_init_gemm_rs,
     prepare_mega_gate_routing_metadata,
 )
 
@@ -113,12 +114,18 @@ class DSparkDeepseekV4Model(nn.Module):
         )
 
         current_vllm_config = get_current_vllm_config()
+        # The target model already holds the GEMM-RS workspace (same hidden
+        # size, same TP group); this only re-checks and binds the draft layers.
+        run_gemm_rs = maybe_init_gemm_rs(
+            current_vllm_config, self.use_sequence_parallel
+        )
         self.layers = nn.ModuleList(
             [
                 DeepseekV4DecoderLayer(
                     current_vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
                     topk_indices_buffer=self.topk_indices_buffer,
+                    run_gemm_rs=run_gemm_rs,
                 )
                 for i in range(self.num_dspark_layers)
             ]
