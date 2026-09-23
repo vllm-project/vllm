@@ -32,8 +32,6 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
-# fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
-FP8_DS_MLA_ROW_BYTES = 656
 HiSparseTopKResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
@@ -1204,6 +1202,18 @@ def initialize_hisparse_runtime_buffers(
     assert cache_handles
     resident = cache_handles[0].view
     assert resident is not None
+    for cache_handle in cache_handles[1:]:
+        view = cache_handle.view
+        assert view is not None
+        if (
+            view.block_size != resident.block_size
+            or view.cache.shape[-1] != resident.cache.shape[-1]
+            or view.cache.dtype != resident.cache.dtype
+        ):
+            raise ValueError(
+                "HiSparse shared staging requires identical KV cache row widths, "
+                "dtypes, and block sizes across layers."
+            )
     device = resident.cache.device
     request_state_indices = torch.full(
         (max_num_reqs,), -1, dtype=torch.int32, device=device
