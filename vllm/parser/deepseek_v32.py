@@ -113,7 +113,9 @@ def deepseek_v32_config() -> ParserEngineConfig:
             ParserState.TOOL_NAME: EventType.TOOL_NAME,
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },
-        arg_converter=_dsml_arg_converter,
+        arg_converter=functools.partial(
+            _dsml_arg_converter, defer_invalid_partial=True
+        ),
         arg_structural_chars=frozenset(">"),
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
@@ -137,7 +139,9 @@ class DeepSeekV32Parser(ParserEngine):
         self._arg_converter = self._convert_args
 
     def _convert_args(self, raw_args: str, partial: bool) -> str:
-        result = _dsml_arg_converter(raw_args, partial)
+        converter = self.parser_engine_config.arg_converter
+        assert converter is not None
+        result = converter(raw_args, partial)
         if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)

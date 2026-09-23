@@ -18,7 +18,6 @@ DeepSeek V4 output format::
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import json
 from typing import TYPE_CHECKING
@@ -82,6 +81,7 @@ def _dsml_arg_converter(
     *,
     param_re: re.Pattern = _PARAM_RE,
     partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
+    defer_invalid_partial: bool = False,
 ) -> str:
     params: dict[str, object] = {}
 
@@ -99,15 +99,18 @@ def _dsml_arg_converter(
                 params[name] = value
         last_end = m.end()
 
-    if partial:
-        pm = partial_param_re.search(raw_args, last_end)
-        if pm:
-            name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
-            if is_str == "true":
-                params[name] = value
-            else:
-                with contextlib.suppress(json.JSONDecodeError, ValueError):
-                    params[name] = json.loads(value)
+    pm = partial_param_re.search(raw_args, last_end)
+    if pm:
+        name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
+        if is_str == "true":
+            params[name] = value
+        else:
+            try:
+                params[name] = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                # Streaming cannot retract a literal if later chunks form JSON.
+                if not (partial and defer_invalid_partial):
+                    params[name] = value
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -236,7 +239,9 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
             ParserState.TOOL_NAME: EventType.TOOL_NAME,
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },
-        arg_converter=_dsml_arg_converter,
+        arg_converter=functools.partial(
+            _dsml_arg_converter, defer_invalid_partial=True
+        ),
         arg_structural_chars=frozenset(">"),
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
