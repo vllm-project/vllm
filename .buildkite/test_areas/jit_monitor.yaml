@@ -20,7 +20,6 @@ steps:
     # instead of running until the build timeout.
     - export PYTHONFAULTHANDLER=1
     - pytest -v -s jit_monitor/test_no_runtime_jit.py --timeout=900 --timeout-method=thread
-
   mirror:
     amd:
       # Focused MRV2 regression; the broader model/backend matrix is pending.
