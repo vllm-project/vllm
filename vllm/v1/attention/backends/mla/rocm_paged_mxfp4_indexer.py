@@ -32,9 +32,8 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     build_rocm_mxfp4_decode_schedule,
-    check_rocm_mxfp4_cache_geometry,
     rocm_mxfp4_decode_schedule_words,
-    rocm_mxfp4_n_per_tile,
+    rocm_paged_mxfp4_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
@@ -244,7 +243,7 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
         num_heads, head_dim = hf_config.index_n_heads, hf_config.index_head_dim
         self.num_heads, self.head_dim = num_heads, head_dim
         self.page_entries = kv_cache_spec.block_size // self.compress_ratio
-        check_rocm_mxfp4_cache_geometry(num_heads, head_dim, self.page_entries)
+        layout = rocm_paged_mxfp4_cache_layout(num_heads, head_dim, self.page_entries)
         # The consumers' gather and ragged steps take a row per query token.
         # Uniform steps also launch the dense layers on next_n-row sequences,
         # see native_decode.
@@ -268,12 +267,11 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                     f"{prefix} on ROCm resolves the candidate pool with a sort "
                     f"that needs a power-of-two block count, not {topk_blocks}."
                 )
-            n_per_tile = rocm_mxfp4_n_per_tile(num_heads, head_dim)
-            if self.page_entries % block or block > n_per_tile:
+            if self.page_entries % block or block > layout.n_per_tile:
                 raise ValueError(
                     f"{prefix} on ROCm needs {block}-entry candidate blocks to "
                     f"tile a {self.page_entries}-entry indexer page and fit in "
-                    f"one {n_per_tile}-entry shuffle group."
+                    f"one {layout.n_per_tile}-entry shuffle group."
                 )
             self.num_candidate_cols = topk_blocks * block
             logger.info_once(

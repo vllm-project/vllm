@@ -115,13 +115,15 @@ class _Case:
         }
         cos_sin = torch.randn(MAX_LEN, 64, device=DEVICE)
         norm = torch.rand(HEAD_DIM, device=DEVICE) + 0.5
-        n_per_tile = ops.rocm_mxfp4_n_per_tile(HEADS, HEAD_DIM)
         for req, n in enumerate(seq_lens):
             if n == 0:
                 continue
             k_pre = torch.randn(n, HEAD_DIM, device=DEVICE).to(torch.bfloat16)
             pos = torch.arange(n, device=DEVICE)
             for ratio, cache in self.cache.items():
+                layout = ops.rocm_paged_mxfp4_cache_layout(
+                    HEADS, HEAD_DIM, cache.shape[1]
+                )
                 comp = pos // ratio
                 boundary = (pos + 1) % ratio == 0
                 entries = cache.shape[1]
@@ -139,7 +141,7 @@ class _Case:
                         slots,
                         ratio,
                         True,
-                        mxfp4_n_per_tile=n_per_tile,
+                        mxfp4_layout=layout,
                     )
 
     def keys(self, ratio, req, n):

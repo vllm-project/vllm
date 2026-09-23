@@ -41,6 +41,9 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
+    from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+        RocmPagedMxfp4CacheLayout,
+    )
 
 from vllm.config import (
     CacheConfig,
@@ -1377,13 +1380,17 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_write=candidate_write,
             )
         # The ROCm MXFP4 cache is stored in the scorer's dot-operand order.
-        self.k_cache_n_per_tile = 0
+        self.k_cache_layout: RocmPagedMxfp4CacheLayout | None = None
         if self.use_fp4_kv and current_platform.is_rocm():
             from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-                rocm_mxfp4_n_per_tile,
+                rocm_paged_mxfp4_cache_layout,
             )
 
-            self.k_cache_n_per_tile = rocm_mxfp4_n_per_tile(self.n_head, self.head_dim)
+            self.k_cache_layout = rocm_paged_mxfp4_cache_layout(
+                self.n_head,
+                self.head_dim,
+                cache_config.block_size // self.compress_ratio,
+            )
 
     def _produce_k(
         self,
@@ -1417,7 +1424,7 @@ class DeepseekV4Indexer(nn.Module):
             indexer_metadata.slot_mapping,
             self.compress_ratio,
             self.use_fp4_kv,
-            mxfp4_n_per_tile=self.k_cache_n_per_tile,
+            mxfp4_layout=self.k_cache_layout,
         )
 
     def forward(

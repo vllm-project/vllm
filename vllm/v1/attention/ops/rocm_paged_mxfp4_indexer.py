@@ -70,18 +70,67 @@ def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
             "query_start_loc API; vLLM needs ROCm/aiter "
             "cagri/gluon_paged_mxfp4_mqa_logits at b2a2fa441 or later"
         )
+    if not callable(getattr(pa, "cache_format", None)):
+        return (
+            "aiter's paged MXFP4 module has no cache_format(), which vLLM reads "
+            "the indexer K page layout from"
+        )
     return None
 
 
-def rocm_mxfp4_n_per_tile(num_heads: int, head_dim: int) -> int:
-    """The MFMA N the kernel tiles keys by, which the cache order is built on."""
-    return _aiter().mfma_nonk_dim(num_heads, head_dim)
+@dataclass(frozen=True)
+class RocmPagedMxfp4CacheLayout:
+    """The byte order of an indexer K page, as the kernel reads it.
+
+    Each run of ``n_per_tile`` tokens stores its values as ``[K chunk of
+    d_per_tile bytes, token, byte]`` and its e8m0 scales as
+    ``[scale % scale_lanes, token, scale // scale_lanes]``.
+    """
+
+    n_per_tile: int
+    d_per_tile: int
+    scale_lanes: int
 
 
-def check_rocm_mxfp4_cache_geometry(
+# The scale order the K writer implements: aiter's mode 1, a lane's scales
+# innermost. cache_format does not report the order or the lane split yet.
+_SCALE_ORDER = 1
+_WAVE_SIZE = 64
+
+
+@functools.cache
+def rocm_paged_mxfp4_cache_layout(
     num_heads: int, head_dim: int, page_entries: int
-) -> None:
-    _aiter().cache_format(num_heads, head_dim, page_entries)
+) -> RocmPagedMxfp4CacheLayout:
+    """The K page layout from aiter's ``cache_format``, the only place vLLM
+    reads it, so a change there cannot reach the writer unchecked.
+
+    Raises:
+        ValueError: aiter rejects the page size, or describes an order the K
+            writer does not implement.
+
+    """
+    fmt = _aiter().cache_format(num_heads, head_dim, page_entries)
+    try:
+        n_per_tile = int(fmt["n_per_tile"])
+        d_per_tile = int(fmt["d_per_tile"])
+        scale_order = fmt.get("scale_mode", _SCALE_ORDER)
+        scale_lanes = int(fmt.get("scale_lanes", _WAVE_SIZE // n_per_tile))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as e:
+        raise ValueError(f"aiter's cache_format() returned {fmt!r}") from e
+    if (
+        scale_order != _SCALE_ORDER
+        or min(n_per_tile, d_per_tile, scale_lanes) <= 0
+        or page_entries % n_per_tile
+        or (head_dim // 2) % d_per_tile
+        or (head_dim // MXFP4_BLOCK_SIZE) % scale_lanes
+    ):
+        raise ValueError(
+            f"aiter's cache_format() returned {fmt!r} for {num_heads} heads of "
+            f"{head_dim} in {page_entries}-entry pages, a K page order the ROCm "
+            "MXFP4 indexer writer does not implement"
+        )
+    return RocmPagedMxfp4CacheLayout(n_per_tile, d_per_tile, scale_lanes)
 
 
 def rocm_mxfp4_decode_schedule_words(
