@@ -442,6 +442,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)
     nn.Module.__init__(wrapper)
     wrapper.model = nn.Module()
+    wrapper.has_own_lm_head = False
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
@@ -519,6 +520,145 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     else:
         wrapper.load_weights(supplied)
         assert wrapper.model.lilicorr._attn_bias is not None
+
+
+@pytest.fixture
+def owned_head_model(monkeypatch):
+    from vllm.model_executor.layers.quantization import modelopt
+    from vllm.model_executor.models import qwen3_dflash
+    from vllm.model_executor.models.lilicorr import LiLiCorrForCausalLM
+
+    quant_config = modelopt.ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
+    )
+    monkeypatch.setattr(
+        modelopt,
+        "select_linear_kernel",
+        lambda *a, **kw: SimpleNamespace(input_quant_key=lambda: None),
+    )
+    monkeypatch.setattr(qwen3_dflash, "get_draft_quant_config", lambda _: quant_config)
+
+    class Backbone(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.quant_config = quant_config
+            self.use_aux_hidden_state = True
+            self.has_separate_mask_embedding = False
+            self.lilicorr = LiLiCorrHead(
+                model_hidden_size=16, block_size=4, rms_norm_eps=1e-6, config=_config()
+            )
+
+        def _build_fused_kv_buffers(self):
+            pass
+
+    monkeypatch.setattr(LiLiCorrForCausalLM, "model_cls", Backbone)
+    monkeypatch.setattr(LiLiCorrForCausalLM, "_read_mask_embedding", lambda _: None)
+
+    def build(owned=True):
+        config = SimpleNamespace(
+            vocab_size=64,
+            draft_vocab_size=64,
+            hidden_size=16,
+            has_own_lm_head=owned,
+            num_hidden_layers=0,
+            dflash_config={},
+        )
+        vllm_config = SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                draft_model_config=SimpleNamespace(hf_config=config),
+                attention_backend=None,
+                kv_cache_dtype=None,
+            ),
+            model_config=SimpleNamespace(
+                get_total_num_hidden_layers=lambda: 0,
+                get_vocab_size=lambda: 64,
+            ),
+            attention_config=SimpleNamespace(),
+            cache_config=SimpleNamespace(),
+            load_config=SimpleNamespace(),
+        )
+        with set_current_vllm_config(
+            VllmConfig(
+                device_config=DeviceConfig("cpu"),
+                compilation_config=CompilationConfig(mode=0),
+            )
+        ):
+            model = LiLiCorrForCausalLM(vllm_config=vllm_config)
+        return model, vllm_config
+
+    return build
+
+
+@pytest.mark.parametrize("missing", [None, "weight", "weight_scale", "weight_scale_2"])
+def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(
+    owned_head_model, missing
+):
+    model, _ = owned_head_model()
+    assert model.lm_head.weight.dtype == torch.uint8
+    assert model.lm_head.weight.shape == (64, 8)
+    weights = {
+        name: torch.ones_like(value) for name, value in model.state_dict().items()
+    }
+    del weights["lm_head.input_scale"]  # Deprecated and unused for W4A16.
+    if missing:
+        del weights[f"lm_head.{missing}"]
+        with pytest.raises(ValueError, match=f"lm_head.{missing}"):
+            model.load_weights(weights.items())
+    else:
+        model.load_weights(weights.items())
+        assert model.has_own_lm_head
+        for name in ("weight", "weight_scale", "weight_scale_2"):
+            torch.testing.assert_close(
+                getattr(model.lm_head, name), weights[f"lm_head.{name}"]
+            )
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_selected_lm_head_survives_dflash_and_lilicorr_sharing(
+    monkeypatch, owned_head_model, owned
+):
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+    from vllm.v1.worker.gpu.spec_decode.dflash import utils as dflash_utils
+    from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
+
+    model, config = owned_head_model(owned)
+    own_head = model.lm_head
+    target_head = owned_head_model(owned)[0].lm_head
+    # Identical packed bytes do not imply identical quantized heads.
+    with torch.no_grad():
+        own_head.weight.fill_(1)
+        target_head.weight.fill_(1)
+        if owned:
+            own_head.weight_scale_2.fill_(1)
+            target_head.weight_scale_2.fill_(2)
+    embedding = VocabParallelEmbedding(64, 16)
+    target = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=embedding), lm_head=target_head
+    )
+    monkeypatch.setattr(
+        eagle_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1)
+    )
+    monkeypatch.setattr(
+        dflash_utils, "replace", lambda obj, **kw: SimpleNamespace(**(vars(obj) | kw))
+    )
+    monkeypatch.setattr(dflash_utils, "get_pp_safe_draft_load_config", lambda c: c)
+    monkeypatch.setattr(dflash_utils, "get_model", lambda **kw: model)
+    if owned:
+
+        def no_weight_comparison(*args):
+            raise AssertionError("Explicit ownership must bypass raw-weight comparison")
+
+        monkeypatch.setattr(dflash_utils, "_should_share", no_weight_comparison)
+    spec = LiLiCorrSpeculator.__new__(LiLiCorrSpeculator)
+    spec.vllm_config = config
+    assert spec.load_draft_model(target, set()) is model
+    assert model.lm_head is (own_head if owned else target_head)
+    assert spec.target_embeddings is embedding
+    if owned:
+        target.lm_head = None
+        assert spec.load_draft_model(target, set()).lm_head is own_head
 
 
 def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch):

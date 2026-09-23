@@ -774,6 +774,11 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
             self.config.hidden_size,
+            quant_config=(
+                get_draft_quant_config(vllm_config)
+                if getattr(self.config, "has_own_lm_head", False)
+                else None
+            ),
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(

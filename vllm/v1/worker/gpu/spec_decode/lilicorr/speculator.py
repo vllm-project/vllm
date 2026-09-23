@@ -38,13 +38,17 @@ class LiLiCorrSpeculator(DFlash2Speculator):
         embedding = getattr(inner, "embed_tokens", None) or getattr(
             inner, "embedding", None
         )
-        lm_head = get_target_lm_head(target_model, language_model)
+        lm_head = (
+            model.lm_head
+            if model.has_own_lm_head
+            else get_target_lm_head(target_model, language_model)
+        )
         if not isinstance(embedding, VocabParallelEmbedding) or not isinstance(
             lm_head, VocabParallelEmbedding
         ):
             raise ValueError(
-                "LiLiCorr requires the target input embedding and LM head "
-                "on the draft rank."
+                "LiLiCorr requires the target input embedding and its selected "
+                "LM head on the draft rank."
             )
         if embedding.embedding_dim != model.config.hidden_size:
             raise ValueError(
@@ -56,8 +60,8 @@ class LiLiCorrSpeculator(DFlash2Speculator):
             or lm_head.shard_indices.num_added_elements
         ):
             raise ValueError("LiLiCorr does not support added vocabulary entries.")
-        # These are the target tables the correlator was trained against, even
-        # when the draft backbone owns different embeddings or an LM head.
+        # Candidate embeddings always come from the target; the checkpoint may
+        # supply its own candidate LM head.
         self.target_embeddings = embedding
         model.lm_head = lm_head
         return model

@@ -24,6 +24,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .qwen3_dflash2 import DFlash2Qwen3DecoderLayer
@@ -493,7 +494,8 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.draft_id_to_target_id is not None:
             raise ValueError("LiLiCorr candidates require the full target vocabulary.")
-        # SGLang's exported head consumes raw target-head log-softmax features.
+        self.has_own_lm_head = bool(getattr(self.config, "has_own_lm_head", False))
+        # The correlator consumes raw candidate-head log-softmax features.
         self.candidate_logits_processor = LogitsProcessor(self.config.vocab_size)
 
     def compute_candidates(
@@ -508,8 +510,9 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         quantized_metadata: set[str] = set()
-        for name, module in self.model.named_modules():
-            if not isinstance(module, LinearBase) or isinstance(
+        for name, module in self.named_modules():
+            name = name.removeprefix("model.")
+            if not isinstance(module, (LinearBase, ParallelLMHead)) or isinstance(
                 module.quant_method, UnquantizedLinearMethod
             ):
                 continue
@@ -530,14 +533,15 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
                 if parameter not in required
             )
         expected = {
-            name
-            for name, _ in self.model.named_parameters()
+            name.removeprefix("model.")
+            for name, _ in self.named_parameters()
             if (
-                name.startswith("lilicorr.")
+                name.startswith("model.lilicorr.")
                 or ".attention_conv." in name
                 or ".mlp_conv." in name
+                or (self.has_own_lm_head and name.startswith("lm_head."))
             )
-            and name not in quantized_metadata
+            and name.removeprefix("model.") not in quantized_metadata
         }
         seen: set[str] = set()
 

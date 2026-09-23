@@ -46,8 +46,14 @@ throughput; evaluate it separately from the proposal sampling mode.
 The checkpoint must declare `LiLiCorrDraftModel` and include all `lilicorr_*`
 geometry fields and trained head weights. Geometry is read from `dflash_config`.
 Convolution tensors must match the configured `conv_kernel_size` and
-`conv_group_size`. Target input embeddings and the target LM head must be
-available on the draft rank.
+`conv_group_size`. Target input embeddings must be available on the draft rank.
+By default, candidates use the target LM head, which must also be available there.
+A checkpoint with top-level `"has_own_lm_head": true` instead uses its own
+`lm_head` with the draft quantization configuration and exclusions. Its weights
+must be present; for ModelOpt NVFP4 this includes `lm_head.weight`,
+`lm_head.weight_scale`, and `lm_head.weight_scale_2`. The owned head is preserved
+and is not replaced by the target head. Candidate token embeddings still come
+from the target.
 
 Correlator linear layers and convolution kernel projections use the draft
 quantization configuration and its module exclusions. The following parameters
