@@ -5,6 +5,9 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Scheduler-side logic for MooncakeStoreConnector."""
 
+import time
+from dataclasses import replace
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -13,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
     partial_hash_hits_enabled,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+    BoundaryStoreStats,
     LoadSpec,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
@@ -33,6 +37,9 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Hand-off declines are summarized no more often than this, in seconds.
+_BOUNDARY_STATS_LOG_INTERVAL = 60.0
 
 
 def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
@@ -111,6 +118,10 @@ class MooncakeStoreScheduler:
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
+
+        self._boundary_store_stats = BoundaryStoreStats()
+        self._last_boundary_stats_log = time.monotonic()
+        self._logged_boundary_drops = 0
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -403,14 +414,17 @@ class MooncakeStoreScheduler:
                     meta.add_request(req_meta)
 
         block_state = getattr(scheduler_output, "kv_connector_block_state", None)
-        if (
-            block_state is not None
-            and block_state.boundary_state_offloads
-            and not is_consumer
-        ):
-            self._handle_boundary_state_offloads(
-                block_state.boundary_state_offloads, meta
-            )
+        if block_state is not None and block_state.boundary_state_offloads:
+            if is_consumer:
+                # A consumer saves nothing, so the core's hand-offs are
+                # discarded wholesale rather than judged entry by entry.
+                self._count_role_gated_boundary_drops(
+                    block_state.boundary_state_offloads
+                )
+            else:
+                self._handle_boundary_state_offloads(
+                    block_state.boundary_state_offloads, meta
+                )
 
         self._apply_current_save_block_ids(meta, scheduler_output)
 
@@ -501,10 +515,16 @@ class MooncakeStoreScheduler:
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
         """Queue and pin a finish-time tail for the next connector step."""
-        if self.kv_role == "kv_consumer" or not partial_tail_offloads:
+        if not partial_tail_offloads:
+            return False
+        stats = self._boundary_store_stats
+        stats.published += len(partial_tail_offloads)
+        if self.kv_role == "kv_consumer":
+            stats.dropped_consumer_role += len(partial_tail_offloads)
             return False
         tracker = self._request_trackers.get(request.request_id)
         if tracker is None or not any(block_ids):
+            stats.dropped_request_gone += len(partial_tail_offloads)
             return False
         boundaries = {boundary for _, _, boundary in partial_tail_offloads}
         if len(boundaries) != 1:
@@ -513,6 +533,7 @@ class MooncakeStoreScheduler:
             )
         boundary_tokens = next(iter(boundaries))
         if boundary_tokens > tracker.prefill_end_tokens:
+            stats.dropped_past_prefill_end += len(partial_tail_offloads)
             return False
 
         pinned_block_ids: list[int] = []
@@ -520,12 +541,15 @@ class MooncakeStoreScheduler:
         for group_id, block_id, boundary in partial_tail_offloads:
             store_group_id = self._store_group_id_by_kv_cache_group_id.get(group_id)
             if store_group_id not in self._boundary_state_group_ids:
+                stats.dropped_group_not_boundary += len(partial_tail_offloads)
                 return False
             if block_id == NULL_BLOCK_ID:
+                stats.dropped_null_block += len(partial_tail_offloads)
                 return False
             pinned_block_ids.append(block_id)
             remapped_offloads.append((store_group_id, block_id, boundary))
         pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
+        stats.accepted += len(remapped_offloads)
 
         pool = self._gpu_block_pool
         assert pool is not None, (
@@ -567,12 +591,15 @@ class MooncakeStoreScheduler:
         ``can_save=True`` takes the normal enqueue and store-job pinning path).
         """
         save_metas = {m.req_id: m for m in meta.requests if m.can_save}
+        stats = self._boundary_store_stats
         for req_id, entries in offloads.items():
+            stats.published += len(entries)
             tracker = self._request_trackers.get(req_id)
             req_tuple = self._unfinished_requests.get(req_id)
             if tracker is None or req_tuple is None:
                 # Request finished/preempted within this step; its blocks are
                 # going away, so the offload is conservatively dropped.
+                stats.dropped_request_gone += len(entries)
                 logger.debug("Dropping boundary-state offload for request %s", req_id)
                 continue
             accepted: list[tuple[int, int, int]] = []
@@ -583,13 +610,17 @@ class MooncakeStoreScheduler:
                 # is the boundary: a resumed request re-prefills and re-saves
                 # its previously generated tokens for every group.
                 if boundary_tokens > tracker.prefill_end_tokens:
+                    stats.dropped_past_prefill_end += 1
                     continue
                 if block_id == NULL_BLOCK_ID:
+                    stats.dropped_null_block += 1
                     continue
                 store_group_id = self._store_group_id_by_kv_cache_group_id.get(group_id)
                 if store_group_id not in self._boundary_state_group_ids:
+                    stats.dropped_group_not_boundary += 1
                     continue
                 accepted.append((store_group_id, block_id, boundary_tokens))
+            stats.accepted += len(accepted)
             if not accepted:
                 continue
             tracker.has_pending_offload = True
@@ -607,6 +638,38 @@ class MooncakeStoreScheduler:
                     boundary_state_offloads=accepted,
                 )
             )
+        self._maybe_log_boundary_drops()
+
+    def _count_role_gated_boundary_drops(
+        self, offloads: dict[str, list[tuple[int, int, int]]]
+    ) -> None:
+        num_entries = sum(len(entries) for entries in offloads.values())
+        stats = self._boundary_store_stats
+        stats.published += num_entries
+        stats.dropped_consumer_role += num_entries
+        self._maybe_log_boundary_drops()
+
+    def _maybe_log_boundary_drops(self) -> None:
+        """Surface accumulated hand-off declines, at most once per interval."""
+        stats = self._boundary_store_stats
+        if stats.dropped == self._logged_boundary_drops:
+            return
+        now = time.monotonic()
+        if now - self._last_boundary_stats_log < _BOUNDARY_STATS_LOG_INTERVAL:
+            return
+        self._last_boundary_stats_log = now
+        self._logged_boundary_drops = stats.dropped
+        logger.info(
+            "Mooncake declined %d of %d mamba boundary-state hand-offs; those "
+            "states are not persisted and cannot be hit later (%s)",
+            stats.dropped,
+            stats.published,
+            stats.summary(),
+        )
+
+    def get_boundary_store_stats(self) -> BoundaryStoreStats:
+        """Return a snapshot of the hand-off counters."""
+        return replace(self._boundary_store_stats)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Drop the block references of store jobs every rank has finished."""
