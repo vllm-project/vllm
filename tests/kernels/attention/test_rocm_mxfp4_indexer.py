@@ -89,8 +89,8 @@ class _Case:
         stride = align(page2) + align(page1) + 576
         self.pool = torch.zeros(num_blocks * stride, dtype=torch.uint8, device=DEVICE)
         self.page_bytes = torch.zeros_like(self.pool, dtype=torch.bool)
-        for block in range(num_blocks):
-            base = block * stride
+        for i in range(num_blocks):
+            base = i * stride
             self.page_bytes[base : base + page2] = True
             base += align(page2)
             self.page_bytes[base : base + page1] = True
