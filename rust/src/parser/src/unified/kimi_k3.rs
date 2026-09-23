@@ -67,8 +67,8 @@ use crate::output_grammar::{
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
-    Attributed, Marker, MarkerScanState, SpecialToken, parse_buffered_event_attributed,
-    safe_text_len_mul, take_until_marker,
+    Attributed, AttributedExt as _, Marker, MarkerScanState, SpecialToken,
+    parse_buffered_event_attributed, safe_text_len_mul, take_until_marker,
 };
 
 const OPEN: &str = "<|open|>";
@@ -94,7 +94,7 @@ const JSON_CLOSE: &str = "<|close|>json<|sep|>";
 /// a generation channel.
 const MAX_PREFILL_TAG_TOKENS: usize = 8;
 
-type KimiK3Input<'i> = Attributed<'i>;
+type KimiK3Input<'i> = Attributed<'i, Markers>;
 
 /// The K3 structural special tokens, resolved once from the active tokenizer.
 struct SpecialTokens {
@@ -121,6 +121,7 @@ impl SpecialTokens {
 /// One definition serves both the `alt` branches that consume a marker and the
 /// safe-text scans that stop in front of one, so the two can never disagree on
 /// whether a spelling is structural.
+#[derive(Debug)]
 struct Markers {
     think_open: Marker,
     think_close: Marker,
@@ -164,42 +165,6 @@ impl Markers {
             call_close: close("call"),
             sep: guarded(Marker::special(&tokens.sep)),
         }
-    }
-
-    fn idle(&self) -> [&Marker; 5] {
-        [
-            &self.think_open,
-            &self.response_open,
-            &self.tools_open,
-            &self.message_close,
-            &self.end_of_msg,
-        ]
-    }
-
-    fn reasoning(&self) -> [&Marker; 2] {
-        [&self.think_close, &self.end_of_msg]
-    }
-
-    fn response(&self) -> [&Marker; 4] {
-        [
-            &self.response_close,
-            &self.tools_open,
-            &self.message_close,
-            &self.end_of_msg,
-        ]
-    }
-
-    fn epilogue(&self) -> [&Marker; 3] {
-        [&self.tools_open, &self.message_close, &self.end_of_msg]
-    }
-
-    fn tools(&self) -> [&Marker; 4] {
-        [
-            &self.call_open,
-            &self.tools_close,
-            &self.message_close,
-            &self.end_of_msg,
-        ]
     }
 }
 
@@ -413,8 +378,8 @@ impl UnifiedParser for KimiK3UnifiedParser {
         self.buffer.append(delta);
 
         while let Some((event, consumed_len)) =
-            parse_buffered_event_attributed(&self.buffer, |input| {
-                parse_next_kimi_k3_event(input, &mut self.mode, &self.markers)
+            parse_buffered_event_attributed(&self.buffer, &self.markers, |input| {
+                parse_next_kimi_k3_event(input, &mut self.mode)
             })?
         {
             let piece = self.buffer.drain_prefix(consumed_len);
@@ -456,88 +421,84 @@ impl UnifiedParser for KimiK3UnifiedParser {
 fn parse_next_kimi_k3_event(
     input: &mut KimiK3Input<'_>,
     mode: &mut KimiK3Mode,
-    markers: &Markers,
 ) -> ModalResult<KimiK3Event> {
     match mode {
-        KimiK3Mode::Idle => parse_idle_event(input, markers),
-        KimiK3Mode::Reasoning => parse_reasoning_event(input, markers),
-        KimiK3Mode::Response => parse_response_event(input, markers),
-        KimiK3Mode::Epilogue => parse_epilogue_event(input, markers),
-        KimiK3Mode::Tools => parse_tools_event(input, markers),
-        KimiK3Mode::Call { scan, .. } => call_body_event(input, markers, scan),
+        KimiK3Mode::Idle => parse_idle_event(input),
+        KimiK3Mode::Reasoning => parse_reasoning_event(input),
+        KimiK3Mode::Response => parse_response_event(input),
+        KimiK3Mode::Epilogue => parse_epilogue_event(input),
+        KimiK3Mode::Tools => parse_tools_event(input),
+        KimiK3Mode::Call { scan, .. } => call_body_event(input, scan),
         KimiK3Mode::Done => parse_done_event(input),
     }
 }
 
 /// Parse an event while waiting for the next channel open.
-fn parse_idle_event(input: &mut KimiK3Input<'_>, markers: &Markers) -> ModalResult<KimiK3Event> {
+fn parse_idle_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
     alt((
         markers.think_open.value(KimiK3Event::ThinkOpen),
         markers.response_open.value(KimiK3Event::ResponseOpen),
         markers.tools_open.value(KimiK3Event::ToolsOpen),
-        |input: &mut KimiK3Input<'_>| message_end_event(input, markers),
-        |input: &mut KimiK3Input<'_>| safe_idle_text_event(input, markers),
+        message_end_event,
+        safe_idle_text_event,
     ))
     .parse_next(input)
 }
 
 /// Parse an event inside the `think` channel.
-fn parse_reasoning_event(
-    input: &mut KimiK3Input<'_>,
-    markers: &Markers,
-) -> ModalResult<KimiK3Event> {
+fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
     alt((
         markers.think_close.value(KimiK3Event::ThinkClose),
         // `<|end_of_msg|>` can reach the parser under `ignore_eos` or
         // `include_stop_str_in_output`; never leak it into reasoning.
         markers.end_of_msg.value(KimiK3Event::MessageEnd),
-        |input: &mut KimiK3Input<'_>| safe_reasoning_event(input, markers),
+        safe_reasoning_event,
     ))
     .parse_next(input)
 }
 
 /// Parse an event inside the `response` channel.
-fn parse_response_event(
-    input: &mut KimiK3Input<'_>,
-    markers: &Markers,
-) -> ModalResult<KimiK3Event> {
+fn parse_response_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
     alt((
         markers.response_close.value(KimiK3Event::ResponseClose),
         // The response body also implicitly ends at a `tools` channel.
         markers.tools_open.value(KimiK3Event::ToolsOpen),
-        |input: &mut KimiK3Input<'_>| message_end_event(input, markers),
-        |input: &mut KimiK3Input<'_>| safe_response_text_event(input, markers),
+        message_end_event,
+        safe_response_text_event,
     ))
     .parse_next(input)
 }
 
 /// Parse an event after the response channel closed.
-fn parse_epilogue_event(
-    input: &mut KimiK3Input<'_>,
-    markers: &Markers,
-) -> ModalResult<KimiK3Event> {
+fn parse_epilogue_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
     alt((
         markers.tools_open.value(KimiK3Event::ToolsOpen),
-        |input: &mut KimiK3Input<'_>| message_end_event(input, markers),
-        |input: &mut KimiK3Input<'_>| skip_epilogue_noise_event(input, markers),
+        message_end_event,
+        skip_epilogue_noise_event,
     ))
     .parse_next(input)
 }
 
 /// Parse an event inside the `tools` channel, between `call` blocks.
-fn parse_tools_event(input: &mut KimiK3Input<'_>, markers: &Markers) -> ModalResult<KimiK3Event> {
+fn parse_tools_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
     alt((
-        |input: &mut KimiK3Input<'_>| call_open_event(input, markers),
+        call_open_event,
         markers.tools_close.value(KimiK3Event::ToolsClose),
         // Defensive: an unterminated tools channel still ends with the message.
-        |input: &mut KimiK3Input<'_>| message_end_event(input, markers),
-        |input: &mut KimiK3Input<'_>| skip_tools_noise_event(input, markers),
+        message_end_event,
+        skip_tools_noise_event,
     ))
     .parse_next(input)
 }
 
 /// Parse a message close or end-of-message marker.
-fn message_end_event(input: &mut KimiK3Input<'_>, markers: &Markers) -> ModalResult<KimiK3Event> {
+fn message_end_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
     alt((&markers.message_close, &markers.end_of_msg))
         .value(KimiK3Event::MessageEnd)
         .parse_next(input)
@@ -549,50 +510,78 @@ fn parse_done_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 }
 
 /// Parse safe text while waiting for the next channel marker.
-fn safe_idle_text_event(
-    input: &mut KimiK3Input<'_>,
-    markers: &Markers,
-) -> ModalResult<KimiK3Event> {
-    safe_text_len_mul(input, &markers.idle()).map(|_| KimiK3Event::Text)
+fn safe_idle_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len_mul(
+        input,
+        &[
+            &markers.think_open,
+            &markers.response_open,
+            &markers.tools_open,
+            &markers.message_close,
+            &markers.end_of_msg,
+        ],
+    )
+    .map(|_| KimiK3Event::Text)
 }
 
 /// Parse safe reasoning before the think close marker.
-fn safe_reasoning_event(
-    input: &mut KimiK3Input<'_>,
-    markers: &Markers,
-) -> ModalResult<KimiK3Event> {
-    safe_text_len_mul(input, &markers.reasoning()).map(|_| KimiK3Event::Reasoning)
+fn safe_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len_mul(input, &[&markers.think_close, &markers.end_of_msg])
+        .map(|_| KimiK3Event::Reasoning)
 }
 
 /// Parse safe response text before the next channel marker.
-fn safe_response_text_event(
-    input: &mut KimiK3Input<'_>,
-    markers: &Markers,
-) -> ModalResult<KimiK3Event> {
-    safe_text_len_mul(input, &markers.response()).map(|_| KimiK3Event::Text)
+fn safe_response_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len_mul(
+        input,
+        &[
+            &markers.response_close,
+            &markers.tools_open,
+            &markers.message_close,
+            &markers.end_of_msg,
+        ],
+    )
+    .map(|_| KimiK3Event::Text)
 }
 
 /// Skip non-content noise after the response channel closed.
-fn skip_epilogue_noise_event(
-    input: &mut KimiK3Input<'_>,
-    markers: &Markers,
-) -> ModalResult<KimiK3Event> {
-    safe_text_len_mul(input, &markers.epilogue()).map(|_| KimiK3Event::Skip)
+fn skip_epilogue_noise_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len_mul(
+        input,
+        &[
+            &markers.tools_open,
+            &markers.message_close,
+            &markers.end_of_msg,
+        ],
+    )
+    .map(|_| KimiK3Event::Skip)
 }
 
 /// Skip non-content noise between `call` blocks.
-fn skip_tools_noise_event(
-    input: &mut KimiK3Input<'_>,
-    markers: &Markers,
-) -> ModalResult<KimiK3Event> {
-    safe_text_len_mul(input, &markers.tools()).map(|_| KimiK3Event::Skip)
+fn skip_tools_noise_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    safe_text_len_mul(
+        input,
+        &[
+            &markers.call_open,
+            &markers.tools_close,
+            &markers.message_close,
+            &markers.end_of_msg,
+        ],
+    )
+    .map(|_| KimiK3Event::Skip)
 }
 
 /// Parse a `call` open tag into its tool name and one-based index.
 ///
 /// The attributes end at the structural `<|sep|>`; an ordinary spelling of
 /// `<|sep|>` inside an attribute value stays attribute text.
-fn call_open_event(input: &mut KimiK3Input<'_>, markers: &Markers) -> ModalResult<KimiK3Event> {
+fn call_open_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
     let mut scan = MarkerScanState::default();
     let (attrs,) = seq!(
         _: &markers.call_open,
@@ -614,9 +603,9 @@ fn call_open_event(input: &mut KimiK3Input<'_>, markers: &Markers) -> ModalResul
 /// completed call.
 fn call_body_event(
     input: &mut KimiK3Input<'_>,
-    markers: &Markers,
     scan: &mut MarkerScanState,
 ) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
     let (body,) = seq!(
         take_until_marker(&markers.call_close, scan),
         _: &markers.call_close,
