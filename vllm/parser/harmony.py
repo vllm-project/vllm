@@ -10,6 +10,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
 from openai_harmony import HarmonyError, Message, Role
+from xgrammar import StructuralTag
 from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
 from xgrammar.structural_tag import (
     AnyTextFormat,
@@ -47,7 +48,6 @@ from vllm.tool_parsers.structural_tag_registry import (
     get_function_parameters,
     register_vllm_structural_tag,
 )
-from xgrammar import StructuralTag
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
