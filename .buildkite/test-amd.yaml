@@ -1830,6 +1830,7 @@ steps:
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
+  - vllm/third_party/flash_linear_attention/
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/mamba
