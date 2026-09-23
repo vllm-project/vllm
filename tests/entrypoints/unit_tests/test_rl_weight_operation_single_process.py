@@ -6,29 +6,35 @@
 `vllm serve` process looks like, and the metrics have to be registered and
 scrapable on the registry that `/metrics` is served from.
 
+The central test drives a real ``FastAPI`` app through the real ASGI stack: it
+mounts the dev RLHF router and the instrumentator's ``/metrics`` route with the
+production helpers, posts to ``/start_weight_update``, then reads ``/metrics``.
+That locks the property the private-registry tests cannot see: the registry the
+collectors are created on is the registry the ``/metrics`` endpoint serves.
+
 The recorder is the production singleton, so label values are namespaced per test
 to keep the assertions independent of test order.
 """
 
-import asyncio
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
-from prometheus_client import REGISTRY, generate_latest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from prometheus_client import REGISTRY
 
 from vllm.entrypoints.serve.dev.rlhf import api_router
 from vllm.entrypoints.serve.dev.rlhf import metrics as rlhf_metrics
+from vllm.entrypoints.serve.dev.rlhf.api_router import attach_router as attach_rlhf
+from vllm.entrypoints.serve.instrumentator.metrics import (
+    attach_router as attach_metrics_endpoint,
+)
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 COUNTER = "vllm:rl_weight_update_operations_total"
-
-# Dedicated label values so tests do not depend on each other's counters.
-OP_OK = "single_process_ok"
-OP_ENGINE_ERROR = "single_process_engine_error"
-OP_INVALID = "single_process_invalid"
+DURATION = "vllm:rl_weight_update_operation_duration_seconds"
+IN_FLIGHT = "vllm:rl_weight_update_operations_in_flight"
 
 ROUTES = {
     "init": api_router.init_weight_transfer_engine,
@@ -37,18 +43,9 @@ ROUTES = {
 }
 
 
-class _Request:
-    def __init__(self, engine, body):
-        self.app = SimpleNamespace(state=SimpleNamespace(engine_client=engine))
-        self._body = body
-
-    async def json(self):
-        if isinstance(self._body, Exception):
-            raise self._body
-        return self._body
-
-
 class _Engine:
+    """Engine stub for both the ASGI stack and the direct route calls."""
+
     def __init__(self, fail_start: bool = False):
         self.calls: list[str] = []
         self.fail_start = fail_start
@@ -73,6 +70,34 @@ class _RejectingEngine(_Engine):
         raise AssertionError("engine reached for an invalid payload")
 
 
+class _Request:
+    def __init__(self, engine, body):
+        self.app = SimpleNamespace(state=SimpleNamespace(engine_client=engine))
+        self._body = body
+
+    async def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+def _build_app(engine) -> FastAPI:
+    """Mount exactly what production mounts, using the production helpers."""
+    app = FastAPI()
+    app.state.engine_client = engine
+    attach_metrics_endpoint(app)
+    attach_rlhf(app)
+    return app
+
+
+def _sample_value(text: str, name: str, labels: str) -> float | None:
+    target = f"{name}{{{labels}}}"
+    for line in text.splitlines():
+        if line.startswith(target + " "):
+            return float(line.rsplit(" ", 1)[1])
+    return None
+
+
 def _counter_value(operation: str, status: str) -> float:
     value = rlhf_metrics.weight_operation_metrics().operations.labels(
         operation=operation, status=status
@@ -87,50 +112,95 @@ def _reset_counter(operation: str) -> None:
         metrics.operations.labels(operation=operation, status=status)._value.set(0)
 
 
-def test_production_singleton_registers_on_the_served_registry(monkeypatch):
+# --------------------------------------------------------------------------- #
+# Real HTTP path: FastAPI app -> route -> production singleton -> GET /metrics
+# --------------------------------------------------------------------------- #
+def test_metrics_endpoint_serves_the_production_recorder(monkeypatch):
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    monkeypatch.setattr(rlhf_metrics, "_metrics", None)
+    engine = _Engine()
+    _reset_counter("start")
+    client = TestClient(_build_app(engine))
+    labels = 'operation="start",status="success"'
+
+    before = _sample_value(client.get("/metrics").text, COUNTER, labels)
+    assert before == 0
+
+    response = client.post("/start_weight_update", json={})
+
+    assert response.status_code == 200
+    assert engine.calls == ["start_weight_update"]
+
+    scrape = client.get("/metrics")
+    assert scrape.status_code == 200
+    assert "# TYPE vllm:rl_weight_update_operations_total counter" in scrape.text
+    after = _sample_value(scrape.text, COUNTER, labels)
+    assert after is not None, "the RL counter is not served by /metrics"
+    assert after == before + 1
+    assert _sample_value(scrape.text, IN_FLIGHT, 'operation="start"') == 0
+    assert _sample_value(scrape.text, DURATION + "_count", 'operation="start"') == 1
+
+
+def test_metrics_endpoint_serves_the_error_path(monkeypatch):
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    monkeypatch.setattr(rlhf_metrics, "_metrics", None)
+    _reset_counter("start")
+    client = TestClient(
+        _build_app(_Engine(fail_start=True)), raise_server_exceptions=False
+    )
+
+    response = client.post("/start_weight_update", json={})
+
+    assert response.status_code == 500
+    scrape = client.get("/metrics")
+    assert _sample_value(scrape.text, COUNTER, 'operation="start",status="error"') == 1
+    assert (
+        _sample_value(scrape.text, COUNTER, 'operation="start",status="success"') == 0
+    )
+
+
+def test_singleton_registers_on_the_served_registry(monkeypatch):
     """``registry=None`` makes prometheus_client skip registration entirely."""
     monkeypatch.setattr(rlhf_metrics, "_metrics", None)
 
     metrics = rlhf_metrics.weight_operation_metrics()
     assert metrics is rlhf_metrics.weight_operation_metrics()
 
-    for name in (
-        COUNTER,
-        "vllm:rl_weight_update_operation_duration_seconds",
-        "vllm:rl_weight_update_operations_in_flight",
-    ):
+    for name in (COUNTER, DURATION, IN_FLIGHT):
         assert name in REGISTRY._names_to_collectors, name
 
 
-def test_metrics_are_scrapable_without_multiprocess(monkeypatch):
-    """No PROMETHEUS_MULTIPROC_DIR: the route must still be visible in /metrics."""
-    assert "PROMETHEUS_MULTIPROC_DIR" not in os.environ
-
-    response = asyncio.run(ROUTES["start"](_Request(_Engine(), {})))
-
-    assert response.status_code == 200
-    expected = _counter_value("start", "success")
-    assert expected >= 1
-    text = generate_latest(REGISTRY).decode()
-    assert f'{COUNTER}{{operation="start",status="success"}} {expected}' in text, (
-        "the RL metrics are not exported by the default registry"
-    )
-
-
-def test_production_singleton_is_not_recreated(monkeypatch):
-    monkeypatch.setattr(rlhf_metrics, "_metrics", None)
-    first = rlhf_metrics.weight_operation_metrics()
-    assert rlhf_metrics.weight_operation_metrics() is first
-
-
+# --------------------------------------------------------------------------- #
+# Top-level JSON shape and unsupported payloads on the direct routes
+# --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
-async def test_engine_error_is_counted_through_the_singleton():
-    engine = _Engine(fail_start=True)
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("/init_weight_transfer_engine", 1),
+        ("/init_weight_transfer_engine", []),
+        ("/init_weight_transfer_engine", "x"),
+        ("/init_weight_transfer_engine", None),
+        ("/init_weight_transfer_engine", True),
+        ("/update_weights", 1),
+        ("/update_weights", []),
+        ("/update_weights", "x"),
+        ("/update_weights", None),
+        ("/update_weights", True),
+    ],
+)
+async def test_non_object_top_level_body_is_rejected(path, body):
+    """A valid JSON scalar/array must not reach ``body.get`` (AttributeError)."""
+    operation = "init" if "init" in path else "update"
+    _reset_counter(operation)
 
-    with pytest.raises(RuntimeError, match="engine down"):
-        await ROUTES["start"](_Request(engine, {}))
+    with pytest.raises(HTTPException) as exc_info:
+        await ROUTES[operation](_Request(_RejectingEngine(), body))
 
-    assert _counter_value("start", "error") == 1
+    assert exc_info.value.status_code == 400
+    assert "JSON object" in exc_info.value.detail
+    assert _counter_value(operation, "error") == 0
+    assert _counter_value(operation, "success") == 0
 
 
 @pytest.mark.asyncio
@@ -142,7 +212,7 @@ async def test_engine_error_is_counted_through_the_singleton():
         ("/init_weight_transfer_engine", {"init_info": None}),
         ("/update_weights", {}),
         ("/update_weights", {"update_info": None}),
-        # wrong shape: rejected by the dataclasses and by the Rust frontend
+        # wrong inner shape: rejected by the dataclasses and by the Rust frontend
         ("/init_weight_transfer_engine", {"init_info": 1}),
         ("/init_weight_transfer_engine", {"init_info": []}),
         ("/init_weight_transfer_engine", {"init_info": [{"rank": 0}]}),
@@ -156,11 +226,10 @@ async def test_engine_error_is_counted_through_the_singleton():
 )
 async def test_invalid_payload_records_nothing(path, body):
     operation = "init" if "init" in path else "update"
-    route = ROUTES[operation]
     _reset_counter(operation)
 
     with pytest.raises(HTTPException) as exc_info:
-        await route(_Request(_RejectingEngine(), body))
+        await ROUTES[operation](_Request(_RejectingEngine(), body))
 
     assert exc_info.value.status_code == 400
     # The recorder must not have been entered, so neither status moved.

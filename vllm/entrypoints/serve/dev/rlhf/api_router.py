@@ -25,6 +25,37 @@ def _weight_metrics():
     return weight_operation_metrics()
 
 
+def _summarize_type(value: object) -> str:
+    if value is None:
+        return "null"
+    return {
+        bool: "boolean",
+        int: "number",
+        float: "number",
+        str: "string",
+        list: "array",
+        dict: "object",
+    }.get(type(value), type(value).__name__)
+
+
+async def _json_object_body(raw_request: Request) -> dict:
+    """Parse the request body and require a top-level JSON object.
+
+    Mirrors the Rust frontend, where a ``Json<T>`` extractor rejects a body that
+    is not an object at the extractor stage.
+    """
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=(f"Request body must be a JSON object, got {_summarize_type(body)}"),
+        )
+    return body
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
@@ -106,11 +137,7 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
     """
     engine = engine_client(raw_request)
 
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-
+    body = await _json_object_body(raw_request)
     request_ids = body.get("request_ids")
 
     try:
@@ -161,10 +188,7 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 @router.post("/init_weight_transfer_engine")
 async def init_weight_transfer_engine(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    body = await _json_object_body(raw_request)
     init_info = body.get("init_info")
     if init_info is None:
         raise HTTPException(
@@ -201,10 +225,7 @@ async def start_draft_weight_update(raw_request: Request):
 
 @router.post("/update_weights")
 async def update_weights(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    body = await _json_object_body(raw_request)
     update_info = body.get("update_info")
     if update_info is None:
         raise HTTPException(
