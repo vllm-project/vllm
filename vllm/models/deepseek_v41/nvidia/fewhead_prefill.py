@@ -8,6 +8,8 @@ from typing import Any
 
 import torch
 
+from vllm.platforms import current_platform
+
 _FWD: Any = None
 
 
@@ -49,12 +51,14 @@ def should_use_fewhead_prefill(
         s_q: Query tokens in this chunk.
 
     Returns:
-        True when the kernel is enabled, heads are padded, and ``s_q`` meets
-        ``VLLM_DSV41_FEWHEAD_MIN_SQ``.
+        True on SM90 when the kernel is enabled, at most 16 local heads
+        are padded, and ``s_q`` meets ``VLLM_DSV41_FEWHEAD_MIN_SQ``.
 
     """
     return (
         fewhead_prefill_enabled()
+        and current_platform.is_device_capability(90)
+        and n_local_heads <= 16
         and 0 < n_local_heads < padded_heads
         and s_q >= fewhead_min_sq()
     )
