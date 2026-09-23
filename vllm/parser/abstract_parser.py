@@ -9,15 +9,18 @@ from dataclasses import dataclass, field
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
-from xgrammar import StructuralTag
 from xgrammar.structural_tag import (
+    ConstStringFormat,
     Format,
+    GrammarFormat,
     JSONSchemaFormat,
     OrFormat,
+    RegexFormat,
     TagFormat,
     TriggeredTagsFormat,
 )
 
+import vllm.envs as envs
 from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
     make_tool_call_id,
@@ -45,6 +48,7 @@ from vllm.tool_parsers.streaming import (
     extract_required_tool_call_streaming,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from xgrammar import StructuralTag
 
 logger = init_logger(__name__)
 
@@ -244,36 +248,63 @@ class Parser:
         return 0
 
 
-def _response_format_to_structural_tag_format(
-    request: ChatCompletionRequest | ResponsesRequest,
-) -> Format | None:
-    """Convert response_format to structural_tag"""
-    response_format = (
-        request.text.format
-        if isinstance(request, ResponsesRequest) and request.text is not None
-        else getattr(request, "response_format", None)
-    )
-    if response_format is None:
-        return None
-    if response_format.type == "json_schema":
-        if response_format.json_schema is None:
-            return None
-        return JSONSchemaFormat(json_schema=response_format.json_schema.json_schema)
-    if response_format.type == "structural_tag":
-        if hasattr(response_format, "format"):
-            return response_format.format
-        return TriggeredTagsFormat(
-            triggers=response_format.triggers,
-            tags=[
-                TagFormat(
-                    begin=s.begin,
-                    content=JSONSchemaFormat(json_schema=s.structural_tag_schema),
-                    end=s.end,
-                )
-                for s in response_format.structures
-            ],
+def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | None:
+    """Map StructuredOutputsParams in a XGrammar Format."""
+    if params.json_object:
+        return JSONSchemaFormat(json_schema={"type": "object"})
+    if params.json is not None:
+        schema = params.json
+        if isinstance(schema, str):
+            schema = json.loads(schema)
+        return JSONSchemaFormat(json_schema=schema)
+    if params.regex is not None:
+        return RegexFormat(pattern=params.regex)
+    if params.choice is not None:
+        return OrFormat(
+            elements=[ConstStringFormat(value=choice) for choice in params.choice]
         )
+    if params.grammar is not None:
+        return GrammarFormat(grammar=params.grammar)
+    if params.structural_tag is not None:
+        s_tag = json.loads(params.structural_tag)
+        if "structures" in s_tag:
+            # LegacyStructuralTagResponseFormat
+            return TriggeredTagsFormat(
+                triggers=s_tag["triggers"],
+                tags=[
+                    TagFormat(
+                        begin=structure["begin"],
+                        content=JSONSchemaFormat(json_schema=structure["schema"]),
+                        end=structure["end"],
+                    )
+                    for structure in s_tag["structures"]
+                ],
+            )
+        # StructuralTagResponseFormat
+        return StructuralTag.model_validate(s_tag).format
     return None
+
+
+def _has_response_format(request: ChatCompletionRequest | ResponsesRequest) -> bool:
+    """Check if request has response_format requirement"""
+    # IMPORTANT(arpera):
+    # Be very cautious here!
+    #
+    # Chat Completions and Responses API consume structured output in different fields:
+    # - Chat Completions: request.response_format
+    # Proof: https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=chat
+    # - Responses: request.text.format
+    # Proof: https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses
+    #
+    # So, we have to handle structured output check in request differently for both APIs
+
+    if isinstance(request, ResponsesRequest):
+        text_format = request.text.format if request.text is not None else None
+        return text_format is not None and text_format.type != "text"
+    # Chat Completions
+    return (
+        request.response_format is not None and request.response_format.type != "text"
+    )
 
 
 class DelegatingParser(Parser):
@@ -429,32 +460,43 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is not None:
             request = self._reasoning_parser.adjust_request(request)
         if self._tool_parser is not None:
-            request = self._apply_structural_tag(request)
-        if self._tool_parser is not None:
-            request = self._tool_parser.adjust_request(request)
+            request = self._apply_structural_tag(request)  # (1)
+            request = self._tool_parser.adjust_request(request)  # (2)
+            if (
+                self._tool_parser.structural_tag_model is None
+                and request.tools
+                and request.tool_choice == "auto"
+                and _has_response_format(request)  # (3)
+            ):
+                # Note(arpera): Look at label (3)
+                # This is key statement: we check here that
+                # request has both requirements enabled at the same time
+                # tool_choice=auto AND response_format
+                # Since we have already tried to apply structural_tag in (1) and
+                # we have already done adjust_request in (2)
+                # we expected that request will be modified in such a way that
+                # response_format field is deleted.
+                # BUT it did NOT happen!
+                # That means our model has NO structural tag support
+                # So, we drop tool calls requirement and respect only response_format
+                # and we must warn user about this
+                logger.warning_once(
+                    "Tool calls are disabled for tool_choice='auto' with a "
+                    "response_format because the tool parser has no "
+                    "structural tag support; the response_format only "
+                    "applies.",
+                    scope="local",
+                )
         return request
 
     def _apply_structural_tag(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        if self._tool_parser is None or not request.tools:
-            return request
-
-        response_format_present = (
-            request.text is not None
-            if isinstance(request, ResponsesRequest)
-            else getattr(request, "response_format", None) is not None
-        )
-
-        if self._tool_parser.structural_tag_model is None:
-            if response_format_present and request.tool_choice in ("auto", None):
-                # if tool_choice is None => auto is used
-                logger.warning_once(
-                    "tool_choice=auto + response_format set, but "
-                    "model has no structural tag support => "
-                    "response_format wins and tool calling disabled.",
-                    scope="local",
-                )
+        if (
+            self._tool_parser is None
+            or self._tool_parser.structural_tag_model is None
+            or not request.tools
+        ):
             return request
 
         need_tool_calling = (
@@ -468,39 +510,78 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
-        structure_tag = self._tool_parser.get_structural_tag(
+        response_format = request.extract_structured_outputs()
+        if response_format and request.tool_choice == "auto":
+            output_format = structured_outputs_to_format(response_format)
+        else:
+            output_format = None
+
+        tools_structural_tag = self._tool_parser.get_structural_tag(
             request,
             reasoning=False,
             strict_level=self.tool_strict_level,
         )
+        if tools_structural_tag and output_format:
+            # IMPORTANT(arpera):
+            # This is a corner case when request has both constraints
+            # tool_choice=auto AND response_format
+            # Here we do a trick to construct structural tag
+            # that respects both constraints
+            # We have to construct structural tag for tool_choice=required
+            # rather than tool_choice=auto from our request
+            # because otherwise structural tag built for tool_choice=auto
+            # would be able to accept ANY kind of text that model generates
+            # In other words this constraint would be ignored
+            # What we should do instead is to construct structural tag
+            # for tool_choice=required which guarantees at least one tool call
+            # After that we combine this structural tag
+            # with structural tag built for response_format
+            # and we finally do OR of these constraints
+            #
+            # More info about this corner case in
+            # https://github.com/vllm-project/vllm/issues/39929
+            tools_structural_tag = self._tool_parser.get_structural_tag(
+                request.model_copy(update={"tool_choice": "required"}),
+                reasoning=False,
+                strict_level=self.tool_strict_level,
+            )
 
-        if structure_tag is None:
-            if response_format_present and request.tool_choice in ("auto", None):
-                # if tool_choice is None => auto is used
+        if tools_structural_tag is None:
+            if output_format is not None:
+                if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
+                    # Note(arpera):
+                    # This env var is responsible for
+                    # using converting tools to structural tag
+                    # By default this env var is enabled and set to 1
+                    # In this corner case it was disabled for some strange reason
+                    reason = "VLLM_ENFORCE_STRICT_TOOL_CALLING is disabled"
+                else:
+                    reason = "none tools are strict"
                 logger.warning_once(
-                    "tool_choice=auto but no tool is strict => "
-                    "no constraint decoding enabled and response_format wins.",
+                    "Tool calls are disabled for tool_choice=auto + "
+                    "response_format because %s => response_format wins",
+                    reason,
                     scope="local",
                 )
             return request
 
-        response_format_fmt = _response_format_to_structural_tag_format(request)
-        if response_format_fmt is not None:
-            structure_tag = StructuralTag(
-                type="structural_tag",
-                format=OrFormat(elements=[structure_tag.format, response_format_fmt]),
+        structural_tag = tools_structural_tag
+        if output_format is not None:
+            # Note(arpera):
+            # tool_choice=auto + response_format
+            # => we do OR of these constraints
+            structural_tag = StructuralTag(
+                format=OrFormat(elements=[tools_structural_tag.format, output_format])
             )
-        elif response_format_present:
+        elif response_format and request.tool_choice != "auto":
             logger.warning_once(
-                "tool_choice=%s with an unsupported response_format type "
-                "=> response_format is ignored, tool calling wins.",
+                "response_format is ignored because tool_choice=%s forces tool call.",
                 request.tool_choice,
                 scope="local",
             )
 
-        structural_tag = json.dumps(structure_tag.model_dump())
         request.structured_outputs = StructuredOutputsParams(
-            structural_tag=structural_tag,
+            structural_tag=json.dumps(structural_tag.model_dump()),
         )
         if isinstance(request, ResponsesRequest):
             request.text = None

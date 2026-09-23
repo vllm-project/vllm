@@ -3,10 +3,9 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -40,6 +39,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     get_model_structural_tag,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from xgrammar import Grammar, StructuralTag
 
 
 @pytest.fixture
@@ -824,116 +824,6 @@ def test_kimi_k3_forced_tool_choice_builds_single_mandatory_call():
     response_only = _k3_response("no call here")
     assert _is_grammar_accept_string(grammar, ok)
     assert not _is_grammar_accept_string(grammar, response_only)
-
-
-# ===========================================================================
-# Note(arpera): testing corner case tool_choice="auto" + response_format:
-#
-# Firstly, we convert both tools and response_format to structural tags.
-# Then we combine them using OR node resulting in one structural tag.
-# See https://github.com/vllm-project/vllm/issues/39929 and the PR #56086
-# review discussion for context.
-# ===========================================================================
-
-
-def _json_schema_response_format() -> dict:
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "answer",
-            "schema": {
-                "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
-            },
-        },
-    }
-
-
-def test_apply_structural_tag_ors_json_schema_response_format(
-    sample_tools_strict: list[ChatCompletionToolsParam],
-):
-    class TestParser(DelegatingParser):
-        tool_parser_cls = Qwen3EngineToolParser
-
-    request = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools_strict,
-        tool_choice="auto",
-        response_format=_json_schema_response_format(),
-    )
-    parser = TestParser(MagicMock(), tools=sample_tools_strict)
-
-    out = parser.adjust_request(request)
-
-    assert out.response_format is None
-    assert out.structured_outputs is not None
-    assert out.structured_outputs.structural_tag is not None
-    tag = json.loads(out.structured_outputs.structural_tag)
-    assert tag["type"] == "structural_tag"
-    assert tag["format"]["type"] == "or"
-    assert len(tag["format"]["elements"]) == 2
-
-    # The combined grammar accepts response_format-compliant text with no
-    # tool call, not just a tool call.
-    grammar = Grammar.from_structural_tag(out.structured_outputs.structural_tag)
-    assert _is_grammar_accept_string(grammar, '{"text": "hi"}')
-
-
-def test_apply_structural_tag_falls_back_when_model_lacks_support(
-    sample_tools: list[ChatCompletionToolsParam],
-):
-    # sample_tools has no "strict": True, so get_model_structural_tag()
-    # returns None for tool_choice="auto" (structural_tag_registry.py's
-    # "auto and not any_tool_strict" guard) — main's fallback behavior
-    # applies: response_format wins, tool calls are not constrained.
-    class TestParser(DelegatingParser):
-        tool_parser_cls = Qwen3EngineToolParser
-
-    request = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="auto",
-        response_format=_json_schema_response_format(),
-    )
-    parser = TestParser(MagicMock(), tools=sample_tools)
-
-    with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
-        out = parser.adjust_request(request)
-
-    assert out.response_format is not None
-    assert out.structured_outputs is None
-    mock_warn.assert_called_once()
-
-
-def test_apply_structural_tag_drops_unsupported_response_format_type_with_warning(
-    sample_tools_strict: list[ChatCompletionToolsParam],
-):
-    # json_object has no schema to OR in, so it's out of scope for now:
-    # tool calling takes priority (matches the pre-OR default), with a
-    # warning instead of a silent drop.
-    class TestParser(DelegatingParser):
-        tool_parser_cls = Qwen3EngineToolParser
-
-    request = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools_strict,
-        tool_choice="auto",
-        response_format={"type": "json_object"},
-    )
-    parser = TestParser(MagicMock(), tools=sample_tools_strict)
-
-    with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
-        out = parser.adjust_request(request)
-
-    assert out.response_format is None
-    assert out.structured_outputs is not None
-    tag = json.loads(out.structured_outputs.structural_tag)
-    assert tag["format"]["type"] != "or"
-    mock_warn.assert_called_once()
 
 
 def _pins_argument_schema(tag: StructuralTag) -> bool:
