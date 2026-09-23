@@ -740,11 +740,31 @@ def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> 
     return num_reqs > 0 and num_tokens == max_query_len * num_reqs
 
 
+def prefill_rows_run_as_decodes(
+    is_prefilling: np.ndarray,
+    num_computed_prefill_tokens: np.ndarray,
+    num_scheduled_tokens: np.ndarray,
+    num_draft_tokens: np.ndarray | None = None,
+) -> bool:
+    """Whether every prefilling request can run the decode kernels.
+
+    True when each is a one-token prompt tail over existing context (e.g. a full
+    prefix-cache hit or P/D KV import), possibly padded with placeholder drafts.
+    """
+    num_real_tokens = num_scheduled_tokens
+    if num_draft_tokens is not None:
+        num_real_tokens = num_scheduled_tokens - num_draft_tokens
+    is_tail = (num_computed_prefill_tokens > 0) & (num_real_tokens == 1)
+    return bool((is_tail | ~is_prefilling).all())
+
+
 def get_uniform_decode_token_count(
-    num_reqs: int, num_tokens: int, max_query_len: int, has_prefill: bool
+    num_reqs: int, num_tokens: int, max_query_len: int, decode_graph_eligible: bool
 ) -> int | None:
     """Per-request token count of a uniform decode batch, or None."""
-    if not has_prefill and is_uniform_query_len(num_reqs, num_tokens, max_query_len):
+    if decode_graph_eligible and is_uniform_query_len(
+        num_reqs, num_tokens, max_query_len
+    ):
         return max_query_len
     return None
 

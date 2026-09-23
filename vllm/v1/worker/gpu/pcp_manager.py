@@ -643,6 +643,7 @@ class PCPManager:
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
             is_prefilling_np=local_is_prefilling_np,
             has_prefill=bool(local_is_prefilling_np.any()),
+            decode_graph_eligible=not local_is_prefilling_np.any(),
             input_ids=input_buffers.input_ids[:num_local_tokens_padded],
             positions=input_buffers.positions[:num_local_tokens_padded],
             is_padding=is_padding,
