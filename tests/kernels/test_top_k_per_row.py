@@ -721,6 +721,47 @@ def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
         assert torch.all(indices[row_idx, num_valid:] == -1)
 
 
+@requires_gfx950
+@torch.inference_mode()
+def test_aiter_decode_topk_matches_per_row_under_mtp() -> None:
+    """The aiter backend expands (B, 1) seq_lens into per-row ends before
+    launching, so next_n > 1 must agree with the in-tree kernel, including
+    the rows that clamp to a zero-length prefix.
+    """
+    from vllm.model_executor.layers.indexer_topk import get_indexer_topk
+
+    next_n = 4
+    top_k = 512
+    num_columns = 1024
+    seq_lens = torch.tensor([[2], [513], [700]], dtype=torch.int32, device="cuda")
+    num_rows = seq_lens.shape[0] * next_n
+
+    torch.manual_seed(0)
+    logits = torch.randn(num_rows, num_columns, dtype=torch.float32, device="cuda")
+
+    outputs = {}
+    for backend in ("aiter", "per_row"):
+        indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+        get_indexer_topk(backend)(logits, seq_lens, next_n, indices, top_k, num_columns)
+        outputs[backend] = indices
+
+    row_ends = (
+        (seq_lens - next_n + 1 + torch.arange(next_n, device="cuda"))
+        .clamp_(min=0)
+        .reshape(-1)
+        .tolist()
+    )
+    assert row_ends[:next_n] == [0, 0, 1, 2]
+
+    for row_idx, row_end in enumerate(row_ends):
+        num_valid = min(top_k, row_end)
+        aiter_row = outputs["aiter"][row_idx]
+        assert set(aiter_row[:num_valid].tolist()) == set(
+            outputs["per_row"][row_idx][:num_valid].tolist()
+        )
+        assert torch.all(aiter_row[num_valid:] == -1)
+
+
 def _enable_aiter_topk(monkeypatch, enabled: bool = True) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
 
