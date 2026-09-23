@@ -37,13 +37,12 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
 class Eagle2_5_VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height of each image patch
-        - w: Width of each image patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - bnp: Batch size * number of images * (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height of each image patch
+    - w: Width of each image patch
     """
 
     type: Literal["pixel_values"]
@@ -52,11 +51,10 @@ class Eagle2_5_VLImagePixelInputs(TensorSchema):
 
 
 class Eagle2_5_VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of images
-        - f: Total image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of images
+    - f: Total image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -127,8 +125,7 @@ class Eagle2_5_VLMultiModalProcessor(
 class Eagle2_5_VLForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 ):
-    """
-    Eagle2.5-VL model for conditional generation.
+    """Eagle2.5-VL model for conditional generation.
 
     Architecture:
         - Vision Encoder: SigLIP
@@ -150,6 +147,7 @@ class Eagle2_5_VLForConditionalGeneration(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -187,7 +185,7 @@ class Eagle2_5_VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.img_context_token_id = None
+        self.img_context_token_id: int | None = None
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -237,8 +235,7 @@ class Eagle2_5_VLForConditionalGeneration(
         )
 
     def pixel_shuffle(self, x: torch.Tensor, scale_factor: float = 0.5) -> torch.Tensor:
-        """
-        Pixel shuffle operation for downsampling vision features.
+        """Pixel shuffle operation for downsampling vision features.
 
         Args:
             x: Input tensor of shape (n, w, h, c)
@@ -246,6 +243,7 @@ class Eagle2_5_VLForConditionalGeneration(
 
         Returns:
             Downsampled tensor
+
         """
         n, w, h, c = x.size()
         # N, W, H, C --> N, W, H * scale, C // scale
@@ -263,14 +261,14 @@ class Eagle2_5_VLForConditionalGeneration(
         return x
 
     def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """
-        Extract visual features from pixel values.
+        """Extract visual features from pixel values.
 
         Args:
             pixel_values: Input pixel values of shape (batch, channels, height, width)
 
         Returns:
             Visual embeddings
+
         """
         vit_embeds = self.vision_model(pixel_values=pixel_values)
 

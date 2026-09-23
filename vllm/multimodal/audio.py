@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
@@ -10,6 +11,7 @@ import numpy.typing as npt
 import torch
 
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.torch_utils import set_default_torch_num_threads
 
 try:
     import av as av
@@ -20,6 +22,16 @@ try:
     import scipy.signal as scipy_signal
 except ImportError:
     scipy_signal = PlaceholderModule("scipy").placeholder_attr("signal")  # type: ignore[assignment]
+
+try:
+    import soxr as soxr
+except ImportError:
+    soxr = PlaceholderModule("soxr")  # type: ignore[assignment]
+
+try:
+    import torchaudio
+except ImportError:
+    torchaudio = PlaceholderModule("torchaudio")  # type: ignore[assignment]
 
 
 # ============================================================
@@ -33,6 +45,7 @@ def get_audio_duration(*, y: npt.NDArray[np.floating], sr: float = 22050) -> flo
 
     Returns:
         Duration of the audio in seconds.
+
     """
     n_samples = y.shape[-1]
     return float(n_samples) / sr
@@ -59,6 +72,7 @@ class AudioSpec:
             (no normalization). 1 = mono, 2 = stereo, etc.
         channel_reduction: Method to reduce channels when input has more
             channels than target. Only used when reducing channels.
+
     """
 
     target_channels: int | None = 1
@@ -107,6 +121,7 @@ def normalize_audio(
     Raises:
         ValueError: If audio has unsupported dimensions or channel expansion
             is requested (e.g., mono to stereo).
+
     """
     if not spec.needs_normalization:
         return audio
@@ -183,6 +198,7 @@ def resample_audio_pyav(
 
     Returns:
         Resampled audio with the same shape as the input (1D → 1D, 2D → 2D).
+
     """
     orig_sr_int = int(round(orig_sr))
     target_sr_int = int(round(target_sr))
@@ -245,14 +261,98 @@ def resample_audio_scipy(
     )
 
 
+def resample_audio_soxr(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+) -> npt.NDArray[np.floating]:
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    if audio.ndim == 2:
+        return np.stack(
+            [
+                resample_audio_soxr(ch, orig_sr=orig_sr, target_sr=target_sr)
+                for ch in audio
+            ],
+            axis=0,
+        )
+
+    return soxr.resample(audio, orig_sr_int, target_sr_int)
+
+
+@lru_cache(maxsize=32)
+def _get_torchaudio_resampler(
+    orig_sr: int, target_sr: int
+) -> "torchaudio.transforms.Resample":
+    # `torchaudio.transforms.Resample` precomputes its kernel for a fixed
+    # (orig_sr, target_sr) pair; cache instances so repeated requests at a
+    # common input rate skip the kernel rebuild.
+    return torchaudio.transforms.Resample(orig_sr, target_sr)
+
+
+def resample_audio_torchaudio(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+) -> npt.NDArray[np.floating]:
+    """Resample audio using torchaudio's bandlimited sinc interpolation.
+
+    Unlike the PyAV resampler, this handles any input length without padding
+    and applies the kernel over the trailing axis, so 2D ``(channels,
+    samples)`` input needs no per-channel loop.
+
+    Args:
+        audio: Input audio. Can be:
+            - 1D array ``(samples,)``: mono audio
+            - 2D array ``(channels, samples)``: stereo audio
+        orig_sr: Original sample rate in Hz.
+        target_sr: Target sample rate in Hz.
+
+    Returns:
+        Resampled audio with the same shape as the input (1D → 1D, 2D → 2D).
+
+    """
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    # The kernel is float32; cast the input to match (same coercion as the
+    # PyAV path).
+    tensor = torch.as_tensor(audio, dtype=torch.float32)
+    # Resampling runs in the API/server parent process. Keep it from
+    # touching OpenMP or oneDNN thread state: both poison subsequently
+    # forked engine-core processes, which then segfault on their first
+    # parallel CPU op.
+    with set_default_torch_num_threads(1), torch.backends.mkldnn.flags(enabled=False):
+        resampler = _get_torchaudio_resampler(orig_sr_int, target_sr_int)
+        return resampler(tensor).numpy()
+
+
 class AudioResampler:
     """Resample audio data to a target sample rate."""
+
+    _METHODS = ("pyav", "scipy", "soxr", "torchaudio")
 
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["pyav", "scipy"] = "pyav",
+        method: Literal["pyav", "scipy", "soxr", "torchaudio"] = "torchaudio",
     ):
+        # Eager validation so a bad method fails at construction rather than
+        # on the first audio request.
+        if method not in self._METHODS:
+            raise ValueError(
+                f"Invalid resampling method: {method!r}. "
+                f"Supported methods: {list(self._METHODS)}."
+            )
         self.target_sr = target_sr
         self.method = method
 
@@ -279,10 +379,16 @@ class AudioResampler:
             return resample_audio_scipy(
                 audio, orig_sr=orig_sr, target_sr=self.target_sr
             )
+        elif self.method == "soxr":
+            return resample_audio_soxr(audio, orig_sr=orig_sr, target_sr=self.target_sr)
+        elif self.method == "torchaudio":
+            return resample_audio_torchaudio(
+                audio, orig_sr=orig_sr, target_sr=self.target_sr
+            )
         else:
             raise ValueError(
                 f"Invalid resampling method: {self.method}. "
-                "Supported methods are 'pyav' and 'scipy'."
+                f"Supported methods are {list(self._METHODS)}."
             )
 
 
@@ -305,8 +411,8 @@ def split_audio(
     for splitting.
 
     Args:
-        audio_data: Audio array to split. Can be 1D (mono) or multi-dimensional.
-                   Splits along the last dimension (time axis).
+        audio_data: 1D mono audio array to split. ASR models consume mono, so
+                   callers must downmix before chunking.
         sample_rate: Sample rate of the audio in Hz.
         max_clip_duration_s: Maximum duration of each chunk in seconds.
         overlap_duration_s: Overlap duration in seconds between consecutive chunks.
@@ -314,8 +420,10 @@ def split_audio(
         min_energy_window_size: Window size in samples for finding low-energy regions.
 
     Returns:
-        List of audio chunks. Each chunk is a numpy array with the same shape
-        as the input except for the last (time) dimension.
+        List of 1D audio chunks.
+
+    Raises:
+        AssertionError: If ``audio_data`` is not 1D.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz
@@ -328,7 +436,13 @@ def split_audio(
         ... )
         >>> len(chunks)
         3
+
     """
+    if audio_data.ndim > 1:
+        raise ValueError(
+            f"split_audio expects mono audio, got shape {audio_data.shape}"
+        )
+
     chunk_size = int(sample_rate * max_clip_duration_s)
     overlap_size = int(sample_rate * overlap_duration_s)
     chunks = []
@@ -346,6 +460,11 @@ def split_audio(
         split_point = find_split_point(
             audio_data, search_start, search_end, min_energy_window_size
         )
+
+        # Guarantee forward progress: if split_point didn't advance,
+        # fall back to the hard chunk boundary.
+        if split_point <= i:
+            split_point = min(i + chunk_size, audio_data.shape[-1])
 
         # Extract chunk up to the split point
         chunks.append(audio_data[..., i:split_point])
@@ -366,7 +485,7 @@ def find_split_point(
     RMS energy in sliding windows.
 
     Args:
-        wav: Audio array. Can be 1D or multi-dimensional.
+        wav: 1D mono audio array.
         start_idx: Start index of search region (inclusive).
         end_idx: End index of search region (exclusive).
         min_energy_window: Window size in samples for energy calculation.
@@ -387,17 +506,18 @@ def find_split_point(
         ... )
         >>> 16000 <= split_idx <= 17600
         True
+
     """
     segment = wav[start_idx:end_idx]
 
     # Calculate RMS energy in small windows
     min_energy = math.inf
-    quietest_idx = 0
+    quietest_idx = start_idx
 
     for i in range(0, len(segment) - min_energy_window, min_energy_window):
         window = segment[i : i + min_energy_window]
         energy = (window**2).mean() ** 0.5
-        if energy < min_energy:
+        if not math.isnan(energy) and energy < min_energy:
             quietest_idx = i + start_idx
             min_energy = energy
 

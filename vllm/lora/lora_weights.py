@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence as GenericSequence
+from dataclasses import dataclass
 
 import torch
 import torch.types
 
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 
 
 class LoRALayerWeights:
@@ -79,7 +80,7 @@ class LoRALayerWeights:
         dtype: torch.dtype,
         device: torch.types.Device,
     ) -> "LoRALayerWeights":
-        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        pin_memory = str(device) == "cpu" and PIN_MEMORY
         lora_a = torch.zeros(
             [rank, input_dim], dtype=dtype, device=device, pin_memory=pin_memory
         )
@@ -162,7 +163,6 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
         If LoRA is None, it signifies that the submodule does not have a LoRA.
         """
-
         first_lora = next(lora for lora in loras if lora is not None)
         assert first_lora is not None
         rank = first_lora.rank
@@ -201,8 +201,9 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         w1_lora_b = torch.stack(w1_lora_b_lst, dim=0)  # (num_experts,output_size,rank)
         w2_lora_b = torch.stack(w2_lora_b_lst, dim=0)
 
-        # All w1, w2, w3 have the same scaling factor.
-        scaling = lora_alpha / rank
+        # All w1, w2, w3 have the same scaling factor. Use the per-adapter
+        # scaling (e.g. alpha/sqrt(r) for rsLoRA) instead of alpha/rank.
+        scaling = first_lora.scaling
         last_scaling = scaling
 
         if is_non_gated_moe:
@@ -227,6 +228,39 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         )
         return obj
 
+    @classmethod
+    def pack_moe_stacked(
+        cls,
+        loras: GenericSequence["LoRALayerWeights | None"],
+        module_name: str,
+    ) -> "PackedLoRALayerWeights":
+        """Pack pre-stacked (3D) w1/w2/w3 expert LoRAs into a single LoRA.
+
+        Unlike :meth:`pack_moe`, which stacks one 2D tensor per expert, this
+        expects each of the three input LoRAs to already carry the expert
+        dimension (``experts.w{1,2,3}``). It is used for "shared-outer"
+        adapters where some factors are shared across experts (expert-dim 1)
+        and cannot be reconstructed by stacking per-expert tensors. The
+        produced ``lora_a``/``lora_b`` are the ``[w1, w2, w3]`` lists that
+        ``FusedMoEWithLoRA.set_lora`` consumes directly.
+        """
+        assert len(loras) == 3, (
+            "shared-outer expert LoRA expects exactly w1/w2/w3 stacked tensors"
+        )
+        w1_lora, w2_lora, w3_lora = loras
+        assert w1_lora is not None and w2_lora is not None and w3_lora is not None
+        rank = w1_lora.rank
+        lora_alpha = w1_lora.lora_alpha
+        scaling = w1_lora.scaling
+        return cls(
+            module_name,
+            rank,
+            [lora_alpha, lora_alpha, lora_alpha],
+            [w1_lora.lora_a, w2_lora.lora_a, w3_lora.lora_a],
+            [w1_lora.lora_b, w2_lora.lora_b, w3_lora.lora_b],
+            scaling=[scaling, scaling, scaling],
+        )
+
     def optimize(self) -> "PackedLoRALayerWeights":
         """Optimize the LoRA by merging the scaling into lora_b."""
         for i in range(len(self.lora_b)):
@@ -247,3 +281,17 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @property
     def is_packed(self) -> bool:
         return True
+
+
+@dataclass
+class LoRAFullModuleWeights:
+    """LoRA weights for classification layers."""
+
+    module_name: str
+    weight: torch.Tensor
+    bias: torch.Tensor | None = None
+
+    def pin_memory(self) -> None:
+        self.weight = self.weight.pin_memory()
+        if self.bias is not None:
+            self.bias = self.bias.pin_memory()

@@ -45,8 +45,7 @@ def _compilation_context() -> Generator[None, None, None]:
 
 
 class TorchCompileWithNoGuardsWrapper:
-    """
-    A wrapper class for torch.compile, it ensures that all guards are dropped
+    """A wrapper class for torch.compile, it ensures that all guards are dropped
     when CompilationMode is not CompilationMode.STOCK_TORCH_COMPILE.
     When guards are dropped, the first time __call__ is invoked, a single
     compilation is triggered. Dynamo should never be traced again after that
@@ -154,7 +153,9 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            self._bytecode_hook_handle = (
+                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            )
             self._compiled_bytecode: CodeType | None = None
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
@@ -261,11 +262,16 @@ class TorchCompileWithNoGuardsWrapper:
             )
             raise RuntimeError(msg)
 
+    def cleanup(self) -> None:
+        """Remove the bytecode hook registered by this instance."""
+        handle = getattr(self, "_bytecode_hook_handle", None)
+        if handle is not None:
+            handle.remove()
+
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
         # noqa: E501
-        """
-        Context manager to dispatch to internally compiled code for torch<2.8.
+        """Context manager to dispatch to internally compiled code for torch<2.8.
         Why does this work? Because Dynamo guarantees that the compiled
         bytecode has exactly the same arguments, cell variables, and free
         variables as the original code. Therefore we can directly switch
@@ -283,9 +289,7 @@ class TorchCompileWithNoGuardsWrapper:
 
 
 def reset_compile_wrapper(model: torch.nn.Module) -> None:
-    """
-    Clean up compiled model and captured CUDA graphs for elastic EP.
-    """
+    """Clean up compiled model and captured CUDA graphs for elastic EP."""
     if not isinstance(model, TorchCompileWithNoGuardsWrapper) and hasattr(
         model, "model"
     ):

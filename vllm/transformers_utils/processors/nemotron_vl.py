@@ -10,12 +10,6 @@ from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import InternVLImageProcessor, InternVLProcessor
 
-# Configure PIL to handle large images without warnings
-# This prevents DecompressionBombWarning for legitimate large images
-Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
-# Alternative: Set a specific higher limit
-# Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
-
 
 def build_transform(input_size: int):
     return T.Compose(
@@ -197,8 +191,7 @@ class LlamaNemotronNanoVLImageProcessor(InternVLImageProcessor):
 
 
 class LlamaNemotronNanoVLProcessor(InternVLProcessor):
-    """
-    This model doesn't define its own HF processor,
+    """This model doesn't define its own HF processor,
     so we implement our own one here.
 
     The image processor is given by:
@@ -293,8 +286,7 @@ class LlamaNemotronVLEmbedImageProcessor(InternVLImageProcessor):
 
 
 class LlamaNemotronVLEmbedProcessor(InternVLProcessor):
-    """
-    Processor for LlamaNemotronVL embedding model.
+    """Processor for LlamaNemotronVL embedding model.
 
     Inherits from NemotronVLProcessor and specializes it for embedding tasks:
     - Uses SigLIP transform with normalization instead of base transform

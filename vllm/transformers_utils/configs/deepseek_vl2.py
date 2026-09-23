@@ -90,7 +90,12 @@ class MlpProjectorConfig(PretrainedConfig):
 
 @strict
 class DeepseekVLV2TextConfig(DeepseekV2Config):
-    kv_lora_rank: int | None = None
+    # DeepSeek-VL2 checkpoints (e.g. deepseek-vl2-small) omit ``vocab_size`` and
+    # rely on the original DeepSeek-VL2 default of 102400; the generic
+    # Transformers ``DeepseekV2Config`` incorrectly defaults it to 32000.
+    # Upstream fix: https://github.com/huggingface/transformers/pull/48159
+    vocab_size: int = 102400
+    kv_lora_rank: int | None = DeepseekV2Config.kv_lora_rank
 
 
 class DeepseekVLV2Config(PretrainedConfig):

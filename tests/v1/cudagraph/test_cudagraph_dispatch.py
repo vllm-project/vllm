@@ -49,6 +49,7 @@ def _create_vllm_config(
     )
     mock_config.parallel_config = ParallelConfig()
     mock_config.speculative_config = None  # No speculative decoding
+    mock_config.num_speculative_tokens = 0
     if not lora_config:
         mock_config.lora_config = None
     else:
@@ -375,7 +376,6 @@ def _run_and_monitor_call(
     wrapper, input_tensor, runtime_mode, batch_descriptor, vllm_config
 ):
     """Helper to run a single call and monitor the action."""
-
     with (
         patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_graph_context,
         patch.object(wrapper, "runnable", wraps=wrapper.runnable) as mock_runnable,

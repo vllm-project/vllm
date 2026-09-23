@@ -9,7 +9,13 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    CompilationConfig,
+    ModelConfig,
+    config,
+)
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -44,6 +50,113 @@ def test_optional_type():
     optional_type_func = optional_type(int)
     assert optional_type_func("None") is None
     assert optional_type_func("42") == 42
+
+
+def test_watermark_config_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+            '"allow_target_only_watermarking":true}',
+        ]
+    )
+
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.algorithm == "dual_key_gumbel"
+    assert config.key == 42
+    assert config.alpha == 0.25
+    assert config.context_width == 4
+    assert config.deduplicate_contexts == "single_turn"
+    assert config.deduplicate_contexts_max_history == 8192
+    assert config.prf == "philox"
+    assert config.allow_target_only_watermarking
+
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"key":42,"deduplicate_contexts":"none",'
+            '"deduplicate_contexts_max_history":32}',
+        ]
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.deduplicate_contexts == "none"
+    assert config.deduplicate_contexts_max_history == 32
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["--gpu-memory-utilization", "--device-memory-utilization"],
+)
+def test_memory_utilization_cli_aliases(option):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args([option, "0.8"]))
+
+    assert args.gpu_memory_utilization == 0.8
+
+
+def test_device_memory_utilization_property():
+    config = CacheConfig(gpu_memory_utilization=0.8)
+
+    assert config.device_memory_utilization == 0.8
+
+    config.device_memory_utilization = 0.7
+    assert config.gpu_memory_utilization == 0.7
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [
+            "--engram-config",
+            '{"cpu_offload": false, "embedding_across_dp": true}',
+        ],
+        [
+            "--engram-config.cpu_offload",
+            "false",
+            "--engram-config.embedding_across_dp",
+            "true",
+        ],
+    ],
+)
+def test_engram_config_cli(options):
+    """JSON and dotted CLI options independently control Engram settings."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert args.engram_config is not None
+    assert args.engram_config.cpu_offload is False
+    assert args.engram_config.embedding_across_dp is True
+
+
+@pytest.mark.parametrize(
+    "options,provided,dp_shared_memory",
+    [
+        ([], False, False),
+        (["--engram-config", "{}"], True, None),
+        (
+            ["--engram-config", '{"dp_shared_memory": true}'],
+            True,
+            True,
+        ),
+        (["--engram-config.dp_shared_memory", "true"], True, True),
+    ],
+)
+def test_engram_config_cli_optional(options, provided, dp_shared_memory):
+    """Explicit configs honor defaults and the JSON/dotted DP shared-memory flag."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert (args.engram_config is not None) == provided
+    if provided:
+        assert args.engram_config.cpu_offload is True
+        assert args.engram_config.dp_shared_memory is dp_shared_memory
 
 
 @pytest.mark.parametrize(
@@ -167,10 +280,13 @@ def test_get_type_hints(type_hint, expected):
     assert get_type_hints(type_hint) == expected
 
 
-def test_get_kwargs():
-    kwargs = get_kwargs(DummyConfig)
-    print(kwargs)
+@pytest.fixture
+def dummy_config_kwargs():
+    return get_kwargs(DummyConfig)
 
+
+def test_get_kwargs(dummy_config_kwargs):
+    kwargs = dummy_config_kwargs
     # bools should not have their type set
     assert kwargs["regular_bool"].get("type") is None
     assert kwargs["optional_bool"].get("type") is None
@@ -180,7 +296,7 @@ def test_get_kwargs():
     assert kwargs["optional_bool_or_str"]["const"] is True
     assert "action" not in kwargs["optional_bool_or_str"]
     # optional literals should have None as a choice
-    assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
+    assert kwargs["optional_literal"]["choices"] == ["x", "y", None]
     # tuples should have the correct nargs
     assert kwargs["tuple_n"]["nargs"] == "+"
     assert kwargs["tuple_2"]["nargs"] == 2
@@ -204,6 +320,41 @@ def test_get_kwargs():
     assert json_tip in kwargs["json_tip"]["help"]
     # nested config should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--optional-literal", "None"], None),
+        (["--optional-literal", ""], None),
+        (["--optional-literal", "x"], "x"),
+    ],
+)
+def test_optional_handling(args, expected, dummy_config_kwargs):
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--optional-literal", **dummy_config_kwargs["optional_literal"])
+
+    assert parser.parse_args(args).optional_literal is expected
+    assert "None" in parser.format_help()
+
+
+def test_jit_monitor_verbose_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--jit-monitor-verbose"])
+
+    assert args.jit_monitor_verbose
+    assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
+
+
+@pytest.mark.parametrize("mode", ["warn", "error"])
+def test_jit_monitor_mode_arg(mode):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--jit-monitor-mode", mode])
+
+    assert args.jit_monitor_mode == mode
+    engine_args = EngineArgs(model="test", jit_monitor_mode=mode)
+    assert engine_args.jit_monitor_mode == mode
+    assert engine_args.create_observability_config().jit_monitor_mode == mode
 
 
 def test_hf_token_get_kwargs():
@@ -269,8 +420,7 @@ def test_media_io_kwargs_parser(arg, expected):
     ],
 )
 def test_optimization_level(args, expected):
-    """
-    Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
+    """Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
     optimization_level.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
@@ -289,9 +439,7 @@ def test_optimization_level(args, expected):
     ],
 )
 def test_mode_parser(args, expected):
-    """
-    Test compilation config modes (-cc.mode=int) map to compilation_config.
-    """
+    """Test compilation config modes (-cc.mode=int) map to compilation_config."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     parsed_args = parser.parse_args(args)
     assert parsed_args.compilation_config.mode == expected
@@ -364,8 +512,6 @@ def test_attention_config():
             "FLASH_ATTN",
             "--attention-config.flash_attn_version",
             "3",
-            "--attention-config.use_prefill_decode_attention",
-            "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
             "--attention-config.use_trtllm_attention",
@@ -379,7 +525,6 @@ def test_attention_config():
     assert engine_args.attention_config.backend is not None
     assert engine_args.attention_config.backend.name == "FLASH_ATTN"
     assert engine_args.attention_config.flash_attn_version == 3
-    assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
     assert engine_args.attention_config.use_trtllm_attention is True
     assert engine_args.attention_config.disable_flashinfer_q_quantization is True
@@ -389,7 +534,6 @@ def test_attention_config():
         [
             "--attention-config="
             '{"backend": "FLASHINFER", "flash_attn_version": 2, '
-            '"use_prefill_decode_attention": false, '
             '"flash_attn_max_num_splits_for_cuda_graph": 8, '
             '"use_trtllm_attention": false, '
             '"disable_flashinfer_q_quantization": false}',
@@ -400,7 +544,6 @@ def test_attention_config():
     assert engine_args.attention_config.backend is not None
     assert engine_args.attention_config.backend.name == "FLASHINFER"
     assert engine_args.attention_config.flash_attn_version == 2
-    assert engine_args.attention_config.use_prefill_decode_attention is False
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
     assert engine_args.attention_config.use_trtllm_attention is False
     assert engine_args.attention_config.disable_flashinfer_q_quantization is False
@@ -450,6 +593,25 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
+def test_multi_node_world_size_includes_pcp(monkeypatch):
+    """PCP expands the process world size, so the --nnodes divisibility check
+    must include it. Without this, TP=1/PCP=2 over 2 nodes computes a world
+    size of 1 and the launch is rejected before the engine starts."""
+    import vllm.config.vllm
+
+    # PCP requires the V2 model runner, which is gated on Triton.
+    monkeypatch.setattr(vllm.config.vllm, "HAS_TRITON", True)
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=2,
+        nnodes=2,
+    )
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.parallel_config.world_size == 2
+
+
 def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
@@ -457,6 +619,7 @@ def test_prefix_cache_default():
     # should be None by default (depends on model).
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.enable_prefix_caching is None
+    assert engine_args.prefix_cache_retention_interval == 0
 
     # with flag to turn it on.
     args = parser.parse_args(["--enable-prefix-caching"])
@@ -467,6 +630,10 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert not engine_args.enable_prefix_caching
+
+    args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.prefix_cache_retention_interval == 64
 
 
 @pytest.mark.parametrize(
@@ -544,6 +711,40 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):
             parser.parse_args(["--max-model-len", invalid])
+
+
+def test_human_readable_other_args():
+    # Test human-readable parsing for other integer args
+    # that were added to use human_readable_int parser
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))
+
+    # Test max_num_scheduled_tokens
+    args = parser.parse_args(["--max-num-scheduled-tokens", "1024"])
+    assert args.max_num_scheduled_tokens == 1024
+    args = parser.parse_args(["--max-num-scheduled-tokens", "2k"])
+    assert args.max_num_scheduled_tokens == 2_000
+    args = parser.parse_args(["--max-num-scheduled-tokens", "4K"])
+    assert args.max_num_scheduled_tokens == 2**10 * 4
+    args = parser.parse_args(["--max-num-scheduled-tokens", "10.5k"])
+    assert args.max_num_scheduled_tokens == 10500
+
+    # Test kv_cache_memory_bytes (existing human-readable arg)
+    args = parser.parse_args(["--kv-cache-memory-bytes", "100000"])
+    assert args.kv_cache_memory_bytes == 100000
+    args = parser.parse_args(["--kv-cache-memory-bytes", "100k"])
+    assert args.kv_cache_memory_bytes == 100_000
+    args = parser.parse_args(["--kv-cache-memory-bytes", "1M"])
+    assert args.kv_cache_memory_bytes == 2**20
+    args = parser.parse_args(["--kv-cache-memory-bytes", "1m"])
+    assert args.kv_cache_memory_bytes == 1_000_000
+
+    # Test max_num_batched_tokens (existing human-readable arg)
+    args = parser.parse_args(["--max-num-batched-tokens", "1024"])
+    assert args.max_num_batched_tokens == 1024
+    args = parser.parse_args(["--max-num-batched-tokens", "2k"])
+    assert args.max_num_batched_tokens == 2_000
+    args = parser.parse_args(["--max-num-batched-tokens", "4K"])
+    assert args.max_num_batched_tokens == 2**10 * 4
 
 
 def test_numa_bind_args():
@@ -641,3 +842,196 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
     args = EngineArgs(model="s3://bucket/model", tokenizer="s3://bucket/tokenizer")
     assert args.model == "s3://bucket/model"
     assert args.tokenizer == "s3://bucket/tokenizer"
+
+
+class TestDeviceIds:
+    def test_device_ids_with_cvd_out_of_range(self, monkeypatch):
+        """--device-ids index beyond the CVD set raises ValueError."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "4,5")
+        args = EngineArgs(model="m", device_ids=[0, 2])
+        with pytest.raises(ValueError, match="out of range"):
+            args._resolve_device_ids()
+
+    def test_device_ids_with_cvd_resolve_to_physical_ids(self, monkeypatch):
+        """--device-ids are CVD-local indices resolved to physical ids."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "4,5")
+        args = EngineArgs(model="m", device_ids=[0, 1])
+        assert args._resolve_device_ids() == [4, 5]
+
+    def test_device_ids_with_uuid_cvd_resolve_to_physical_ids(self, monkeypatch):
+        """--device-ids support UUID CVD values resolved by the platform."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "GPU-abcd1234,GPU-ef567890")
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(
+                lambda cls, device_id: {"GPU-abcd1234": 4, "GPU-ef567890": 5}[device_id]
+            ),
+        )
+
+        args = EngineArgs(model="m", device_ids=[0, 1])
+        assert args._resolve_device_ids() == [4, 5]
+
+    def test_device_ids_with_uuid_args_resolve_to_physical_ids(self, monkeypatch):
+        """UUID --device-ids are resolved to physical IDs immediately."""
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(lambda cls, device_id: {"GPU-abcd1234": 4}[device_id]),
+        )
+
+        args = EngineArgs(model="m", device_ids=["GPU-abcd1234"])
+        assert args._resolve_device_ids() == [4]
+
+    def test_device_ids_reject_mixed_integer_and_uuid_args(self):
+        """--device-ids must not mix CVD indices and UUIDs."""
+        args = EngineArgs(model="m", device_ids=[0, "GPU-abcd1234"])
+        with pytest.raises(ValueError, match="must not mix"):
+            args._resolve_device_ids()
+
+    def test_no_device_ids(self):
+        """No --device-ids returns None."""
+        args = EngineArgs(model="m")
+        assert args._resolve_device_ids() is None
+
+    def test_cli_parsing(self):
+        """--device-ids parses comma-separated string from CLI."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(["--model", "m", "--device-ids", "0,2,4"])
+        assert parsed.device_ids == [0, 2, 4]
+
+    def test_cli_parsing_uuid(self):
+        """--device-ids parses comma-separated UUID strings from CLI."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(
+            ["--model", "m", "--device-ids", "GPU-abcd1234,GPU-ef567890"]
+        )
+        assert parsed.device_ids == ["GPU-abcd1234", "GPU-ef567890"]
+
+    def test_assigned_physical_gpu_ids_are_physical_with_cvd(self, monkeypatch):
+        """assigned_physical_gpu_ids are already physical and not composed with CVD."""
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [4, 5])
+        monkeypatch.setenv(current_platform.device_control_env_var, "4,5")
+
+        assert current_platform.device_id_to_physical_device_id(0) == 4
+        assert current_platform.device_id_to_physical_device_id(1) == 5
+        assert current_platform.logical_device_id_to_visible_device_id(0) == 0
+        assert current_platform.logical_device_id_to_visible_device_id(1) == 1
+
+    def test_assigned_physical_gpu_ids_map_to_visible_uuid_cvd(self, monkeypatch):
+        """Physical IDs map back to visible ordinals when CVD uses UUIDs."""
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [5])
+        monkeypatch.setenv(
+            current_platform.device_control_env_var,
+            "GPU-abcd1234,GPU-ef567890",
+        )
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(
+                lambda cls, device_id: {"GPU-abcd1234": 4, "GPU-ef567890": 5}[device_id]
+            ),
+        )
+
+        assert current_platform.logical_device_id_to_visible_device_id(0) == 1
+
+    def test_device_ids_reject_duplicates(self):
+        """--device-ids must not contain duplicate entries."""
+        args = EngineArgs(model="m", device_ids=[2, 2])
+        with pytest.raises(ValueError, match="duplicates"):
+            args._resolve_device_ids()
+
+    def test_cli_parsing_strips_whitespace(self):
+        """--device-ids tolerates whitespace around commas."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(["--model", "m", "--device-ids", "0, 2, 4"])
+        assert parsed.device_ids == [0, 2, 4]
+
+    def test_visible_ordinal_to_physical_ignores_assigned_ids(self, monkeypatch):
+        """visible_device_id_to_physical_device_id maps torch device ordinals,
+        independent of the logical-to-physical mapping.
+
+        Regression test: CustomAllreduce passes device.index (a visible
+        ordinal) and must not index into assigned_physical_gpu_ids, which
+        raised IndexError for non-identity --device-ids like [2, 3].
+        """
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [2, 3])
+        monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+
+        # CVD unset: visible ordinal == physical ID, even beyond the
+        # assigned list's length.
+        assert current_platform.visible_device_id_to_physical_device_id(2) == 2
+        assert current_platform.visible_device_id_to_physical_device_id(3) == 3
+
+        monkeypatch.setenv(current_platform.device_control_env_var, "4,5")
+        assert current_platform.visible_device_id_to_physical_device_id(1) == 5
+        with pytest.raises(IndexError, match="out of range"):
+            current_platform.visible_device_id_to_physical_device_id(2)
+
+
+class TestDpDeviceIdSharding:
+    def test_dp_supervisor_device_ids_stay_env_relative(self):
+        """Regression test: the DP supervisor must pass env-relative indices,
+        not physical IDs, because each child re-resolves --device-ids
+        against its inherited device-control env var."""
+        import argparse
+
+        from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
+
+        args = argparse.Namespace(
+            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=None
+        )
+        assert _build_device_ids(args, local_rank=0) == [0, 1]
+        assert _build_device_ids(args, local_rank=1) == [2, 3]
+
+    def test_dp_supervisor_shards_user_device_ids(self):
+        """User-provided --device-ids are sharded across DP children."""
+        import argparse
+
+        from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
+
+        args = argparse.Namespace(
+            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=[4, 5, 6, 7]
+        )
+        assert _build_device_ids(args, local_rank=0) == [4, 5]
+        assert _build_device_ids(args, local_rank=1) == [6, 7]
+        with pytest.raises(ValueError, match="needs devices"):
+            _build_device_ids(args, local_rank=2)
+
+    def test_dp_rank_shards_user_assigned_gpu_ids(self):
+        """get_physical_gpu_ids_for_local_dp_rank slices the user-provided
+        --device-ids list instead of recomputing from the env var."""
+        from vllm.platforms import current_platform
+        from vllm.v1.engine.utils import get_physical_gpu_ids_for_local_dp_rank
+
+        evar = current_platform.device_control_env_var
+        assert get_physical_gpu_ids_for_local_dp_rank(
+            evar, local_dp_rank=1, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
+        ) == [6, 7]
+        with pytest.raises(ValueError, match="needs devices"):
+            get_physical_gpu_ids_for_local_dp_rank(
+                evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
+            )

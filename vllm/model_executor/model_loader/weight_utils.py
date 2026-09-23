@@ -12,7 +12,6 @@ import os
 import tempfile
 import threading
 import time
-from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,7 +22,7 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from safetensors.torch import load, load_file, safe_open, save_file
+from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -55,15 +54,9 @@ except ImportError:
     SafetensorsStreamer = runai_model_streamer.placeholder_attr("SafetensorsStreamer")
 
 try:
-    import gguf
-except ImportError:
-    gguf = PlaceholderModule("gguf")
-
-try:
-    from fastsafetensors import SafeTensorsFileLoader, SingleGroup
+    from fastsafetensors import SingleGroup
 except ImportError:
     fastsafetensors = PlaceholderModule("fastsafetensors")
-    SafeTensorsFileLoader = fastsafetensors.placeholder_attr("SafeTensorsFileLoader")
     SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
 
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
@@ -78,7 +71,7 @@ temp_dir = tempfile.gettempdir()
 
 
 def enable_xet_high_performance():
-    """automatically activates xet high performance mode"""
+    """Automatically activates xet high performance mode"""
     if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
         huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
 
@@ -109,8 +102,7 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
 def atomic_writer(
     filepath: str | Path, mode: str = "w", encoding: str | None = None
 ) -> Generator[IO]:
-    """
-    Context manager that provides an atomic file writing routine.
+    """Context manager that provides an atomic file writing routine.
 
     The context manager writes to a temporary file and, if successful,
     atomically replaces the original file.
@@ -122,6 +114,7 @@ def atomic_writer(
 
     Yields:
         file object: A handle to the temporary file.
+
     """
     # Create a temporary file in the same directory as the target file
     # to ensure it's on the same filesystem for an atomic replace.
@@ -192,56 +185,6 @@ def maybe_download_from_modelscope(
     return None
 
 
-def _shared_pointers(tensors):
-    ptrs = defaultdict(list)
-    for k, v in tensors.items():
-        ptrs[v.data_ptr()].append(k)
-    failing = []
-    for _, names in ptrs.items():
-        if len(names) > 1:
-            failing.append(names)
-    return failing
-
-
-def convert_bin_to_safetensor_file(
-    pt_filename: str,
-    sf_filename: str,
-) -> None:
-    loaded = torch.load(pt_filename, map_location="cpu", weights_only=True)
-    if "state_dict" in loaded:
-        loaded = loaded["state_dict"]
-    shared = _shared_pointers(loaded)
-    for shared_weights in shared:
-        for name in shared_weights[1:]:
-            loaded.pop(name)
-
-    # For tensors to be contiguous
-    loaded = {k: v.contiguous() for k, v in loaded.items()}
-
-    dirname = os.path.dirname(sf_filename)
-    os.makedirs(dirname, exist_ok=True)
-    save_file(loaded, sf_filename, metadata={"format": "pt"})
-
-    # check file size
-    sf_size = os.stat(sf_filename).st_size
-    pt_size = os.stat(pt_filename).st_size
-    if (sf_size - pt_size) / pt_size > 0.01:
-        raise RuntimeError(
-            f"""The file size different is more than 1%:
-         - {sf_filename}: {sf_size}
-         - {pt_filename}: {pt_size}
-         """
-        )
-
-    # check if the tensors are the same
-    reloaded = load_file(sf_filename)
-    for k in loaded:
-        pt_tensor = loaded[k]
-        sf_tensor = reloaded[k]
-        if not torch.equal(pt_tensor, sf_tensor):
-            raise RuntimeError(f"The output tensors do not match for key {k}")
-
-
 # TODO(woosuk): Move this to other place.
 def get_quant_config(
     model_config: ModelConfig, load_config: LoadConfig
@@ -249,10 +192,26 @@ def get_quant_config(
     if model_config.quantization is None:
         raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
+    from vllm.config.quantization import _ONLINE_SHORTHANDS, QuantizationConfigArgs
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
 
-    # GGUF doesn't have config file
-    if model_config.quantization == "gguf":
-        return quant_cls()
+    # resolve_quantization_config does not resolve `quantization_config` from
+    # ambiguous shorthands as `"mxfp4"`, `"mxfp8"`.
+    online_args = model_config.quantization_config
+
+    def maybe_compose_online_quantization(
+        checkpoint_config: QuantizationConfig,
+    ) -> QuantizationConfig:
+        if online_args is None:
+            return checkpoint_config
+        assert isinstance(online_args, QuantizationConfigArgs)
+
+        checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
+            online_args
+        )
+        return checkpoint_config
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -270,12 +229,8 @@ def get_quant_config(
         and hf_quant_config.get("quant_method") == "compressed-tensors"
         and "config_groups" in hf_quant_config
     ):
-        if hf_text_config is not None:
-            n_heads = getattr(hf_text_config, "num_attention_heads", None)
-            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
-        else:
-            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
-            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+        n_heads = model_config.model_arch_config.total_num_attention_heads
+        n_kv_heads = model_config.model_arch_config.total_num_kv_heads
 
         hf_quant_config["total_num_heads"] = n_heads
         hf_quant_config["total_num_kv_heads"] = (
@@ -298,30 +253,41 @@ def get_quant_config(
         ):
             pass  # fall through to file-based loading below
         else:
-            return quant_cls.from_config(hf_quant_config)
+            return maybe_compose_online_quantization(
+                quant_cls.from_config(hf_quant_config)
+            )
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
     hf_overrides = model_config.hf_overrides
+    if callable(hf_overrides):
+        # A callable hf_overrides is a config-to-config transform (e.g. the
+        # one SpeculativeConfig installs on draft model configs); it cannot
+        # carry quantization config entries, so treat it as no overrides.
+        hf_overrides = {}
     if not isinstance(hf_overrides, dict):
         raise ValueError(
             "hf_overrides must be a dict for get_quant_config "
             "to get the quantization config from it."
         )
-    quantization_config_file = hf_overrides.get("quantization_config_file", None)
+    quantization_config_file = hf_overrides.get("quantization_config_file")
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
-            return quant_cls.from_config_file(quantization_config_file)
+            return maybe_compose_online_quantization(
+                quant_cls.from_config_file(quantization_config_file)
+            )
         else:
             raise NotImplementedError(
                 "from_config_file is specified in hf_override config, "
                 "but quant_cls.from_config_file is not implemented in "
                 f"{quant_cls}"
             )
-    quantization_config_json = hf_overrides.get("quantization_config_dict_json", None)
+    quantization_config_json = hf_overrides.get("quantization_config_dict_json")
     if quantization_config_json is not None:
         if hasattr(quant_cls, "from_config_dict_json"):
-            return quant_cls.from_config_dict_json(quantization_config_json)
+            return maybe_compose_online_quantization(
+                quant_cls.from_config_dict_json(quantization_config_json)
+            )
         else:
             raise NotImplementedError(
                 "from_config_dict_json is specified in hf_override config, "
@@ -329,20 +295,15 @@ def get_quant_config(
                 f"{quant_cls}"
             )
 
-    # Online quantization doesn't read from checkpoint configs - it quantizes
-    # fp16/bf16 weights on the fly during loading.
-    if model_config.quantization_config is not None:
-        from vllm.config.quantization import QuantizationConfigArgs
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
+    # Raw unambiguous online quantization doesn't read from checkpoint configs
+    # We must continue to load/read the config below in two cases:
+    # 1. composed online quantization, before `maybe_compose_online_quantization`,
+    # 2. Ambiguous online shorthands as `"mxpf4"`, `"mxfp8"`, for which `online_args`
+    # is not set yet.
+    if quant_cls is OnlineQuantizationConfig and online_args is not None:
+        assert isinstance(online_args, QuantizationConfigArgs)
+        return OnlineQuantizationConfig(args=online_args)
 
-        assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
-        return OnlineQuantizationConfig(args=model_config.quantization_config)
-
-    # Inflight BNB quantization
-    if model_config.quantization == "bitsandbytes":
-        return quant_cls.from_config({})
     model_name_or_path = (
         maybe_download_from_modelscope(
             model_config.model,
@@ -371,7 +332,11 @@ def get_quant_config(
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
-        return quant_cls()
+        if model_config.quantization in _ONLINE_SHORTHANDS:
+            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
+            assert isinstance(args, QuantizationConfigArgs)
+            return OnlineQuantizationConfig(args=args)
+        return maybe_compose_online_quantization(quant_cls())
 
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
@@ -379,6 +344,10 @@ def get_quant_config(
         f for f in config_files if any(f.endswith(x) for x in possible_config_filenames)
     ]
     if len(quant_config_files) == 0:
+        if model_config.quantization in _ONLINE_SHORTHANDS:
+            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
+            assert isinstance(args, QuantizationConfigArgs)
+            return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
         raise ValueError(
@@ -390,18 +359,16 @@ def get_quant_config(
     with open(quant_config_file) as f:
         config = json.load(f)
 
-        if model_config.quantization == "bitsandbytes":
-            config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+        if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
-                return quant_cls.from_config(config)
+                return maybe_compose_online_quantization(quant_cls.from_config(config))
             else:
                 raise ValueError(
                     f"Unsupported quantization config"
                     f" found for {model_config.quantization} in {f}."
                 )
 
-    return quant_cls.from_config(config)
+    return maybe_compose_online_quantization(quant_cls.from_config(config))
 
 
 def get_sparse_attention_config(
@@ -437,52 +404,6 @@ def get_sparse_attention_config(
     return config
 
 
-def download_gguf(
-    repo_id: str,
-    quant_type: str,
-    cache_dir: str | None = None,
-    revision: str | None = None,
-    ignore_patterns: str | list[str] | None = None,
-) -> str:
-    # Use patterns that snapshot_download can handle directly
-    # Patterns to match:
-    # - *-{quant_type}.gguf (root)
-    # - *-{quant_type}-*.gguf (root sharded)
-    # - */*-{quant_type}.gguf (subdir)
-    # - */*-{quant_type}-*.gguf (subdir sharded)
-    allow_patterns = [
-        f"*-{quant_type}.gguf",
-        f"*-{quant_type}-*.gguf",
-        f"*/*-{quant_type}.gguf",
-        f"*/*-{quant_type}-*.gguf",
-    ]
-
-    # Use download_weights_from_hf which handles caching and downloading
-    folder = download_weights_from_hf(
-        model_name_or_path=repo_id,
-        cache_dir=cache_dir,
-        allow_patterns=allow_patterns,
-        revision=revision,
-        ignore_patterns=ignore_patterns,
-    )
-
-    # Find the downloaded file(s) in the folder
-    local_files = []
-    for pattern in allow_patterns:
-        # Convert pattern to glob pattern for local filesystem
-        glob_pattern = os.path.join(folder, pattern)
-        local_files.extend(glob.glob(glob_pattern))
-
-    if not local_files:
-        raise ValueError(
-            f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
-        )
-
-    # Sort to ensure consistent ordering (prefer non-sharded files)
-    local_files.sort(key=lambda x: (x.count("-"), x))
-    return local_files[0]
-
-
 @instrument(span_name="Download weights - HF")
 def download_weights_from_hf(
     model_name_or_path: str,
@@ -510,6 +431,7 @@ def download_weights_from_hf(
 
     Returns:
         str: The path to the downloaded model weights.
+
     """
     assert len(allow_patterns) > 0
     local_only = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -608,6 +530,7 @@ def download_safetensors_index_file_from_hf(
         subfolder (Optional[str]): The subfolder within the model repository
             to download weights from.
         revision (Optional[str]): The revision of the model.
+
     """
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
@@ -651,14 +574,21 @@ def filter_duplicate_safetensors_files(
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
+    # Check if files referenced in model.safetensors.index.json actually exist.
+    # Raise error if any file is missing.
+    hf_weights_files_set = set(hf_weights_files)
+    missing_files = weight_files_in_index - hf_weights_files_set
+    if missing_files:
+        raise FileNotFoundError(
+            f"Weight files referenced in index but missing: {missing_files}"
+        )
     # Filter out any fields that are not found in the index file.
     hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
     return hf_weights_files
 
 
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:
-    """
-    Exclude files that are not needed for inference.
+    """Exclude files that are not needed for inference.
 
     See https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
     """
@@ -742,10 +672,24 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
 
 
 def _get_available_ram_bytes() -> int:
-    """Return the available RAM in bytes."""
+    """Return available RAM, honoring cgroup limits."""
     import psutil
 
-    return psutil.virtual_memory().available
+    host_available = psutil.virtual_memory().available
+
+    from vllm.utils.cpu_resource_utils import (
+        get_cgroup_memory_limit,
+        get_cgroup_memory_usage,
+    )
+
+    cgroup_limit = get_cgroup_memory_limit()
+    if cgroup_limit is None:
+        return host_available
+    cgroup_usage = get_cgroup_memory_usage()
+    cgroup_available = (
+        cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
+    )
+    return min(host_available, cgroup_available)
 
 
 def _get_fs_type(files: list[str]) -> str:
@@ -1077,25 +1021,19 @@ def runai_safetensors_weights_iterator(
             yield name, tensor.clone()
 
 
-def _init_fastsafetensors_loader(
-    pg: "torch.distributed.ProcessGroup",
-    device: torch.device,
-    f_list: list[str],
-    *,
-    nogds: bool = False,
-):
-    loader = SafeTensorsFileLoader(pg, device, nogds=nogds)
-    rank_file_map = {i: [f] for i, f in enumerate(f_list)}
-    loader.add_filenames(rank_file_map)
-    return loader
-
-
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
-    using fastsafetensor library."""
+    using fastsafetensor library.
+
+    Uses ParallelLoader for pipelined loading: the producer thread
+    prepares metadata for the next shard while the consumer yields
+    tensors from the current shard.
+    """
+    from fastsafetensors.parallel_loader import ParallelLoader
+
     if torch.distributed.is_initialized():
         pg = torch.distributed.group.WORLD
     else:
@@ -1103,48 +1041,53 @@ def fastsafetensors_weights_iterator(
 
     device = torch.device(f"cuda:{current_platform.current_device()}")
     hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
-    weight_files_sub_lists = [
-        hf_weights_files[i : i + pg.size()]
-        for i in range(0, len(hf_weights_files), pg.size())
-    ]
 
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
     nogds = pg.size() > 1
 
-    for f_list in tqdm(
-        weight_files_sub_lists,
-        desc="Loading safetensors using Fastsafetensor loader",
-        disable=not enable_tqdm(use_tqdm_on_load),
-        bar_format=_BAR_FORMAT,
-    ):
-        loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
+    queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
+    tqdm_enabled = enable_tqdm(use_tqdm_on_load)
+
+    def _make_loader(nogds: bool) -> "ParallelLoader":
+        return ParallelLoader(
+            pg=pg,
+            hf_weights_files=hf_weights_files,
+            queue_size=queue_size,
+            use_tqdm_on_load=tqdm_enabled,
+            device=str(device),
+            nogds=nogds,
+        )
+
+    # GDS can fail either at construction or lazily inside the producer
+    # thread during iteration (e.g. cuFileHandleRegister returning
+    # CU_FILE_HANDLE_NOT_REGISTERED on a filesystem without GDS support).
+    # Catch both and fall back to nogds, but only before yielding any
+    # tensor -- restarting mid-stream would reload earlier shards.
+    pl = None
+    yielded = False
+    try:
         try:
-            try:
-                fb = loader.copy_files_to_device()
-            except RuntimeError as e:
-                if "gds" not in str(e):
-                    raise
-
-                loader.close()
-                nogds = True
-                logger.warning_once(
-                    "GDS not enabled, setting `nogds=True`.\n"
-                    "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
-                )
-                loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
-                fb = loader.copy_files_to_device()
-
-            try:
-                keys = list(fb.key_to_rank_lidx.keys())
-                for k in keys:
-                    t = fb.get_tensor(k)
-                    yield k, t
-            finally:
-                fb.close()
-        finally:
-            loader.close()
+            pl = _make_loader(nogds)
+            for name, tensor in pl.iterate_weights():
+                yielded = True
+                yield name, tensor
+        except RuntimeError as e:
+            if nogds or yielded or "gds" not in str(e):
+                raise
+            logger.warning_once(
+                "GDS not enabled, setting `nogds=True`.\n"
+                "For more information, see: https://github.com/foundation-model-stack/"
+                "fastsafetensors?tab=readme-ov-file#basic-api-usages"
+            )
+            if pl is not None:
+                pl.close()
+            pl = _make_loader(nogds=True)
+            yield from pl.iterate_weights()
+    finally:
+        if pl is not None:
+            pl.close()
 
 
 def instanttensor_weights_iterator(
@@ -1157,7 +1100,7 @@ def instanttensor_weights_iterator(
         import instanttensor
     except ImportError as e:
         raise ImportError(
-            "Please install instanttensor via `pip install instanttensor`"
+            "Please install instanttensor via `pip install vllm[instanttensor]`"
         ) from e
 
     if not current_platform.is_cuda():
@@ -1173,18 +1116,33 @@ def instanttensor_weights_iterator(
 
     device = current_platform.current_device()
 
+    # copy=True yields tensors that own their memory, staying valid after the
+    # context exits or InstantTensor reuses its buffer.
     with instanttensor.safe_open(
-        hf_weights_files, framework="pt", device=device, process_group=process_group
+        hf_weights_files,
+        framework="pt",
+        device=device,
+        process_group=process_group,
+        copy=True,
     ) as f:
-        yield from tqdm(
-            f.tensors(),
+        # Track bytes so the bar reports load throughput (GB/s).
+        pbar = tqdm(
+            total=f.total_tensor_size,
             desc="Loading safetensors using InstantTensor loader",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
             position=tqdm._get_free_pos(),
-            total=len(f.keys()),
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
             mininterval=1.0,
         )
+        try:
+            for name, tensor in f.tensors():
+                pbar.update(tensor.numel() * tensor.element_size())
+                yield name, tensor
+        finally:
+            pbar.close()
 
 
 def pt_weights_iterator(
@@ -1235,133 +1193,6 @@ def multi_thread_pt_weights_iterator(
             state = future.result()
             yield from state.items()
             del state
-
-
-def get_gguf_extra_tensor_names(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> list[str]:
-    reader = gguf.GGUFReader(gguf_file)
-    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
-    exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
-    extra_keys = expected_gguf_keys - exact_gguf_keys
-    return [gguf_to_hf_name_map[key] for key in extra_keys]
-
-
-def get_gguf_weight_type_map(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> dict[str, str]:
-    """
-    Return GGUF mapped weight's name and its quant type
-    """
-    reader = gguf.GGUFReader(gguf_file)
-    return {
-        gguf_to_hf_name_map[tensor.name]: tensor.tensor_type.name
-        for tensor in reader.tensors
-        if tensor.name in gguf_to_hf_name_map
-    }
-
-
-def gguf_quant_weights_iterator(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """
-    Iterate over the quant weights in the model gguf files and convert
-    them to torch tensors.
-    Be careful of the order of yielding weight types and weights data,
-    we have to yield all weight types first before yielding any weights.
-    Otherwise it would cause issue when loading weights with for packed
-    layer with different quant types.
-    """
-
-    reader = gguf.GGUFReader(gguf_file)
-
-    for tensor in reader.tensors:
-        if tensor.name in gguf_to_hf_name_map:
-            weight_type = tensor.tensor_type
-            name = gguf_to_hf_name_map[tensor.name]
-
-            if weight_type.name not in ("F32", "BF16", "F16"):
-                weight_type_name = name.replace("weight", "qweight_type")
-                weight_type = torch.tensor(weight_type)
-                yield weight_type_name, weight_type
-
-    for tensor in reader.tensors:
-        if tensor.name in gguf_to_hf_name_map:
-            weight = tensor.data
-            weight_type = tensor.tensor_type
-            name = gguf_to_hf_name_map[tensor.name]
-            if weight_type.name not in ("F32", "BF16", "F16"):
-                name = name.replace("weight", "qweight")
-            if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
-                # BF16 is currently the only "quantization" type that isn't
-                # actually quantized but is read as a raw byte tensor.
-                # Reinterpret as `torch.bfloat16` tensor.
-                weight = weight.view(np.uint16)
-                if reader.byte_order == "S":
-                    # GGUF endianness != system endianness
-                    weight = weight.byteswap()
-                param = torch.tensor(weight).view(torch.bfloat16)
-            else:
-                param = torch.tensor(weight)
-            yield name, param
-
-
-def gguf_quant_weights_iterator_multi(
-    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str]
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """
-    Iterate over the quant weights across multiple GGUF shard files
-    and convert them to torch tensors.
-
-    Like gguf_quant_weights_iterator, we yield all weight types first
-    before yielding any weights data to avoid issues with packed layers
-    that have different quant types.
-    """
-    readers = [gguf.GGUFReader(f) for f in gguf_files]
-
-    # First pass: yield all weight types across all shards
-    for reader in readers:
-        for tensor in reader.tensors:
-            if tensor.name in gguf_to_hf_name_map:
-                weight_type = tensor.tensor_type
-                name = gguf_to_hf_name_map[tensor.name]
-                if weight_type.name not in ("F32", "BF16", "F16"):
-                    weight_type_name = name.replace("weight", "qweight_type")
-                    weight_type = torch.tensor(weight_type)
-                    yield weight_type_name, weight_type
-
-    # Second pass: yield all weight data across all shards
-    for reader in readers:
-        for tensor in reader.tensors:
-            if tensor.name in gguf_to_hf_name_map:
-                weight = tensor.data
-                weight_type = tensor.tensor_type
-                name = gguf_to_hf_name_map[tensor.name]
-                if weight_type.name not in ("F32", "BF16", "F16"):
-                    name = name.replace("weight", "qweight")
-                if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
-                    weight = weight.view(np.uint16)
-                    if reader.byte_order == "S":
-                        weight = weight.byteswap()
-                    param = torch.tensor(weight).view(torch.bfloat16)
-                else:
-                    param = torch.tensor(weight)
-                yield name, param
-
-
-def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
-    """convert PySafeSlice object from safetensors to torch.Tensor
-
-    PySafeSlice object supports indexing, which is done before loading the
-    actual tensor and can reduce the amount of memory being read into the
-    memory. However, it does not support more advanced functionalities
-    like `.view()` or `.t()`. Therefore, if we need to modify the loaded
-    tensor with these more complicated operators, we need to convert to
-    tensor first.
-    """
-    if not isinstance(x, torch.Tensor):
-        x = x[:]
-    return x
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
@@ -1431,29 +1262,6 @@ def composed_weight_loader(
     return composed_loader
 
 
-def initialize_dummy_weights(
-    model: torch.nn.Module,
-    model_config: ModelConfig,
-    low: float = -1e-3,
-    high: float = 1e-3,
-    seed: int = 1234,
-) -> None:
-    """Initialize model weights with random values.
-
-    The model weights must be randomly initialized for accurate performance
-    measurements. Additionally, the model weights should not cause NaNs in the
-    forward pass. We empirically found that initializing the weights with
-    values between -1e-3 and 1e-3 works well for most models.
-
-    We use per-parameter random seed, so that dummy weights are consistent,
-    even if the model is partitioned across multiple devices. When the seed
-    is fixed, the random values generated by this function only depends on
-    the parameter's number of elements and its data type.
-    """
-    for param in model.state_dict().values():
-        initialize_single_dummy_weight(param, low, high, seed)
-
-
 @torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
@@ -1463,6 +1271,10 @@ def initialize_single_dummy_weight(
 ) -> None:
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)
+
+    if (dummy_weight_value := getattr(param, "dummy_weight_value", None)) is not None:
+        param.fill_(dummy_weight_value)
+        return
 
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():
@@ -1499,10 +1311,9 @@ def initialize_single_dummy_weight(
     generator.manual_seed(seed)
     if torch.finfo(param.data.dtype).bits < 16:
         # uniform_ doesn't support < 16-bit datatypes (FP8)
-        dtype = param.data.dtype
-        tmp_param = param.data.to(torch.float16)
-        tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-        param.data.copy_(tmp_param)
+        tmp_param = torch.empty_like(param, dtype=torch.float16)
+        tmp_param.uniform_(low, high, generator=generator)
+        param.copy_(tmp_param)
     else:
         param.uniform_(low, high, generator=generator)
 
@@ -1523,6 +1334,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         str: The remapped parameter name if successful, or the original name
              if no remapping is needed.
         None: If the remapped name is not found in params_dict.
+
     """
     # Already in vLLM's expected form (e.g. weights pre-renamed by a
     # `WeightsMapper` from the quant config). Skip the regex remap, which
@@ -1622,8 +1434,7 @@ def maybe_remap_moe_expert_param_name(
     name: str,
     params_dict: dict[str, torch.nn.Parameter],
 ) -> str:
-    """
-    Remap MoE expert parameter names to account for routed_experts hierarchy.
+    """Remap MoE expert parameter names to account for routed_experts hierarchy.
 
     This handles the transition from the old FusedMoE structure where weights
     were directly in the experts module, to the new MoERunner → RoutedExperts
@@ -1645,6 +1456,7 @@ def maybe_remap_moe_expert_param_name(
     Returns:
         Remapped parameter name if routed_experts hierarchy exists,
         otherwise the original name
+
     """
     # Only remap if this looks like an expert parameter
     if ".experts." not in name:
@@ -1666,8 +1478,6 @@ def maybe_remap_moe_expert_param_name(
         "w2_bias",
         "w13_scale",
         "w2_scale",
-        "w13_g_idx",
-        "w2_g_idx",
         "w13_qweight",
         "w2_qweight",
         "w13_qzeros",
@@ -1700,8 +1510,7 @@ def remap_moe_expert_weights(
     weights: Iterable[tuple[str, torch.Tensor]],
     params_dict: dict[str, torch.nn.Parameter],
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """
-    Wrapper generator that remaps MoE expert parameter names for backward compatibility.
+    """Remap MoE expert parameter names for backward compatibility.
 
     This allows models with custom weight loading to automatically handle both old
     and new checkpoint formats without needing model-specific remapping code.
@@ -1719,6 +1528,7 @@ def remap_moe_expert_weights(
 
     Yields:
         (remapped_name, tensor) tuples
+
     """
     for name, weight in weights:
         remapped_name = maybe_remap_moe_expert_param_name(name, params_dict)

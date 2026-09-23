@@ -14,17 +14,18 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import BatchedTensorInputs
+from vllm.multimodal.inputs import BatchedTensorInputs, MultiModalKwargsItem
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
     MultiModalDataItems,
 )
 from vllm.multimodal.processing.processor import (
-    MultiModalProcessingInfo,
+    MultiModalProcessingResult,
     ProcessorInputs,
     PromptReplacement,
     TimingContext,
+    cached_encode,
 )
 from vllm.transformers_utils.processors.h2ovl import H2OVLImageProcessor, H2OVLProcessor
 
@@ -90,6 +91,8 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
         hf_processor: H2OVLProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -111,6 +114,7 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 feature_size = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -127,7 +131,7 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
 
         return PromptReplacement(
             modality="image",
-            target="<image>",
+            target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
             replacement=get_replacement_internvl,
         )
 
@@ -135,7 +139,7 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> MultiModalProcessingResult:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
@@ -157,38 +161,34 @@ class H2OVLChatModel(InternVLChatModel):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
-        is_mono: bool,
         prefix: str,
     ):
-        if not is_mono:
-            vision_feature_layer = config.select_layer
-            if vision_feature_layer < 0:
-                num_hidden_layers = (
-                    config.vision_config.num_hidden_layers + vision_feature_layer + 1
-                )
-            else:
-                num_hidden_layers = vision_feature_layer + 1
-
-            return InternVisionModel(
-                config.vision_config,
-                quant_config=quant_config,
-                num_hidden_layers_override=num_hidden_layers,
-                prefix=prefix,
+        vision_feature_layer = config.select_layer
+        if vision_feature_layer < 0:
+            num_hidden_layers = (
+                config.vision_config.num_hidden_layers + vision_feature_layer + 1
             )
         else:
-            msg = "Monolith mode is not applicable to H2OVL"
-            raise NotImplementedError(msg)
+            num_hidden_layers = vision_feature_layer + 1
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        if num_image_tokens <= 0 or self.num_image_token <= 0:
-            return 0
+        return InternVisionModel(
+            config.vision_config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers,
+            prefix=prefix,
+        )
 
-        num_patches = num_image_tokens // self.num_image_token
-        return num_patches * (self.patch_tokens + 1)
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        if num_mm_embeds <= 0 or self.num_image_token <= 0:
+            return 0, 0
 
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        if num_vision_tokens <= 0 or self.num_image_token <= 0:
-            return 0
-
-        num_patches = num_vision_tokens // (self.patch_tokens + 1)
-        return num_patches * self.num_image_token
+        num_patches = num_mm_embeds // self.num_image_token
+        tower_tokens = num_patches * (self.patch_tokens + 1)
+        return tower_tokens, num_patches * self.num_image_token

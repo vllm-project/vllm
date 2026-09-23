@@ -78,6 +78,16 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
+        # cudaError_t cudaHostRegister ( void* ptr, size_t size, unsigned int flags )
+        Function(
+            "cudaHostRegister",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint],
+        ),
+        # cudaError_t cudaHostUnregister ( void* ptr )
+        Function("cudaHostUnregister", cudaError_t, [ctypes.c_void_p]),
+        # cudaError_t cudaGetLastError ( void )
+        Function("cudaGetLastError", cudaError_t, []),
     ]
 
     # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
@@ -92,6 +102,9 @@ class CudaRTLibrary:
         "cudaMemcpy": "hipMemcpy",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
+        "cudaHostRegister": "hipHostRegister",
+        "cudaHostUnregister": "hipHostUnregister",
+        "cudaGetLastError": "hipGetLastError",
     }
 
     # class attribute to store the mapping from the path to the library
@@ -104,15 +117,12 @@ class CudaRTLibrary:
 
     def __init__(self, so_file: str | None = None):
         if so_file is None:
-            so_file = find_loaded_library("libcudart")
-            if so_file is None:
-                # libcudart is not loaded in the current process, try hip
-                so_file = find_loaded_library("libamdhip64")
-                # should be safe to assume now that we are using ROCm
-                # as the following assertion should error out if the
-                # libhiprtc library is also not loaded
-                if so_file is None:
-                    so_file = envs.VLLM_CUDART_SO_PATH  # fallback to env var
+            so_file = (
+                find_loaded_library(
+                    "libamdhip64" if current_platform.is_rocm() else "libcudart"
+                )
+                or envs.VLLM_CUDART_SO_PATH  # fallback to env var
+            )
             assert so_file is not None, (
                 "libcudart is not loaded in the current process, "
                 "try setting VLLM_CUDART_SO_PATH"
@@ -188,3 +198,16 @@ class CudaRTLibrary:
             )
         )
         return devPtr
+
+    def cudaHostRegister(self, ptr: int, size: int, flags: int = 0) -> int:
+        """Return the raw error code instead of raising, since callers can
+        fall back to pageable memory. Drain a failure with cudaGetLastError."""
+        return self.funcs["cudaHostRegister"](ctypes.c_void_p(ptr), size, flags)
+
+    def cudaHostUnregister(self, ptr: int) -> int:
+        """Return the raw error code instead of raising."""
+        return self.funcs["cudaHostUnregister"](ctypes.c_void_p(ptr))
+
+    def cudaGetLastError(self) -> int:
+        """Return and clear the error pending on this thread."""
+        return self.funcs["cudaGetLastError"]()

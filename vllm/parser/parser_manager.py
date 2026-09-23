@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
@@ -16,10 +17,7 @@ logger = init_logger(__name__)
 
 
 class ParserManager:
-    """
-    Provides a unified Parser by composing individual reasoning and tool
-    parsers from their respective registries.
-    """
+    """Provides a unified Parser by composing reasoning and tool parser adapters."""
 
     @classmethod
     def get_tool_parser(
@@ -79,21 +77,26 @@ class ParserManager:
         reasoning_parser_name: str | None = None,
         enable_auto_tools: bool = False,
         model_name: str | None = None,
+        is_harmony: bool = False,
+        tool_strict_level: str = "auto",
     ) -> type[Parser] | None:
-        """
-        Get a Parser that handles both reasoning and tool parsing.
+        """Get a Parser that handles both reasoning and tool parsing.
 
-        Composes individual reasoning and tool parsers into a single
-        DelegatingParser subclass.
+        Composes the individual parsers into a ``DelegatingParser`` subclass.
 
         Args:
             tool_parser_name: The name of the tool parser.
             reasoning_parser_name: The name of the reasoning parser.
             enable_auto_tools: Whether auto tool choice is enabled.
             model_name: The model name for parser-specific warnings.
+            is_harmony: Whether the selected model uses the Harmony format.
+                        If True, HarmonyParser is always returned.
+            tool_strict_level: Server-side floor for tool-call structural
+                tags (``--tool-strict-level``).
 
         Returns:
             A Parser class, or None if neither parser is specified.
+
         """
         if not tool_parser_name and not reasoning_parser_name:
             return None
@@ -106,14 +109,44 @@ class ParserManager:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
-        from vllm.utils.mistral import is_mistral_tool_parser
+        strict_level = ToolStrictLevel.from_name(tool_strict_level)
 
-        if is_mistral_tool_parser(tool_parser_cls):
-            from vllm.parser.mistral import MistralParser
+        if is_harmony:
+            from vllm.parser.harmony import HarmonyParser
 
-            MistralParser.reasoning_parser_cls = reasoning_parser_cls
-            MistralParser.tool_parser_cls = tool_parser_cls
-            return MistralParser
+            HarmonyParser.reasoning_parser_cls = reasoning_parser_cls
+            HarmonyParser.tool_parser_cls = tool_parser_cls
+            HarmonyParser.tool_strict_level = strict_level
+            return HarmonyParser
+
+        if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
+            from vllm.parser.kimi_k3 import KimiK3Parser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _KimiK3Parser(KimiK3Parser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+
+            return _KimiK3Parser
+
+        if {reasoning_parser_name, tool_parser_name} & {
+            "cohere_command3",
+            "cohere_command4",
+        }:
+            from vllm.parser.cohere_command import CohereCommandParser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _CohereCommandParser(CohereCommandParser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+
+            return _CohereCommandParser
 
         from vllm.parser.abstract_parser import DelegatingParser
 
@@ -123,5 +156,6 @@ class ParserManager:
         class _Parser(DelegatingParser):
             reasoning_parser_cls = r_cls
             tool_parser_cls = t_cls
+            tool_strict_level = strict_level
 
         return _Parser

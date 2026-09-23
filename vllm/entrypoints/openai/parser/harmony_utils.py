@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 from openai.types.responses.tool import Tool
@@ -13,6 +13,7 @@ from openai_harmony import (
     HarmonyEncodingName,
     Message,
     ReasoningEffort,
+    RenderConversationConfig,
     Role,
     StreamableParser,
     SystemContent,
@@ -23,6 +24,7 @@ from openai_harmony import (
 
 from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -86,8 +88,7 @@ MCP_BUILTIN_TOOLS: set[str] = set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
 
 
 def has_custom_tools(tool_types: set[str]) -> bool:
-    """
-    Checks if the given tool types are custom tools
+    """Checks if the given tool types are custom tools
     (i.e. any tool other than MCP builtin tools)
     """
     return not tool_types.issubset(MCP_BUILTIN_TOOLS)
@@ -122,9 +123,10 @@ def get_system_message(
     if reasoning_effort is not None:
         if reasoning_effort not in REASONING_EFFORT:
             supported_values = ", ".join(REASONING_EFFORT)
-            raise ValueError(
+            raise VLLMValidationError(
                 f"reasoning_effort={reasoning_effort!r} is not supported by "
-                f"Harmony. Supported values are: {supported_values}."
+                f"Harmony. Supported values are: {supported_values}.",
+                parameter="reasoning_effort",
             )
         sys_msg_content = sys_msg_content.with_reasoning_effort(
             REASONING_EFFORT[reasoning_effort]
@@ -180,7 +182,10 @@ def get_developer_message(
             elif tool.type == "function":
                 function_tools.append(tool)
             else:
-                raise ValueError(f"tool type {tool.type} not supported")
+                raise VLLMValidationError(
+                    f"tool type {tool.type!r} is not supported.",
+                    parameter="tools",
+                )
         if function_tools:
             function_tool_descriptions = [
                 create_tool_definition(tool) for tool in function_tools
@@ -203,8 +208,7 @@ def get_system_or_developer_message(role: str, instructions: str) -> Message:
 
 
 def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
-    """
-    Parse a list of messages from request.messages in the Chat Completion API to
+    """Parse a list of messages from request.messages in the Chat Completion API to
     Harmony messages.
     """
     msgs: list[Message] = []
@@ -220,14 +224,12 @@ def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
     for chat_msg in chat_msgs:
         msgs.extend(parse_chat_input_to_harmony_message(chat_msg, tool_id_names))
 
-    msgs = auto_drop_analysis_messages(msgs)
     return msgs
 
 
 def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
-    """
-    Harmony models expect the analysis messages (representing raw chain of thought) to
-    be dropped after an assistant message to the final channel is produced from the
+    """Harmony models expect the analysis messages (representing raw chain of thought)
+    to be dropped after an assistant message to the final channel is produced from the
     reasoning of those messages.
 
     The openai-harmony library does this if the very last assistant message is to the
@@ -257,8 +259,7 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
 
 
 def flatten_input_text_content(content: Any) -> str | None:
-    """
-    Extract text parts from a Chat Completion or Responses API content field and
+    """Extract text parts from a Chat Completion or Responses API content field and
     flatten them into a single string. Returns None if no text content is found.
     """
     if content is None or isinstance(content, str):
@@ -281,8 +282,7 @@ def flatten_input_text_content(content: Any) -> str | None:
 def extract_instructions_from_messages(
     messages: Sequence[Any],
 ) -> tuple[str | None, list[Any]]:
-    """
-    Peel a leading system/developer Chat Completion or Responses message and
+    """Peel a leading system/developer Chat Completion or Responses message and
     flatten its instruction text.
     """
     remaining_messages = list(messages)
@@ -297,7 +297,10 @@ def extract_instructions_from_messages(
         elif hasattr(first_message, "model_dump"):
             first_message = first_message.model_dump(exclude_none=True)
         else:
-            raise ValueError(f"Unknown message type: {type(first_message)}")
+            raise VLLMValidationError(
+                f"Unknown message type: {type(first_message)}",
+                parameter="input",
+            )
 
     if first_message.get("role") not in (
         "system",
@@ -319,9 +322,7 @@ def build_harmony_preamble(
     container_description: str | None = None,
     with_custom_tools: bool = False,
 ) -> list[Message]:
-    """
-    Build the standard Harmony system/developer prefix for a request.
-    """
+    """Build the standard Harmony system/developer prefix for a request."""
     developer_instructions = system_instructions = None
     if envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         system_instructions = instructions
@@ -351,8 +352,7 @@ def build_harmony_preamble(
 def parse_chat_input_to_harmony_message(
     chat_msg, tool_id_names: dict[str, str] | None = None
 ) -> list[Message]:
-    """
-    Parse a message from request.messages in the Chat Completion API to
+    """Parse a message from request.messages in the Chat Completion API to
     Harmony messages.
     """
     tool_id_names = tool_id_names or {}
@@ -447,74 +447,15 @@ def parse_chat_input_to_harmony_message(
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:
+    messages = auto_drop_analysis_messages(messages)
     conversation = Conversation.from_messages(messages)
     token_ids = get_encoding().render_conversation_for_completion(
-        conversation, Role.ASSISTANT
+        conversation,
+        Role.ASSISTANT,
+        config=RenderConversationConfig(auto_drop_analysis=False),
     )
     return token_ids
 
 
 def get_streamable_parser_for_assistant() -> StreamableParser:
     return StreamableParser(get_encoding(), role=Role.ASSISTANT)
-
-
-def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
-    parser = get_streamable_parser_for_assistant()
-    for token_id in token_ids:
-        parser.process(token_id)
-    return parser
-
-
-def parse_chat_output(
-    token_ids: Sequence[int],
-) -> tuple[str | None, str | None, bool]:
-    """
-    Parse the output of a Harmony chat completion into reasoning and final content.
-    Note that when the `openai` tool parser is used, serving_chat only uses this
-    for the reasoning content and gets the final content from the tool call parser.
-
-    When the `openai` tool parser is not enabled, or when `GptOssReasoningParser` is
-    in use,this needs to return the final content without any tool calls parsed.
-
-    Empty reasoning or final content is returned as None instead of an empty string.
-    """
-    parser = parse_output_into_messages(token_ids)
-    output_msgs = parser.messages
-    is_tool_call = False  # TODO: update this when tool call is supported
-
-    # Get completed messages from the parser
-    # - analysis channel: hidden reasoning
-    # - commentary channel without recipient (preambles): visible to user
-    # - final channel: visible to user
-    # - commentary with recipient (tool calls): handled separately by tool parser
-    reasoning_texts = [
-        msg.content[0].text for msg in output_msgs if msg.channel == "analysis"
-    ]
-    final_texts = [
-        msg.content[0].text
-        for msg in output_msgs
-        if msg.channel == "final" or (msg.channel == "commentary" and not msg.recipient)
-    ]
-
-    # Extract partial messages from the parser
-    if parser.current_channel == "analysis" and parser.current_content:
-        reasoning_texts.append(parser.current_content)
-    elif parser.current_channel == "final" and parser.current_content:
-        final_texts.append(parser.current_content)
-    elif (
-        parser.current_channel == "commentary"
-        and not parser.current_recipient
-        and parser.current_content
-    ):
-        # Preambles (commentary without recipient) are visible to user
-        final_texts.append(parser.current_content)
-
-    # Flatten multiple messages into a single string
-    reasoning: str | None = "\n".join(reasoning_texts)
-    final_content: str | None = "\n".join(final_texts)
-
-    # Return None instead of empty string since existing callers check for None
-    reasoning = reasoning or None
-    final_content = final_content or None
-
-    return reasoning, final_content, is_tool_call

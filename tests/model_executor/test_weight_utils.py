@@ -72,28 +72,28 @@ class TestMaybeRemapKvScaleName:
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
     def test_modelopt_k_proj_k_scale(self):
-        """ModelOpt format: k_proj.k_scale -> attn.k_scale"""
+        """ModelOpt format: k_proj.k_scale -> attn.k_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_proj.k_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.k_scale"
 
     def test_modelopt_v_proj_v_scale(self):
-        """ModelOpt format: v_proj.v_scale -> attn.v_scale"""
+        """ModelOpt format: v_proj.v_scale -> attn.v_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.v_proj.v_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
     def test_deprecated_kv_scale(self):
-        """Old format: kv_scale -> attn.k_scale (deprecated)"""
+        """Old format: kv_scale -> attn.k_scale (deprecated)."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.kv_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.k_scale"
 
     def test_default_bare_k_scale(self):
-        """Default format: .k_scale -> .attn.k_scale"""
+        """Default format: .k_scale -> .attn.k_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_scale", self.PARAMS_DICT
         )
@@ -158,6 +158,138 @@ class TestMaybeRemapKvScaleName:
             "model.layers.0.self_attn.qkv_proj.k_scale", empty_params
         )
         assert result is None
+
+
+def test_checkpoint_weight_mapper_discards_serialized_g_idx():
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
+
+    mapper = QuantizationConfig.get_checkpoint_weight_mapper()
+
+    assert mapper._map_name("model.layers.0.g_idx") is None
+    assert mapper._map_name("model.layers.0.qweight") == "model.layers.0.qweight"
+
+
+class TestKvCacheScaleMapper:
+    """The `WeightsMapper` returned by `get_cache_scale_mapper` replaces the
+    per-model `maybe_remap_kv_scale_name` calls. It must remap the same set of
+    checkpoint formats (the non-`params_dict`-dependent ones) and be idempotent
+    so it composes safely with a model's own qkv/gate_up `hf_to_vllm_mapper`."""
+
+    def _mapper(self):
+        # `get_cache_scale_mapper` does not use `self`; call it on the base
+        # class to get the default (non-config-specific) mapper.
+        from vllm.model_executor.layers.quantization.base_config import (
+            QuantizationConfig,
+        )
+
+        return QuantizationConfig.get_cache_scale_mapper()
+
+    def _map(self, name: str) -> str | None:
+        return self._mapper()._map_name(name)
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            # Qwen3-MoE / llm-compressor fused qkv_proj
+            (
+                "model.layers.0.self_attn.qkv_proj.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            (
+                "model.layers.0.self_attn.qkv_proj.v_scale",
+                "model.layers.0.self_attn.attn.v_scale",
+            ),
+            # ModelOpt / NVFP4 k_proj/v_proj
+            (
+                "model.layers.0.self_attn.k_proj.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            (
+                "model.layers.0.self_attn.v_proj.v_scale",
+                "model.layers.0.self_attn.attn.v_scale",
+            ),
+            # deprecated fused kv_scale and bare scales
+            (
+                "model.layers.0.self_attn.kv_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            (
+                "model.layers.0.self_attn.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            # NemotronH mixer
+            (
+                "model.layers.0.mixer.k_proj.k_scale",
+                "model.layers.0.mixer.attn.k_scale",
+            ),
+            # already in vLLM form -> unchanged (idempotent)
+            (
+                "model.layers.0.self_attn.attn.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            # non-kv scales must not be touched
+            (
+                "model.layers.0.self_attn.k_proj.weight_scale",
+                "model.layers.0.self_attn.k_proj.weight_scale",
+            ),
+            (
+                "model.layers.0.self_attn.k_proj.input_scale",
+                "model.layers.0.self_attn.k_proj.input_scale",
+            ),
+            # regular weights untouched
+            (
+                "model.layers.0.self_attn.q_proj.weight",
+                "model.layers.0.self_attn.q_proj.weight",
+            ),
+        ],
+    )
+    def test_remap(self, name, expected):
+        assert self._map(name) == expected
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "model.layers.0.self_attn.k_scale",
+            "model.layers.0.self_attn.k_proj.k_scale",
+            "model.layers.0.self_attn.qkv_proj.v_scale",
+            "model.layers.0.mixer.k_proj.k_scale",
+        ],
+    )
+    def test_idempotent(self, name):
+        once = self._map(name)
+        assert once is not None
+        assert self._map(once) == once
+
+    def test_composes_with_qkv_mapper(self):
+        """Applied together with a model's qkv/gate_up mapper, the regex scale
+        rules run before the substr rename, so scales are normalized to `.attn.`
+        and regular projections are still fused correctly."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        model_mapper = WeightsMapper(
+            orig_to_new_substr={
+                ".q_proj": ".qkv_proj.q",
+                ".k_proj": ".qkv_proj.k",
+                ".v_proj": ".qkv_proj.v",
+            }
+        )
+        # AutoWeightsLoader does `mapper |= cache_scale_mapper`
+        combined = model_mapper | self._mapper()
+
+        assert (
+            combined._map_name("model.layers.0.self_attn.q_proj.weight")
+            == "model.layers.0.self_attn.qkv_proj.q.weight"
+        )
+        assert (
+            combined._map_name("model.layers.0.self_attn.k_proj.k_scale")
+            == "model.layers.0.self_attn.attn.k_scale"
+        )
+        assert (
+            combined._map_name("model.layers.0.self_attn.k_scale")
+            == "model.layers.0.self_attn.attn.k_scale"
+        )
 
 
 if __name__ == "__main__":
