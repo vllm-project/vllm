@@ -127,7 +127,7 @@ class InputBatch:
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
