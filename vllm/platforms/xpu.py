@@ -157,8 +157,17 @@ class XPUPlatform(Platform):
             logger.info_once("Using XPU MLA Sparse backend.")
             return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
         if attn_selector_config.use_mla:
-            logger.info_once("Using Triton MLA backend on V1 engine.")
-            return AttentionBackendEnum.TRITON_MLA.get_path()
+            if selected_backend in (None, AttentionBackendEnum.FLASH_ATTN_MLA):
+                logger.info_once("Using Flash Attention MLA backend on XPU.")
+                return AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
+            if selected_backend == AttentionBackendEnum.TRITON_MLA:
+                logger.info_once("Using Triton MLA backend on V1 engine.")
+                return AttentionBackendEnum.TRITON_MLA.get_path()
+            if selected_backend:
+                raise ValueError(
+                    f"Invalid attention backend for {cls.device_name}, "
+                    f"with use_mla: {attn_selector_config.use_mla}"
+                )
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
