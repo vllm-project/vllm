@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Encoder attention through the zentorch SDPA kernel on Zen CPUs."""
+"""Encoder attention and decoder prefill through zentorch SDPA on Zen CPUs."""
 
 from __future__ import annotations
 
@@ -10,11 +10,38 @@ import torch
 
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.cpu_attn import CPUAttentionMetadata
 
-__all__ = ["should_use_zentorch_sdpa", "zentorch_sdpa_attn"]
+__all__ = [
+    "should_use_zentorch_prefill_sdpa",
+    "should_use_zentorch_sdpa",
+    "zentorch_prefill_sdpa",
+    "zentorch_sdpa_attn",
+]
+
+# The CPU cache writer stores an fp8 KV cache as uint8 holding `fp8(x / scale)`.
+_FP8_KV_CACHE_DTYPES = {
+    "fp8": torch.float8_e4m3fn,
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
+}
+
+
+def _supports_dtype(dtype: torch.dtype) -> bool:
+    """Whether the zentorch SDPA kernels run `dtype` on this CPU.
+
+    dtype must match the op's ISA gate (bf16: AVX512-BF16, fp32: AVX512);
+    fp16 needs AVX512-FP16, which torch exposes no query for, so it stays
+    native.
+    """
+    if dtype == torch.bfloat16:
+        return torch.cpu._is_avx512_bf16_supported()
+    if dtype == torch.float32:
+        return torch.cpu._is_avx512_supported()
+    return False
 
 
 def should_use_zentorch_sdpa(
@@ -26,20 +53,188 @@ def should_use_zentorch_sdpa(
     Full, sliding-window, and ALiBi encoder layers all dispatch. A window is
     a single-head [1, 1, S, S] additive mask; ALiBi is a per-query-head
     [1, H, S, S] bias. The zentorch_sdpa_attn op builds both.
-
-    dtype must match the op's ISA gate (bf16: AVX512-BF16, fp32: AVX512);
-    fp16 needs AVX512-FP16, which torch exposes no query for, so it stays
-    native.
     """
     if attn_type not in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
         return False
     if not has_zentorch_op(["zentorch_sdpa_attn"]):
         return False
-    if dtype == torch.bfloat16:
-        return torch.cpu._is_avx512_bf16_supported()
-    if dtype == torch.float32:
-        return torch.cpu._is_avx512_supported()
-    return False
+    return _supports_dtype(dtype)
+
+
+def should_use_zentorch_prefill_sdpa(
+    attn_type: str,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    alibi_slopes: torch.Tensor | None,
+    logits_soft_cap: float | None,
+    sinks: torch.Tensor | None,
+    kv_sharing_target_layer_name: str | None,
+) -> bool:
+    """True when decoder prefill should dispatch to zentorch_sdpa.out.
+
+    Only plain causal self-attention over an unquantized or per-tensor fp8 KV
+    cache is routed; decode stays on the paged CPU kernel.
+    """
+    if (
+        attn_type != AttentionType.DECODER
+        or alibi_slopes is not None
+        or logits_soft_cap
+        or sinks is not None
+        # KV-shared layers (Gemma) project Q only and receive no key/value.
+        or kv_sharing_target_layer_name is not None
+        or (
+            is_quantized_kv_cache(kv_cache_dtype)
+            and kv_cache_dtype not in _FP8_KV_CACHE_DTYPES
+        )
+    ):
+        return False
+    return (
+        has_zentorch_op(["zentorch_sdpa"])
+        and hasattr(torch.ops.zentorch.zentorch_sdpa, "out")
+        and _supports_dtype(dtype)
+    )
+
+
+def _fp8_round_trip(
+    tensor: torch.Tensor, fp8_dtype: torch.dtype, scale: float
+) -> torch.Tensor:
+    """`tensor` as the CPU cache writer stores it and the paged kernel reads it.
+
+    The writer multiplies by the fp32 reciprocal of `scale`, rounds to nearest
+    even and saturates at the fp8 maximum.
+    """
+    inv_scale = torch.tensor(scale, dtype=torch.float32).reciprocal()
+    limit = torch.finfo(fp8_dtype).max
+    scaled = (tensor.float() * inv_scale).clamp_(-limit, limit)
+    return scaled.to(fp8_dtype).to(tensor.dtype).mul_(scale)
+
+
+def _gather_cached_kv(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    query_lens: list[int],
+    seq_lens: list[int],
+    window: int,
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    """Pack each request's cached keys/values, current chunk included.
+
+    A request keeps only its last `window - 1` context tokens plus its query
+    tokens when sliding-window attention is on. Returns the packed key, value
+    and the `cu_seqlens_k` offsets.
+
+    Keys are stored column-major, `[head_dim, block_size]` per head, by every
+    non-AMX ISA; values are token-major, `[block_size, head_dim]`.
+    """
+    block_size = key_cache.size(2)
+    keys, values, cu_seqlens_k = [], [], [0]
+    for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens, strict=True)):
+        begin = max(seq_len - query_len - window + 1, 0) if window else 0
+        first_block = begin // block_size
+        block_ids = block_table[i, first_block : (seq_len - 1) // block_size + 1]
+        tokens = slice(
+            begin - first_block * block_size, seq_len - first_block * block_size
+        )
+
+        key = key_cache.index_select(0, block_ids)
+        num_blocks, num_heads, _, head_dim = key.shape
+        key = key.reshape(num_blocks, num_heads, head_dim, block_size).transpose(2, 3)
+        keys.append(key.permute(0, 2, 1, 3).reshape(-1, num_heads, head_dim)[tokens])
+        value = value_cache.index_select(0, block_ids)
+        values.append(
+            value.permute(0, 2, 1, 3).reshape(-1, num_heads, head_dim)[tokens]
+        )
+        cu_seqlens_k.append(cu_seqlens_k[-1] + seq_len - begin)
+    return torch.cat(keys), torch.cat(values), cu_seqlens_k
+
+
+def zentorch_prefill_sdpa(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    attn_metadata: CPUAttentionMetadata,
+    scale: float,
+    sliding_window: int,
+    isa: str,
+    kv_cache_dtype: str,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+) -> bool:
+    """Run the prefill requests, which follow the decodes, with zentorch_sdpa.
+
+    Fills the prefill rows of `output` and leaves the decode rows untouched.
+    Fresh prompts attend the packed `key`/`value`; requests with cached
+    context attend that context gathered from the KV cache, which already
+    holds this step's tokens. With an fp8 cache, the fresh `key`/`value` get
+    the cache writer's fp8 round trip and the gathered context is dequantized
+    with `k_scale`/`v_scale`, so both match what the paged kernel attends.
+
+    Returns:
+        False when the batch must run on the native kernel instead: cached
+        context under AMX, whose cache layout is tiled.
+
+    """
+    first_req = attn_metadata.num_decodes
+    first_token = attn_metadata.num_decode_tokens
+    cu_seqlens_q = [
+        offset - first_token
+        for offset in attn_metadata.query_start_loc[first_req:].tolist()
+    ]
+    seq_lens = attn_metadata.seq_lens[first_req:].tolist()
+    query_lens = [end - start for start, end in zip(cu_seqlens_q, cu_seqlens_q[1:])]
+    window = max(sliding_window, 0)
+
+    fp8_dtype = _FP8_KV_CACHE_DTYPES.get(kv_cache_dtype)
+
+    cu_seqlens_k = None
+    tokens = slice(first_token, first_token + cu_seqlens_q[-1])
+    if query_lens == seq_lens:
+        key, value = key[tokens], value[tokens]
+        if fp8_dtype is not None:
+            key = _fp8_round_trip(key, fp8_dtype, k_scale)
+            value = _fp8_round_trip(value, fp8_dtype, v_scale)
+    elif isa == "amx":
+        return False
+    else:
+        if fp8_dtype is not None:
+            key_cache = key_cache.view(fp8_dtype)
+            value_cache = value_cache.view(fp8_dtype)
+        key, value, cu_seqlens_k = _gather_cached_kv(
+            key_cache,
+            value_cache,
+            attn_metadata.block_table[first_req:],
+            query_lens,
+            seq_lens,
+            window,
+        )
+        if fp8_dtype is not None:
+            key = key.to(query.dtype).mul_(k_scale)
+            value = value.to(query.dtype).mul_(v_scale)
+    query, output = query[tokens], output[tokens]
+
+    if cu_seqlens_k is None and len(set(seq_lens)) == 1:
+        # Equal-length fresh prompts: one dense batched call.
+        def _to_bhsd(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor.unflatten(0, (len(seq_lens), seq_lens[0])).permute(0, 2, 1, 3)
+
+        query, key, value, output = map(_to_bhsd, (query, key, value, output))
+        cu_seqlens_q = None
+
+    torch.ops.zentorch.zentorch_sdpa.out(
+        query,
+        key,
+        value,
+        is_causal=True,
+        scale=scale,
+        sliding_window_size=window,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        out=output,
+    )
+    return True
 
 
 def zentorch_sdpa_attn(
