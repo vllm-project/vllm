@@ -317,9 +317,7 @@ class KimiMoE(nn.Module):
 
 
 class KimiMLAAttention(nn.Module):
-    """
-    Main reference: DeepseekV2 vllm Implementation
-    """
+    """Main reference: DeepseekV2 vllm Implementation."""
 
     def __init__(
         self,
@@ -593,7 +591,7 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        pending_add: torch.Tensor | None = None,
+        prefix_delta: torch.Tensor | None = None,
         **kwargs,
     ) -> (
         tuple[torch.Tensor, torch.Tensor]
@@ -602,12 +600,10 @@ class KimiDecoderLayer(nn.Module):
         if self.use_attn_residuals:
             assert residual is not None
             return self.forward_attn_residual(
-                positions, hidden_states, residual, pending_add
+                positions, hidden_states, residual, prefix_delta
             )
 
-        # Only the attn-residual path defers the MLP add
-        assert pending_add is None
-
+        assert prefix_delta is None
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -627,7 +623,7 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
-        pending_add: torch.Tensor | None = None,
+        prefix_delta: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prefix_sum = hidden_states
         hidden_states = _apply_attn_res(
@@ -636,7 +632,7 @@ class KimiDecoderLayer(nn.Module):
             self.self_attention_res_proj,
             self.self_attention_res_norm,
             self.prev_valid_blocks,
-            delta=pending_add,
+            delta=prefix_delta,
             output_norm=self.input_layernorm,
             block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
         )
@@ -821,33 +817,28 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
+        prefix_delta = None
 
-        # Each layer hands its MLP output back unsummed
-        # next layer attn-res kernel folds it
-        pending_add: torch.Tensor | None = None
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            hidden_states, residual, pending_add = layer(
+            hidden_states, residual, prefix_delta = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
-                pending_add=pending_add,
+                prefix_delta=prefix_delta,
             )
             if (layer_idx + 1) in self.aux_hidden_state_layers:
-                captured = (
-                    hidden_states
-                    if pending_add is None
-                    else hidden_states + pending_add
-                )
                 self._maybe_add_hidden_state(
-                    aux_hidden_states, layer_idx + 1, captured, residual
+                    aux_hidden_states,
+                    layer_idx + 1,
+                    hidden_states + prefix_delta,
+                    residual,
                 )
 
         if not get_pp_group().is_last_rank:
-            if pending_add is not None:
-                hidden_states = hidden_states + pending_add
+            hidden_states = hidden_states + prefix_delta
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -858,7 +849,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.output_attn_res_proj,
             self.output_attn_res_norm,
             attn_res_block_num,
-            delta=pending_add,
+            delta=prefix_delta,
         )
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
