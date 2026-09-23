@@ -2248,6 +2248,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         torch.accelerator.synchronize()
         if self.aux_output_connector is not None:
             self.aux_output_connector.close()
+        set_offloader(None)
         self.cudagraph_manager = None
         self.fast_prefill = None
         self.pooling_runner = None
