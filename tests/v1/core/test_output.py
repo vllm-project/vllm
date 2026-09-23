@@ -262,18 +262,22 @@ def test_strip_covered_mm_data_prefix_cache_resets_on_preempt() -> None:
 def test_new_request_data_from_request_reuses_stripped_mm_features() -> None:
     """NewRequestData.from_request is the realtime hot path: the same Request
     is converted every step and must reuse already-stripped mm features."""
-    from vllm.sampling_params import SamplingParams
-    from vllm.v1.request import Request
+    from types import SimpleNamespace
 
     features = [_mm_feature(offset=i * 10, length=10) for i in range(40)]
-    request = Request(
+    request = SimpleNamespace(
         request_id="rt",
         prompt_token_ids=list(range(500)),
-        sampling_params=SamplingParams(max_tokens=1),
+        sampling_params=None,
         pooling_params=None,
         mm_features=features,
+        num_computed_tokens=250,
+        lora_request=None,
+        prompt_embeds=None,
+        prompt_is_token_ids=None,
+        replay_start=0,
+        _mm_stripped_prefix=[],
     )
-    request.num_computed_tokens = 250
 
     first = NewRequestData.from_request(request, block_ids=([],))
     second = NewRequestData.from_request(request, block_ids=([],))
