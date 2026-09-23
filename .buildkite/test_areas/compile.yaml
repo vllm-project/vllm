@@ -208,7 +208,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
   mirror:
     amd:
-      label: ":amd: (MI355) Fusion E2E TP2 Quick (AITER subset)"
+      label: ":amd: (MI355) Fusion E2E TP2 Quick"
       dind: false
       device: mi355_2
       timeout_in_minutes: 60

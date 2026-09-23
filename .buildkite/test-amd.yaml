@@ -3659,7 +3659,7 @@ steps:
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
 
-- label: ":amd: (MI355) Fusion E2E TP2 Quick (AITER subset)" # TBD
+- label: ":amd: (MI355) Fusion E2E TP2 Quick" # TBD
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
