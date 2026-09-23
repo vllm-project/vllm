@@ -122,6 +122,7 @@ class ParserEngine(Parser):
         self._deferred_content: str = ""
         self._deferred_reasoning: str = ""
         self._content_has_nonws: bool = False
+        self._held_content_sep: str = ""
         self._suppress_tool_calls: bool = False
 
         self._arg_converter = parser_engine_config.arg_converter
@@ -136,6 +137,7 @@ class ParserEngine(Parser):
         self._strip_content_ws_with_tools = (
             parser_engine_config.strip_content_whitespace_with_tools
         )
+        self._content_tool_sep = parser_engine_config.content_tool_separator
 
         vocab = self.vocab
         self._reasoning_start_token_id: int | None = None
@@ -204,7 +206,7 @@ class ParserEngine(Parser):
 
     def finish_streaming(self) -> DeltaMessage | None:
         events = self._engine.finish()
-        if events or self._deferred_content:
+        if events or self._deferred_content or self._held_content_sep:
             return self._events_to_delta(events, finished=True)
         return None
 
@@ -215,6 +217,7 @@ class ParserEngine(Parser):
         self._deferred_content = ""
         self._deferred_reasoning = ""
         self._content_has_nonws = False
+        self._held_content_sep = ""
         self._prompt_streaming_prepared = False
 
     def adjust_request(
@@ -435,11 +438,44 @@ class ParserEngine(Parser):
         tools_called: bool,
     ) -> str | None:
         if tools_called:
+            sep = self._content_tool_sep
+            if sep and content.endswith(sep):
+                content = content[: -len(sep)]
             if self._strip_content_ws_with_tools:
                 content = content.strip()
             elif self._drop_ws_only_content_before_tools and not content.strip():
                 content = ""
         return content or None
+
+    def _hold_content_tool_separator(
+        self,
+        content_str: str,
+        tool_follows: bool,
+        finished: bool,
+    ) -> str:
+        """Withhold a trailing (partial) content/tool separator until we know
+        whether a tool-call block follows it.
+
+        Mirrors the reference DeepSeek parser, which treats the separator as
+        part of the tool-call opener: when a tool call follows, exactly one
+        trailing separator is dropped; when more text follows or the turn
+        ends without a tool call, the withheld text is released unchanged.
+        """
+        sep = self._content_tool_sep
+        assert sep
+        content_str = self._held_content_sep + content_str
+        self._held_content_sep = ""
+        if tool_follows:
+            if content_str.endswith(sep):
+                content_str = content_str[: -len(sep)]
+            return content_str
+        if finished:
+            return content_str
+        for k in range(min(len(sep), len(content_str)), 0, -1):
+            if content_str.endswith(sep[:k]):
+                self._held_content_sep = content_str[-k:]
+                return content_str[:-k]
+        return content_str
 
     # ── Streaming: parse_delta ────────────────────────────────────────
 
@@ -777,7 +813,11 @@ class ParserEngine(Parser):
         events: list[SemanticEvent],
         finished: bool = False,
     ) -> DeltaMessage | None:
-        if not events and not self._deferred_content:
+        if (
+            not events
+            and not self._deferred_content
+            and not (finished and self._held_content_sep)
+        ):
             return None
 
         tool_call_deltas: list[DeltaToolCall] = []
@@ -845,6 +885,13 @@ class ParserEngine(Parser):
             elif not finished:
                 self._deferred_content = content_str
                 content_str = ""
+
+        if self._content_tool_sep and (
+            self._content_has_nonws or self._held_content_sep
+        ):
+            content_str = self._hold_content_tool_separator(
+                content_str, seen_tool_event, finished
+            )
 
         content = content_str or None
         reasoning = "".join(reasoning_parts) or None

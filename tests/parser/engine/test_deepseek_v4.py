@@ -849,6 +849,143 @@ def _tool_calls(*invokes):
     return DSML_TOOL_START + "\n".join(invokes) + DSML_TOOL_END
 
 
+# ── Content/tool separator round-trip ────────────────────────────────
+
+
+class TestContentToolSeparator:
+    """The template renders ``{content}\n\n<｜DSML｜tool_calls>`` and the
+    reference DeepSeek parser consumes that ``\n\n`` as part of the tool-call
+    opener. If the client receives it in ``content`` and echoes the turn back
+    as history, the encoder adds its own ``\n\n`` and the turn re-renders
+    with four newlines instead of the two the model generated."""
+
+    _CALL = _tool_calls(_invoke("get_weather", ("location", "true", "NYC")))
+
+    @pytest.fixture
+    def parser(self, mock_tokenizer):
+        return DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Let me check.\n\n", "Let me check."),
+            ("Let me check.\n\n\n", "Let me check.\n"),
+            ("Let me check.\n", "Let me check.\n"),
+            ("Let me check.", "Let me check."),
+        ],
+    )
+    def test_non_streaming_drops_exactly_one_separator(
+        self, parser, mock_request, text, expected
+    ):
+        result = parser.extract_tool_calls(text + self._CALL, mock_request)
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.content == expected
+
+    def test_non_streaming_parse(self, parser, mock_request):
+        _, content, tool_calls = parser.parse(
+            "Let me check.\n\n" + self._CALL, mock_request
+        )
+        assert content == "Let me check."
+        assert tool_calls is not None
+        assert [tc.name for tc in tool_calls] == ["get_weather"]
+
+    def test_no_tool_call_keeps_trailing_newlines(self, parser, mock_request):
+        result = parser.extract_tool_calls("Done.\n\n", mock_request)
+        assert result.tools_called is False
+        assert result.content == "Done.\n\n"
+
+    @pytest.mark.parametrize(
+        "chunks",
+        [
+            ["Let me check.\n\n", DSML_TOOL_START, _CALL[len(DSML_TOOL_START) :]],
+            [
+                "Let me check.",
+                "\n",
+                "\n",
+                DSML_TOOL_START,
+                _CALL[len(DSML_TOOL_START) :],
+            ],
+            ["Let me check.\n", "\n" + DSML_TOOL_START, _CALL[len(DSML_TOOL_START) :]],
+            ["Let me check.\n\n" + _CALL],
+        ],
+    )
+    def test_streaming_drops_separator(self, parser, mock_request, chunks):
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        assert collect_content(results) == "Let me check."
+        assert collect_function_name(results) == "get_weather"
+        assert json.loads(collect_tool_arguments(results)) == {"location": "NYC"}
+
+    def test_streaming_releases_separator_when_text_continues(
+        self, parser, mock_request
+    ):
+        chunks = ["Let me check.\n\n", "Then more.", "\n"]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        results.append((parser.finish_streaming(), ""))
+        assert collect_content(results) == "Let me check.\n\nThen more.\n"
+
+    def test_streaming_releases_partial_separator_at_finish(self, parser, mock_request):
+        chunks = ["Let me check.", "\n"]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        # The trailing newline is withheld until the turn ends without a tool call.
+        assert collect_content(results) == "Let me check."
+        results.append((parser.finish_streaming(), ""))
+        assert collect_content(results) == "Let me check.\n"
+
+    def test_parsed_turn_re_renders_byte_identically(self, parser, mock_request):
+        """Round trip through the bundled encoder: what the model generated is
+        exactly what the encoder renders for the parsed history turn."""
+        from vllm.tokenizers import deepseek_v4_encoding as enc
+
+        history = [
+            {"role": "user", "content": "Weather?"},
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": json.dumps({"location": "NYC"}),
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "Sunny"},
+        ]
+        rendered = enc.encode_messages(history, thinking_mode="chat")
+        generated = rendered.split("<｜Assistant｜>")[1].split(enc.eos_token)[0]
+        generated = generated.removeprefix("</think>")
+        assert generated.startswith("Let me check.\n\n<")
+
+        result = parser.extract_tool_calls(generated, mock_request)
+        assert result.content == "Let me check."
+        echoed = [
+            history[0],
+            {
+                "role": "assistant",
+                "content": result.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in result.tool_calls
+                ],
+            },
+            history[2],
+        ]
+        assert enc.encode_messages(echoed, thinking_mode="chat") == rendered
+
+
 class TestParallelUnwrapping:
     @pytest.fixture
     def weather_tool(self):
