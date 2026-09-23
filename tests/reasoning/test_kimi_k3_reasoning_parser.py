@@ -19,6 +19,8 @@ SEP = "<|sep|>"
 THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
+OPEN_IDS = [1, 2, 3]
+CLOSE_IDS = [4, 2, 3]
 
 
 class DummyTokenizer:
@@ -117,6 +119,68 @@ def test_is_reasoning_end_ignores_stale_close_from_prior_turn():
     assert parser.is_reasoning_end([*stale_close, *new_open, *stale_close])
     # open with no close yet -> not ended
     assert not parser.is_reasoning_end([*new_open])
+
+
+def test_count_reasoning_tokens_with_xtml_markers():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    token_ids = [
+        *OPEN_IDS,
+        9,
+        10,
+        *CLOSE_IDS,
+        *[ord(ch) for ch in RESPONSE_OPEN],
+        11,
+        12,
+    ]
+
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
+def test_count_reasoning_tokens_with_generation_prefix_consumed():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    token_ids = [9, 10, *CLOSE_IDS, *[ord(ch) for ch in RESPONSE_OPEN], 11]
+
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
+def test_count_reasoning_tokens_does_not_count_response_only_output():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    token_ids = [*[ord(ch) for ch in RESPONSE_OPEN], 11, 12]
+
+    assert parser.count_reasoning_tokens(token_ids) == 0
+
+
+def test_count_reasoning_tokens_counts_unterminated_reasoning():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    token_ids = [*OPEN_IDS, 9, 10]
+
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
+def test_count_reasoning_tokens_is_zero_when_thinking_disabled():
+    parser = KimiK3ReasoningParser(
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
+    )
+
+    assert parser.count_reasoning_tokens([*OPEN_IDS, 9, *CLOSE_IDS]) == 0
+
+
+def test_count_reasoning_tokens_incremental_handles_split_markers():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    assert parser.count_reasoning_tokens_incremental([*OPEN_IDS[:2]]) == 0
+    assert (
+        parser.count_reasoning_tokens_incremental([OPEN_IDS[2], 9, CLOSE_IDS[0]]) == 1
+    )
+    count = parser.count_reasoning_tokens_incremental(
+        [*CLOSE_IDS[1:], *[ord(ch) for ch in RESPONSE_OPEN], 11], finished=True
+    )
+
+    assert count == 1
 
 
 def test_streaming_split_open_marker_is_held_back():
@@ -248,10 +312,6 @@ def test_adjust_request_keeps_xtml_markers_contiguous():
     assert adjusted.skip_special_tokens is False
     if hasattr(adjusted, "spaces_between_special_tokens"):
         assert adjusted.spaces_between_special_tokens is False
-
-
-OPEN_IDS = [1, 2, 3]
-CLOSE_IDS = [4, 2, 3]
 
 
 def _reference_is_reasoning_end(input_ids: list[int]) -> bool:

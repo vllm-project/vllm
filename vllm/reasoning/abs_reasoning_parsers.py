@@ -149,6 +149,17 @@ class ReasoningParser:
         # By default, assume the parser cannot detect reasoning spans.
         return 0
 
+    def count_reasoning_tokens_incremental(
+        self, token_ids: Sequence[int], *, finished: bool = False
+    ) -> int | None:
+        """Count reasoning tokens incrementally, if supported.
+
+        Parsers with stateful incremental accounting may override this method.
+        The returned count is cumulative. Returning ``None`` keeps the caller
+        on the full-sequence fallback used by existing parsers.
+        """
+        return None
+
     @abstractmethod
     def extract_reasoning(
         self,

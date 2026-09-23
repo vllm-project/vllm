@@ -134,8 +134,20 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._think_close_ids = tokenizer.encode(
             self._think_close, add_special_tokens=False
         )
+        self._response_open_ids = tokenizer.encode(
+            self._response_open, add_special_tokens=False
+        )
+        self._response_close_ids = tokenizer.encode(
+            self._response_close, add_special_tokens=False
+        )
+        self._message_close_ids = tokenizer.encode(
+            self._message_close, add_special_tokens=False
+        )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
+        self._incremental_count_pending_ids: list[int] = []
+        self._incremental_count_in_reasoning = True
+        self._incremental_count_total = 0
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -210,6 +222,89 @@ class KimiK3ReasoningParser(ReasoningParser):
         if cached_delta_ids == tuple(input_ids) and cached_content_ids is not None:
             return cached_content_ids
         return self._extract_content_ids(input_ids)
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count generated tokens in the Kimi K3 think channel."""
+        if not self._thinking_enabled:
+            return 0
+
+        count = 0
+        in_reasoning = True
+        i = 0
+        markers = (
+            (self._think_open_ids, True),
+            (self._think_close_ids, False),
+            (self._response_open_ids, False),
+            (self._response_close_ids, False),
+            (self._message_close_ids, False),
+        )
+        while i < len(token_ids):
+            for marker, enters_reasoning in markers:
+                if (
+                    marker
+                    and i + len(marker) <= len(token_ids)
+                    and _match_at(token_ids, i, marker)
+                ):
+                    in_reasoning = enters_reasoning
+                    i += len(marker)
+                    break
+            else:
+                if in_reasoning:
+                    count += 1
+                i += 1
+        return count
+
+    def count_reasoning_tokens_incremental(
+        self, token_ids: Sequence[int], *, finished: bool = False
+    ) -> int:
+        """Count K3 reasoning tokens while retaining split marker prefixes."""
+        if not self._thinking_enabled:
+            return 0
+
+        markers = (
+            (self._think_open_ids, True),
+            (self._think_close_ids, False),
+            (self._response_open_ids, False),
+            (self._response_close_ids, False),
+            (self._message_close_ids, False),
+        )
+        pending = self._incremental_count_pending_ids
+        tokens = [*pending, *token_ids]
+        self._incremental_count_pending_ids = []
+
+        count = 0
+        i = 0
+        while i < len(tokens):
+            for marker, enters_reasoning in markers:
+                if (
+                    marker
+                    and i + len(marker) <= len(tokens)
+                    and _match_at(tokens, i, marker)
+                ):
+                    self._incremental_count_in_reasoning = enters_reasoning
+                    i += len(marker)
+                    break
+            else:
+                remaining = tokens[i:]
+                if not finished and any(
+                    len(remaining) < len(marker)
+                    and remaining == marker[: len(remaining)]
+                    for marker, _ in markers
+                    if marker
+                ):
+                    self._incremental_count_pending_ids = remaining
+                    break
+                if self._incremental_count_in_reasoning:
+                    count += 1
+                i += 1
+
+        if finished and self._incremental_count_pending_ids:
+            if self._incremental_count_in_reasoning:
+                count += len(self._incremental_count_pending_ids)
+            self._incremental_count_pending_ids = []
+
+        self._incremental_count_total += count
+        return self._incremental_count_total
 
     def _strip_content_wrapper(self, text: str) -> str:
         """Strip ``<|open|>response<|sep|>…<|close|>response<|sep|>`` wrapper and
