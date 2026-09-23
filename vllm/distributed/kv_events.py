@@ -547,6 +547,11 @@ class ZmqEventPublisher(EventPublisher):
 
         if "inproc" in endpoint:
             return f"{endpoint}_dp{data_parallel_rank}"
+        # `_is_bind_endpoint` accepts ipc:// endpoints, so they need a per-rank
+        # suffix here too. Checked by prefix because "ipc" is a substring of
+        # "inproc", which is handled above.
+        if endpoint.startswith("ipc://"):
+            return f"{endpoint}_dp{data_parallel_rank}"
         if "tcp" in endpoint:
             if endpoint and ":" in endpoint:
                 # Get everything after the last colon (the port)
@@ -558,7 +563,7 @@ class ZmqEventPublisher(EventPublisher):
                 new_port = base_port + data_parallel_rank
                 return f"{base_addr}:{new_port}"
             return endpoint
-        raise ValueError("Invalid endpoint: must contain 'inproc' or 'tcp'")
+        raise ValueError("Invalid endpoint: must contain 'inproc', 'ipc://' or 'tcp'")
 
 
 class EventPublisherFactory:
