@@ -943,6 +943,7 @@ class VllmConfig:
 
         model_config.hf_config = hf_config
         model_config.model_arch_config = model_config.get_model_arch_config()
+        model_config.is_submodel_config = True
 
         return replace(self, model_config=model_config)
 
@@ -1330,6 +1331,12 @@ class VllmConfig:
         """Verify configs are valid & consistent with each other."""
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
+
+        if self.model_config is not None and self.model_config.is_submodel_config:
+            # with_hf_config() view: the parent config was already validated,
+            # and this view's empty architecture list makes the model-dependent checks
+            # below unsafe (e.g. use_mla resolves the architecture registry).
+            return
 
         self._resolve_mm_encoder_only()
 
