@@ -4,7 +4,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
@@ -234,6 +234,42 @@ class OffloadingKVEventsConfig:
     # OffloadingConnector opt-in for self-describing BlockStored payloads.
     # Effective only when enable_kv_cache_events is true.
     self_describing_kv_events: bool
+
+
+@dataclass(frozen=True)
+class ConfigInfo:
+    """Static, per-engine facts that one offloading component publishes.
+
+    A subclass declares one field for each label of
+    vllm:kv_offload_config_info. OffloadingSpec.config_info_keys() returns the
+    names in the API-server process, and OffloadingManager.config_info()
+    returns the values in the engine process. Both sides come off the same
+    fields, so a name cannot appear on one side alone. Document every field in
+    docs/features/kv_offloading_usage.md (document with the correct prefix in the
+    label).
+    """
+
+    # Start of every label name of this class. A secondary tier keeps it
+    # empty, because TieringOffloadingSpec adds the tier index and the tier
+    # type to each name.
+    key_prefix: ClassVar[str] = ""
+
+    @classmethod
+    def config_info_keys(cls) -> tuple[str, ...]:
+        """Return one label name for each field, in field order."""
+        return tuple(f"{cls.key_prefix}{info.name}" for info in fields(cls))
+
+    def as_config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Return the label values, under the names of config_info_keys().
+
+        Returns "None" for an unknown fact. Done so the label will not be
+        dropped, as an empty label would be.
+        """
+        values = (getattr(self, info.name) for info in fields(self))
+        return {
+            key: "None" if value is None else value
+            for key, value in zip(self.config_info_keys(), values)
+        }
 
 
 class OffloadingManager(ABC):

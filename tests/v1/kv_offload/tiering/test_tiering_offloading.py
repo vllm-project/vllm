@@ -256,6 +256,19 @@ class TestExampleSecondaryTierManager:
         # Third chunk not present
         assert tier.lookup(chunks[2], _CTX) is LookupResult.MISS
 
+    def test_config_info_keys_match_the_filled_values(self):
+        """A name the declaration misses becomes a dropped label at runtime."""
+        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+        tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="example",
+            custom_param=67,
+        )
+        info = tier.config_info()
+        assert tuple(info) == ExampleSecondaryTierManager.config_info_keys({})
+        assert info["example_info"] == 67
+
 
 # What a request-level cascade does with a key already present in the primary
 # tier, keyed by what primary lookup says about it. SUPPLY reaches the peer now,

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec
+from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec, ConfigInfo
 
 
 class CPUOffloadingMetrics:
@@ -30,7 +30,7 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
 
 
 @dataclass(frozen=True)
-class CPUOffloadingInfo:
+class CPUOffloadingInfo(ConfigInfo):
     """Static, per-engine facts about the CPU offload tier.
 
     CPUOffloadingManager fills the values through
@@ -39,6 +39,8 @@ class CPUOffloadingInfo:
     docs/features/kv_offloading_usage.md.
 
     """
+
+    key_prefix: ClassVar[str] = "cpu_"
 
     # Chunk slots in the tier. Chunks, not GPU blocks. See blocks_per_chunk.
     num_chunks: int
@@ -52,20 +54,3 @@ class CPUOffloadingInfo:
     # to max_model_len. None when max_model_len is not known. See
     # CPUOffloadingManager._capacity_tokens_at_max_len.
     capacity_tokens_at_max_len: int | None
-
-    @classmethod
-    def config_info_keys(cls) -> tuple[str, ...]:
-        """Return one label name for each field, in field order."""
-        return tuple(f"cpu_{field.name}" for field in fields(cls))
-
-    def as_config_info(self) -> Mapping[str, str | int]:
-        """Return the label values, under the names of config_info_keys().
-
-        Returns "None" for an unknown fact. Done so the label will not be
-        dropped, as an empty label would be.
-        """
-        values = (getattr(self, field.name) for field in fields(self))
-        return {
-            key: "None" if value is None else value
-            for key, value in zip(self.config_info_keys(), values)
-        }
