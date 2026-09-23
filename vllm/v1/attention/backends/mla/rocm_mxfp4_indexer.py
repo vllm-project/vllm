@@ -29,7 +29,9 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
 )
 from vllm.v1.attention.ops.rocm_mxfp4_indexer import (
+    build_rocm_mxfp4_decode_schedule,
     check_rocm_mxfp4_cache_geometry,
+    rocm_mxfp4_decode_schedule_words,
     rocm_mxfp4_n_per_tile,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
@@ -76,6 +78,8 @@ class DeepseekV41RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     decode_row_lens: torch.Tensor | None = None
     """[rows] int32 compressed context of each decode query row."""
     decode_block_ends: torch.Tensor | None = None
+    decode_schedule: torch.Tensor | None = None
+    """The dense decode launches' work schedule, built once for the step."""
     decode_use_gather: bool = False
     decode_gather: tuple[dict, torch.Tensor] | None = None
     """The pool the first consumer resolved for the decode rows."""
@@ -180,6 +184,7 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
             )
         hf_config = vllm_config.model_config.hf_text_config
         num_heads, head_dim = hf_config.index_n_heads, hf_config.index_head_dim
+        self.num_heads, self.head_dim = num_heads, head_dim
         self.page_entries = kv_cache_spec.block_size // self.compress_ratio
         check_rocm_mxfp4_cache_geometry(num_heads, head_dim, self.page_entries)
         # The kernel takes one block-table row per query row. Flattening gives
@@ -227,6 +232,13 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
             self.arange_buffer.shape[0], **int32
         )
         self.context_lens_buffer = torch.zeros(scheduler_config.max_num_seqs, **int32)
+        # Every dense layer of this group reads the same rows through the same
+        # page geometry, so the step builds their schedule once; the scheduler
+        # launch costs about half a decode launch.
+        self.decode_schedule_buffer = torch.empty(
+            rocm_mxfp4_decode_schedule_words(num_heads, head_dim, self.page_entries),
+            **int32,
+        )
 
     def _prefill_split_seq_lens(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
         # The consumers' logits are [rows, pool] fp32 whatever the context, so
@@ -255,6 +267,13 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                 torch.add(lengths, block - 1, out=ends)
                 ends.floor_divide_(block)
                 metadata.decode_block_ends = ends
+            metadata.decode_schedule = build_rocm_mxfp4_decode_schedule(
+                lengths,
+                self.num_heads,
+                self.head_dim,
+                self.page_entries,
+                self.decode_schedule_buffer,
+            )
             metadata.decode_use_gather = self._gather_pays(
                 base.max_seq_len // self.compress_ratio, _GATHER_MIN_CUT_DECODE
             )

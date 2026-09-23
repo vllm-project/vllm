@@ -193,6 +193,12 @@ def _decode_metadata(case, rows, ratio):
     lens = torch.tensor([(p + 1) // ratio for _, p in rows], dtype=torch.int32)
     lens = lens.to(DEVICE)
     block_table = case.block_table[[req for req, _ in rows]].contiguous()
+    entries = case.cache[ratio].shape[1]
+    schedule = torch.empty(
+        ops.rocm_mxfp4_decode_schedule_words(HEADS, HEAD_DIM, entries),
+        dtype=torch.int32,
+        device=DEVICE,
+    )
     return DeepseekV41RocmMxfp4IndexerMetadata(
         seq_lens=None,
         max_seq_len=max(case.seq_lens),
@@ -204,6 +210,10 @@ def _decode_metadata(case, rows, ratio):
         decode=types.SimpleNamespace(block_table=block_table, seq_lens=lens[:, None]),
         decode_row_lens=lens,
         decode_block_ends=(lens + CAND_BLOCK - 1) // CAND_BLOCK,
+        # six rows, so the step gets a work schedule rather than the static grid
+        decode_schedule=ops.build_rocm_mxfp4_decode_schedule(
+            lens, HEADS, HEAD_DIM, entries, schedule
+        ),
     )
 
 

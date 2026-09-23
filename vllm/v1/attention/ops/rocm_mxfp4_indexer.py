@@ -75,6 +75,29 @@ def check_rocm_mxfp4_cache_geometry(
     _aiter().cache_format(num_heads, head_dim, page_entries)
 
 
+def rocm_mxfp4_decode_schedule_words(
+    num_heads: int, head_dim: int, page_entries: int
+) -> int:
+    """int32 words of a flattened decode step's work schedule."""
+    config = _aiter().select_config(num_heads, head_dim, 1, page_entries)
+    return 4 * config["target_wgs"]
+
+
+def build_rocm_mxfp4_decode_schedule(
+    row_lens: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    page_entries: int,
+    out: torch.Tensor,
+) -> torch.Tensor | None:
+    """Work descriptors that even out a flattened decode step's rows, or None
+    where the static grid already fills the machine. Depends only on the rows'
+    lengths and the cache geometry, so one serves every layer of a group."""
+    return _aiter().build_schedule(
+        row_lens, 1, num_heads, head_dim, page_entries, out=out
+    )
+
+
 def _kv_view(kv_cache: torch.Tensor, head_dim: int) -> torch.Tensor:
     """The indexer cache as [pages, entries, 1, bytes]. The page stride is the
     block-major pool's, not the page's own size."""
@@ -371,6 +394,7 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         logits_width,
         out_logits=logits,
         clean_logits=False,
+        schedule=metadata.decode_schedule,
         **_block_scores(layer, scores[0] if scores else None),
     )
     candidates = None if layer.candidates is None else layer.candidates[:rows]
