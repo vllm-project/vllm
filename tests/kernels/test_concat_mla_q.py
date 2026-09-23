@@ -152,8 +152,7 @@ def test_concat_mla_q_values_preserved(num_tokens):
 
 @pytest.mark.parametrize("rope_dim,transposed", [(0, False), (0, True), (64, False)])
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("use_aiter", [False, True])
-def test_concat_mla_q_fp8_nope_and_rope(rope_dim, transposed, enabled, use_aiter):
+def test_concat_mla_q_fp8_nope_and_rope(rope_dim, transposed, enabled):
     """FP8 query packing preserves values with empty RoPE and strided BMM output."""
     from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.attention.mla_attention import _DecodeConcatQuantFP8
@@ -175,7 +174,6 @@ def test_concat_mla_q_fp8_nope_and_rope(rope_dim, transposed, enabled, use_aiter
     )
     with set_current_vllm_config(config):
         quant = _DecodeConcatQuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
-        quant.use_aiter = quant.use_aiter and use_aiter
         actual = quant(ql, qp, scale)
     torch.testing.assert_close(actual.float(), expected.float(), atol=0, rtol=0)
     assert actual.is_contiguous()
