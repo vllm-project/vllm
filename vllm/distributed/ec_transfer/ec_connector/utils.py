@@ -60,24 +60,26 @@ def collect_ec_item_metadata(
 
     Keyed by mm_hash, each entry carries a `metadata` dict with whatever
     placeholder fields `resolver` says this model needs published for its
-    modality, so a consumer can skip the image transform. `item_indices`
+    modality, so a consumer can skip media preprocessing. `item_indices`
     identifies every occurrence in `mm_features`, including repeated hashes.
-    `data` is None for items served from the processor cache, so the metadata is
-    unavailable here and the consumer has to fall back to processing the
-    media itself. A connector that also has transfer coordinates to report
+    Audio token counts come from the placeholder; other metadata requires
+    `data` and falls back to raw media when it is unavailable on cache hits.
+    A connector that also has transfer coordinates to report
     (e.g. NIXL peer_host/peer_port/size_bytes) merges those in alongside
     `metadata`, not into it.
     """
     items: dict[str, dict[str, Any]] = {}
     for index, feature in enumerate(mm_features):
         metadata: dict[str, Any] = {}
+        wanted = resolver.fields_for(feature.modality)
+        if "audio_num_tokens" in wanted:
+            metadata["audio_num_tokens"] = [feature.mm_position.get_num_embeds()]
         if feature.data is not None:
-            wanted = resolver.fields_for(feature.modality)
             for key, value in feature.data.get_data().items():
                 if key not in wanted:
                     continue
                 if isinstance(value, torch.Tensor):
-                    metadata[key] = value.tolist()
+                    metadata[key] = torch.atleast_1d(value).tolist()
                 elif is_list_of(value, (int, float)):
                     # Some metadata (e.g. Qwen3-VL video timestamps) is
                     # produced as a plain list rather than a tensor.
