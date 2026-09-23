@@ -36,8 +36,8 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from .utils import AutoWeightsLoader
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 NORM2FN = {
@@ -114,36 +114,8 @@ class InternVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class InternVisionPatchModel(nn.Module):
-    def __init__(self, config: PretrainedConfig):
-        super().__init__()
-        self.config = config
-        self.embeddings = InternVisionEmbeddings(config)
-
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor | None = None,
-        pixel_embeds: torch.Tensor | None = None,
-    ) -> torch.FloatTensor:
-        if pixel_values is None and pixel_embeds is None:
-            raise ValueError("You have to specify pixel_values or pixel_embeds")
-
-        if pixel_embeds is not None:
-            hidden_states = pixel_embeds
-        elif pixel_values is not None:
-            if pixel_values.ndim == 4:
-                hidden_states = self.embeddings(pixel_values)
-            else:
-                raise ValueError(f"wrong pixel_values size: {pixel_values.shape}")
-
-        return hidden_states
-
-
 class InternParallelAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -445,11 +417,5 @@ class InternVisionModel(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

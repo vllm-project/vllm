@@ -126,7 +126,7 @@ Models using selective state-space mechanisms instead of standard transformer at
 Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`, `FalconMambaForCausalLM`) are supported.
 
 Hybrid models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g.,
-`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`, `Plamo2ForCausalLM`).
+`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`).
 
 Hybrid models with mechanisms different to Mamba are also supported (e.g, `Lfm2ForCausalLM`).
 

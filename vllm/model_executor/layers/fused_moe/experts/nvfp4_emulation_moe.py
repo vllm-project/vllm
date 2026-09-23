@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-NVFP4 quantization emulation for MoE.
+"""NVFP4 quantization emulation for MoE.
 
 This file implements NVFP4 emulation for NVFP4 MOE in case the hardware used does not
 natively support NVFP4 MOE.
@@ -86,8 +85,7 @@ def fused_moe_nvfp4_emulation_kernel(
     compute_type: tl.constexpr,
     group_size: tl.constexpr,
 ):
-    """
-    Fused MoE kernel for emulated NVFP4 weight-only dequantization + GEMM.
+    """Fused MoE kernel for emulated NVFP4 weight-only dequantization + GEMM.
 
     Activations A are BF16 (already QDQ'd externally).
     Weights B are packed uint8 NVFP4 [E, N, K//2] — two FP4 values per byte
@@ -334,8 +332,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
 
 
 class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
-    """
-    Extension of TritonExperts to support emulated NVFP4 MoE experts.
+    """Extension of TritonExperts to support emulated NVFP4 MoE experts.
 
     It may be used for NVFP4 models when the device does not have
     native support for this dtype.
@@ -427,8 +424,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        """
-        Apply emulated quantized MoE computation.
+        """Apply emulated quantized MoE computation.
 
         This dequantizes the weights on the fly and calls fused_experts_impl
         with activation quantization support.

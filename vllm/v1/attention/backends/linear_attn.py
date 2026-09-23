@@ -16,7 +16,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
 class LinearAttentionBackend(AttentionBackend):
@@ -46,19 +46,19 @@ class LinearAttentionMetadata:
 
 
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
+    kv_cache_spec: MambaSpec
     reorder_batch_threshold: int = 1
 
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        assert isinstance(kv_cache_spec, MambaSpec)
 
     def build(
         self,
@@ -120,13 +120,13 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
     def get_cudagraph_support(
         cls,
         vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
         return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,

@@ -19,8 +19,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""
-Memory-efficient attention for prefill.
+"""Memory-efficient attention for prefill.
 It supports page size = 1.
 """
 
@@ -31,6 +30,16 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
+
+
+def _prefer_narrow_kv_tile() -> bool:
+    """RDNA3/RDNA4 prefer a narrower KV tile than the shared default."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1x
+
+    # RDNA3/RDNA4 only: on_gfx1x() excludes gfx10xx and gfx1250.
+    return on_gfx1x()
 
 
 @triton.jit
@@ -58,6 +67,7 @@ def _fwd_kernel(
     IS_CAUSAL: tl.constexpr,
     SLIDING_WINDOW_Q: tl.constexpr,
     SLIDING_WINDOW_K: tl.constexpr,
+    SINKS_BIAS_KEY0: tl.constexpr,
     USE_SINKS: tl.constexpr,
     Lk: tl.constexpr,
 ):
@@ -98,8 +108,15 @@ def _fwd_kernel(
     # initialize pointer to m and l
     if USE_SINKS:
         sink = tl.load(Sinks + cur_head) * 1.4426950408889634
-        m_i = tl.full([BLOCK_M], sink, dtype=tl.float32)
-        l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
+        if SINKS_BIAS_KEY0:
+            # Sinks bias the logit of key 0, so the softmax starts empty and
+            # normalizes over the biased scores as usual.
+            m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+            l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+        else:
+            # Sinks are a null logit that only inflates the denominator.
+            m_i = tl.full([BLOCK_M], sink, dtype=tl.float32)
+            l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     else:
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
         l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
@@ -113,8 +130,17 @@ def _fwd_kernel(
     # Apply causal attention pruning and sliding window attention pruning
     end_n = tl.minimum(end_n, (start_m + 1) * BLOCK_M) if IS_CAUSAL else end_n
 
-    # Calculate the start position for backward sliding window
+    # Calculate the start position for backward sliding window.
+    # Keys outside the window are fully masked below, so skip those blocks
+    # rather than loading them and discarding the result. Without this a
+    # windowed pass still costs O(seq_len^2).
     start_n_limit = 0
+    if SLIDING_WINDOW_Q > 0:
+        first_needed = start_m * BLOCK_M - SLIDING_WINDOW_Q
+        start_n_limit = tl.maximum(0, (first_needed // BLOCK_N) * BLOCK_N)
+    if SLIDING_WINDOW_K > 0:
+        last_needed = (start_m + 1) * BLOCK_M - 1 + SLIDING_WINDOW_K
+        end_n = tl.minimum(end_n, last_needed + 1)
     end_n_limit = block_mask * end_n
 
     for start_n in range(start_n_limit, end_n_limit, BLOCK_N):
@@ -151,6 +177,8 @@ def _fwd_kernel(
 
         qk = tl.dot(q, k)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
+        if USE_SINKS and SINKS_BIAS_KEY0:
+            qk = tl.where(mask & (pos_k == 0), qk + sink, qk)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
         p = tl.math.exp2(qk)
@@ -208,9 +236,9 @@ def context_attention_fwd(
     sliding_window_q: int | None = None,
     sliding_window_k: int | None = None,
     sinks: torch.Tensor | None = None,
+    sinks_bias_key0: bool = False,
 ):
-    """
-    q, k, v: [b * s, head, head_dim]
+    """q, k, v: [b * s, head, head_dim]
     b_start_loc: [b]
     b_seq_len: [b]
     out: [b * s, head, head_dim]
@@ -230,6 +258,10 @@ def context_attention_fwd(
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
     num_warps = 4 if Lk <= 64 else 8
+
+    # BLOCK_M, num_warps and num_stages stay at the shared defaults; min()
+    # leaves dtypes whose default tile is already 32, such as float32, alone.
+    BLOCK_N = min(BLOCK, 32) if _prefer_narrow_kv_tile() else BLOCK
 
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
@@ -254,11 +286,12 @@ def context_attention_fwd(
         kv_group_num=kv_group_num,
         BLOCK_M=BLOCK,
         BLOCK_DMODEL=triton.next_power_of_2(Lk),
-        BLOCK_N=BLOCK,
+        BLOCK_N=BLOCK_N,
         IS_CAUSAL=is_causal,
         SLIDING_WINDOW_Q=sliding_window_q,
         SLIDING_WINDOW_K=sliding_window_k,
         USE_SINKS=sinks is not None,
+        SINKS_BIAS_KEY0=sinks_bias_key0,
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,

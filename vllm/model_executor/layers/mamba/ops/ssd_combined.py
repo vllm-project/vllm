@@ -175,8 +175,7 @@ def mamba_chunk_scan_combined_varlen(
     return_intermediate_states=False,
     state_dtype=None,
 ):
-    """
-    Argument:
+    """Argument:
         x: (seqlen, nheads, headdim)
         dt: (seqlen, nheads)
         A: (nheads)
@@ -198,7 +197,6 @@ def mamba_chunk_scan_combined_varlen(
     Return:
         varlen_states: (batch, nheads, headdim, dstate)
     """
-
     assert cu_seqlens is not None, "cu_seqlens must be provided assuming varlen input"
     assert seq_idx is not None
 
@@ -225,3 +223,11 @@ def mamba_chunk_scan_combined_varlen(
     )
 
     return varlen_states
+
+
+from vllm.platforms import current_platform  # noqa: E402
+
+if current_platform.is_cpu():
+    import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_mamba_ssm
+
+    _mamba_chunk_scan_combined_fwd = cpu_mamba_ssm._mamba_chunk_scan_combined_fwd_cpu  # type: ignore

@@ -47,13 +47,13 @@ from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -82,6 +82,8 @@ logger = init_logger(__name__)
 
 class FlashConfig(PretrainedConfig):
     """Flash model configuration."""
+
+    moe_intermediate_size: int
 
     model_type = "longcat_flash"
     keys_to_ignore_at_inference = ["past_key_values"]
@@ -252,12 +254,12 @@ class LongcatRouter(nn.Module):
             else config.num_experts[0]
         )
         self.n_routed_experts = self.n_routed_experts + zero_expert_num
-        self.classifier = ReplicatedLinear(
+        self.classifier = GateLinear(
             config.hidden_size,
             self.n_routed_experts,
             bias=config.router_bias,
+            out_dtype=router_params_dtype,
             params_dtype=router_params_dtype,
-            quant_config=None,
             prefix=f"{prefix}.classifier",
         )
         self.e_score_correction_bias = nn.Parameter(
@@ -297,7 +299,7 @@ class LongcatMoe(nn.Module):
         )
 
         assert config.zero_expert_type is not None
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             zero_expert_type=config.zero_expert_type,
             e_score_correction_bias=self.router.e_score_correction_bias,
             num_experts=num_experts,
@@ -317,7 +319,7 @@ class LongcatMoe(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # Align to FusedMoE padded hidden size to avoid dim mismatch
+        # Align to MoERunner padded hidden size to avoid dim mismatch
         padded_hidden = self.experts.moe_config.hidden_dim
         if hidden_dim < padded_hidden:
             hidden_states_padded = torch.nn.functional.pad(
@@ -329,11 +331,9 @@ class LongcatMoe(nn.Module):
         else:
             hidden_states_padded = hidden_states
 
-        router_logits_full = self.router(
-            hidden_states_padded.to(self.router_params_dtype)
-        )
+        router_logits_full = self.router(hidden_states_padded)
 
-        # FusedMoE handles routing memoization and zero expert computation
+        # MoERunner handles routing memoization and zero expert computation
         # internally. Pass full router_logits (including zero experts) so that
         # zero experts can be properly identified in routing.
         final_hidden_states = self.experts(
@@ -604,7 +604,7 @@ class FlashModel(nn.Module):
             else:
                 is_expert_weight = False
                 for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
+                    param_name, weight_name, expert_id, expert_shard_id = mapping
                     if weight_name not in name:
                         continue
                     is_expert_weight = True
@@ -627,7 +627,7 @@ class FlashModel(nn.Module):
                         param,
                         loaded_weight,
                         name_mapped,
-                        shard_id=shard_id,
+                        shard_id=expert_shard_id,
                         expert_id=expert_id,
                         return_success=True,
                     )
@@ -664,11 +664,14 @@ class FlashModel(nn.Module):
                 if isinstance(self.layers[layer_id], PPMissingLayer):
                     continue
                 self_attn = self.layers[layer_id].self_attn[i]
-                if hasattr(
-                    self.quant_config, "weight_block_size"
-                ) and self_attn.kv_b_proj.weight.dtype in (
-                    torch.float8_e4m3fn,
-                    torch.float8_e4m3fnuz,
+                if (
+                    self.quant_config is not None
+                    and hasattr(self.quant_config, "weight_block_size")
+                    and self_attn.kv_b_proj.weight.dtype
+                    in (
+                        torch.float8_e4m3fn,
+                        torch.float8_e4m3fnuz,
+                    )
                 ):
                     weight_block_size = self.quant_config.weight_block_size
                     if weight_block_size is not None:

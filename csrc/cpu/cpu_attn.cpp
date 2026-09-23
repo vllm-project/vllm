@@ -1,5 +1,8 @@
 #include "cpu_attn_dispatch_generated.h"
 
+// Runtime check for AMX-FP8, implemented in cpu_isa.cpp.
+extern bool runtime_has_amx_fp8();
+
 // Maps kv_cache_dtype string to Fp8KVCacheDataType enum.
 // "auto" -> kAuto(0); "fp8"/"fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
 static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
@@ -20,6 +23,16 @@ bool cpu_attn_has_isa(const std::string& isa) {
     return false;
 #endif
   }
+  if (isa == "amx_fp8") {
+#ifdef CPU_CAPABILITY_AMXFP8
+    // Guard with runtime CPUID check: the binary may be compiled with
+    // -mamx-fp8 (CPU_CAPABILITY_AMXFP8 defined) but run on a CPU that
+    // has AMX-BF16 without AMX-FP8 (e.g. Sapphire Rapids, Emerald Rapids).
+    return runtime_has_amx_fp8();
+#else
+    return false;
+#endif
+  }
   return false;
 }
 
@@ -30,10 +43,13 @@ torch::Tensor get_scheduler_metadata(
     const torch::Tensor& query_start_loc, const bool causal,
     const int64_t window_size, const std::string& isa_hint,
     const bool enable_kv_split,
-    const std::optional<torch::Tensor>& dynamic_causal) {
+    const std::optional<torch::Tensor>& dynamic_causal,
+    const std::string& kv_cache_dtype) {
   cpu_attention::ISA isa;
   if (isa_hint == "amx") {
     isa = cpu_attention::ISA::AMX;
+  } else if (isa_hint == "amx_fp8") {
+    isa = cpu_attention::ISA::AMX_FP8;
   } else if (isa_hint == "vec") {
     isa = cpu_attention::ISA::VEC;
   } else if (isa_hint == "vec16") {
@@ -65,9 +81,11 @@ torch::Tensor get_scheduler_metadata(
   input.dynamic_causal =
       dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
 
+  const int64_t kv_cache_idx =
+      static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
-    CPU_ATTN_DISPATCH(head_dim, isa, 0, [&]() {
-      input.elem_size = sizeof(scalar_t);
+    CPU_ATTN_DISPATCH(head_dim, isa, kv_cache_idx, [&]() {
+      input.elem_size = sizeof(attn_impl::kv_cache_t);
       input.q_buffer_elem_size = sizeof(attn_impl::q_buffer_t);
       input.logits_buffer_elem_size = sizeof(attn_impl::logits_buffer_t);
       input.output_buffer_elem_size =
@@ -127,6 +145,8 @@ void cpu_attn_reshape_and_cache(
   cpu_attention::ISA isa_tag = [&]() {
     if (isa == "amx") {
       return cpu_attention::ISA::AMX;
+    } else if (isa == "amx_fp8") {
+      return cpu_attention::ISA::AMX_FP8;
     } else if (isa == "vec") {
       return cpu_attention::ISA::VEC;
     } else if (isa == "vec16") {
@@ -146,8 +166,9 @@ void cpu_attn_reshape_and_cache(
 
   if (is_fp8) {
     TORCH_CHECK(isa_tag == cpu_attention::ISA::AMX ||
+                    isa_tag == cpu_attention::ISA::AMX_FP8 ||
                     isa_tag == cpu_attention::ISA::VEC,
-                "FP8 KV cache is only supported on x86 (AMX/VEC) ISA");
+                "FP8 KV cache is only supported on x86 (AMX_FP8/AMX/VEC) ISA");
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(
@@ -222,7 +243,19 @@ void cpu_attention_with_kv_cache(
   input.block_table = block_table.data_ptr<int32_t>();
   input.alibi_slopes =
       alibi_slopes.has_value() ? alibi_slopes->data_ptr<float>() : nullptr;
-  input.s_aux = s_aux.has_value() ? s_aux->data_ptr<c10::BFloat16>() : nullptr;
+  // Attention sinks may be bf16 (native path) or fp32. Anything that is not
+  // bf16 must be provided as fp32 and is executed in full float precision.
+  if (s_aux.has_value()) {
+    TORCH_CHECK(s_aux->scalar_type() == at::ScalarType::BFloat16 ||
+                    s_aux->scalar_type() == at::ScalarType::Float,
+                "cpu_attention_with_kv_cache: s_aux (attention sinks) dtype ",
+                s_aux->scalar_type(), " must be bfloat16 or float32");
+    input.s_aux = s_aux->data_ptr();
+    input.s_aux_is_bf16 = s_aux->scalar_type() == at::ScalarType::BFloat16;
+  } else {
+    input.s_aux = nullptr;
+    input.s_aux_is_bf16 = false;
+  }
   input.dynamic_causal =
       dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
   input.scale = scale;
@@ -234,8 +267,9 @@ void cpu_attention_with_kv_cache(
     input.k_scale_fp8 = static_cast<float>(k_scale);
     input.v_scale_fp8 = static_cast<float>(v_scale);
     TORCH_CHECK(input.metadata->isa == cpu_attention::ISA::AMX ||
+                    input.metadata->isa == cpu_attention::ISA::AMX_FP8 ||
                     input.metadata->isa == cpu_attention::ISA::VEC,
-                "FP8 KV cache is only supported on x86 (AMX/VEC) ISA");
+                "FP8 KV cache is only supported on x86 (AMX_FP8/AMX/VEC) ISA");
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(

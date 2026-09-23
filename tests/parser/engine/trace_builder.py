@@ -31,8 +31,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4Parser,
     DeepSeekV32Parser,
+    DeepSeekV41Parser,
     Gemma4Parser,
     Glm47MoeParser,
+    GraniteParser,
+    InklingParser,
     KimiK2Parser,
     MinimaxM2Parser,
     NemotronV3Parser,
@@ -657,7 +660,7 @@ _DSV4_VOCAB: dict[str, int] = {
 }
 
 
-def _dsv4_param_text(key: str, value: Any) -> str:
+def _dsv4_param_text(key: str, value: Any, dsml: str = _DSML) -> str:
     is_string = isinstance(value, str)
     if is_string:
         val_str = value
@@ -669,36 +672,39 @@ def _dsv4_param_text(key: str, value: Any) -> str:
         val_str = json.dumps(value, ensure_ascii=False)
     string_attr = "true" if is_string else "false"
     return (
-        f'<{_DSML}parameter name="{key}" string="{string_attr}">'
-        f"{val_str}</{_DSML}parameter>\n"
+        f'<{dsml}parameter name="{key}" string="{string_attr}">'
+        f"{val_str}</{dsml}parameter>\n"
     )
 
 
-def _dsv4_tool_text(tc: ToolCallSpec) -> str:
-    parts = [f'<{_DSML}invoke name="{tc.name}">\n']
+def _dsv4_tool_text(tc: ToolCallSpec, dsml: str = _DSML) -> str:
+    parts = [f'<{dsml}invoke name="{tc.name}">\n']
     for key, value in tc.arguments.items():
-        parts.append(_dsv4_param_text(key, value))
-    parts.append(f"</{_DSML}invoke>\n")
+        parts.append(_dsv4_param_text(key, value, dsml))
+    parts.append(f"</{dsml}invoke>\n")
     return "".join(parts)
 
 
 def _dsml_tool_segs(
     scenario: Scenario,
     tag: str,
+    dsml: str = _DSML,
 ) -> list[tuple[str, bool]]:
     if not scenario.tool_calls:
         return []
     parts = ["\n"]
     for tc in scenario.tool_calls:
-        parts.append(_dsv4_tool_text(tc))
+        parts.append(_dsv4_tool_text(tc, dsml))
     return [
-        (f"<{_DSML}{tag}>", True),
+        (f"<{dsml}{tag}>", True),
         ("".join(parts), False),
-        (f"</{_DSML}{tag}>", True),
+        (f"</{dsml}{tag}>", True),
     ]
 
 
-def _dsv4_segments(scenario: Scenario, thinking: bool) -> list[tuple[str, bool]]:
+def _dsv4_segments(
+    scenario: Scenario, thinking: bool, *, v41: bool = False
+) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
 
     if thinking:
@@ -715,13 +721,31 @@ def _dsv4_segments(scenario: Scenario, thinking: bool) -> list[tuple[str, bool]]
     if scenario.content is not None:
         segs.append((scenario.content, False))
 
-    segs.extend(_dsml_tool_segs(scenario, "tool_calls"))
+    segs.extend(
+        _dsml_tool_segs(scenario, "calls", f"{_DSML} ")
+        if v41
+        else _dsml_tool_segs(scenario, "tool_calls")
+    )
     return segs
 
 
-def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
+def _build_deepseek_v4(
+    scenario: Scenario, validate: bool = True, *, v41: bool = False
+) -> Sample:
     thinking = scenario.reasoning is not None
-    chat_kwargs = {"thinking": True} if thinking else None
+    chat_kwargs = {"thinking": thinking}
+    parser_cls = DeepSeekV41Parser if v41 else DeepSeekV4Parser
+    model = "deepseek_v41" if v41 else "deepseek_v4"
+    vocab = (
+        {
+            "<think>": 128821,
+            "</think>": 128822,
+            f"<{_DSML} calls>": 128823,
+            f"</{_DSML} calls>": 128824,
+        }
+        if v41
+        else _DSV4_VOCAB
+    )
 
     if thinking:
         expected_reasoning: str | None = scenario.reasoning or ""
@@ -729,10 +753,10 @@ def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
         expected_reasoning = None
 
     sample = _make_sample(
-        sample_id=f"deepseek_v4-{scenario.id}",
+        sample_id=f"{model}-{scenario.id}",
         description=scenario.description,
-        vocab=_DSV4_VOCAB,
-        segments=_dsv4_segments(scenario, thinking),
+        vocab=vocab,
+        segments=_dsv4_segments(scenario, thinking, v41=v41),
         expected_reasoning=expected_reasoning,
         expected_content=_qwen3_expected_content(scenario),
         expected_tool_calls=_expected_tc(scenario),
@@ -743,7 +767,7 @@ def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
         kwargs = {}
         if chat_kwargs:
             kwargs["chat_template_kwargs"] = chat_kwargs
-        _validate_sample(sample, DeepSeekV4Parser, **kwargs)
+        _validate_sample(sample, parser_cls, **kwargs)
     return sample
 
 
@@ -948,18 +972,175 @@ _KIMI_K2_SCENARIOS = [
 ]
 
 
+# ── Inkling (typed content blocks, JSON tool payloads) ───────────────────
+
+_TML_VOCAB: dict[str, int] = {
+    "<|message_model|>": 200001,
+    "<|content_text|>": 200004,
+    "<|content_model_end_sampling|>": 200006,
+    "<|content_thinking|>": 200008,
+    "<|end_message|>": 200010,
+    "<|content_tool_error|>": 200022,
+    "<|content_invoke_tool_json|>": 200049,
+    "<|content_invoke_tool_text|>": 200057,
+}
+
+
+def _inkling_block(
+    segs: list[tuple[str, bool]],
+    kind_token: str,
+    body: str,
+) -> None:
+    """Append one Inkling content block; blocks after the first start with
+    the ``<|message_model|>`` role token (the first block continues the
+    generation prompt directly)."""
+    if segs:
+        segs.append(("<|message_model|>", True))
+    segs.append((kind_token, True))
+    if body:
+        segs.append((body, False))
+    segs.append(("<|end_message|>", True))
+
+
+def _inkling_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        _inkling_block(segs, "<|content_thinking|>", scenario.reasoning)
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        _inkling_block(segs, "<|content_invoke_tool_json|>", "")
+    if scenario.content is not None:
+        _inkling_block(segs, "<|content_text|>", scenario.content)
+    if scenario.tool_calls:
+        for tc in scenario.tool_calls:
+            args = json.dumps(tc.arguments, ensure_ascii=False, separators=(",", ":"))
+            payload = f'{{"name":"{tc.name}","args":{args}}}'
+            _inkling_block(segs, "<|content_invoke_tool_json|>", payload)
+    return segs
+
+
+def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
+    prompt_token_ids = None
+    if scenario.after_tool_response:
+        # Prompt ends with a closed tool-response block and the
+        # generation-prompt role token.
+        prompt_token_ids = [
+            _TML_VOCAB["<|end_message|>"],
+            _TML_VOCAB["<|message_model|>"],
+        ]
+    sample = _make_sample(
+        sample_id=f"inkling-{scenario.id}",
+        description=scenario.description,
+        vocab=_TML_VOCAB,
+        segments=_inkling_segments(scenario),
+        expected_reasoning=scenario.reasoning,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+        prompt_token_ids=prompt_token_ids,
+    )
+    if validate:
+        _validate_sample(sample, InklingParser)
+    return sample
+
+
+# ── Granite (JSON-array tool bodies, no reasoning) ───────────────────────
+
+_GRANITE_VOCAB: dict[str, int] = {
+    "<|tool_call|>": 49154,
+}
+
+
+def _granite_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.content:
+        # Granite has no reasoning; prose is plain content preceding the marker.
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        segs.append(("<|tool_call|>", True))
+        payload = json.dumps(
+            [
+                {"name": tc.name, "arguments": tc.arguments}
+                for tc in scenario.tool_calls
+            ],
+            ensure_ascii=False,
+            separators=(", ", ": "),
+        )
+        segs.append((" " + payload, False))
+    return segs
+
+
+def _granite_expected_content(scenario: Scenario) -> str | None:
+    if scenario.tool_calls:
+        if not scenario.content:
+            return None
+        return scenario.content.strip() or None
+    return scenario.content
+
+
+def _build_granite(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"granite-{scenario.id}",
+        description=scenario.description,
+        vocab=_GRANITE_VOCAB,
+        segments=_granite_segments(scenario),
+        expected_reasoning=None,
+        expected_content=_granite_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, GraniteParser)
+    return sample
+
+
+# Granite has no reasoning, so the shared reasoning-centric SCENARIOS do not
+# apply; these exercise the JSON-array tool body (single, parallel, surrounding
+# text) instead.
+_GRANITE_SCENARIOS: list[Scenario] = [
+    Scenario(
+        id="single-tool",
+        description="Single tool call",
+        tool_calls=[_READ_TOOL],
+    ),
+    Scenario(
+        id="parallel-tools",
+        description="Parallel tool calls in one JSON array",
+        tool_calls=[_BASH_TOOL, _WEATHER_TOOL],
+    ),
+    Scenario(
+        id="complex-json-args",
+        description="Tool call with nested objects, arrays, numbers, booleans",
+        tool_calls=[_COMPLEX_TOOL],
+    ),
+    Scenario(
+        id="content-only",
+        description="Plain content response without tool calls",
+        content="Hello! How can I help you today?",
+    ),
+    Scenario(
+        id="surrounding-text",
+        description="Prose content preceding the tool call",
+        content="Let me check the weather.",
+        tool_calls=[_WEATHER_TOOL],
+    ),
+]
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
     "deepseek_v32": _build_deepseek_v32,
     "deepseek_v4": _build_deepseek_v4,
+    "deepseek_v41": functools.partial(_build_deepseek_v4, v41=True),
     "gemma4": _build_gemma4,
+    "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
+    "inkling": _build_inkling,
 }
 
 
