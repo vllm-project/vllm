@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::Deserialize;
 use tracing::info;
+use vllm_engine_core_client::Error as EngineCoreClientError;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -47,14 +48,6 @@ pub async fn start_profile(
             Some("profile_prefix"),
         ));
     }
-    if !state.try_start_profile() {
-        return Err(ApiError::conflict(
-            "A profiling session is already active. Call /stop_profile before \
-             starting another session."
-                .to_string(),
-        ));
-    }
-
     info!("starting profiler");
     if let Err(error) = state
         .engine_core_client()
@@ -65,7 +58,13 @@ pub async fn start_profile(
         )
         .await
     {
-        state.finish_profile();
+        if matches!(error, EngineCoreClientError::ProfileAlreadyActive) {
+            return Err(ApiError::conflict(
+                "A profiling session is already active. Call /stop_profile before \
+                 starting another session."
+                    .to_string(),
+            ));
+        }
         return Err(utility_call_error("start_profile", error));
     }
     info!("profiler started");
@@ -80,7 +79,6 @@ pub async fn stop_profile(State(state): State<Arc<AppState>>) -> Result<StatusCo
         .stop_profile(None)
         .await
         .map_err(|error| utility_call_error("stop_profile", error))?;
-    state.finish_profile();
     info!("profiler stopped");
     Ok(StatusCode::OK)
 }
