@@ -296,6 +296,17 @@ class VocabParallelEmbedding(PluggableLayer):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
+        # Divide the weight matrix along the vocabulary dimension.
+        self.num_embeddings_per_partition = divide(
+            self.num_embeddings_padded, self.tp_size
+        )
+
+        # Quantization methods share the same weight factory as linear layers.
+        self.input_size = self.input_size_per_partition = embedding_dim
+        self.output_size = self.num_embeddings_padded
+        self.output_size_per_partition = self.num_embeddings_per_partition
+        self.output_partition_sizes = [self.output_size_per_partition]
+        self.prefix = prefix
 
         # Avoid overriding a preselected model-specific method with generic
         # config-based dispatch.
@@ -322,11 +333,7 @@ class VocabParallelEmbedding(PluggableLayer):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
-        # Divide the weight matrix along the vocabulary dimension.
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
-        self.num_embeddings_per_partition = divide(
-            self.num_embeddings_padded, self.tp_size
-        )
         assert (
             self.shard_indices.num_elements_padded == self.num_embeddings_per_partition
         )
@@ -349,10 +356,10 @@ class VocabParallelEmbedding(PluggableLayer):
 
         self.quant_method.create_weights(
             self,
-            self.embedding_dim,
-            [self.num_embeddings_per_partition],
-            self.embedding_dim,
-            self.num_embeddings_padded,
+            self.input_size_per_partition,
+            self.output_partition_sizes,
+            self.input_size,
+            self.output_size,
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
@@ -600,6 +607,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         *,
         disable_tp: bool = False,
     ):
+        self.has_bias = bias
         super().__init__(
             num_embeddings,
             embedding_dim,
