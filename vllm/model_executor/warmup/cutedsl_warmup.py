@@ -13,12 +13,12 @@ from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass
 
 import torch
-from tqdm import tqdm
 
 from vllm.distributed import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
+from vllm.utils.tqdm_utils import vllm_tqdm
 
 logger = init_logger(__name__)
 
@@ -82,7 +82,7 @@ def _compile_cutedsl_warmup_units(
 ) -> int:
     compiled = 0
     if is_global_first_rank():
-        compile_units = tqdm(compile_units, desc="Compiling CuTeDSL kernels")
+        compile_units = vllm_tqdm(compile_units, desc="Compiling CuTeDSL kernels")
     with torch.inference_mode():
         for unit in compile_units:
             unit.compile()

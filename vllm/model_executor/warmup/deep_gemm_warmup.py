@@ -6,7 +6,7 @@ be used during model execution beforehand.
 """
 
 import torch
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
@@ -30,6 +30,7 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
+from vllm.utils.tqdm_utils import vllm_tqdm
 from vllm.v1.worker.workspace import current_workspace_manager
 
 
@@ -364,7 +365,7 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
 
     # Only show progress bar on rank 0 to avoid cluttered output
     if is_global_first_rank():
-        with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
+        with vllm_tqdm(total=total, desc="DeepGEMM warmup") as pbar:
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
     else:
