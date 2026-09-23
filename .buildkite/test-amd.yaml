@@ -3452,6 +3452,29 @@ steps:
   commands:
   - pytest -v -s compile/h100/test_startup.py
 
+- label: ":amd: (MI355) Fusion and Compile FP8"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers/
+  - vllm/v1/attention/
+  - vllm/distributed/
+  - vllm/_aiter_ops.py
+  - tests/compile/passes/
+  - tests/compile/correctness_e2e/test_attn_quant.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/models/llama.py
+  commands:
+  - amd-smi
+  - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+  - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
+
 #--------------------------------------------------------  mi355 · distributed  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Sharded RDT Weight Transfer"
