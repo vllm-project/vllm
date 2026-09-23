@@ -1659,9 +1659,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REGEX_COMPILATION_TIMEOUT_S": lambda: int(
         os.getenv("VLLM_REGEX_COMPILATION_TIMEOUT_S", "5")
     ),
-    # Maximum number of concurrent regex compilation subprocesses.
-    # Limits resource consumption from adversarial regex patterns that
-    # survive beyond the timeout deadline.
+    # Maximum number of concurrent regex compilation worker processes.
+    # A worker that exceeds the timeout is killed and replaced.
     "VLLM_REGEX_COMPILATION_MAX_CONCURRENT": lambda: int(
         os.getenv("VLLM_REGEX_COMPILATION_MAX_CONCURRENT", "1")
     ),
