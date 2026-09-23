@@ -91,6 +91,7 @@ class TestUnclosedParameterFlush:
 
     @pytest.fixture
     def tools(self):
+        """A write_file schema whose ``count`` is an integer."""
         return [
             {
                 "type": "function",
@@ -109,6 +110,7 @@ class TestUnclosedParameterFlush:
 
     @pytest.fixture
     def parser_with_tools(self, mock_tokenizer, tools):
+        """A Qwen3 parser that knows the ``tools`` schema."""
         return ParserEngine(
             mock_tokenizer,
             tools=tools,
