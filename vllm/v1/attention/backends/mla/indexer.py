@@ -816,9 +816,9 @@ def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     return (
         current_platform.is_rocm()
         and model_config is not None
-        and any(
-            architecture in model_config.architectures
-            for architecture in ("DeepseekV4ForCausalLM", "DeepseekV41ForCausalLM")
+        and (
+            "DeepseekV4ForCausalLM" in model_config.architectures
+            or "DeepseekV41ForCausalLM" in model_config.architectures
         )
     )
 
