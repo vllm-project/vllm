@@ -10,6 +10,8 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    materialize_tool_calls_in_messages,
+    normalize_chat_messages_before_validation,
 )
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
@@ -315,6 +317,16 @@ class ChatRequestMixin(ChatRequestOptionsMixin):
     # --8<-- [start:chat-params]
     messages: list[ChatCompletionMessageParam]
     # --8<-- [end:chat-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_messages_before(cls, data: Any) -> Any:
+        return normalize_chat_messages_before_validation(data)
+
+    @model_validator(mode="after")
+    def _materialize_tool_calls_after(self) -> "ChatRequestMixin":
+        materialize_tool_calls_in_messages(self.messages)
+        return self
 
 
 class EncodingRequestMixin(OpenAIBaseModel):

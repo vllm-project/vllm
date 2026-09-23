@@ -15,9 +15,13 @@ models because:
      "ValueError: Unexpected tool call id ...".
 """
 
+import copy
+
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingChatRequest
+from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest
 
 
 def _make_tool_call(tc_id: str, name: str, args: str) -> dict:
@@ -148,3 +152,65 @@ def test_multiple_tool_calls_materialised(num_tool_calls: int):
     # Verify after model_dump_json too
     _ = req.model_dump_json()
     assert len(assistant_msg.get("tool_calls", [])) == num_tool_calls
+
+
+def _tool_call_conversation() -> list:
+    tool_call = _make_tool_call("call_1", "lookup_weather", '{"city": "Shanghai"}')
+    return [
+        {"role": "user", "content": "What is the weather in Shanghai tomorrow?"},
+        {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": '{"temp_c": 24, "condition": "cloudy"}',
+        },
+        {"role": "user", "content": "Do I need an umbrella?"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "request_cls",
+    [ChatCompletionRequest, TokenizeChatRequest, EmbeddingChatRequest],
+)
+def test_tool_calls_materialised_for_all_chat_request_models(request_cls):
+    """Every request model carrying ``messages`` must materialise tool_calls.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/57730:
+    ``/tokenize`` (and pooling chat endpoints) validated ``messages`` without
+    the materialisation pass used by ``/v1/chat/completions``, so an assistant
+    message with ``content: null`` + ``tool_calls`` kept a lazy
+    ``ValidatorIterator`` that blew up on ``copy.deepcopy`` inside tokenizers
+    ("cannot pickle 'ValidatorIterator' object").
+    """
+    req = request_cls(model="test-model", messages=_tool_call_conversation())
+
+    assistant_msg = req.messages[1]
+    assert isinstance(assistant_msg, dict)
+    assert isinstance(assistant_msg.get("tool_calls"), list)
+
+    # Tokenizers/renderers deep-copy messages; this must not raise.
+    copied = copy.deepcopy(req.messages)
+    assert copied[1]["tool_calls"][0]["function"]["name"] == "lookup_weather"
+
+    # Reading twice must not consume anything.
+    assert len(list(assistant_msg["tool_calls"])) == 1
+    assert len(list(assistant_msg["tool_calls"])) == 1
+
+
+@pytest.mark.parametrize(
+    "request_cls",
+    [ChatCompletionRequest, TokenizeChatRequest, EmbeddingChatRequest],
+)
+def test_reasoning_content_normalised_for_all_chat_request_models(request_cls):
+    """Deprecated ``reasoning_content`` is renamed to ``reasoning`` everywhere."""
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello", "reasoning_content": "think"},
+    ]
+
+    req = request_cls(model="test-model", messages=messages)
+
+    assistant_msg = req.messages[1]
+    assert isinstance(assistant_msg, dict)
+    assert assistant_msg.get("reasoning") == "think"
+    assert "reasoning_content" not in assistant_msg

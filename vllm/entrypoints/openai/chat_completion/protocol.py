@@ -22,6 +22,8 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    materialize_tool_calls_in_messages,
+    normalize_chat_messages_before_validation,
 )
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
@@ -520,46 +522,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def _normalize_messages_before(cls, data: Any) -> Any:
-        """Pre-process message dicts before Pydantic field validation.
-
-        Performs two normalizations in a single pass:
-        - Converts tool_calls generators/iterators to lists so one-shot
-          generators are not consumed during union type matching.
-        - Renames the deprecated ``reasoning_content`` field to
-          ``reasoning`` so downstream code only needs to check one field.
-        """
-        if not isinstance(data, dict):
-            return data
-        messages = data.get("messages")
-        if not isinstance(messages, list):
-            return data
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            tool_calls = msg.get("tool_calls")
-            if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
-            reasoning_content = msg.pop("reasoning_content", None)
-            if reasoning_content is not None and msg.get("reasoning") is None:
-                msg["reasoning"] = reasoning_content
-        return data
+        return normalize_chat_messages_before_validation(data)
 
     @model_validator(mode="after")
     def _materialize_tool_calls_after(self) -> "ChatCompletionRequest":
-        """Convert Pydantic ValidatorIterator wrappers back to lists.
-
-        Even after the "before" validator converts iterables to lists,
-        Pydantic re-wraps them in a ValidatorIterator when validating
-        against ChatCompletionAssistantMessageParam's Iterable[...] type.
-        This "after" pass materialises those wrappers so downstream code
-        (tokenizers, model_dump_json) always sees plain lists.
-        """
-        for msg in self.messages:
-            if not isinstance(msg, dict):
-                continue
-            tool_calls = msg.get("tool_calls")
-            if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+        materialize_tool_calls_in_messages(self.messages)
         return self
 
     _grammar_from_parser: bool = PrivateAttr(default=False)

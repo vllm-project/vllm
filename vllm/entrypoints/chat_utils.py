@@ -396,6 +396,58 @@ ChatCompletionMessageParam: TypeAlias = (
 )
 
 
+def normalize_chat_messages_before_validation(data: Any) -> Any:
+    """Pre-process raw ``messages`` dicts before Pydantic field validation.
+
+    Intended to be called from a ``mode="before"`` model validator of any
+    request model that carries a ``messages: list[ChatCompletionMessageParam]``
+    field (chat completions, tokenize, pooling chat requests, ...).
+
+    Performs two normalizations in a single pass:
+
+    - Converts ``tool_calls`` generators/iterators to lists so one-shot
+      generators are not consumed during union type matching.
+    - Renames the deprecated ``reasoning_content`` field to ``reasoning`` so
+      downstream code only needs to check one field.
+    """
+    if not isinstance(data, dict):
+        return data
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return data
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        tool_calls = msg.get("tool_calls")
+        if tool_calls is not None and not isinstance(tool_calls, list):
+            msg["tool_calls"] = list(tool_calls)
+        reasoning_content = msg.pop("reasoning_content", None)
+        if reasoning_content is not None and msg.get("reasoning") is None:
+            msg["reasoning"] = reasoning_content
+    return data
+
+
+def materialize_tool_calls_in_messages(
+    messages: Iterable[ChatCompletionMessageParam],
+) -> None:
+    """Convert Pydantic ``ValidatorIterator`` wrappers back to plain lists.
+
+    Even after :func:`normalize_chat_messages_before_validation` converts
+    iterables to lists, Pydantic re-wraps ``tool_calls`` in a lazy
+    ``ValidatorIterator`` when validating against the ``Iterable[...]`` type
+    of ``ChatCompletionAssistantMessageParam``. Such wrappers cannot be
+    pickled/deep-copied and are consumed on first iteration, so downstream
+    code (tokenizers, renderers, ``model_dump_json``) must always see plain
+    lists. Intended to be called from a ``mode="after"`` model validator.
+    """
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        tool_calls = msg.get("tool_calls")
+        if tool_calls is not None and not isinstance(tool_calls, list):
+            msg["tool_calls"] = list(tool_calls)
+
+
 # TODO: Make fields ReadOnly once mypy supports it
 class ConversationMessage(TypedDict, total=False):
     role: Required[str]
