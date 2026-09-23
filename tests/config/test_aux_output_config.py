@@ -112,26 +112,28 @@ def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
 
 
 @pytest.mark.parametrize(
-    ("connector", "blocked"),
+    "connector",
     [
-        ("NixlConnector", True),
-        ("NixlPullConnector", True),
-        ("NixlPushConnector", True),
-        ("MoRIIOConnector", True),
-        ("MooncakeConnector", True),
-        ("MooncakeStoreConnector", False),
-        ("OffloadingConnector", False),
-        ("LMCacheConnectorV1", False),
-        ("LMCacheMPConnector", False),
-        ("SimpleCPUOffloadConnector", False),
+        "NixlConnector",
+        "NixlPullConnector",
+        "NixlPushConnector",
+        "MoRIIOConnector",
+        "MooncakeConnector",
+        "MooncakeStoreConnector",
+        "OffloadingConnector",
+        "LMCacheConnectorV1",
+        "LMCacheMPConnector",
+        "SimpleCPUOffloadConnector",
     ],
 )
 @pytest.mark.parametrize("kv_role", ["kv_both", "kv_producer", "kv_consumer"])
 @pytest.mark.parametrize("multi", [False, True])
-def test_aux_output_connector_policy_is_independent_of_role(
-    connector, blocked, kv_role, multi
+@pytest.mark.parametrize("backend", ["shm", "mooncake"])
+def test_aux_output_does_not_restrict_kv_connector_configuration(
+    connector, kv_role, multi, backend
 ):
     config = _config(connector=connector, kv_role=kv_role)
+    config.aux_output_config.backend = backend
     if multi:
         config.kv_transfer_config = KVTransferConfig(
             kv_connector="MultiConnector",
@@ -143,11 +145,7 @@ def test_aux_output_connector_policy_is_independent_of_role(
                 ]
             },
         )
-    if blocked:
-        with pytest.raises(ValueError, match=f"incompatible with {connector}"):
-            VllmConfig._verify_aux_output_compatibility(config)
-    else:
-        VllmConfig._verify_aux_output_compatibility(config)
+    VllmConfig._verify_aux_output_compatibility(config)
 
 
 @pytest.mark.parametrize(

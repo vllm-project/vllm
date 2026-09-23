@@ -1204,20 +1204,6 @@ class VllmConfig:
                 "context parallelism (DCP/PCP > 1)."
             )
 
-        kv_transfer_config = self.kv_transfer_config
-        if (
-            kv_transfer_config is not None
-            and kv_transfer_config.is_kv_transfer_instance
-            and not (
-                kv_transfer_config.kv_connector == "MooncakeConnector"
-                and self.aux_output_config.backend == "mooncake"
-            )
-        ):
-            raise ValueError(
-                "--enable-return-routed-experts is incompatible with KV "
-                "connectors except MooncakeConnector with the mooncake aux backend."
-            )
-
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
