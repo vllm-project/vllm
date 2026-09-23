@@ -711,6 +711,8 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
+# uv reads `[tool.uv] exclude-dependencies` from here when recompiling below.
+COPY pyproject.toml pyproject.toml
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -1105,6 +1107,8 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
+# uv reads `[tool.uv] exclude-dependencies` from here when recompiling below.
+COPY pyproject.toml pyproject.toml
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
