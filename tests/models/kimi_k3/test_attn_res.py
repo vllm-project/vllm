@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-import importlib.metadata
-import os
 
 import pytest
 import torch
@@ -19,26 +17,19 @@ EPS = 1e-5
 attn_res_module = importlib.import_module("vllm.models.kimi_k3.nvidia.ops.attn_res")
 
 
-def _rocm_major_version() -> int | None:
-    # ROCm 10+ ships as the `rocm` pip SDK; older releases install to /opt/rocm.
-    try:
-        return int(importlib.metadata.version("rocm").split(".")[0])
-    except (importlib.metadata.PackageNotFoundError, ValueError):
-        pass
-    rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
-    version_file = os.path.join(rocm_path, ".info", "version")
-    try:
-        with open(version_file) as f:
-            return int(f.read().split(".")[0])
-    except (OSError, ValueError):
-        return None
+def _on_rocm_below_10() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_rocm_version
+
+    return (get_rocm_version() or (0,)) < (10,)
 
 
 # The Triton bundled with ROCm < 10 (3.7.x) crashes in the AMD
 # CanonicalizePointers pass on the kernel's tl.where over pointer tensors. Only
 # the num_blocks > 0 loop contains it. ROCm serves AttnRes from
 # vllm/models/kimi_k3/amd/ops/attn_res.py instead, so nothing real is lost.
-_OLD_ROCM = current_platform.is_rocm() and (_rocm_major_version() or 0) < 10
+_OLD_ROCM = _on_rocm_below_10()
 
 
 def _skip_on_old_rocm(num_blocks: int) -> None:
