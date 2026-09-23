@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.model_executor.layers.quantization import QuantizationConfig
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 def align_mtp_quant_config(
-    quant_config: QuantizationConfig | None, config: PretrainedConfig
+    quant_config: QuantizationConfig | None, config: PreTrainedConfig
 ) -> None:
     """Re-key the quant config's MTP entries onto the draft module prefixes.
 
