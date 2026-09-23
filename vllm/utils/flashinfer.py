@@ -30,6 +30,39 @@ logger = init_logger(__name__)
 _bf16_autotune_buckets: ContextVar[tuple[int, ...] | None] = ContextVar(
     "flashinfer_bf16_autotune_buckets", default=None
 )
+_sparse_mla_autotune_skip_ops: ContextVar[set[str] | None] = ContextVar(
+    "flashinfer_sparse_mla_autotune_skip_ops", default=None
+)
+
+
+@contextlib.contextmanager
+def autotune_sparse_mla_only(*, skip_ops: set[str] | None = None) -> Iterator[None]:
+    """Enable tuning only around sparse MLA calls, not the enclosing model."""
+    from flashinfer.autotuner import AutoTuner
+
+    if AutoTuner.get().is_tuning_mode:
+        raise RuntimeError(
+            "autotune_sparse_mla_only cannot run inside active FlashInfer autotuning"
+        )
+    token = _sparse_mla_autotune_skip_ops.set(
+        set(skip_ops) if skip_ops is not None else set()
+    )
+    try:
+        yield
+    finally:
+        _sparse_mla_autotune_skip_ops.reset(token)
+
+
+def _autotune_sparse_mla_call(fn: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        skip_ops = _sparse_mla_autotune_skip_ops.get()
+        if skip_ops is None:
+            return fn(*args, **kwargs)
+        with autotune(tune_mode=True, skip_ops=skip_ops):
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 @contextlib.contextmanager
@@ -279,15 +312,19 @@ flashinfer_get_hybrid_num_tokens_buckets = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
-flashinfer_trtllm_batch_decode_with_kv_cache_mla = _lazy_import_wrapper(
-    "flashinfer.decode",
-    "trtllm_batch_decode_with_kv_cache_mla",
-    fallback_fn=_missing_sparse_mla,
+flashinfer_trtllm_batch_decode_with_kv_cache_mla = _autotune_sparse_mla_call(
+    _lazy_import_wrapper(
+        "flashinfer.decode",
+        "trtllm_batch_decode_with_kv_cache_mla",
+        fallback_fn=_missing_sparse_mla,
+    )
 )
-flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
-    "flashinfer.decode",
-    "trtllm_batch_decode_sparse_mla_dsv4",
-    fallback_fn=_missing_sparse_mla,
+flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _autotune_sparse_mla_call(
+    _lazy_import_wrapper(
+        "flashinfer.decode",
+        "trtllm_batch_decode_sparse_mla_dsv4",
+        fallback_fn=_missing_sparse_mla,
+    )
 )
 flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
@@ -1264,6 +1301,7 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
     "autotune_bf16_only",
+    "autotune_sparse_mla_only",
     "has_flashinfer_bf16_gemm",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",

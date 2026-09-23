@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import inspect
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -135,3 +138,119 @@ class TestImportPlugin:
         ):
             result = import_plugin("nonexistent_plugin_xyz")
             assert result is None
+
+
+@pytest.fixture
+def sparse_mla_autotune(monkeypatch):
+    from vllm.utils import flashinfer as fi
+
+    state = SimpleNamespace(is_tuning_mode=False, calls=[])
+
+    @contextlib.contextmanager
+    def autotune(*, tune_mode, skip_ops):
+        state.calls.append((tune_mode, skip_ops))
+        previous = state.is_tuning_mode
+        state.is_tuning_mode = previous or tune_mode
+        try:
+            yield
+        finally:
+            state.is_tuning_mode = previous
+
+    monkeypatch.setitem(
+        sys.modules,
+        "flashinfer.autotuner",
+        SimpleNamespace(AutoTuner=SimpleNamespace(get=lambda: state)),
+    )
+    monkeypatch.setattr(fi, "autotune", autotune)
+    monkeypatch.setattr(fi, "has_flashinfer", lambda: True)
+    implementations = SimpleNamespace()
+    monkeypatch.setattr(fi, "_get_submodule", lambda _: implementations)
+    wrappers = [
+        fi.flashinfer_trtllm_batch_decode_with_kv_cache_mla,
+        fi.flashinfer_trtllm_batch_decode_sparse_mla_dsv4,
+        fi.flashinfer_trtllm_bf16_moe,
+    ]
+    caches = [
+        inspect.getclosurevars(inspect.unwrap(fn)).nonlocals["_get_impl"]
+        for fn in wrappers
+    ]
+    for cache in caches:
+        cache.cache_clear()
+    yield fi, state, implementations
+    for cache in caches:
+        cache.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "op_name",
+    ["trtllm_batch_decode_with_kv_cache_mla", "trtllm_batch_decode_sparse_mla_dsv4"],
+)
+@pytest.mark.parametrize("fails", [False, True])
+def test_sparse_mla_lazy_wrappers_tune_only_attention(
+    sparse_mla_autotune, monkeypatch, op_name, fails
+):
+    fi, state, implementations = sparse_mla_autotune
+    query, output = object(), object()
+
+    def decode(arg, *, out):
+        assert arg is query and out is output
+        if fails and state.is_tuning_mode:
+            raise ValueError("decode failed")
+        return state.is_tuning_mode
+
+    setattr(implementations, op_name, decode)
+    implementations.trtllm_bf16_moe = lambda: state.is_tuning_mode
+    wrapper = getattr(fi, "flashinfer_" + op_name)
+    skip_ops = {"some_attention_op"}
+    error = (
+        pytest.raises(ValueError, match="decode failed")
+        if fails
+        else contextlib.nullcontext()
+    )
+    with error, fi.autotune_sparse_mla_only(skip_ops=skip_ops):
+        assert not state.is_tuning_mode
+        assert not fi.flashinfer_trtllm_bf16_moe()
+        assert wrapper(query, out=output)
+        assert not fi.flashinfer_trtllm_bf16_moe()
+    assert state.calls == [(True, skip_ops)]
+    assert not state.is_tuning_mode
+
+    def unexpected_autotune(*args, **kwargs):
+        pytest.fail("Inactive sparse MLA must not access the autotuner")
+
+    monkeypatch.setattr(fi, "autotune", unexpected_autotune)
+    monkeypatch.setitem(sys.modules, "flashinfer.autotuner", None)
+    assert not wrapper(query, out=output)
+
+
+def test_sparse_mla_scope_restores_nested_marker_after_exception(sparse_mla_autotune):
+    fi, state, implementations = sparse_mla_autotune
+    implementations.trtllm_batch_decode_sparse_mla_dsv4 = lambda: None
+    decode = fi.flashinfer_trtllm_batch_decode_sparse_mla_dsv4
+    with fi.autotune_sparse_mla_only(skip_ops={"outer"}):
+        with (
+            pytest.raises(ValueError, match="model failed"),
+            fi.autotune_sparse_mla_only(),
+        ):
+            decode()
+            raise ValueError("model failed")
+        decode()
+    decode()
+    assert state.calls == [(True, set()), (True, {"outer"})]
+    assert not state.is_tuning_mode
+
+
+def test_sparse_mla_scope_rejects_existing_full_model_tuning(sparse_mla_autotune):
+    fi, state, implementations = sparse_mla_autotune
+    state.is_tuning_mode = True
+    with (
+        pytest.raises(RuntimeError, match="active FlashInfer autotuning"),
+        fi.autotune_sparse_mla_only(),
+    ):
+        pytest.fail("Must reject the outer tuning context before running the model")
+    assert state.is_tuning_mode
+    assert state.calls == []
+    state.is_tuning_mode = False
+    implementations.trtllm_batch_decode_sparse_mla_dsv4 = lambda: None
+    fi.flashinfer_trtllm_batch_decode_sparse_mla_dsv4()
+    assert state.calls == []
