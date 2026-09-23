@@ -22,6 +22,7 @@ from vllm.distributed import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
@@ -29,7 +30,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -377,11 +377,10 @@ class MLPBlock(torch.nn.Module):
         self.hidden_size = config.hidden_size
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.router = ReplicatedLinear(
+        self.router = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=True,
-            quant_config=None,
             prefix=f"{prefix}.router",
             return_bias=False,
         )
