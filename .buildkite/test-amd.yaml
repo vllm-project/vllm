@@ -1818,6 +1818,48 @@ steps:
   commands:
   - pytest -v -s models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
 
+- label: ":amd: (MI355) Kimi K3" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - csrc/libtorch_stable/kimi_k3/
+  - tests/models/kimi_k3/
+  - vllm/platforms/rocm.py
+  commands:
+  # Mirrors the ":amd: (MI355) Kimi K3" step generated from
+  # .buildkite/test_areas/models_basic.yaml. The ROCm KDA/AttnRes kernels are
+  # gated on gfx950, so this has to be MI355. The two kernels/ files the NVIDIA
+  # step runs are CUDA-only (they import cuda.bindings.driver), so they are
+  # deliberately left out here.
+  - pytest -v -s models/kimi_k3
+
+- label: ":amd: (MI355) Kimi K3 Multi-GPU" # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - tests/models/kimi_k3/
+  - vllm/platforms/rocm.py
+  commands:
+  # The single-GPU step above skips every @multi_gpu_test case. `-m "distributed"`
+  # selects exactly those: multi_gpu_test() applies pytest.mark.distributed
+  # alongside its skipif (tests/utils.py:2080), so this picks up a new
+  # multi-GPU test anywhere in the directory without editing this list.
+  # Four GPUs run the two tp4 cases in test_amd_latent_moe_runner.py; the tp8
+  # case and the 8/16-GPU cases in test_latent_moe_tail.py still skip.
+  - pytest -v -s -m "distributed" models/kimi_k3
+
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
