@@ -148,3 +148,33 @@ def test_auto_discovered_unprotected_routes_no_auth(task_routes):
         assert resp.status_code == 200, (
             f"[{task}] {test_method} {test_path} should be accessible without token"
         )
+
+
+# ---------------------------------------------------------------------------
+# Trailing slashes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", sorted(UNGUARDED_PATHS))
+def test_unguarded_path_with_trailing_slash_needs_no_token(path):
+    """A liveness probe configured with a trailing slash must still answer.
+
+    The middleware runs ahead of the router, so "/health/" never reaches
+    FastAPI's redirect_slashes: an exact-match allowlist test rejects it with
+    401 before routing ever happens.
+    """
+    routes = [(path, ["GET"]), (path + "/", ["GET"])]
+    client = TestClient(_create_app_with_mock_routes(routes))
+
+    assert client.get(path + "/").status_code == 200
+
+
+def test_trailing_slash_does_not_unguard_a_protected_path():
+    """Normalizing the trailing slash must not widen the allowlist."""
+    routes = [("/v1/models", ["GET"]), ("/v1/models/", ["GET"])]
+    client = TestClient(_create_app_with_mock_routes(routes))
+
+    assert client.get("/v1/models/").status_code == 401
+
+    headers = {"Authorization": "Bearer valid-token"}
+    assert client.get("/v1/models/", headers=headers).status_code == 200
