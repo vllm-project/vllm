@@ -239,16 +239,19 @@ __device__ __forceinline__ void attn_step_wave_int8(
     T* __restrict__ P_lds_wave,
     const float* __restrict__ k_scale_lds,  // [K_TILE] k_scales (fp32)
     const float* __restrict__ v_scale_lds,  // [K_TILE] v_scales (fp32)
-    typename WmmaNative<T>::v16 (&q_frags)[HEAD_SIZE / 16],
-    v8fp32 (&out_acc)[HEAD_SIZE / 16], float (&m_state)[8], float (&l_state)[8],
-    int wave_q_tile_start, int start_n, int valid_q_count, int valid_k_count,
-    float sm_scale, int lane, int lane_lo, int lane_hi) {
+    const T* __restrict__ q_row_g, v8fp32 (&out_acc)[HEAD_SIZE / 16],
+    float (&m_state)[8], float (&l_state)[8], int wave_q_tile_start,
+    int start_n, int valid_q_count, int valid_k_count, float sm_scale, int lane,
+    int lane_lo, int lane_hi) {
   using V16 = typename WmmaNative<T>::v16;
   constexpr int FRAGS = HEAD_SIZE / 16;
 
   // ---- Q @ K (8 WMMAs into s_acc) ----
   v8fp32 s_acc = {0, 0, 0, 0, 0, 0, 0, 0};
-  #pragma unroll
+  // Partial unroll on purpose: see the note on PHASE above. Fully unrolled, the
+  // scheduler hoists all FRAGS LDS loads before the WMMAs (16 x 8 = 128 VGPRs)
+  // and this phase spills 384 B/lane instead of 12.
+  #pragma unroll 2
   for (int dh = 0; dh < FRAGS; ++dh) {
     V16 b_frag;
     int4 lo =
@@ -257,7 +260,9 @@ __device__ __forceinline__ void attn_step_wave_int8(
         *(const int4*)&K_lds_raw[(dh * 2 + 1) * (K_TILE * X) + lane_lo * X];
     __builtin_memcpy(&b_frag, &lo, 16);
     __builtin_memcpy(((char*)&b_frag) + 16, &hi, 16);
-    s_acc = wmma_mma(q_frags[dh], b_frag, s_acc);
+    V16 a_frag;
+    __builtin_memcpy(&a_frag, q_row_g + dh * 16, sizeof(V16));
+    s_acc = wmma_mma(a_frag, b_frag, s_acc);
   }
 
   // ---- Apply k_scale per token + softmax scale + mask ----
@@ -478,9 +483,28 @@ __device__ __forceinline__ void attn_step_int8qk(
 // default and budgets VGPRs ultra-conservatively (capped at 192 -> ~600 B/
 // thread scratch spill at HS=256). Declaring the real 256-thread bound lets it
 // use up to 256 VGPRs, cutting the spill and ~1.27x on long-context prefill.
-template <typename T, int HEAD_SIZE>
+//
+// PHASE splits the two halves of the work into two launches. Fusing them in one
+// kernel kept the int8 Q of the prefix phase (FRAGS x v16i8 = 64 VGPRs) and the
+// fp16 Q of the chunk phase (FRAGS x v16 = 128 VGPRs) live in the same
+// function, on top of out_acc (128 VGPRs). At HS=256 that does not fit in the
+// 256-VGPR budget: -Rpass-analysis=kernel-resource-usage reported
+//
+//     <__half, 256>   VGPRs 256   VGPRs Spill 215   ScratchSize 420 B/lane
+//
+// while the HS=64 and HS=128 instantiations of the same kernel spill nothing.
+// Splitting by phase drops that to 124 B/lane (prefix) and 12 B/lane (chunk),
+// and the partial state travels through `ws` (see below). It is bit-identical:
+// the arithmetic order does not change and out_acc/m_state/l_state are already
+// fp32, so the round trip through memory rounds nothing. Measured cost on
+// gfx1100 (alternating both kernels in one process, min of 3): 0.96x to 1.01x.
+template <typename T, int HEAD_SIZE, int PHASE>
 __global__ void __launch_bounds__(HEAD_SIZE) paged_prefill_attn_kernel_v2_int8(
-    T* __restrict__ out, const T* __restrict__ q,
+    T* __restrict__ out,
+    // [total_tokens, num_query_heads, HEAD_SIZE + 2]: out_acc, then m_state and
+    // l_state. Written by PHASE 1, read by PHASE 2; never read before written,
+    // because both phases skip the same rows.
+    float* __restrict__ ws, const T* __restrict__ q,
     const T* __restrict__ k_chunk,            // current chunk K (fp16/bf16)
     const T* __restrict__ v_chunk,            // current chunk V (fp16/bf16)
     const int8_t* __restrict__ k_cache,       // paged K cache (int8)
@@ -581,7 +605,7 @@ __global__ void __launch_bounds__(HEAD_SIZE) paged_prefill_attn_kernel_v2_int8(
   // q_frags dies at the end of this scope; only q_i8 survives into phase 1,
   // freeing VGPRs. Phase 2 reloads Q in fp16.
   v16i8 q_i8[FRAGS];
-  {
+  if constexpr (PHASE == 1) {
     V16 q_frags[FRAGS];
     if (valid_q) {
       const T* q_row = q +
@@ -617,139 +641,173 @@ __global__ void __launch_bounds__(HEAD_SIZE) paged_prefill_attn_kernel_v2_int8(
 
   // ---- PHASE 1: Cached prefix (INT8 paged cache, int8 WMMA QK, no causal)
   // ----
-  for (int start_n = 0; start_n < ctx_len; start_n += K_TILE) {
-    load_k_tile_int8_raw<T, HEAD_SIZE>(
-        K_lds_i8, k_cache, k_scale_cache, block_table, seq_idx, kv_head_idx,
-        start_n, ctx_len, block_size, max_blocks_per_seq, stride_kcache_block,
-        stride_kcache_head, stride_kcache_slot, stride_ks_blk, stride_ks_slot,
-        stride_ks_head, k_scale_lds, tid);
-    load_v_tile_paged_int8_coop<T, HEAD_SIZE>(
-        V_lds, v_cache, v_scale_cache, block_table, seq_idx, kv_head_idx,
-        start_n, ctx_len, block_size, max_blocks_per_seq, stride_vcache_block,
-        stride_vcache_head, stride_vcache_d, stride_vcache_slot, stride_vs_blk,
-        stride_vs_slot, stride_vs_head, v_scale_lds, tid);
-    __syncthreads();
+  if constexpr (PHASE == 1) {
+    for (int start_n = 0; start_n < ctx_len; start_n += K_TILE) {
+      load_k_tile_int8_raw<T, HEAD_SIZE>(
+          K_lds_i8, k_cache, k_scale_cache, block_table, seq_idx, kv_head_idx,
+          start_n, ctx_len, block_size, max_blocks_per_seq, stride_kcache_block,
+          stride_kcache_head, stride_kcache_slot, stride_ks_blk, stride_ks_slot,
+          stride_ks_head, k_scale_lds, tid);
+      load_v_tile_paged_int8_coop<T, HEAD_SIZE>(
+          V_lds, v_cache, v_scale_cache, block_table, seq_idx, kv_head_idx,
+          start_n, ctx_len, block_size, max_blocks_per_seq, stride_vcache_block,
+          stride_vcache_head, stride_vcache_d, stride_vcache_slot,
+          stride_vs_blk, stride_vs_slot, stride_vs_head, v_scale_lds, tid);
+      __syncthreads();
 
-    const int valid_k_count = min(K_TILE, ctx_len - start_n);
-    attn_step_int8qk<T, HEAD_SIZE, X_FP16>(
-        K_lds_i8, V_lds, P_lds_wave, k_scale_lds, v_scale_lds,
-        &qscale_lds[wave_id][0], q_i8, out_acc, m_state, l_state,
-        valid_q_count_for_wave, valid_k_count, sm_scale, lane_lo, lane_hi);
-    __syncthreads();
-  }
+      const int valid_k_count = min(K_TILE, ctx_len - start_n);
+      attn_step_int8qk<T, HEAD_SIZE, X_FP16>(
+          K_lds_i8, V_lds, P_lds_wave, k_scale_lds, v_scale_lds,
+          &qscale_lds[wave_id][0], q_i8, out_acc, m_state, l_state,
+          valid_q_count_for_wave, valid_k_count, sm_scale, lane_lo, lane_hi);
+      __syncthreads();
+    }
+
+  // Hand the partial online-softmax state to PHASE 2. m_state and l_state are
+  // uniform across the 16 lanes of each half (they come out of wave16_max /
+  // wave16_sum), so one lane writes them and any lane may read them back.
+  #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      const int abs_q_pos = q_tile_start + wave_q_offset + 2 * i + lane_hi;
+      if (abs_q_pos >= query_len) continue;
+      float* w = ws + ((int64_t)(q_start_token + abs_q_pos) * num_query_heads +
+                       head_idx) *
+                          (HEAD_SIZE + 2);
+  #pragma unroll
+      for (int dh = 0; dh < FRAGS; ++dh) w[dh * 16 + lane_lo] = out_acc[dh][i];
+      if (lane_lo == 0) {
+        w[HEAD_SIZE] = m_state[i];
+        w[HEAD_SIZE + 1] = l_state[i];
+      }
+    }
+  }  // PHASE == 1
 
   // ---- PHASE 2: Current chunk (fp16, causal) ----
-  // Current chunk tokens are NOT yet in the int8 cache — they're in fp16.
-  // Reuse the fp16 v2 loaders and the original attn_step (no int8 scales).
-  // Import from the v2 namespace.
-  const int valid_q_count_for_block =
-      max(0, min(BLOCK_M, query_len - q_tile_start));
-  const int causal_k_upper =
-      causal ? (q_tile_start + valid_q_count_for_block) : query_len;
-  const int phase2_k_end = min(query_len, causal_k_upper);
-
-  // Reload Q in fp16 for phase 2 (it was only kept as int8 during phase 1).
-  V16 q_frags[FRAGS];
-  if (valid_q) {
-    const T* q_row = q + (int64_t)(q_start_token + my_q_pos) * stride_q_token +
-                     (int64_t)head_idx * stride_q_head;
+  if constexpr (PHASE == 2) {
   #pragma unroll
-    for (int dh = 0; dh < FRAGS; ++dh)
-      __builtin_memcpy(&q_frags[dh], q_row + dh * 16, sizeof(V16));
-  } else {
+    for (int i = 0; i < 8; ++i) {
+      const int abs_q_pos = q_tile_start + wave_q_offset + 2 * i + lane_hi;
+      if (abs_q_pos >= query_len) continue;
+      const float* w =
+          ws +
+          ((int64_t)(q_start_token + abs_q_pos) * num_query_heads + head_idx) *
+              (HEAD_SIZE + 2);
   #pragma unroll
-    for (int dh = 0; dh < FRAGS; ++dh)
-  #pragma unroll
-      for (int k = 0; k < 16; ++k) q_frags[dh][k] = (E)0;
-  }
-
-  for (int start_n = 0; start_n < phase2_k_end; start_n += K_TILE) {
-    // Phase 2 uses fp16 K/V from k_chunk/v_chunk (same as v2 kernel).
-    // For now, inline a simplified chunk loader.
-    // K chunk: load cooperatively into K_lds_raw (same format as fp16 v2)
-    {
-      constexpr int X = X_FP16;
-      constexpr int D_CHUNKS = HEAD_SIZE / 16;  // threads per slot
-      const int my_k_idx = tid / D_CHUNKS;
-      const int my_dh_base = (tid % D_CHUNKS) * 2;
-      const int abs_k = start_n + my_k_idx;
-      const bool valid_k = abs_k < query_len;
-      const T* row =
-          valid_k
-              ? (k_chunk + (int64_t)(q_start_token + abs_k) * stride_kc_token +
-                 (int64_t)kv_head_idx * stride_kc_head)
-              : nullptr;
-  #pragma unroll
-      for (int dh = 0; dh < 2; ++dh) {
-        const int d_high = my_dh_base + dh;
-        int4 vec;
-        if (valid_k) {
-          vec = *(const int4*)(row + d_high * X);
-        } else {
-          vec.x = vec.y = vec.z = vec.w = 0;
-        }
-        *(int4*)&K_lds_raw[d_high * (K_TILE * X) + my_k_idx * X] = vec;
-      }
+      for (int dh = 0; dh < FRAGS; ++dh) out_acc[dh][i] = w[dh * 16 + lane_lo];
+      m_state[i] = w[HEAD_SIZE];
+      l_state[i] = w[HEAD_SIZE + 1];
     }
-    // V chunk
-    {
-      constexpr int TPS = HEAD_SIZE / K_TILE;  // threads per slot
+
+    // Current chunk tokens are NOT yet in the int8 cache — they're in fp16.
+    // Reuse the fp16 v2 loaders and the original attn_step (no int8 scales).
+    // Import from the v2 namespace.
+    const int valid_q_count_for_block =
+        max(0, min(BLOCK_M, query_len - q_tile_start));
+    const int causal_k_upper =
+        causal ? (q_tile_start + valid_q_count_for_block) : query_len;
+    const int phase2_k_end = min(query_len, causal_k_upper);
+
+    // Q for the chunk phase is read from global inside the loop, not kept in
+    // FRAGS fp16 fragments. The wave's 16 rows are 8 KiB, so it stays in L1/L2,
+    // and it keeps the partially unrolled QK loop from turning a register array
+    // into a scratch array. The row index is clamped: an out-of-range row is
+    // masked to -INFINITY by m_in_q anyway, so reading it changes nothing and
+    // saves a branch in the loop.
+    const T* q_row_g = q +
+                       (int64_t)(q_start_token + min(my_q_pos, query_len - 1)) *
+                           stride_q_token +
+                       (int64_t)head_idx * stride_q_head;
+
+    for (int start_n = 0; start_n < phase2_k_end; start_n += K_TILE) {
+      // Phase 2 uses fp16 K/V from k_chunk/v_chunk (same as v2 kernel).
+      // For now, inline a simplified chunk loader.
+      // K chunk: load cooperatively into K_lds_raw (same format as fp16 v2)
+      {
+        constexpr int X = X_FP16;
+        constexpr int D_CHUNKS = HEAD_SIZE / 16;  // threads per slot
+        const int my_k_idx = tid / D_CHUNKS;
+        const int my_dh_base = (tid % D_CHUNKS) * 2;
+        const int abs_k = start_n + my_k_idx;
+        const bool valid_k = abs_k < query_len;
+        const T* row =
+            valid_k ? (k_chunk +
+                       (int64_t)(q_start_token + abs_k) * stride_kc_token +
+                       (int64_t)kv_head_idx * stride_kc_head)
+                    : nullptr;
   #pragma unroll
-      for (int p = 0; p < 2; ++p) {
-        const int my_k = tid / TPS;
-        const int my_dc = (tid % TPS) + p * TPS;
-        const int d_base = my_dc * 8;
-        const int abs_k = start_n + my_k;
-        const bool valid = abs_k < query_len;
-        int4 vec;
-        if (valid) {
-          const T* src =
-              v_chunk + (int64_t)(q_start_token + abs_k) * stride_vc_token +
-              (int64_t)kv_head_idx * stride_vc_head + (int64_t)d_base;
-          vec = *(const int4*)src;
-        } else {
-          vec.x = vec.y = vec.z = vec.w = 0;
-        }
-        T tmp[8];
-        __builtin_memcpy(tmp, &vec, 16);
-  #pragma unroll
-        for (int e = 0; e < 8; ++e) {
-          V_lds[(d_base + e) * K_TILE + my_k] = tmp[e];
+        for (int dh = 0; dh < 2; ++dh) {
+          const int d_high = my_dh_base + dh;
+          int4 vec;
+          if (valid_k) {
+            vec = *(const int4*)(row + d_high * X);
+          } else {
+            vec.x = vec.y = vec.z = vec.w = 0;
+          }
+          *(int4*)&K_lds_raw[d_high * (K_TILE * X) + my_k_idx * X] = vec;
         }
       }
-    }
-    // Scales = 1.0 for chunk (not quantized yet)
-    if (tid < K_TILE) {
-      k_scale_lds[tid] = 1.0f;
-      v_scale_lds[tid] = 1.0f;
-    }
-    __syncthreads();
+      // V chunk
+      {
+        constexpr int TPS = HEAD_SIZE / K_TILE;  // threads per slot
+  #pragma unroll
+        for (int p = 0; p < 2; ++p) {
+          const int my_k = tid / TPS;
+          const int my_dc = (tid % TPS) + p * TPS;
+          const int d_base = my_dc * 8;
+          const int abs_k = start_n + my_k;
+          const bool valid = abs_k < query_len;
+          int4 vec;
+          if (valid) {
+            const T* src =
+                v_chunk + (int64_t)(q_start_token + abs_k) * stride_vc_token +
+                (int64_t)kv_head_idx * stride_vc_head + (int64_t)d_base;
+            vec = *(const int4*)src;
+          } else {
+            vec.x = vec.y = vec.z = vec.w = 0;
+          }
+          T tmp[8];
+          __builtin_memcpy(tmp, &vec, 16);
+  #pragma unroll
+          for (int e = 0; e < 8; ++e) {
+            V_lds[(d_base + e) * K_TILE + my_k] = tmp[e];
+          }
+        }
+      }
+      // Scales = 1.0 for chunk (not quantized yet)
+      if (tid < K_TILE) {
+        k_scale_lds[tid] = 1.0f;
+        v_scale_lds[tid] = 1.0f;
+      }
+      __syncthreads();
 
-    const int valid_k_count = min(K_TILE, query_len - start_n);
-    attn_step_wave_int8<T, HEAD_SIZE, X_FP16, /*CAUSAL_MASK=*/true>(
-        K_lds_raw, V_lds, P_lds_wave, k_scale_lds, v_scale_lds, q_frags,
-        out_acc, m_state, l_state, wave_q_tile_start, start_n,
-        valid_q_count_for_wave, valid_k_count, sm_scale, lane, lane_lo,
-        lane_hi);
-    __syncthreads();
-  }
+      const int valid_k_count = min(K_TILE, query_len - start_n);
+      attn_step_wave_int8<T, HEAD_SIZE, X_FP16, /*CAUSAL_MASK=*/true>(
+          K_lds_raw, V_lds, P_lds_wave, k_scale_lds, v_scale_lds, q_row_g,
+          out_acc, m_state, l_state, wave_q_tile_start, start_n,
+          valid_q_count_for_wave, valid_k_count, sm_scale, lane, lane_lo,
+          lane_hi);
+      __syncthreads();
+    }
+
+  }  // PHASE == 2
 
   // ---- Epilogue: divide by L, write output ----
+  if constexpr (PHASE == 2)
   #pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    const int m_row = 2 * i + lane_hi;
-    const int abs_m_row = wave_q_offset + m_row;
-    const int abs_q_pos = q_tile_start + abs_m_row;
-    if (abs_q_pos >= query_len) continue;
-    const float l_inv = 1.0f / (l_state[i] + 1e-10f);
-    T* out_row = out + (int64_t)(q_start_token + abs_q_pos) * stride_o_token +
-                 (int64_t)head_idx * stride_o_head;
+    for (int i = 0; i < 8; ++i) {
+      const int m_row = 2 * i + lane_hi;
+      const int abs_m_row = wave_q_offset + m_row;
+      const int abs_q_pos = q_tile_start + abs_m_row;
+      if (abs_q_pos >= query_len) continue;
+      const float l_inv = 1.0f / (l_state[i] + 1e-10f);
+      T* out_row = out + (int64_t)(q_start_token + abs_q_pos) * stride_o_token +
+                   (int64_t)head_idx * stride_o_head;
   #pragma unroll
-    for (int dh = 0; dh < FRAGS; ++dh) {
-      const int out_col = dh * 16 + lane_lo;
-      out_row[out_col] = to_T<T>(out_acc[dh][i] * l_inv);
+      for (int dh = 0; dh < FRAGS; ++dh) {
+        const int out_col = dh * 16 + lane_lo;
+        out_row[out_col] = to_T<T>(out_acc[dh][i] * l_inv);
+      }
     }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -772,23 +830,37 @@ void launch_paged_prefill_attn_v2_int8(
     int64_t stride_vcache_slot, int64_t stride_ks_blk, int64_t stride_ks_slot,
     int64_t stride_ks_head, int64_t stride_vs_blk, int64_t stride_vs_slot,
     int64_t stride_vs_head, int64_t stride_o_token, int64_t stride_o_head,
-    cudaStream_t stream) {
+    float* ws, cudaStream_t stream) {
   constexpr int THREADS = HEAD_SIZE;
   constexpr int NUM_WAVES = THREADS / 32;
   constexpr int BLOCK_M = NUM_WAVES * M_PER_WAVE;
   const int q_blocks = (max_query_len + BLOCK_M - 1) / BLOCK_M;
   dim3 block(THREADS);
   dim3 grid(num_seqs, num_query_heads, q_blocks);
-  paged_prefill_attn_kernel_v2_int8<T, HEAD_SIZE><<<grid, block, 0, stream>>>(
-      out, q, k_chunk, v_chunk, k_cache, v_cache, k_scale_cache, v_scale_cache,
-      block_table, cu_seqlens_q, seq_lens, num_query_heads, num_kv_heads,
-      block_size, max_blocks_per_seq, sm_scale, causal, stride_q_token,
-      stride_q_head, stride_kc_token, stride_kc_head, stride_vc_token,
-      stride_vc_head, stride_kcache_block, stride_kcache_head,
-      stride_kcache_dhi, stride_kcache_slot, stride_vcache_block,
-      stride_vcache_head, stride_vcache_d, stride_vcache_slot, stride_ks_blk,
-      stride_ks_slot, stride_ks_head, stride_vs_blk, stride_vs_slot,
-      stride_vs_head, stride_o_token, stride_o_head);
+  paged_prefill_attn_kernel_v2_int8<T, HEAD_SIZE, 1>
+      <<<grid, block, 0, stream>>>(
+          out, ws, q, k_chunk, v_chunk, k_cache, v_cache, k_scale_cache,
+          v_scale_cache, block_table, cu_seqlens_q, seq_lens, num_query_heads,
+          num_kv_heads, block_size, max_blocks_per_seq, sm_scale, causal,
+          stride_q_token, stride_q_head, stride_kc_token, stride_kc_head,
+          stride_vc_token, stride_vc_head, stride_kcache_block,
+          stride_kcache_head, stride_kcache_dhi, stride_kcache_slot,
+          stride_vcache_block, stride_vcache_head, stride_vcache_d,
+          stride_vcache_slot, stride_ks_blk, stride_ks_slot, stride_ks_head,
+          stride_vs_blk, stride_vs_slot, stride_vs_head, stride_o_token,
+          stride_o_head);
+  paged_prefill_attn_kernel_v2_int8<T, HEAD_SIZE, 2>
+      <<<grid, block, 0, stream>>>(
+          out, ws, q, k_chunk, v_chunk, k_cache, v_cache, k_scale_cache,
+          v_scale_cache, block_table, cu_seqlens_q, seq_lens, num_query_heads,
+          num_kv_heads, block_size, max_blocks_per_seq, sm_scale, causal,
+          stride_q_token, stride_q_head, stride_kc_token, stride_kc_head,
+          stride_vc_token, stride_vc_head, stride_kcache_block,
+          stride_kcache_head, stride_kcache_dhi, stride_kcache_slot,
+          stride_vcache_block, stride_vcache_head, stride_vcache_d,
+          stride_vcache_slot, stride_ks_blk, stride_ks_slot, stride_ks_head,
+          stride_vs_blk, stride_vs_slot, stride_vs_head, stride_o_token,
+          stride_o_head);
 }
 
 // Explicit instantiations
@@ -798,7 +870,7 @@ template void launch_paged_prefill_attn_v2_int8<half, 128>(
     int, int, int, int, float, bool, int64_t, int64_t, int64_t, int64_t,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
-    int64_t, int64_t, cudaStream_t);
+    int64_t, int64_t, float*, cudaStream_t);
 
 template void launch_paged_prefill_attn_v2_int8<bf16_t, 128>(
     bf16_t*, const bf16_t*, const bf16_t*, const bf16_t*, const int8_t*,
@@ -806,7 +878,7 @@ template void launch_paged_prefill_attn_v2_int8<bf16_t, 128>(
     const int*, int, int, int, int, int, int, float, bool, int64_t, int64_t,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
-    int64_t, int64_t, int64_t, int64_t, cudaStream_t);
+    int64_t, int64_t, int64_t, int64_t, float*, cudaStream_t);
 
 #endif  // USE_ROCM
 
@@ -842,6 +914,15 @@ void paged_prefill_attn_rdna3_int8(
   // Derive head_size from cache layout: padded_hs - scale_pad(4)
   const int head_size = q.size(2);
 
+  // Partial online-softmax state handed from the prefix phase to the chunk
+  // phase: 258 floats per (token, head), i.e. ~8.6 MB at 1072 tokens x 8 heads,
+  // written and read once. That is ~17 us against a ~8 ms kernel; the spill it
+  // removes costs far more. Not zeroed on purpose: both phases skip the same
+  // rows, so nothing is read before it is written.
+  auto ws = at::empty(
+      {(int64_t)q.size(0), (int64_t)q.size(1), (int64_t)q.size(2) + 2},
+      q.options().dtype(at::kFloat));
+
   // Macro to reduce boilerplate for head_size dispatch
   #define LAUNCH_INT8(T, HS)                                                  \
     launch_paged_prefill_attn_v2_int8<T, HS>(                                 \
@@ -861,7 +942,7 @@ void paged_prefill_attn_rdna3_int8(
         k_scale_cache.stride(0), k_scale_cache.stride(1),                     \
         k_scale_cache.stride(2), v_scale_cache.stride(0),                     \
         v_scale_cache.stride(1), v_scale_cache.stride(2), out.stride(0),      \
-        out.stride(1), stream)
+        out.stride(1), (float*)ws.data_ptr(), stream)
 
   if (q.dtype() == at::kHalf) {
     using T = half;
