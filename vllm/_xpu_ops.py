@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from vllm_xpu_kernels.rotary import apply_rotary_emb
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
@@ -247,6 +248,24 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     is_neox_style: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return query, key
+
+
+def _xpu_apply_rotary_emb_impl(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return apply_rotary_emb(x, cos, sin, is_neox_style)
+
+
+def _xpu_apply_rotary_emb_fake(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return torch.empty_like(x)
 
 
 def _xpu_fp8_bmm_impl(
@@ -1255,6 +1274,12 @@ class xpu_ops:
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_apply_rotary_emb",
+                op_func=_xpu_apply_rotary_emb_impl,
+                fake_impl=_xpu_apply_rotary_emb_fake,
             )
 
             direct_register_custom_op(
