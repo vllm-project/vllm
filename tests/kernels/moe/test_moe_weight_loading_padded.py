@@ -544,6 +544,161 @@ class TestLoadWeightsExpertBias:
             list(RoutedExperts.load_weights(experts, weights))
 
 
+class TestLoadWeightsFusedNvfp4:
+    """Fully-fused compressed-tensors NVFP4 MoE checkpoints stack every expert
+    in one tensor named by projection (`gate_up_proj`/`down_proj`) with quant
+    suffixes (`weight_packed`, `weight_scale`, `weight_global_scale`,
+    `input_global_scale`). `RoutedExperts.load_weights` must map those onto the
+    `w13_*`/`w2_*` params and split the 2D per-shard global scales stacked over
+    experts ([E, 2] for w13, [E, 1] for w2) into per-expert scalars.
+    """
+
+    NUM_EXPERTS = 2
+    INTERMEDIATE = 32
+    HIDDEN = 32
+    GROUP = 16
+
+    def _make_experts(self) -> torch.nn.Module:
+        e = self.NUM_EXPERTS
+        i2 = 2 * self.INTERMEDIATE
+        experts = torch.nn.Module()
+        experts.layer_name = "model.layers.0.mlp.experts"
+        experts.is_fused_checkpoint_transposed = False
+        experts._orient_fused_weight = RoutedExperts._orient_fused_weight
+        mapping = RoutedExperts.build_expert_params_mapping(
+            "gate_proj",
+            "down_proj",
+            "up_proj",
+            num_experts=e,
+            routed_experts_prefix="",
+            include_fused=True,
+        )
+        experts.get_expert_mapping = lambda **_: mapping
+
+        calls: list[dict] = []
+
+        def weight_loader(
+            param,
+            loaded_weight,
+            weight_name,
+            shard_id,
+            expert_id,
+            return_success=False,
+        ):
+            calls.append(
+                dict(
+                    param_name=weight_name.removeprefix(f"{experts.layer_name}."),
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    shape=tuple(loaded_weight.shape),
+                    value=(
+                        loaded_weight.reshape(-1).tolist()
+                        if loaded_weight.numel() == 1
+                        else None
+                    ),
+                )
+            )
+            return True
+
+        experts._calls = calls
+
+        shapes = {
+            "w13_weight_packed": (e, i2, self.HIDDEN // 2),
+            "w13_weight_scale": (e, i2, self.HIDDEN // self.GROUP),
+            "w13_weight_global_scale": (e, 2),
+            "w13_input_global_scale": (e, 2),
+            "w2_weight_packed": (e, self.HIDDEN, self.INTERMEDIATE // 2),
+            "w2_weight_scale": (e, self.HIDDEN, self.INTERMEDIATE // self.GROUP),
+            "w2_weight_global_scale": (e,),
+            "w2_input_global_scale": (e,),
+        }
+        for name, shape in shapes.items():
+            param = torch.nn.Parameter(torch.zeros(shape), requires_grad=False)
+            param.weight_loader = weight_loader
+            setattr(experts, name, param)
+        return experts
+
+    def _checkpoint_weights(self) -> list[tuple[str, torch.Tensor]]:
+        e = self.NUM_EXPERTS
+        i2 = 2 * self.INTERMEDIATE
+        return [
+            (
+                "gate_up_proj.weight_packed",
+                torch.zeros(e, i2, self.HIDDEN // 2, dtype=torch.uint8),
+            ),
+            (
+                "gate_up_proj.weight_scale",
+                torch.zeros(e, i2, self.HIDDEN // self.GROUP),
+            ),
+            # Row -> expert, column 0 -> w1, column 1 -> w3.
+            (
+                "gate_up_proj.weight_global_scale",
+                torch.tensor([[10.0, 11.0], [20.0, 21.0]]),
+            ),
+            (
+                "gate_up_proj.input_global_scale",
+                torch.tensor([[12.0, 13.0], [22.0, 23.0]]),
+            ),
+            (
+                "down_proj.weight_packed",
+                torch.zeros(e, self.HIDDEN, self.INTERMEDIATE // 2, dtype=torch.uint8),
+            ),
+            (
+                "down_proj.weight_scale",
+                torch.zeros(e, self.HIDDEN, self.INTERMEDIATE // self.GROUP),
+            ),
+            ("down_proj.weight_global_scale", torch.tensor([[30.0], [31.0]])),
+            ("down_proj.input_global_scale", torch.tensor([[32.0], [33.0]])),
+        ]
+
+    def test_all_fused_nvfp4_params_resolve(self):
+        experts = self._make_experts()
+        loaded = set(RoutedExperts.load_weights(experts, self._checkpoint_weights()))
+        assert loaded == {
+            "w13_weight_packed",
+            "w13_weight_scale",
+            "w13_weight_global_scale",
+            "w13_input_global_scale",
+            "w2_weight_packed",
+            "w2_weight_scale",
+            "w2_weight_global_scale",
+            "w2_input_global_scale",
+        }
+
+    def test_2d_global_scales_split_per_expert_and_shard(self):
+        experts = self._make_experts()
+        list(RoutedExperts.load_weights(experts, self._checkpoint_weights()))
+        got = {
+            (c["param_name"], c["shard_id"], c["expert_id"]): c["value"][0]
+            for c in experts._calls
+            if c["param_name"].endswith("global_scale")
+        }
+        # w13 weight global scale [E, 2]: column 0 -> w1, column 1 -> w3.
+        assert got[("w13_weight_global_scale", "w1", 0)] == 10.0
+        assert got[("w13_weight_global_scale", "w3", 0)] == 11.0
+        assert got[("w13_weight_global_scale", "w1", 1)] == 20.0
+        assert got[("w13_weight_global_scale", "w3", 1)] == 21.0
+        # w2 weight global scale [E, 1]: one scalar per expert.
+        assert got[("w2_weight_global_scale", "w2", 0)] == 30.0
+        assert got[("w2_weight_global_scale", "w2", 1)] == 31.0
+        # Input global scales split the same way.
+        assert got[("w13_input_global_scale", "w1", 0)] == 12.0
+        assert got[("w13_input_global_scale", "w3", 1)] == 23.0
+        assert got[("w2_input_global_scale", "w2", 1)] == 33.0
+
+    def test_fused_packed_weights_split_into_shards(self):
+        experts = self._make_experts()
+        list(RoutedExperts.load_weights(experts, self._checkpoint_weights()))
+        packed = [c for c in experts._calls if c["param_name"] == "w13_weight_packed"]
+        assert {(c["shard_id"], c["expert_id"]) for c in packed} == {
+            ("w1", 0),
+            ("w3", 0),
+            ("w1", 1),
+            ("w3", 1),
+        }
+        assert all(c["shape"] == (self.INTERMEDIATE, self.HIDDEN // 2) for c in packed)
+
+
 class TestPerTensorScaleCoercion:
     """Regression test for shape-(1,) per-tensor scales (issue #43297).
 
