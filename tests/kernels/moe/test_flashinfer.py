@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -22,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    view_as_block_major_k,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsModular,
@@ -534,10 +538,11 @@ def _make_unquantized_flashinfer_test_layer(
     method.moe = moe_config
     method.unquantized_backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
     method.moe_kernel = None
+    mock_kernel = MagicMock()
     monkeypatch.setattr(
         method,
         "_init_moe_kernel",
-        lambda _: setattr(method, "moe_kernel", object()),
+        lambda _: setattr(method, "moe_kernel", mock_kernel),
     )
 
     layer = torch.nn.Module()
@@ -570,6 +575,10 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
     padded = w2_shape[-1]
     w13_ptr = layer.w13_weight.data_ptr()
     w2_ptr = layer.w2_weight.data_ptr()
+    load_numel = (
+        layer.w13_weight.weight_loader_numel,
+        layer.w2_weight.weight_loader_numel,
+    )
 
     for _ in range(2):
         reloaded_w13 = torch.randn_like(layer.w13_weight)
@@ -602,30 +611,41 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
         assert layer.w2_weight.shape == w2_shape
         assert layer.w13_weight.data_ptr() == w13_ptr
         assert layer.w2_weight.data_ptr() == w2_ptr
-        kernel_w13, kernel_w2 = method._kernel_weights(layer)
+        assert (
+            layer.w13_weight.weight_loader_numel,
+            layer.w2_weight.weight_loader_numel,
+        ) == load_numel
+        kernel_w13 = view_as_block_major_k(layer.w13_weight)
+        kernel_w2 = view_as_block_major_k(layer.w2_weight)
         assert torch.equal(kernel_w13, expected_w13)
         assert torch.equal(kernel_w2, expected_w2)
 
 
-def _check_flashinfer_ipc_weights(entries, expected, is_gated, mode, device_index):
+def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
     from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheState,
+    )
     from vllm.model_executor.utils import weights_already_processed
 
     torch.accelerator.set_device_index(device_index)
     with pytest.MonkeyPatch.context() as monkeypatch:
         method, layer = _make_unquantized_flashinfer_test_layer(
-            monkeypatch, 192, is_gated, device="meta"
+            monkeypatch, 192, is_gated=True, device="meta"
         )
         loader = object.__new__(IpcModelLoader)
         loader.mode = mode
-        loader._apply_entries(layer, entries, {}, device_index)
+        loader._apply_entries(layer, WeightCacheState(entries, {}, {}), device_index)
         pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
 
         # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.
         with weights_already_processed():
             method.process_weights_after_loading(layer)
         assert method.moe_kernel is not None
-        actual = method._kernel_weights(layer)
+        actual = (
+            view_as_block_major_k(layer.w13_weight),
+            view_as_block_major_k(layer.w2_weight),
+        )
         for weight, reference, pointer in zip(actual, expected, pointers):
             assert weight.data_ptr() == pointer
             assert torch.equal(weight.cpu(), reference)
@@ -636,11 +656,10 @@ def _check_flashinfer_ipc_weights(entries, expected, is_gated, mode, device_inde
         torch.accelerator.synchronize()
 
 
-@pytest.mark.parametrize("is_gated", [True, False])
 @pytest.mark.parametrize("cache_ndim", [3, 4])
 @pytest.mark.parametrize("mode", ["copy", "zero_copy"])
 def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
-    monkeypatch, is_gated, cache_ndim, mode
+    monkeypatch, cache_ndim, mode
 ):
     """A spawned IPC consumer restores views without transient method state."""
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -649,13 +668,12 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
     from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
 
     method, layer = _make_unquantized_flashinfer_test_layer(
-        monkeypatch, 192, is_gated, device="meta"
+        monkeypatch, 192, is_gated=True, device="meta"
     )
     packed = convert_moe_weights_to_flashinfer_trtllm_block_layout(
         {},
         torch.randn_like(layer.w13_weight, device="cuda"),
         torch.randn_like(layer.w2_weight, device="cuda"),
-        is_gated_act_gemm=is_gated,
     )
     expected = [weight.cpu() for weight in packed]
     entries = {}
@@ -667,7 +685,6 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
         args=(
             entries,
             expected,
-            is_gated,
             mode,
             torch.accelerator.current_device_index(),
         ),
