@@ -803,7 +803,7 @@ def test_long_prefill_threshold_floored_by_fair_share():
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
         long_prefill_token_threshold=100,
-        enable_long_prefill_token_threshold_adaptive=True,
+        long_prefill_token_threshold_adaptive=True,
     )
     long_req = create_requests(num_requests=1, num_tokens=2000)[0]
     short_req = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])[0]

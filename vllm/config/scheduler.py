@@ -84,7 +84,7 @@ class SchedulerConfig:
     The cap is not applied when the request is the only one in the batch,
     since there is no other request for it to starve."""
 
-    enable_long_prefill_token_threshold_adaptive: bool = Field(default=False)
+    long_prefill_token_threshold_adaptive: bool = Field(default=False)
     """Floor the effective long prefill token threshold at a fair share of
     the token budget: max_num_batched_tokens divided by the number of
     queued and running requests. Only applies when

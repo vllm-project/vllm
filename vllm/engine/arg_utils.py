@@ -573,8 +573,8 @@ class EngineArgs:
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    enable_long_prefill_token_threshold_adaptive: bool = (
-        SchedulerConfig.enable_long_prefill_token_threshold_adaptive
+    long_prefill_token_threshold_adaptive: bool = (
+        SchedulerConfig.long_prefill_token_threshold_adaptive
     )
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
@@ -1647,8 +1647,8 @@ class EngineArgs:
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
         scheduler_group.add_argument(
-            "--enable-long-prefill-token-threshold-adaptive",
-            **scheduler_kwargs["enable_long_prefill_token_threshold_adaptive"],
+            "--long-prefill-token-threshold-adaptive",
+            **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
         )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
@@ -2496,8 +2496,8 @@ class EngineArgs:
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
-            enable_long_prefill_token_threshold_adaptive=(
-                self.enable_long_prefill_token_threshold_adaptive
+            long_prefill_token_threshold_adaptive=(
+                self.long_prefill_token_threshold_adaptive
             ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,

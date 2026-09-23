@@ -135,7 +135,7 @@ class Scheduler(SchedulerInterface):
             else self.scheduler_config.max_num_batched_tokens
         )
         self.adaptive_long_prefill_threshold = (
-            self.scheduler_config.enable_long_prefill_token_threshold_adaptive
+            self.scheduler_config.long_prefill_token_threshold_adaptive
         )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
