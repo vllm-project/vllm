@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Mapping
-from typing import Any
 
 import torch
 
@@ -14,6 +13,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
+    AttentionState,
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
@@ -31,9 +31,7 @@ def _prepare_dflash_inputs_to_capture(
     max_model_len: int,
     skip_attn: bool,
     causal: bool | Mapping[int, bool],
-) -> tuple[Callable[[], dict[str, Any] | None], dict[str, torch.Tensor]]:
-    """Fill the dummy inputs now and return the attention metadata build, which
-    the caller runs either before the capture or inside it."""
+) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
@@ -41,6 +39,7 @@ def _prepare_dflash_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
+    attn_metadata = None
     if not skip_attn:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         if block_tables.cp_size > 1:
@@ -53,11 +52,7 @@ def _prepare_dflash_inputs_to_capture(
                 block_tables.cp_interleave,
                 num_reqs_padded=input_batch.num_reqs_after_padding,
             )
-
-    def build_attn() -> dict[str, Any] | None:
-        if skip_attn:
-            return None
-        return build_attn_metadata(
+        attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
@@ -73,8 +68,7 @@ def _prepare_dflash_inputs_to_capture(
             for_cudagraph_capture=True,
             causal=causal,
         )
-
-    return build_attn, slot_mappings_by_layer
+    return AttentionState(attn_metadata, slot_mappings_by_layer)
 
 
 class DFlashCudaGraphManager(CudaGraphManager):
@@ -90,11 +84,11 @@ class DFlashCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         causal: bool | Mapping[int, bool],
-        precompute_context_kv: Callable[[int], None] | None = None,
+        precompute_context_kv: Callable[[int], None],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """``precompute_context_kv(num_reqs)``, if given, is captured together
-        with the attention metadata build ahead of the forward."""
+        """``precompute_context_kv(num_reqs)`` is captured ahead of the query
+        forward."""
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -107,7 +101,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 if self.dp_size > 1
                 else None
             )
-            build_attn, slot_mappings = _prepare_dflash_inputs_to_capture(
+            attn_state = _prepare_dflash_inputs_to_capture(
                 num_reqs,
                 num_tokens,
                 input_buffers,
@@ -118,23 +112,14 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
                 causal=causal,
             )
-            if precompute_context_kv is None:
-                attn_metadata = build_attn()
-                return lambda cg_mode: forward_fn(
-                    num_reqs,
-                    num_tokens,
-                    attn_metadata,
-                    slot_mappings,
-                    num_tokens_across_dp,
-                    cg_mode,
-                )
+            attn_metadata, slot_mappings = attn_state
 
             def forward(cg_mode: CUDAGraphMode) -> None:
                 precompute_context_kv(num_reqs)
                 forward_fn(
                     num_reqs,
                     num_tokens,
-                    build_attn(),
+                    attn_metadata,
                     slot_mappings,
                     num_tokens_across_dp,
                     cg_mode,

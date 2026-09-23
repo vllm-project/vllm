@@ -105,9 +105,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         ).repeat(self.max_num_reqs)
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
-        # Whether the FULL graphs also capture the context K/V precompute and the
-        # attention metadata build, i.e. the whole draft step.
-        self.capture_context_kv = False
         self.draft_kv_cache_group_id: int = -1
 
     @property
@@ -146,23 +143,14 @@ class DFlashSpeculator(DraftModelSpeculator):
             decode_query_len=self.num_query_per_req,
         )
 
-        self.capture_context_kv = (
-            getattr(self.model, "supports_captured_draft_step", False)
-            and self.query_cudagraph_manager.needs_capture()
-            and self.pcp_manager is None
-            and self.block_tables.cp_size == 1
-        )
-
     def capture(self) -> None:
         logger.info("Capturing model for %s speculator...", self._speculator_name)
         # Padded sample rows must not scatter into a live request during capture.
         self.sample_indices.zero_()
         self.sample_pos.zero_()
         self.sample_idx_mapping.fill_(-1)
-        if self.capture_context_kv:
-            # Capture must not write context K/V.
-            self.context_positions.zero_()
-            self._context_slot_mappings.fill_(PAD_SLOT_ID)
+        # Capture must not write context K/V.
+        self._context_slot_mappings.fill_(PAD_SLOT_ID)
         assert self.query_cudagraph_manager is not None
         self.query_cudagraph_manager.capture(
             self._generate_draft,
@@ -172,14 +160,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             self.max_model_len,
             causal=self._group_causal,
-            precompute_context_kv=(
-                (
-                    lambda num_reqs: self._precompute_context_kv(
-                        0, self._num_graph_context_tokens(num_reqs)
-                    )
-                )
-                if self.capture_context_kv
-                else None
+            precompute_context_kv=lambda num_reqs: self._precompute_context_kv(
+                0, self._num_graph_context_tokens(num_reqs)
             ),
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
@@ -472,26 +454,23 @@ class DFlashSpeculator(DraftModelSpeculator):
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
 
-        if self.capture_context_kv and batch_desc.cg_mode == CUDAGraphMode.FULL:
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # The graph stores the first num_context context rows.
             assert batch_desc.num_reqs is not None
             num_context = self._num_graph_context_tokens(batch_desc.num_reqs)
             if dummy_run:
                 # Dummy block tables are placeholders: write no context K/V.
                 self._context_slot_mappings[:, :num_context].fill_(PAD_SLOT_ID)
             elif num_target_tokens <= num_context:
-                self.context_positions[num_target_tokens:num_context].zero_()
+                # Rows past the batch keep stale positions but write no K/V.
                 self._context_slot_mappings[:, num_target_tokens:num_context].fill_(
                     PAD_SLOT_ID
                 )
             else:
                 # Prefill context beyond the graph's rows is stored before replay.
                 self._precompute_context_kv(num_context, num_target_tokens)
-            self._prepare_eplb_forward(num_query_tokens)
-            assert self.query_cudagraph_manager is not None
-            self.query_cudagraph_manager.run_fullgraph(batch_desc)
-            return self.draft_tokens[:num_reqs]
-
-        self._precompute_context_kv(0, num_target_tokens, dummy_run)
+        else:
+            self._precompute_context_kv(0, num_target_tokens, dummy_run)
 
         # Rebuild the draft attention metadata even when replaying the FULL
         # graph so that any attention metadata builder state is updated.
