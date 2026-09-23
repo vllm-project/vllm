@@ -45,7 +45,7 @@ from .interfaces import (
     SupportsMultiModal,
     _require_is_multimodal,
 )
-from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
+from .mimo_v2 import MiMoV2Attention, MiMoV2MLP, _shard_fp8_qkv_proj
 from .utils import _merge_multimodal_embeddings, maybe_prefix
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
@@ -141,7 +141,7 @@ class MiMoV2MTPLayer(nn.Module):
 
 
 class _MiMoV2MTPLayers(nn.Module):
-    """Thin wrapper so parameter paths match checkpoint: model.mtp.layers.*"""
+    """Thin wrapper so parameter paths match checkpoint: model.mtp.layers.*."""
 
     def __init__(
         self,
@@ -266,6 +266,7 @@ class MiMoV2MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        pending_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -279,14 +280,54 @@ class MiMoV2MTP(nn.Module):
             ):
                 continue
 
-            # Support fused qkv_proj checkpoint (Pro format).
-            # The checkpoint is stored pre-sharded for TP=8 as
-            # [Q_rank0, K_rank0, V_rank0, Q_rank1, ...], so splitting along
-            # dim 0 with chunk(tp_size) gives each rank its Q+K+V slice for
-            # both the FP8 weight and the block weight_scale_inv. This matches
-            # how the main model loads the same layout.
+            # Fused qkv_proj: the fp8 weight and its block scales arrive as
+            # separate tensors and are pre-sharded at `config.num_key_value_heads`
+            # chunks of [Q_c | K_c | V_c] (see _shard_fp8_qkv_proj for the
+            # layout). Shard them together: a plain chunk(tp_size) only happens
+            # to be right when tp_size is that chunk count *and* the scales are
+            # tiled per chunk (they are 4 x 29 = 116 rows for MiMo-V2.5, not
+            # tp_size slices of an even split).
             if "qkv_proj" in name:
-                if name in params_dict:
+                is_fp8_weight = (
+                    name.endswith("qkv_proj.weight")
+                    and loaded_weight.dtype == torch.float8_e4m3fn
+                )
+                is_fp8_scale = name.endswith("qkv_proj.weight_scale_inv")
+                if is_fp8_weight or is_fp8_scale:
+                    prefix, kind = name.rsplit(".", 1)
+                    if (
+                        f"{prefix}.weight" not in params_dict
+                        or f"{prefix}.weight_scale_inv" not in params_dict
+                    ):
+                        continue
+                    entry = pending_qkv_proj.setdefault(prefix, {})
+                    entry[kind] = loaded_weight
+                    if "weight" not in entry or "weight_scale_inv" not in entry:
+                        # Waiting for the other half of the fused projection.
+                        continue
+                    del pending_qkv_proj[prefix]
+
+                    # Geometry comes from the module the weights belong to.
+                    attn = self.get_submodule(prefix.rsplit(".", 1)[0])
+                    w_rank, s_rank = _shard_fp8_qkv_proj(
+                        entry["weight"],
+                        entry["weight_scale_inv"],
+                        num_heads=attn.total_num_heads,
+                        num_kv_heads=attn.total_num_kv_heads,
+                        head_dim=attn.head_dim,
+                        v_head_dim=attn.v_head_dim,
+                        tp_rank=tp_rank,
+                        tp_size=tp_size,
+                        ckpt_tp=self.config.num_key_value_heads,
+                    )
+                    for k, tensor in (("weight", w_rank), ("weight_scale_inv", s_rank)):
+                        param = params_dict[f"{prefix}.{k}"]
+                        if tensor.shape[0] > param.shape[0]:
+                            tensor = tensor[: param.shape[0]]
+                        default_weight_loader(param, tensor)
+                        loaded_params.add(f"{prefix}.{k}")
+                elif name in params_dict:
+                    # Non-fp8 fused checkpoint: unchanged behaviour.
                     param = params_dict[name]
                     loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
                     default_weight_loader(param, loaded_weight)

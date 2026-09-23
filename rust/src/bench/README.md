@@ -18,6 +18,7 @@ vllm-bench --backend vllm --base-url http://127.0.0.1:8000 \
 - **Beyond a single run** — concurrency/rate **sweeps**, **multi-run** stats, **multi-turn** conversations, **LoRA** multi-adapter, and result **comparison**.
 - **Steady-state metrics** — throughput/latency measured over the saturated plateau, excluding ramp-up and drain.
 - **Parity** — JSON output schema and timing semantics match Python `vllm bench serve` exactly.
+- **Multimodal preprocessing** — `mm-processor` subcommand measures per-stage VLM preprocessing latency against a managed headless engine (mirrors `vllm bench mm-processor`).
 
 ### Performance vs. Python
 
@@ -404,6 +405,32 @@ vllm-bench \
 
 </details>
 
+<details>
+<summary><b>Multimodal preprocessing (offline)</b></summary>
+
+The `mm-processor` subcommand benchmarks the multimodal preprocessing pipeline
+itself (media fetch → per-modality preprocess → prompt expansion), mirroring
+`vllm bench mm-processor`. It spawns a managed headless Python engine (real
+weights, real encoder) — no serving endpoint needed — and reports per-stage
+timing (mean/median/std/percentiles) plus end-to-end latency.
+
+```bash
+vllm-bench mm-processor \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --num-prompts 100 --num-warmups 5 \
+  --random-input-len 512 --random-output-len 128 \
+  --random-mm-base-items-per-request 1 \
+  --random-mm-limit-mm-per-prompt '{"image": 1, "video": 0}' \
+  --random-mm-bucket-config '{(1024, 800, 1): 1.0}' \
+  --metric-percentiles "50,90,99" \
+  --output-json mm_processor_stats.json
+```
+
+`--max-concurrency` defaults to `1`, matching Python's serial driver; raise it
+to measure a concurrent serving-style workload.
+
+</details>
+
 ## Supported Backends
 
 ### Generation
@@ -667,6 +694,7 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 
 - `--dataset-name random` — synthetic conversations with controllable per-turn token lengths. Auto-sets `min_tokens` to enforce output length without `ignore_eos`.
 - `--dataset-name sharegpt` — loads all turns (not just the first two); filters for entries with ≥ 2 real turns.
+- `--dataset-name hf` — downloads a ShareGPT-format HuggingFace config, then loads it like `sharegpt`.
 
 **Prefix sharing** (random dataset): when `--multi-turn-prefix-global-ratio` or `--multi-turn-prefix-conversation-ratio` is > 0, each turn sends a fixed-length message (no history accumulation) composed of a global prefix + per-conversation prefix + unique suffix. The two ratios must sum to < 1.0.
 
@@ -704,6 +732,36 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 
 </details>
 
+<details>
+<summary><b><code>mm-processor</code> subcommand</b></summary>
+
+Offline multimodal preprocessing latency benchmark (mirrors `vllm bench mm-processor`). Spawns a managed headless Python engine and drives the full chat preprocessing pipeline.
+
+| Flag | Default | Description |
+| ------ | --------- | ------------- |
+| `--model` | (required) | Model to serve and benchmark (HF id or local path) |
+| `--num-prompts` | `10` | Prompts to process, excluding warmups |
+| `--num-warmups` | `1` | Warmup prompts processed and discarded before timing |
+| `--metric-percentiles` | `99` | Comma-separated percentiles to report |
+| `--output-json` | — | Path to write aggregate stats as JSON (same schema as Python) |
+| `--random-input-len` | `1024` | Text input length per prompt |
+| `--random-output-len` | `128` | Expected output length per prompt |
+| `--random-prefix-len` | `0` | Prefix token length per prompt |
+| `--random-range-ratio` | `0.0` | Input/output length range ratio (float or `{"input": i, "output": o}`) |
+| `--random-mm-base-items-per-request` | `1` | Base number of multimodal items per request |
+| `--random-mm-num-mm-items-range-ratio` | `0.0` | Range ratio (in [0, 1]) for the number of mm items per request |
+| `--random-mm-limit-mm-per-prompt` | `{"image": 255, "video": 1}` | Per-modality item caps |
+| `--random-mm-bucket-config` | `{(256,256,1): 0.5, (720,1280,1): 0.5}` | Bucket config |
+| `--seed` | `0` | Seed for dataset generation |
+| `--request-id-prefix` | `mm-proc-` | Request-id prefix for per-request timing keys |
+| `--max-concurrency` | `1` | Maximum concurrent requests (1 matches Python's serial driver) |
+| `--trust-remote-code` | `false` | Trust remote code for the tokenizer and the managed engine |
+| `--chat-template` | — | Chat-template override (inline text or path) |
+
+Managed headless-engine options (e.g. `--python`, `--data-parallel-address`, `--data-parallel-rpc-port`, `--data-parallel-size`, `--max-model-len`, `--python-args`) are shared with other managed-engine commands; see `vllm-bench mm-processor --help`.
+
+</details>
+
 ## Tokenizer Support
 
 Tokenizers are loaded with a three-tier fallback chain:
@@ -733,10 +791,11 @@ Use `--append-result` to append multiple runs to the same file in JSONL format. 
 
 ```text
 src/
-├── main.rs                  # Entry point, mimalloc, tokio runtime, mode dispatch
+├── main.rs                  # Entry point, mimalloc, tokio runtime, mode/subcommand dispatch
 ├── cli.rs                   # clap CLI argument definitions
 ├── config.rs                # Validated config, goodput/ramp-up parsing
 ├── benchmark.rs             # Core orchestrator (schedule, spawn, collect, verify, profile)
+├── mm_processor.rs          # Offline mm preprocessing benchmark (mm-processor subcommand)
 ├── multi_turn.rs            # Multi-turn conversation orchestrator (channel workers)
 ├── compare.rs               # Result diff (--compare file_a.json file_b.json)
 ├── sweep.rs                 # Parameter sweep (--sweep-max-concurrency, --sweep-request-rate)

@@ -127,9 +127,7 @@ class StructuredOutputsParams:
             )
 
     def all_constraints_none(self) -> bool:
-        """
-        Returns True if all structured-output constraint fields are None.
-        """
+        """Returns True if all structured-output constraint fields are None."""
         return all(
             getattr(self, field) is None
             for field in (
@@ -143,9 +141,7 @@ class StructuredOutputsParams:
         )
 
     def all_non_structural_tag_constraints_none(self) -> bool:
-        """
-        Returns True if all structured-output constraint fields are None.
-        """
+        """Returns True if all structured-output constraint fields are None."""
         return all(
             getattr(self, field) is None
             for field in (
@@ -530,6 +526,16 @@ class SamplingParams(
 
         self._verify_args()
 
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and self.temperature >= _SAMPLING_EPS
+            and self.seed is None
+        ):
+            logger.warning_once(
+                "Random sampling without an explicit seed may not be batch "
+                "invariant. Set seed in SamplingParams or use temperature=0."
+            )
+
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
@@ -692,7 +698,7 @@ class SamplingParams(
         generation_config: dict[str, Any],
         eos_token_id: int | None = None,
     ) -> None:
-        """Update if there are non-default values from generation_config"""
+        """Update if there are non-default values from generation_config."""
         if not self.ignore_eos:
             self._eos_token_id = eos_token_id
 
@@ -827,7 +833,6 @@ class SamplingParams(
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
-        self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
@@ -997,13 +1002,6 @@ class SamplingParams(
                 value=invalid_token_ids,
             )
 
-    def _validate_logits_processors(self, model_config: ModelConfig) -> None:
-        from vllm.v1.sample.logits_processor import (
-            validate_logits_processors_parameters,
-        )
-
-        validate_logits_processors_parameters(model_config.logits_processors, self)
-
     def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids
         if allowed_token_ids is None:
@@ -1155,6 +1153,18 @@ class SamplingParams(
         if self.structured_outputs.regex and "\x00" in self.structured_outputs.regex:
             raise VLLMValidationError(
                 "structured_outputs.regex must not contain a NUL character ('\\x00')"
+            )
+        # Note(arpera):
+        # We do NOT check here structured output regex on emptiness because
+        # empty regex is indeed compiles to a valid grammar as well as
+        # whitespace-only regexps, for instance, regex="\n" or regex=" "
+        # are valid patterns and we MUST process them.
+        if (
+            isinstance(self.structured_outputs.structural_tag, str)
+            and self.structured_outputs.structural_tag.strip() == ""
+        ):
+            raise VLLMValidationError(
+                "structured_outputs.structural_tag cannot be an empty string"
             )
 
         from vllm.v1.structured_output.backend_guidance import (
@@ -1313,6 +1323,7 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+    skip_special_tokens: bool = True
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
