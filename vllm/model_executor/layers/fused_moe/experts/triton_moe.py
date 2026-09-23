@@ -604,16 +604,22 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     top_k_num=top_k_num,
                 )
 
+        # separate function is required for MoE + LoRA
+        self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
+
+    def moe_sum(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
         if expert_map is not None:
             # Skip the slots whose expert is not on this rank: the rows the
             # alignment dropped, or the zeros the `-1` blocks wrote.
-            ops.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
+            ops.moe_sum(input, output, topk_ids, expert_map)
         else:
-            # separate function is required for MoE + LoRA
-            self.moe_sum(intermediate_cache3, output)
-
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
+            ops.moe_sum(input, output)
 
 
 class TritonWNA16Experts(TritonExperts):
