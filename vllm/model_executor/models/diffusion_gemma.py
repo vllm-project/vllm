@@ -1618,6 +1618,13 @@ class DiffusionSampler:
                                 rows = src[pos : pos + k_i]
                                 lp = rows.log_softmax(dim=-1)
                                 am = argmax_tokens[local_idx][:k_i]
+                                sel_lp = lp.gather(1, am.unsqueeze(1))
+                                # Same convention as _ranks_kernel: 1-based,
+                                # ties count, so the rank is the number of
+                                # columns at or above the selected one. Out
+                                # of set ids have zero probability, so the
+                                # rank within the set is the real rank.
+                                ranks = (lp >= sel_lp).sum(dim=1)
                                 self._pending_logprobs[slot] = LogprobsTensors(
                                     logprob_token_ids=torch.cat(
                                         (
@@ -1626,12 +1633,8 @@ class DiffusionSampler:
                                         ),
                                         dim=1,
                                     ),
-                                    logprobs=torch.cat(
-                                        (lp.gather(1, am.unsqueeze(1)), lp), dim=1
-                                    ),
-                                    selected_token_ranks=torch.zeros(
-                                        k_i, dtype=torch.int64, device=device
-                                    ),
+                                    logprobs=torch.cat((sel_lp, lp), dim=1),
+                                    selected_token_ranks=ranks.to(torch.int64),
                                 )
                                 continue
                             per_req_ids = max_token_ids > 0
