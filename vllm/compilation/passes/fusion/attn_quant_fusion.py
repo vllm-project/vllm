@@ -47,33 +47,22 @@ class AttnFp8StaticQuantPattern(
     will be passed into Attention op as the `output_scale` argument.
     """
 
-    def __init__(
-        self, layer: Attention, dtype: torch.dtype, *, aiter_quant: bool = False
-    ):
+    def __init__(self, layer: Attention, dtype: torch.dtype):
         self._layer_name = layer.layer_name
         self._num_heads = layer.num_heads
         self._head_size = layer.head_size
         self._dtype = dtype
         self._quant_matcher = MatcherQuantFP8(_FP8_QUANT_KEY)
-        self._aiter_quant = aiter_quant
 
-    def _quantize(self, value: torch.Tensor, scale: torch.Tensor):
-        if not self._aiter_quant:
-            return self._quant_matcher(value, scale)[0]
-        out = torch.empty_like(value, dtype=FP8_DTYPE)
-        _, out, scale = auto_functionalized(
-            torch.ops.vllm.rocm_aiter_per_tensor_quant.default,
-            out=out,
-            x=value,
-            scale=scale,
-            is_dynamic=False,
-        )
-        # The shared AITER op declares scale mutable for its dynamic variant.
-        # Static quant preserves it; keep this graph output when replacing it.
-        return out, scale
+    def _quantize(
+        self, value: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self._quant_matcher(value, scale)[0]
 
-    def _output(self, value: torch.Tensor, scale: torch.Tensor):
-        return (value, scale) if self._aiter_quant else value
+    def _output(
+        self, value: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return value
 
     @property
     def pattern(
@@ -198,6 +187,30 @@ class AttnFp8StaticQuantPattern(
         if _USE_LAYERNAME:
             inputs.append(_encode_layer_name(self._layer_name))
         return inputs
+
+
+class RocmAttnFp8StaticQuantPattern(AttnFp8StaticQuantPattern):
+    """Fuse AITER static quantization while preserving its scale output."""
+
+    def _quantize(
+        self, value: torch.Tensor, scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        out = torch.empty_like(value, dtype=FP8_DTYPE)
+        _, out, scale = auto_functionalized(
+            torch.ops.vllm.rocm_aiter_per_tensor_quant.default,
+            out=out,
+            x=value,
+            scale=scale,
+            is_dynamic=False,
+        )
+        # The shared AITER op declares scale mutable for its dynamic variant.
+        # Static quant preserves it; keep this graph output when replacing it.
+        return out, scale
+
+    def _output(
+        self, value: torch.Tensor, scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return value, scale
 
 
 class AttnNvfp4QuantPattern(
@@ -420,9 +433,7 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
             if layer.impl.fused_output_quant_supported(_FP8_QUANT_KEY):
                 self.register(AttnFp8StaticQuantPattern(layer, dtype))
                 if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
-                    self.register(
-                        AttnFp8StaticQuantPattern(layer, dtype, aiter_quant=True)
-                    )
+                    self.register(RocmAttnFp8StaticQuantPattern(layer, dtype))
                 if _USE_LAYERNAME:
                     break
 
