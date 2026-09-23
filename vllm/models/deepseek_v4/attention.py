@@ -973,14 +973,24 @@ class DeepseekV4Indexer(nn.Module):
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
 
+        self.uncompressed_max_model_len = vllm_config.model_config.max_model_len
         self.max_model_len = (
-            vllm_config.model_config.max_model_len // self.compress_ratio
+            self.uncompressed_max_model_len // self.compress_ratio
         )
         self.prefix = prefix
 
         self.max_total_seq_len = (
             get_max_prefill_buffer_size(vllm_config) // self.compress_ratio
         )
+        if self.compress_ratio > 1:
+            logger.info_once(
+                "DeepseekV4Indexer paged-MQA semantics: "
+                "uncompressed_max_model_len=%d compress_ratio=%d "
+                "compressed_max_model_len=%d",
+                self.uncompressed_max_model_len,
+                self.compress_ratio,
+                self.max_model_len,
+            )
 
         assert cache_config is not None, "Deepseek V4 indexer requires cache_config"
         if self.use_fp4_kv:
@@ -1023,6 +1033,8 @@ class DeepseekV4Indexer(nn.Module):
             skip_k_cache_insert=True,
             use_fp4_cache=self.use_fp4_kv,
             compress_ratio=self.compress_ratio,
+            semantic_uncompressed_max_model_len=self.uncompressed_max_model_len,
+            semantic_compress_ratio=self.compress_ratio,
         )
 
         # None on ROCm — maybe_execute_in_parallel falls back to sequential.
