@@ -162,3 +162,41 @@ def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -
                 streamed += arguments
 
     assert json.loads(streamed) == {"city": "Dallas", "state": "TX"}
+
+
+def test_streaming_two_action_blocks_no_unpack_error(
+    default_tokenizer: TokenizerLike,
+) -> None:
+    """A second '<|action_start|><|plugin|>' block in the accumulated text must
+    not raise 'too many values to unpack' when splitting the delta."""
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    parser = Internlm2ToolParser(default_tokenizer)
+
+    deltas = [
+        '<|action_start|><|plugin|>{"name": "f", "parameters": {}}<|action_end|>',
+        '<|action_start|><|plugin|>{"name": "g", "parameters": {}}<|action_end|>',
+    ]
+
+    current_text = ""
+    for delta_text in deltas:
+        previous_text = current_text
+        current_text += delta_text
+        # Must not raise (previously: ValueError from an unbounded str.split).
+        parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )

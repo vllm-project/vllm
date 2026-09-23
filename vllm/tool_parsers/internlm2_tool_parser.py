@@ -77,7 +77,10 @@ class Internlm2ToolParser(ToolParser):
             return None
 
         new_delta = current_text[last_pos:]
-        text, action = new_delta.split("<|action_start|><|plugin|>")
+        # Split only on the first marker: the model may stream more than one
+        # "<|action_start|><|plugin|>" block (e.g. a second tool call), in which
+        # case an unbounded split would yield >2 parts and raise ValueError.
+        text, _, action = new_delta.partition("<|action_start|><|plugin|>")
 
         if len(text) > 0:
             self.position = self.position + len(text)
