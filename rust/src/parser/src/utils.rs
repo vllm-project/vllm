@@ -3,6 +3,7 @@
 
 //! Shared helpers for streaming parsers.
 
+use vllm_tokenizer::DecodedText;
 use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult, Needed, StrContext, StrContextValue};
 use winnow::stream::{Partial, Stream};
@@ -401,15 +402,30 @@ fn json_scan_error(label: &'static str, expected: StrContextValue) -> ErrMode<Co
 
 /// Parse one event from a buffered streaming input.
 ///
-/// `input` is the stream over the whole buffer: `Partial::new(text)` for text
-/// parsers, [`attributed`] for token-aware ones.
-///
 /// Returns:
 /// - `Ok(Some((event, consumed_len)))` if an event was successfully parsed, along with the number
 ///   of bytes consumed from the buffer.
 /// - `Ok(None)` if the buffer does not contain a full event yet, and more data is needed.
 /// - `Err` if a parsing error occurred.
-pub fn parse_buffered_event<'i, I: MarkerStream<'i>, E>(
+pub fn parse_buffered_event<E>(
+    buffer: &str,
+    parse: impl FnOnce(&mut Partial<&str>) -> ModalResult<E>,
+) -> Result<Option<(E, usize)>> {
+    parse_buffered_stream_event(Partial::new(buffer), parse)
+}
+
+/// Parse one event from a buffered [`DecodedText`], for token-aware parsers.
+///
+/// Same contract as [`parse_buffered_event`]; the input also carries the
+/// buffer's token anchors ([`Attributed`]).
+pub fn parse_buffered_event_attributed<E>(
+    buffer: &DecodedText,
+    parse: impl FnOnce(&mut Attributed<'_>) -> ModalResult<E>,
+) -> Result<Option<(E, usize)>> {
+    parse_buffered_stream_event(attributed(buffer), parse)
+}
+
+fn parse_buffered_stream_event<'i, I: MarkerStream<'i>, E>(
     mut input: I,
     parse: impl FnOnce(&mut I) -> ModalResult<E>,
 ) -> Result<Option<(E, usize)>> {
@@ -860,7 +876,7 @@ mod tests {
 
     #[test]
     fn parse_buffered_event_error_includes_input_snippet() {
-        let result = parse_buffered_event(Partial::new(" {\"x\":1}"), |input| {
+        let result = parse_buffered_event(" {\"x\":1}", |input| {
             take_json_object(input, &mut JsonObjectScanState::default())
         });
         let err = result.unwrap_err().to_string();
@@ -870,7 +886,7 @@ mod tests {
     #[test]
     fn parse_buffered_event_error_truncates_long_input() {
         let long_input = format!(" {}", "x".repeat(100));
-        let result = parse_buffered_event(Partial::new(long_input.as_str()), |input| {
+        let result = parse_buffered_event(&long_input, |input| {
             take_json_object(input, &mut JsonObjectScanState::default())
         });
         let err = result.unwrap_err().to_string();

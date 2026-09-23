@@ -67,7 +67,7 @@ use crate::output_grammar::{
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
-    Attributed, Marker, MarkerScanState, SpecialToken, attributed, parse_buffered_event,
+    Attributed, Marker, MarkerScanState, SpecialToken, parse_buffered_event_attributed,
     safe_text_len_mul, take_until_marker,
 };
 
@@ -413,7 +413,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
         self.buffer.append(delta);
 
         while let Some((event, consumed_len)) =
-            parse_buffered_event(attributed(&self.buffer), |input| {
+            parse_buffered_event_attributed(&self.buffer, |input| {
                 parse_next_kimi_k3_event(input, &mut self.mode, &self.markers)
             })?
         {
