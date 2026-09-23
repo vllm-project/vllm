@@ -41,6 +41,11 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
+void w8a8_block_fp8_gemm_rdna4(const torch::Tensor& A, const torch::Tensor& B,
+                               const torch::Tensor& As, const torch::Tensor& Bs,
+                               torch::Tensor& C, int64_t group_n,
+                               int64_t group_k);
+
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
