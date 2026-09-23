@@ -869,7 +869,7 @@ class MarianMultiModalProcessor(EncDecMultiModalProcessor[MarianProcessingInfo])
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ):
         """Tokenize the source text directly.
 
