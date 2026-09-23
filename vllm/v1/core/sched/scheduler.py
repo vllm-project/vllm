@@ -2394,6 +2394,7 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        """Apply one model runner step to the requests and build their outputs."""
         # A step with tokens can make schedule() produce work again.
         if (
             scheduler_output.total_num_scheduled_tokens
