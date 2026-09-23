@@ -395,6 +395,7 @@ class TestNonFunctionToolsSkipped:
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
 
+
 def test_required_streaming_single_closed_tool_no_indexerror():
     """Regression: a length-1 tool-call array whose sole object closes before
     a 'parameters' key must not crash with IndexError on obj[-2]."""
