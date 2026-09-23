@@ -17,6 +17,22 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 UNGUARDED_PATHS = frozenset({"/health", "/ping", "/load", "/version"})
 
 
+def _is_cors_preflight(scope: Scope, headers: Headers) -> bool:
+    """Return True for a CORS preflight, which browsers send without a token.
+
+    This is the same test that Starlette's CORSMiddleware uses before it
+    answers a preflight itself. Both headers are necessary. Without "origin",
+    CORSMiddleware sends the request through to the app, and a mount such as
+    /metrics answers any method. A bare OPTIONS request must therefore pass
+    the token check like every other request.
+    """
+    return (
+        scope.get("method") == "OPTIONS"
+        and "origin" in headers
+        and "access-control-request-method" in headers
+    )
+
+
 class AuthenticationMiddleware:
     """Pure ASGI middleware that authenticates each request by checking
     if the Authorization Bearer token exists and equals anyof "{api_key}".
@@ -24,7 +40,8 @@ class AuthenticationMiddleware:
     Notes
     -----
     There are two cases in which authentication is skipped:
-        1. The HTTP method is OPTIONS.
+        1. The request is a CORS preflight: OPTIONS with an Origin header
+           and an Access-Control-Request-Method header.
         2. The request path, ignoring a trailing slash, is one of
            UNGUARDED_PATHS (e.g. /health).
 
@@ -52,10 +69,7 @@ class AuthenticationMiddleware:
         return token_match
 
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
-        if (
-            scope["type"] not in ("http", "websocket")
-            or scope.get("method") == "OPTIONS"
-        ):
+        if scope["type"] not in ("http", "websocket"):
             # scope["type"] can be "lifespan" or "startup" for example,
             # in which case we don't need to do anything
             return self.app(scope, receive, send)
@@ -67,6 +81,8 @@ class AuthenticationMiddleware:
         # configured as /health/ is answered with 401.
         probe_path = url_path.rstrip("/") or "/"
         headers = Headers(scope=scope)
+        if _is_cors_preflight(scope, headers):
+            return self.app(scope, receive, send)
         # Type narrow to satisfy mypy.
         if probe_path not in UNGUARDED_PATHS and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)

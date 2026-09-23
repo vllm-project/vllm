@@ -7,7 +7,8 @@ from typing import get_args
 import pytest
 import regex as re
 from fastapi import FastAPI
-from starlette.responses import JSONResponse
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
@@ -178,3 +179,70 @@ def test_trailing_slash_does_not_unguard_a_protected_path():
 
     headers = {"Authorization": "Bearer valid-token"}
     assert client.get("/v1/models/", headers=headers).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# OPTIONS and CORS preflights
+# ---------------------------------------------------------------------------
+
+METRICS_BODY = "vllm:num_requests_running 0\n"
+
+
+async def _any_method_metrics_app(scope, receive, send):
+    """Stand-in for the mounted Prometheus app: it answers any method."""
+    await PlainTextResponse(METRICS_BODY)(scope, receive, send)
+
+
+def _create_app_with_cors_and_metrics_mount() -> FastAPI:
+    """The middleware order of the vLLM server: CORSMiddleware is added first,
+    so AuthenticationMiddleware runs before it."""
+    app = FastAPI()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.add_middleware(AuthenticationMiddleware, tokens=["valid-token"])
+    app.mount("/metrics", _any_method_metrics_app)
+    return app
+
+
+def test_bare_options_on_a_guarded_mount_needs_a_token():
+    """A bare OPTIONS request is not a preflight, so it must not skip the
+    token check. A mount such as /metrics answers any method."""
+    client = TestClient(_create_app_with_cors_and_metrics_mount())
+
+    resp = client.options("/metrics")
+    assert resp.status_code == 401
+    assert METRICS_BODY not in resp.text
+
+    headers = {"Authorization": "Bearer valid-token"}
+    assert client.options("/metrics", headers=headers).text == METRICS_BODY
+
+
+def test_options_without_origin_is_not_a_preflight():
+    """Without Origin, CORSMiddleware sends the request through to the app,
+    so the request-method header alone must not skip the token check."""
+    client = TestClient(_create_app_with_cors_and_metrics_mount())
+
+    resp = client.options("/metrics", headers={"Access-Control-Request-Method": "GET"})
+    assert resp.status_code == 401
+    assert METRICS_BODY not in resp.text
+
+
+def test_cors_preflight_needs_no_token_and_returns_no_data():
+    """Browsers send a preflight without credentials. CORSMiddleware answers
+    it, and the request does not get to the mount."""
+    client = TestClient(_create_app_with_cors_and_metrics_mount())
+
+    resp = client.options(
+        "/metrics",
+        headers={
+            "Origin": "http://dashboard.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert resp.status_code == 200
+    assert "access-control-allow-origin" in resp.headers
+    assert METRICS_BODY not in resp.text
