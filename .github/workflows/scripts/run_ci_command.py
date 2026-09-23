@@ -247,6 +247,20 @@ class GitHubClient:
     def get_pr(self, number: int) -> dict[str, Any]:
         return self._request(self._repo_path(f"/pulls/{number}"))
 
+    def update_pr_branch(self, number: int, expected_head_sha: str) -> dict[str, Any]:
+        self._request(
+            self._repo_path(f"/pulls/{number}/update-branch"),
+            body={"expected_head_sha": expected_head_sha},
+            method="PUT",
+        )
+        # GitHub accepts the update asynchronously.
+        for _ in range(12):
+            time.sleep(5)
+            pr = self.get_pr(number)
+            if pr["head"]["sha"] != expected_head_sha or pr["state"] != "open":
+                return pr
+        raise ApiError(None, "Timed out waiting for the branch update.")
+
     def get_commits_behind_base(self, base_ref: str, head_sha: str) -> int:
         base_ref = urllib.parse.quote(f"refs/heads/{base_ref}", safe="")
         head_sha = urllib.parse.quote(head_sha, safe="")
@@ -826,6 +840,8 @@ def prepare_pr_for_ci(
     github: GitHubClient,
     pr: Mapping[str, Any],
     command: str,
+    *,
+    update_branch: bool = False,
 ) -> tuple[dict[str, Any], str]:
     base_ref = pr["base"]["ref"]
     no_action = "No new CI build was started."
@@ -861,6 +877,18 @@ def prepare_pr_for_ci(
             print(warning)
         return current_pr, warning
 
+    if behind and update_branch:
+        try:
+            updated_pr = github.update_pr_branch(pr["number"], pr["head"]["sha"])
+        except ApiError as error:
+            raise CiPreparationError(
+                f"Could not update the branch. {no_action} "
+                f"Update it manually, then comment `{command}` again. {error}"
+            ) from error
+        if updated_pr["base"]["ref"] != base_ref:
+            raise CiPreparationError(f"The PR target branch changed. {no_action}")
+        return prepare_pr_for_ci(github, updated_pr, command)
+
     if behind:
         raise CiPreparationError(
             f"{lag} Your branch must contain every commit currently on upstream "
@@ -880,6 +908,7 @@ def handle_run_ci(
     command: str,
     github: GitHubClient,
     pr: Mapping[str, Any],
+    update_branch: bool = False,
 ) -> str:
     ci_name = ci_name_for_command(command)
     duplicate_builds = buildkite.list_builds(
@@ -906,7 +935,20 @@ def handle_run_ci(
             f"{ci_name} is already running for this commit: {active_build['web_url']}"
         )
 
-    current_pr, warning = prepare_pr_for_ci(github, pr, command)
+    current_pr, warning = prepare_pr_for_ci(
+        github, pr, command, update_branch=update_branch
+    )
+    if current_pr["head"]["sha"] != pr["head"]["sha"]:
+        # Recheck existing builds and freshness for the updated head, without
+        # attempting another update if the target branch advances again.
+        return handle_run_ci(
+            actor=actor,
+            buildkite=buildkite,
+            comment_id=comment_id,
+            command=command,
+            github=github,
+            pr=current_pr,
+        )
 
     build = buildkite.create_build(
         create_build_payload(
@@ -1153,6 +1195,10 @@ def run(
                 command=command,
                 github=github,
                 pr=pr,
+                update_branch=(
+                    is_trusted_permission(permission)
+                    and command in UPSTREAM_CI_COMMANDS
+                ),
             )
         elif command in RETRY_COMMANDS:
             message = handle_retry_failed(
