@@ -71,6 +71,8 @@ def create_scheduler(
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
+    adaptive_num_speculative_tokens: bool = False,
+    adaptive_speculative_kwargs: dict | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
@@ -161,6 +163,9 @@ def create_scheduler(
             spec_kwargs["num_speculative_tokens_per_batch_size"] = (
                 num_speculative_tokens_per_batch_size
             )
+        if adaptive_num_speculative_tokens:
+            spec_kwargs["adaptive_num_speculative_tokens"] = True
+            spec_kwargs.update(adaptive_speculative_kwargs or {})
         if speculative_method is not None:
             spec_kwargs["method"] = speculative_method
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens

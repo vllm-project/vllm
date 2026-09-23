@@ -483,6 +483,40 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    adaptive_num_speculative_tokens: bool = False
+    """Choose the speculative-token count each step from the drafter's observed
+    per-position acceptance rate. ``num_speculative_tokens`` becomes the upper
+    bound; only the leading draft positions whose acceptance rate is at least
+    ``adaptive_acceptance_threshold`` are drafted. Composes with
+    ``num_speculative_tokens_per_batch_size`` (the smaller K wins)."""
+
+    adaptive_acceptance_threshold: float = 0.4
+    """Minimum unconditional acceptance rate for a draft position to stay
+    enabled under ``adaptive_num_speculative_tokens``. Each extra position
+    costs one drafter forward pass and yields ``acceptance[pos]`` expected
+    tokens, so this is the break-even you are willing to accept."""
+
+    adaptive_min_num_speculative_tokens: int = 0
+    """Lower bound on the adaptive speculative-token count. 0 allows the
+    controller to switch speculation off when even position 0 is below the
+    threshold."""
+
+    adaptive_window_drafts: int = 256
+    """Number of verified drafts the acceptance estimate averages over, and the
+    warm-up before adaptation starts (static ``num_speculative_tokens`` is used
+    until then)."""
+
+    adaptive_probe_interval: int = 64
+    """Every this many scheduler steps the full ``num_speculative_tokens`` is
+    drafted once so positions that were switched off keep receiving acceptance
+    samples and can be re-enabled. 0 disables probing."""
+
+    adaptive_hysteresis: float = 0.05
+    """A disabled draft position is re-enabled only once its acceptance rate
+    reaches ``adaptive_acceptance_threshold + adaptive_hysteresis``, so the
+    speculative-token count does not flap when a position hovers at the
+    threshold."""
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -618,6 +652,15 @@ class SpeculativeConfig:
             "dspark",
         )
         factors.append(uses_aux_hidden_states)
+        # Dynamic K changes the set of decode query lengths that get compiled
+        # and graph-captured, so both mechanisms are part of the cache key.
+        factors.append(self.num_speculative_tokens_per_batch_size)
+        factors.append(
+            (
+                self.adaptive_num_speculative_tokens,
+                self.adaptive_min_num_speculative_tokens,
+            )
+        )
 
         if self.draft_model_config is not None:
             factors.append(self.draft_model_config.compute_hash())
@@ -1795,6 +1838,8 @@ class SpeculativeConfig:
                 "n_predict parameter."
             )
 
+        self._verify_adaptive_num_speculative_tokens()
+
         if self.num_speculative_tokens <= 0:
             raise ValueError(
                 "Expected num_speculative_tokens to be greater "
@@ -1930,7 +1975,33 @@ class SpeculativeConfig:
         return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
-        return self.num_speculative_tokens_per_batch_size is not None
+        return (
+            self.num_speculative_tokens_per_batch_size is not None
+            or self.adaptive_num_speculative_tokens
+        )
+
+    def _verify_adaptive_num_speculative_tokens(self) -> None:
+        if not self.adaptive_num_speculative_tokens:
+            return
+        if not 0.0 < self.adaptive_acceptance_threshold <= 1.0:
+            raise ValueError(
+                "adaptive_acceptance_threshold must be in (0, 1], got "
+                f"{self.adaptive_acceptance_threshold}."
+            )
+        if not 0 <= self.adaptive_min_num_speculative_tokens <= (
+            self.num_speculative_tokens or 0
+        ):
+            raise ValueError(
+                "adaptive_min_num_speculative_tokens must be in "
+                f"[0, num_speculative_tokens={self.num_speculative_tokens}], got "
+                f"{self.adaptive_min_num_speculative_tokens}."
+            )
+        if self.adaptive_window_drafts < 1:
+            raise ValueError("adaptive_window_drafts must be >= 1.")
+        if self.adaptive_probe_interval < 0:
+            raise ValueError("adaptive_probe_interval must be >= 0.")
+        if self.adaptive_hysteresis < 0.0:
+            raise ValueError("adaptive_hysteresis must be >= 0.")
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

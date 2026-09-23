@@ -37,6 +37,7 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.dynamic.adaptive import possible_num_speculative_tokens
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -276,15 +277,30 @@ class CudaGraphManager:
             num_new_sampled_tokens_per_step = (
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
-            dense_schedule = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
-                vllm_max_batch_size=self.max_num_reqs,
-                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
+            schedule = speculative_config.num_speculative_tokens_per_batch_size
+            dense_schedule = (
+                build_dynamic_sd_schedule_lookup(
+                    schedule,
+                    vllm_max_batch_size=self.max_num_reqs,
+                    vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
+                )
+                if schedule is not None
+                else None
+            )
+            adaptive_min = (
+                speculative_config.adaptive_min_num_speculative_tokens
+                if speculative_config.adaptive_num_speculative_tokens
+                else None
             )
             decode_query_lens = sorted(
                 {
                     num_spec + num_new_sampled_tokens_per_step
-                    for num_spec in dense_schedule[1:]
+                    for num_spec in possible_num_speculative_tokens(
+                        dense_schedule,
+                        adaptive_min,
+                        self.vllm_config.num_speculative_tokens,
+                        self.max_num_reqs,
+                    )
                 }
             )
         else:

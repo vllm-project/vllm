@@ -1020,11 +1020,13 @@ class VllmConfig:
             "Dynamic speculative decoding is not supported with data "
             "parallelism because data-parallel ranks can select different "
             "speculative-token counts, causing DP divergence and deadlocks. "
-            "Disabling num_speculative_tokens_per_batch_size and falling back "
+            "Disabling num_speculative_tokens_per_batch_size / "
+            "adaptive_num_speculative_tokens and falling back "
             "to static num_speculative_tokens=%d.",
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
+        speculative_config.adaptive_num_speculative_tokens = False
 
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
@@ -2277,6 +2279,9 @@ class VllmConfig:
                         speculative_config is not None
                         and speculative_config.uses_dynamic_speculative_decoding()
                     ):
+                        from vllm.v1.spec_decode.dynamic.adaptive import (
+                            possible_num_speculative_tokens,
+                        )
                         from vllm.v1.spec_decode.dynamic.utils import (
                             build_dynamic_sd_schedule_lookup,
                         )
@@ -2284,28 +2289,39 @@ class VllmConfig:
                         schedule = (
                             speculative_config.num_speculative_tokens_per_batch_size
                         )
-                        assert schedule is not None
                         # Read the tiers off the dense lookup the scheduler
                         # runs on, so the clamp against num_speculative_tokens
                         # and the carry-forward through gaps and the tail
                         # cannot drift from it. Validation lives elsewhere; an
                         # invalid schedule keeps the single-tier default.
-                        try:
-                            dense_schedule = build_dynamic_sd_schedule_lookup(
-                                schedule,
-                                vllm_max_batch_size=max_num_seqs,
-                                vllm_num_speculative_tokens=self.num_speculative_tokens,
+                        dense_schedule: list[int] | None = None
+                        schedule_ok = True
+                        if schedule is not None:
+                            try:
+                                dense_schedule = build_dynamic_sd_schedule_lookup(
+                                    schedule,
+                                    vllm_max_batch_size=max_num_seqs,
+                                    vllm_num_speculative_tokens=self.num_speculative_tokens,
+                                )
+                            except ValueError:
+                                schedule_ok = False
+                        if schedule_ok:
+                            adaptive_min = (
+                                speculative_config.adaptive_min_num_speculative_tokens
+                                if speculative_config.adaptive_num_speculative_tokens
+                                else None
                             )
-                        except ValueError:
-                            pass
-                        else:
                             # Ascending batch size, so the last write per
                             # query length is the widest batch running at it.
-                            widest_batch: dict[int, int] = {}
-                            for batch_size, num_spec in enumerate(
-                                dense_schedule[1:], start=1
-                            ):
-                                widest_batch[num_spec + 1] = batch_size
+                            widest_batch = {
+                                num_spec + 1: batch_size
+                                for num_spec, batch_size in possible_num_speculative_tokens(
+                                    dense_schedule,
+                                    adaptive_min,
+                                    self.num_speculative_tokens,
+                                    max_num_seqs,
+                                ).items()
+                            }
                             decode_tiers = list(widest_batch.items())
 
                     uniform_decode_sizes = sorted(

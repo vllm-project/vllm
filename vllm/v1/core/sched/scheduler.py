@@ -70,6 +70,7 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+from vllm.v1.spec_decode.dynamic.adaptive import AcceptanceAdaptiveK
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -273,6 +274,7 @@ class Scheduler(SchedulerInterface):
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
+        self.adaptive_sd: AcceptanceAdaptiveK | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
@@ -280,6 +282,25 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
+            if (
+                speculative_config.adaptive_num_speculative_tokens
+                and self.num_spec_tokens > 0
+            ):
+                self.adaptive_sd = AcceptanceAdaptiveK(
+                    max_num_speculative_tokens=self.num_spec_tokens,
+                    threshold=speculative_config.adaptive_acceptance_threshold,
+                    min_num_speculative_tokens=(
+                        speculative_config.adaptive_min_num_speculative_tokens
+                    ),
+                    window=speculative_config.adaptive_window_drafts,
+                    probe_interval=speculative_config.adaptive_probe_interval,
+                    hysteresis=speculative_config.adaptive_hysteresis,
+                )
+        # Either mechanism makes the verification length vary per step.
+        self.uses_dynamic_sd = (
+            self.dynamic_sd_lookup is not None or self.adaptive_sd is not None
+        )
+        if speculative_config is not None:
             self.use_eagle = speculative_config.use_eagle()
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if self.use_eagle and not self.use_eagle_block_drop:
@@ -1042,7 +1063,7 @@ class Scheduler(SchedulerInterface):
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
                     if (
-                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        (self.num_spec_tokens > 0 and not self.uses_dynamic_sd)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
@@ -1391,12 +1412,19 @@ class Scheduler(SchedulerInterface):
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
 
-        # Dynamic speculative decoding: compute optimal K
+        # Dynamic speculative decoding: compute optimal K. The batch-size
+        # schedule caps K by load; the acceptance controller caps it by drafter
+        # quality. When both are set the smaller value wins.
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
                 len(num_scheduled_tokens)
             ]
+        if self.adaptive_sd is not None and len(num_scheduled_tokens) > 0:
+            num_spec_tokens_to_schedule = min(
+                num_spec_tokens_to_schedule,
+                self.adaptive_sd.next_num_speculative_tokens(),
+            )
 
         scheduled_encoder_input_stats = None
         if (
@@ -2000,6 +2028,15 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+                if self.adaptive_sd is not None and num_draft_tokens:
+                    # Feed the controller regardless of log_stats; grammar-
+                    # invalidated drafts were never proposed by the drafter.
+                    observed_draft_tokens = num_draft_tokens
+                    if scheduler_output.num_invalid_spec_tokens:
+                        observed_draft_tokens -= (
+                            scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
+                        )
+                    self.adaptive_sd.observe(observed_draft_tokens, num_accepted)
                 if request.spec_decode_metrics is not None:
                     # Exclude grammar-invalidated drafts from the proposed
                     # count, mirroring make_spec_decoding_stats; the accepted

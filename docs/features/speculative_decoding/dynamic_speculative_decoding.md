@@ -69,8 +69,55 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 ```
 
+## Acceptance-adaptive K
+
+The batch-size schedule adapts K to *load*. `adaptive_num_speculative_tokens`
+adapts K to *drafter quality*: the scheduler tracks the unconditional acceptance
+rate of every draft position from verification results and only drafts the
+leading positions whose rate is at least `adaptive_acceptance_threshold`.
+Each extra draft position costs one drafter forward pass and returns
+`acceptance[pos]` expected tokens, so positions below the threshold are net
+negative and are dropped. `num_speculative_tokens` becomes the upper bound.
+
+```bash
+--speculative-config '{
+    "method": "draft_model",
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "num_speculative_tokens": 5,
+    "adaptive_num_speculative_tokens": true,
+    "adaptive_acceptance_threshold": 0.4,
+    "adaptive_min_num_speculative_tokens": 0,
+    "adaptive_window_drafts": 256,
+    "adaptive_probe_interval": 64
+  }'
+```
+
+* `adaptive_acceptance_threshold` (default `0.4`): break-even acceptance for a
+  position to stay enabled. With a measured per-position curve of
+  `[0.70, 0.45, 0.35, 0.25, 0.20]` this yields K=2.
+* `adaptive_min_num_speculative_tokens` (default `0`): floor on K. `0` lets the
+  controller switch speculation off entirely when even position 0 is below the
+  threshold.
+* `adaptive_window_drafts` (default `256`): drafts averaged over (EMA decay
+  `1/window`) and the warm-up before adaptation starts; until then the static
+  `num_speculative_tokens` is used.
+* `adaptive_probe_interval` (default `64`): every N scheduler steps the full
+  `num_speculative_tokens` is drafted once so positions that were switched off
+  keep receiving samples and can be re-enabled when the workload changes. `0`
+  disables probing (K can then only shrink).
+* `adaptive_hysteresis` (default `0.05`): a switched-off position is re-enabled
+  only once its rate reaches `threshold + hysteresis`, so K does not flap when a
+  position hovers at the threshold.
+
+K changes are logged at INFO with the per-position acceptance that caused them.
+
+Both mechanisms can be combined; the scheduler then uses
+`min(schedule_k, adaptive_k)` — the schedule is the load cap, the controller
+the quality cap. CUDA graphs are captured for every K the combination can
+produce.
+
 ## Limitations
 
 * Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
 * Full Cudagraph only works with Model Runner V2. MRv1 only supports piece-wise cuda graph with this feature
-* Not compatible with data parallelism (`--data-parallel-size > 1`). Each DP rank schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens` value.
+* Not compatible with data parallelism (`--data-parallel-size > 1`). Each DP rank schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `num_speculative_tokens_per_batch_size` and `adaptive_num_speculative_tokens` and falls back to the static `num_speculative_tokens` value.
