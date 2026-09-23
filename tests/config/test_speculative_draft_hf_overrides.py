@@ -48,20 +48,49 @@ def test_none_overrides_fall_back_to_arch_mapping():
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("hf_kwargs", "n_predict", "architecture"),
+    [
+        (
+            dict(
+                model_type="deepseek_v4",
+                num_nextn_predict_layers=3,
+                dspark_block_size=5,
+            ),
+            3,
+            "DSparkDraftModel",
+        ),
+        (
+            dict(
+                model_type="deepseek_v41",
+                num_nextn_predict_layers=3,
+                dspark_block_size=5,
+            ),
+            3,
+            "DSparkV41DraftModel",
+        ),
+        (
+            dict(
+                model_type="gemma4_text",
+                architectures=["Gemma4DSparkModel"],
+                block_size=5,
+            ),
+            None,
+            "Gemma4DSparkModel",
+        ),
+    ],
+)
 @pytest.mark.parametrize("speculative_kwargs", [{"num_speculative_tokens": 5}, {}])
-def test_deepseek_v4_dspark_preserves_draft_stages(speculative_kwargs):
-    hf_config = SpeculativeConfig.hf_config_override(
-        _make_hf_config(
-            model_type="deepseek_v4",
-            num_nextn_predict_layers=3,
-            dspark_block_size=5,
-        )
-    )
+def test_dspark_width_is_independent_of_mtp_stages(
+    hf_kwargs, n_predict, architecture, speculative_kwargs
+):
+    hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
     draft = MagicMock(
         hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
     )
-    draft.registry.inspect_model_cls.return_value = (None, "DSparkDraftModel")
+    draft.registry.inspect_model_cls.return_value = (None, architecture)
     target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
+    target.hf_config.model_type = hf_kwargs["model_type"]
 
     with patch("vllm.config.speculative.ModelConfig", return_value=draft):
         config = SpeculativeConfig(
@@ -73,9 +102,8 @@ def test_deepseek_v4_dspark_preserves_draft_stages(speculative_kwargs):
         )
 
     assert config.num_speculative_tokens == 5
-    assert config.draft_model_config.hf_config.n_predict == 3
-    assert config.draft_model_config.hf_config.num_nextn_predict_layers == 3
-    assert config.draft_model_config.hf_config.dspark_block_size == 5
+    assert getattr(config.draft_model_config.hf_config, "n_predict", None) == n_predict
+    assert config.draft_model_config.hf_config.architectures == [architecture]
 
 
 @pytest.mark.cpu_test
