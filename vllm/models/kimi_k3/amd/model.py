@@ -41,6 +41,10 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
+from vllm.models.kimi_k3.amd.ops.third_party.replayssm import (
+    append_kda_replayssm_buffers,
+    append_kda_replayssm_dtypes,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
@@ -264,9 +268,7 @@ class KimiK3ForConditionalGeneration(
         enabled, _ = cls._kda_replayssm_params(vllm_config)
         if not enabled:
             return base
-        return MambaStateDtypeCalculator.append_kda_replayssm_dtypes(
-            base, vllm_config.model_config.dtype
-        )
+        return append_kda_replayssm_dtypes(base, vllm_config.model_config.dtype)
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
@@ -276,7 +278,7 @@ class KimiK3ForConditionalGeneration(
         enabled, cache_len = cls._kda_replayssm_params(vllm_config)
         if not enabled:
             return base
-        return MambaStateShapeCalculator.append_kda_replayssm_buffers(base, cache_len)
+        return append_kda_replayssm_buffers(base, cache_len)
 
     @classmethod
     def get_mamba_state_copy_func(cls):

@@ -39,7 +39,13 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.kda_metadata import (
+    KimiK3ROCmKDABackend,
+    KimiK3ROCmKDAMetadata,
+)
+from vllm.models.kimi_k3.amd.ops.fused_sigmoid_gating import (
+    fused_sigmoid_gating_delta_rule_update,
+)
 from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     is_fused_kda_chunk_supported,
 )
@@ -49,14 +55,14 @@ from vllm.models.kimi_k3.amd.ops.kda_decode import (
     make_decode_norm_weight_loader,
 )
 from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
-from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
-    fused_sigmoid_gating_delta_rule_update,
+from vllm.models.kimi_k3.amd.ops.third_party.replayssm import (
+    append_kda_replayssm_buffers,
+    append_kda_replayssm_dtypes,
 )
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
@@ -75,9 +81,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self._use_kda_replayssm():
-            return MambaStateDtypeCalculator.append_kda_replayssm_dtypes(
-                base, self.model_config.dtype
-            )
+            return append_kda_replayssm_dtypes(base, self.model_config.dtype)
         return base
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
@@ -98,9 +102,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 self.cache_config.replayssm_buffer_len,
                 2 * (self.num_spec + 1),
             )
-            return MambaStateShapeCalculator.append_kda_replayssm_buffers(
-                base, cache_len
-            )
+            return append_kda_replayssm_buffers(base, cache_len)
         return base
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec | None:
@@ -132,7 +134,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         v: torch.Tensor,
         gate: torch.Tensor,
         beta: torch.Tensor,
-        metadata: GDNAttentionMetadata,
+        metadata: KimiK3ROCmKDAMetadata,
         *,
         cu_seqlens: torch.Tensor,
         ssm_state_indices: torch.Tensor | None = None,
@@ -194,7 +196,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             ssm_state_indices=ssm_state_indices,
             num_accepted_tokens=num_accepted_tokens,
             use_qk_l2norm_in_kernel=True,
-            is_kda=True,
             lower_bound=self.gate_lower_bound,
         )
         return core_out
@@ -446,7 +447,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
         if attn_metadata_narrowed is None:
             return
-        assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
+        assert isinstance(attn_metadata_narrowed, KimiK3ROCmKDAMetadata)
         m = attn_metadata_narrowed
         has_initial_state = m.has_initial_state
         non_spec_query_start_loc = m.non_spec_query_start_loc

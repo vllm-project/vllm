@@ -11,6 +11,8 @@ ATOM-style ReplaySSM path (one checkpoint + ring record buffers) instead of
 materializing one recurrent state per draft token.
 """
 
+from dataclasses import dataclass, fields
+
 import torch
 
 from vllm.logger import init_logger
@@ -89,6 +91,32 @@ def prepare_chunk_metadata_device(
         num_warps=4,
     )
     return chunk_indices, chunk_offsets
+
+
+@dataclass
+class KimiK3ROCmKDAMetadata(GDNAttentionMetadata):
+    """GDN metadata plus ROCm KDA ReplaySSM fields.
+
+    Lives here so CUDA Qwen GDN can keep ``GDNAttentionMetadata`` unchanged.
+    """
+
+    replayssm: bool = False
+    slot_idx: torch.Tensor | None = None
+    write_pos: torch.Tensor | None = None
+    replayssm_cache_len: int = 0
+    replayssm_max_query_len: int = 1
+    replayssm_fold_slots: torch.Tensor | None = None
+    replayssm_fold_len: torch.Tensor | None = None
+    replayssm_spec_slot_idx: torch.Tensor | None = None
+    replayssm_decode_slot_idx: torch.Tensor | None = None
+
+
+def _promote_gdn_metadata(md: GDNAttentionMetadata) -> KimiK3ROCmKDAMetadata:
+    if isinstance(md, KimiK3ROCmKDAMetadata):
+        return md
+    return KimiK3ROCmKDAMetadata(
+        **{f.name: getattr(md, f.name) for f in fields(GDNAttentionMetadata)}
+    )
 
 
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
@@ -188,14 +216,14 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             FLA_CHUNK_SIZE,
         )
 
-    def build(self, *args, **kwargs) -> GDNAttentionMetadata:
+    def build(self, *args, **kwargs) -> KimiK3ROCmKDAMetadata:
         common_attn_metadata = (
             args[1] if len(args) > 1 else kwargs["common_attn_metadata"]
         )
         if self._replayssm_step_marker is not common_attn_metadata:
             self._replayssm_step_marker = common_attn_metadata
             self._replayssm_committed_this_step = False
-        metadata = super().build(*args, **kwargs)
+        metadata = _promote_gdn_metadata(super().build(*args, **kwargs))
         if not self.use_kda_replayssm:
             return metadata
         if not self._ensure_replayssm_slots():
@@ -207,7 +235,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         self._attach_kda_replayssm(metadata)
         return metadata
 
-    def _attach_kda_replayssm(self, md: GDNAttentionMetadata) -> None:
+    def _attach_kda_replayssm(self, md: KimiK3ROCmKDAMetadata) -> None:
         from vllm.models.kimi_k3.amd.ops.third_party.replayssm import replayssm_commit
 
         write_pos = self.replayssm_write_pos
@@ -265,7 +293,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
 
     def _advance_replayssm_cursors(
         self,
-        md: GDNAttentionMetadata,
+        md: KimiK3ROCmKDAMetadata,
         write_pos: torch.Tensor,
         pending_reset: torch.Tensor,
         slot_idx: torch.Tensor | None,
@@ -305,7 +333,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
 
     def _stage_replayssm_fold(
         self,
-        md: GDNAttentionMetadata,
+        md: KimiK3ROCmKDAMetadata,
         write_pos: torch.Tensor,
         pending_reset: torch.Tensor,
     ) -> None:

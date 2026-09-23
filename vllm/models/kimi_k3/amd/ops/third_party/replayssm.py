@@ -13,9 +13,12 @@ import torch
 
 from vllm.third_party.flash_linear_attention.ops.op import exp
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
 __all__ = [
     "PAD_SLOT_ID",
+    "append_kda_replayssm_buffers",
+    "append_kda_replayssm_dtypes",
     "flush_threshold_ok",
     "replayssm_buffer_shapes",
     "replayssm_commit",
@@ -79,6 +82,29 @@ def replayssm_buffer_shapes(
         (num_v_heads, cache_len, head_k_dim),
         (num_v_heads, cache_len, head_v_dim),
         (num_v_heads, cache_len, head_k_dim) if is_kda else (num_v_heads, cache_len),
+    )
+
+
+def append_kda_replayssm_dtypes(
+    base_dtypes: tuple[torch.dtype, ...],
+    model_dtype: torch.dtype,
+) -> tuple[torch.dtype, ...]:
+    """Append KDA ReplaySSM record-buffer dtypes (k, u, g)."""
+    activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+    return (*base_dtypes, activation_dtype, activation_dtype, activation_dtype)
+
+
+def append_kda_replayssm_buffers(
+    base_shapes: tuple[tuple[int, ...], ...],
+    replayssm_cache_len: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Append KDA ReplaySSM record buffers (k, u, g) to conv + recurrent."""
+    local_num_heads, head_dim, _ = base_shapes[1]
+    return (
+        *base_shapes,
+        *replayssm_buffer_shapes(
+            replayssm_cache_len, local_num_heads, head_dim, head_dim, is_kda=True
+        ),
     )
 
 
