@@ -69,9 +69,7 @@ def restore_patched_kernels(monkeypatch):
     )
 
 
-@pytest.mark.parametrize(
-    "module, dispatcher_name, fallback_name", DISPATCHER_FALLBACKS
-)
+@pytest.mark.parametrize("module, dispatcher_name, fallback_name", DISPATCHER_FALLBACKS)
 def test_postprocess_triton_installs_cpu_fallback(
     monkeypatch, restore_patched_kernels, module, dispatcher_name, fallback_name
 ):
