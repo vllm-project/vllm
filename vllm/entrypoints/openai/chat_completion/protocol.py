@@ -256,12 +256,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
-    thinking_loop_break: bool | None = Field(
+    thinking_loop_break: bool | Literal["force", "ramp"] | None = Field(
         default=None,
         description=(
             "Per-request control for server-configured reasoning loop "
-            "breaking. null follows the server configuration; false opts "
-            "this request out. true cannot enable the feature on a server "
+            "breaking. null or true follows the server configuration, false "
+            "opts this request out, and 'force' or 'ramp' picks how a detected "
+            "loop ends the reasoning. No value enables the feature on a server "
             "that has not configured it."
         ),
     )

@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 from pydantic import BeforeValidator
@@ -355,11 +355,12 @@ class SamplingParams(
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
 
-    thinking_loop_break: bool | None = None
+    thinking_loop_break: bool | Literal["force", "ramp"] | None = None
     """Per-request control for server-configured reasoning loop breaking
-    (``ReasoningConfig.loop_break_*``). ``None`` (default) follows the server
-    configuration; ``False`` opts this request out. ``True`` cannot enable
-    the feature on a server that has not configured it."""
+    (``ReasoningConfig.loop_break_*``). ``None`` (default) or ``True`` follows
+    the server configuration, ``False`` opts this request out, and ``"force"``
+    or ``"ramp"`` picks the release in place of ``loop_break_release``. No value
+    enables the feature on a server that has not configured it."""
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -422,7 +423,7 @@ class SamplingParams(
         # Appended rather than placed beside thinking_token_budget: from_optional
         # takes positional arguments, so inserting mid-signature would silently
         # rebind every later positional argument of existing callers.
-        thinking_loop_break: bool | None = None,
+        thinking_loop_break: bool | Literal["force", "ramp"] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once

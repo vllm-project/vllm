@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import field
+from typing import Literal
+
+from pydantic import Field
 
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
@@ -56,6 +59,20 @@ class ReasoningConfig:
 
     loop_break_check_interval: int = 16
     """Check for loops every this many newly accepted reasoning tokens."""
+
+    loop_break_release: Literal["force", "ramp"] = "force"
+    """How a detected loop ends the reasoning section. ``"force"`` writes
+    ``reasoning_end_str`` at once. ``"ramp"`` adds a logit bias that grows with
+    every token to the first token of the parser's own end marker, so the model
+    closes the section itself, and writes ``reasoning_end_str`` only if it has
+    not closed it within ``loop_break_ramp_max_tokens`` tokens."""
+
+    loop_break_ramp_increment: float = Field(default=2.0, gt=0)
+    """Logit bias the ``"ramp"`` release adds per token, before temperature."""
+
+    loop_break_ramp_max_tokens: int = Field(default=32, ge=1)
+    """Tokens the ``"ramp"`` release runs before falling back to writing
+    ``reasoning_end_str``."""
 
     _reasoning_start_token_ids: list[int] | None = field(
         default=None, init=False, repr=False
