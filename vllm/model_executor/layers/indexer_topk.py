@@ -373,11 +373,16 @@ class SparseIndexerTopk(torch.nn.Module):
         elif backend == "aiter":
             from vllm._aiter_ops import rocm_aiter_ops
 
+            max_valid_seq_len = cdiv(max_seq_len, compress_ratio)
             if rocm_aiter_ops.is_indexer_top_k_supported(
                 is_prefill=False,
                 compress_ratio=compress_ratio,
                 num_rows=logits.shape[0],
-                max_valid_seq_len=cdiv(max_seq_len, compress_ratio),
+                max_valid_seq_len=max_valid_seq_len,
+            ) or rocm_aiter_ops.glm5next_indexer_prefers_aiter_top_k(
+                compress_ratio=compress_ratio,
+                max_valid_seq_len=max_valid_seq_len,
+                topk_tokens=topk_tokens,
             ):
                 # AITER's decode kernel only implements the 1D/next_n == 1
                 # form, which is equivalent once the ragged ends are expanded.
