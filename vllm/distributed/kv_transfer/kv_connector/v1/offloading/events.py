@@ -250,7 +250,8 @@ class OffloadingEventsTracker:
         removed_keys: set[OffloadKey] = set()
         for event in events:
             if event.removed:
-                removed_keys.update(event.keys)
+                if self.self_describing_enabled:
+                    removed_keys.update(event.keys)
                 yield from self._take_removed_event(event)
             else:
                 yield from self._take_stored_event(event)
