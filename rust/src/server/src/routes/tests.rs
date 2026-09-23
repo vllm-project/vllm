@@ -6498,6 +6498,79 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn weight_transfer_routes_reject_top_level_json_arrays() {
+    // `Json<T>` also deserializes a struct from a positional sequence, so
+    // `[{}]` used to be accepted and recorded as a successful operation. These
+    // bodies must be rejected as "not a JSON object", before the recorder.
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let message = recv_engine_message(dealer).await;
+            panic!("array body reached engine: {message:?}");
+        })
+    })
+    .await;
+    let metrics_before = METRICS.render().unwrap();
+
+    for (path, body) in [
+        ("/init_weight_transfer_engine", "[{}]"),
+        ("/init_weight_transfer_engine", r#"[{"init_info":{}}]"#),
+        ("/init_weight_transfer_engine", "[1]"),
+        ("/update_weights", "[{}]"),
+        ("/finish_weight_update", r#"["array-version"]"#),
+        ("/update_weight_version", r#"["array-version-2"]"#),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}: {body}");
+        let payload = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let error: serde_json::Value = serde_json::from_slice(&payload).expect("decode json");
+        assert_eq!(
+            error["error"]["message"].as_str(),
+            Some("Request body must be a JSON object"),
+            "{path}: {body}"
+        );
+    }
+
+    // No operation may be recorded for a body that is not an object.
+    let metrics_after = METRICS.render().unwrap();
+    for operation in ["init", "update", "finish", "set_version"] {
+        for status in ["success", "error"] {
+            assert_eq!(
+                metric_delta(
+                    &metrics_before,
+                    &metrics_after,
+                    "vllm:rl_weight_update_operations_total",
+                    Some(&format!("operation=\"{operation}\",status=\"{status}\"")),
+                ),
+                0.0,
+                "{operation}/{status}"
+            );
+        }
+        assert_eq!(
+            metric_delta(
+                &metrics_before,
+                &metrics_after,
+                "vllm:rl_weight_update_operations_in_flight",
+                Some(&format!("operation=\"{operation}\"")),
+            ),
+            0.0,
+            "{operation} gauge"
+        );
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
         boxed_test_future(async move {

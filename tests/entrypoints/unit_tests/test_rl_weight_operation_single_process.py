@@ -19,6 +19,12 @@ stops the singleton from being re-created. Other test modules use private
 registries, which is why they are unaffected.
 """
 
+import asyncio
+import socket
+import threading
+import time
+import urllib.request
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -40,12 +46,21 @@ _NAMES = (COUNTER, DURATION, IN_FLIGHT)
 class _Engine:
     """Engine stub for the ASGI stack."""
 
-    def __init__(self, fail_start: bool = False):
+    def __init__(self, fail_start: bool = False, block: bool = False):
         self.calls: list[str] = []
         self.fail_start = fail_start
+        self.block = block
+        self.started = threading.Event()
+        self.release = threading.Event()
 
     async def start_weight_update(self, *args, **kwargs):
         self.calls.append("start_weight_update")
+        if self.block:
+            self.started.set()
+            # Waits on a threading event so the test can release it from another
+            # thread without touching the server's event loop.
+            while not self.release.is_set():
+                await asyncio.sleep(0.01)
         if self.fail_start:
             raise RuntimeError("engine down")
 
@@ -136,3 +151,92 @@ def test_singleton_registers_on_the_served_registry():
 
     for name in _NAMES:
         assert name in REGISTRY._names_to_collectors, name
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class _LiveServer:
+    """A real uvicorn server over a loopback socket."""
+
+    def __init__(self, app: FastAPI):
+        uvicorn = pytest.importorskip(
+            "uvicorn", reason="uvicorn ships with fastapi[standard]"
+        )
+        self.port = _free_port()
+        config = uvicorn.Config(
+            app, host="127.0.0.1", port=self.port, log_level="error"
+        )
+        self._server = uvicorn.Server(config)
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+
+    def __enter__(self) -> "_LiveServer":
+        self._thread.start()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if self._server.started:
+                return self
+            time.sleep(0.02)
+        raise AssertionError("server did not start")
+
+    def __exit__(self, *exc) -> None:
+        self._server.should_exit = True
+        self._thread.join(timeout=30)
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def scrape(self) -> str:
+        with urllib.request.urlopen(self.url("/metrics"), timeout=10) as response:
+            return response.read().decode()
+
+
+def test_client_disconnect_does_not_cancel_the_operation(monkeypatch):
+    """A dropped socket is not an operation cancellation on this frontend.
+
+    The Python route does not watch the connection, so the engine await keeps
+    running and the operation is still recorded as ``success`` - unlike the Rust
+    frontend, where a dropped handler future records ``error``. Pinned here so a
+    later lifecycle change is a deliberate, visible decision.
+    """
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    engine = _Engine(block=True)
+    success_labels = 'operation="start",status="success"'
+    error_labels = 'operation="start",status="error"'
+
+    with _LiveServer(_build_app(engine)) as server:
+        before_success = _sample_value(server.scrape(), COUNTER, success_labels)
+        before_error = _sample_value(server.scrape(), COUNTER, error_labels)
+
+        # Send the request, then drop the socket while the engine call is running.
+        conn = socket.create_connection(("127.0.0.1", server.port), timeout=10)
+        body = b"{}"
+        conn.sendall(
+            b"POST /start_weight_update HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode()
+            + b"Connection: close\r\n\r\n"
+            + body
+        )
+        assert engine.started.wait(timeout=30), "engine call never started"
+        conn.close()
+
+        # The operation outlives the disconnect and completes normally.
+        engine.release.set()
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            scrape = server.scrape()
+            if _sample_value(scrape, COUNTER, success_labels) - before_success == 1:
+                break
+            time.sleep(0.05)
+
+        assert _sample_value(scrape, COUNTER, success_labels) - before_success == 1, (
+            "the operation should still be recorded as success after a disconnect"
+        )
+        assert _sample_value(scrape, COUNTER, error_labels) - before_error == 0
+        assert _sample_value(scrape, IN_FLIGHT, 'operation="start"') == 0
