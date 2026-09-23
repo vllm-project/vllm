@@ -98,5 +98,6 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
                     )
             assert not divergent, (
                 f"{name}: {len(divergent)}/{len(ref_outputs)} prompts diverged "
-                f"at {divergent}; sharded sampling is misrouting requests"
+                f"at {divergent}; the sampling modes did not agree token for "
+                "token with in-process scheduling"
             )

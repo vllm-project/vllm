@@ -18,6 +18,7 @@ import pytest
 from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.logprobs import Logprob, LogprobsOnePosition
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -57,6 +58,10 @@ def _is_sharded_sampling_active(worker) -> bool:
     return worker.model_runner.batch_sharder is not None
 
 
+def _sampling_params() -> list[SamplingParams]:
+    return [SAMPLING_PARAMS[i % len(SAMPLING_PARAMS)] for i in range(len(PROMPTS))]
+
+
 def _generate(monkeypatch: pytest.MonkeyPatch, disable_sharding: bool):
     llm = LLM(
         model=MODEL,
@@ -78,9 +83,7 @@ def _generate(monkeypatch: pytest.MonkeyPatch, disable_sharding: bool):
         # intended sampling mode.
         modes = llm.llm_engine.collective_rpc(_is_sharded_sampling_active)
         assert all(mode == (not disable_sharding) for mode in modes), modes
-        params = [
-            SAMPLING_PARAMS[i % len(SAMPLING_PARAMS)] for i in range(len(PROMPTS))
-        ]
+        params = _sampling_params()
         # Two waves: the second reuses the request slots freed by the first
         # (in whatever order requests finished), covering the cross-rank
         # slot-recycling path that request ownership derives from.
@@ -92,31 +95,32 @@ def _generate(monkeypatch: pytest.MonkeyPatch, disable_sharding: bool):
         cleanup_dist_env_and_memory()
 
 
-def _requested_top_k(lps) -> set[int]:
-    """The token ids of the requested top-k, without the sampled token.
-
-    vLLM appends the sampled token when it misses the top-k, so the dict holds
-    k or k+1 entries. The top-k occupy ranks 1..k with no gaps and the extra
-    entry lands at its own rank, so the first gap ends the top-k. Rank is
-    optional on Logprob, and without it there is nothing to split on.
-    """
-    by_rank = sorted(lps.items(), key=lambda kv: (kv[1].rank is None, kv[1].rank))
-    top = set()
-    for expected_rank, (token_id, logprob) in enumerate(by_rank, start=1):
-        if logprob.rank != expected_rank:
-            break
-        top.add(token_id)
-    return top or set(lps)
+def _requested_top_k(lps: LogprobsOnePosition, num_logprobs: int) -> set[int]:
+    """Exclude the extra sampled/prompt token, including at rank k+1."""
+    top = {
+        token_id
+        for token_id, logprob in lps.items()
+        if logprob.rank is not None and 1 <= logprob.rank <= num_logprobs
+    }
+    assert len(top) == num_logprobs, (
+        f"expected {num_logprobs} ranked top-k entries, got {len(top)}"
+    )
+    return top
 
 
-def _assert_logprob_dicts_close(ref_lps, out_lps, what: str) -> None:
+def _assert_logprob_dicts_close(
+    ref_lps: LogprobsOnePosition,
+    out_lps: LogprobsOnePosition,
+    what: str,
+    num_logprobs: int,
+) -> None:
     # Allow one boundary entry of the top-k set to swap at a near-tie. Compare
     # the top-k alone: counting the sampled token would spend that allowance
     # on the extra entry itself whenever only one side carries one.
-    ref_top = _requested_top_k(ref_lps)
-    out_top = _requested_top_k(out_lps)
+    ref_top = _requested_top_k(ref_lps, num_logprobs)
+    out_top = _requested_top_k(out_lps, num_logprobs)
     shared_top = ref_top & out_top
-    assert len(shared_top) >= max(len(ref_top), len(out_top)) - 1, (
+    assert len(shared_top) >= num_logprobs - 1, (
         f"{what}: top-k token sets diverge: {sorted(ref_top)} vs {sorted(out_top)}"
     )
     # Values are comparable for every shared token, sampled one included.
@@ -126,6 +130,52 @@ def _assert_logprob_dicts_close(ref_lps, out_lps, what: str) -> None:
             f"{what}[{token_id}]: logprob diff {diff} "
             f"({ref_lps[token_id].logprob} vs {out_lps[token_id].logprob})"
         )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("num_logprobs", "ref_ranks", "out_ranks"),
+    [
+        (2, {0: 1, 1: 2, 2: 3}, {0: 1, 3: 2, 2: 4}),
+        (1, {0: 1, 1: 2}, {2: 1, 1: 3}),
+        (2, {0: 1, 1: 2}, {0: 1, 2: 2, 1: 3}),
+        (2, {0: 1, 1: 2, 2: 4}, {0: 1, 1: 2, 2: 5}),
+        (0, {0: 2}, {0: 3}),
+    ],
+    ids=["decode-boundary", "prompt-boundary", "sampled-in-top-k", "gap", "zero"],
+)
+def test_logprob_comparison_allows_sampled_token_rank_changes(
+    num_logprobs: int, ref_ranks: dict[int, int], out_ranks: dict[int, int]
+):
+    ref_lps, out_lps = (
+        {token: Logprob(-2.0 - rank / 100, rank=rank) for token, rank in ranks.items()}
+        for ranks in (ref_ranks, out_ranks)
+    )
+    _assert_logprob_dicts_close(ref_lps, out_lps, "boundary swap", num_logprobs)
+
+
+@pytest.mark.cpu_test
+def test_logprob_comparison_rejects_multiple_top_k_swaps():
+    ref = {0: Logprob(-2.0, rank=1), 1: Logprob(-2.01, rank=2)}
+    out = {2: Logprob(-2.0, rank=1), 3: Logprob(-2.01, rank=2)}
+    with pytest.raises(AssertionError, match="top-k token sets diverge"):
+        _assert_logprob_dicts_close(ref, out, "misrouted top-k", num_logprobs=2)
+
+
+@pytest.mark.cpu_test
+def test_logprob_comparison_checks_extra_sampled_token_value():
+    ref = {0: Logprob(-1.0, rank=1), 1: Logprob(-3.0, rank=3)}
+    out = {0: Logprob(-1.0, rank=1), 1: Logprob(-4.0, rank=3)}
+    with pytest.raises(AssertionError, match="logprob diff"):
+        _assert_logprob_dicts_close(ref, out, "sampled token", num_logprobs=1)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("rank", [None, 2])
+def test_logprob_comparison_rejects_missing_top_k_rank(rank: int | None):
+    lps = {0: Logprob(-1.0, rank=rank)}
+    with pytest.raises(AssertionError, match="expected 1 ranked top-k entries"):
+        _assert_logprob_dicts_close(lps, lps, "missing rank", num_logprobs=1)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -143,8 +193,11 @@ def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
     shard_outputs = _generate(monkeypatch, disable_sharding=False)
 
     assert len(ref_outputs) == len(shard_outputs) == 2 * len(PROMPTS)
+    params = _sampling_params()
     divergent = []
-    for i, (ref, out) in enumerate(zip(ref_outputs, shard_outputs)):
+    for i, (ref, out, sampling_params) in enumerate(
+        zip(ref_outputs, shard_outputs, params + params[::-1])
+    ):
         ref_completion = ref.outputs[0]
         out_completion = out.outputs[0]
         ref_ids = list(ref_completion.token_ids)
@@ -163,17 +216,20 @@ def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
 
         if ref_completion.logprobs is not None:
             assert out_completion.logprobs is not None
+            assert sampling_params.logprobs is not None
             comparable = min(prefix + 1, len(ref_ids), len(out_ids))
             for pos in range(comparable):
                 _assert_logprob_dicts_close(
                     ref_completion.logprobs[pos],
                     out_completion.logprobs[pos],
                     f"prompt {i} logprobs[{pos}]",
+                    sampling_params.logprobs,
                 )
 
         # The prompt is fixed, so every prompt-logprob position is comparable.
         if ref.prompt_logprobs is not None:
             assert out.prompt_logprobs is not None
+            assert sampling_params.prompt_logprobs is not None
             for pos, (ref_lps, out_lps) in enumerate(
                 zip(ref.prompt_logprobs, out.prompt_logprobs)
             ):
@@ -181,12 +237,14 @@ def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
                     assert ref_lps is None and out_lps is None
                     continue
                 _assert_logprob_dicts_close(
-                    ref_lps, out_lps, f"prompt {i} prompt_logprobs[{pos}]"
+                    ref_lps,
+                    out_lps,
+                    f"prompt {i} prompt_logprobs[{pos}]",
+                    sampling_params.prompt_logprobs,
                 )
 
     assert not divergent, (
         f"{len(divergent)}/{2 * len(PROMPTS)} completions diverged at "
-        f"(prompt, position) {divergent}; with both boots scheduling the same "
-        "batches the two sampling modes must agree token for token, so this "
-        "points at sharded sampling misrouting requests"
+        f"(prompt, position) {divergent}; the sampling modes did not agree "
+        "token for token with in-process scheduling"
     )
