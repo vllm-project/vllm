@@ -357,6 +357,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._push_writer_thread = None
 
         # Base worker fields touched by start_load_kv / _get_new_notifs.
+        w._checkpoint_quiescing = False
         w._recving_metadata = {}
         w._pending_recv_notifs = {}
         w._failed_recv_reqs = queue.Queue()

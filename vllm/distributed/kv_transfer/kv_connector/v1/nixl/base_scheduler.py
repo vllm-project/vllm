@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base scheduler-side logic for the NIXL connector."""
 
+import socket
 import threading
 import time
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -21,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    UPDATE_META_MSG,
     HeartbeatInfo,
     NixlConnectorMetadata,
     NixlHandshakePayload,
@@ -46,6 +49,22 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Bound on how long a handshake-listener start/stop may take: starting
+# (waiting for its ready signal) and stopping (waiting for its thread to
+# exit) during both normal startup and refresh_handshake_endpoint()'s rebind.
+_HANDSHAKE_LISTENER_TIMEOUT_S = 5.0
+
+_LOCAL_SCHEDULERS: weakref.WeakValueDictionary[str, "NixlBaseConnectorScheduler"] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def get_local_nixl_scheduler(
+    engine_id: EngineId,
+) -> "NixlBaseConnectorScheduler | None":
+    """Return the scheduler connector in this process, if one exists."""
+    return _LOCAL_SCHEDULERS.get(engine_id)
 
 
 class NixlBaseConnectorScheduler:
@@ -108,6 +127,8 @@ class NixlBaseConnectorScheduler:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._handshake_metadata_lock = threading.RLock()
+        self._encoded_handshake_data: dict[tuple[int, int], bytes] = {}
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -189,12 +210,15 @@ class NixlBaseConnectorScheduler:
                 self.kv_recompute_threshold,
                 self.decoder_kv_blocks_ttl,
             )
+        _LOCAL_SCHEDULERS[self.engine_id] = self
 
     def shutdown(self):
         self._stop_event.set()
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+        if _LOCAL_SCHEDULERS.get(self.engine_id) is self:
+            _LOCAL_SCHEDULERS.pop(self.engine_id, None)
 
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
@@ -321,33 +345,75 @@ class NixlBaseConnectorScheduler:
                 str(len(encoded_data[(pp_rank, tp_rank)])),
             )
 
+        with self._handshake_metadata_lock:
+            self._encoded_handshake_data = encoded_data
+
         # Only start the listener when we have metadata to serve.
         if self._nixl_handshake_listener_t is None:
-            ready_event = threading.Event()
-            self._nixl_handshake_listener_t = threading.Thread(
-                target=self._nixl_handshake_listener,
-                args=(
-                    encoded_data,
-                    ready_event,
-                    self._stop_event,
-                    self.side_channel_host,
-                    self.side_channel_port,
-                ),
-                daemon=True,
-                name="nixl_handshake_listener",
-            )
-            self._nixl_handshake_listener_t.start()
-            ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+            self._start_handshake_listener()
 
-    @staticmethod
+    def _start_handshake_listener(self) -> None:
+        ready_event = threading.Event()
+        listener = threading.Thread(
+            target=self._nixl_handshake_listener,
+            args=(
+                ready_event,
+                self._stop_event,
+                self.side_channel_host,
+                self.side_channel_port,
+            ),
+            daemon=True,
+            name="nixl_handshake_listener",
+        )
+        self._nixl_handshake_listener_t = listener
+        listener.start()
+        if ready_event.wait(timeout=_HANDSHAKE_LISTENER_TIMEOUT_S):
+            return
+        self._stop_event.set()
+        listener.join(timeout=_HANDSHAKE_LISTENER_TIMEOUT_S)
+        self._nixl_handshake_listener_t = None
+        raise RuntimeError("Timed out starting NIXL handshake listener")
+
+    def refresh_handshake_endpoint(self) -> None:
+        """Rebind the handshake listener after a pod IP changes."""
+        host = socket.gethostbyname(socket.gethostname())
+        if host == self.side_channel_host:
+            return
+        listener = self._nixl_handshake_listener_t
+        if listener is not None:
+            self._stop_event.set()
+            listener.join(timeout=_HANDSHAKE_LISTENER_TIMEOUT_S)
+            if listener.is_alive():
+                raise RuntimeError("Timed out stopping NIXL handshake listener")
+        self.side_channel_host = host
+        self._stop_event = threading.Event()
+        self._nixl_handshake_listener_t = None
+        if not self._encoded_handshake_data:
+            return
+        self._start_handshake_listener()
+
+    def update_handshake_metadata(
+        self, pp_rank: int, tp_rank: int, metadata: NixlHandshakePayload
+    ) -> None:
+        """Atomically replace one worker's payload served by the listener."""
+        if not isinstance(metadata, NixlHandshakePayload):
+            raise ValueError("NIXL metadata update expects NixlHandshakePayload")
+        with self._handshake_metadata_lock:
+            encoded_data = self._encoded_handshake_data.copy()
+            encoded_data[(pp_rank, tp_rank)] = msgspec.msgpack.encode(metadata)
+            self._encoded_handshake_data = encoded_data
+
     def _nixl_handshake_listener(
-        encoded_data: dict[tuple[int, int], Any],
+        self,
         ready_event: threading.Event,
         stop_event: threading.Event,
         host: str,
         port: int,
     ):
         """Background thread for getting new NIXL handshakes."""
+        # Support legacy direct calls with encoded_data in place of self.
+        metadata = self if isinstance(self, dict) else None
+        metadata_lock = None if metadata is not None else self._handshake_metadata_lock
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach via HTTP endpoint soon.
 
@@ -364,13 +430,28 @@ class NixlBaseConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode (GET_META_MSG, pp_rank, tp_rank).
-                msg, target_pp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
+                decoded = msgspec.msgpack.decode(msg)
+                msg, target_pp_rank, target_tp_rank = decoded[:3]
+                target_rank = (target_pp_rank, target_tp_rank)
                 logger.debug(
                     "Received message for pp rank %s, tp rank %s",
                     target_pp_rank,
                     target_tp_rank,
                 )
+                if msg == UPDATE_META_MSG:
+                    if len(decoded) != 4:
+                        logger.warning("Invalid NIXL metadata update message")
+                        sock.send_multipart((identity, b"", b"error", b""))
+                        continue
+                    payload = decoded[3]
+                    if metadata is not None:
+                        metadata[target_rank] = payload
+                    else:
+                        assert metadata_lock is not None
+                        with metadata_lock:
+                            self._encoded_handshake_data[target_rank] = payload
+                    sock.send_multipart((identity, b"", b"ok", b""))
+                    continue
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
                 # Echo our perf_counter so P can estimate the clock offset.
@@ -378,9 +459,19 @@ class NixlBaseConnectorScheduler:
                 # listener must run in the same process that stamps the block
                 # expiry deadline (`_reqs_need_send`).
                 ts = msgspec.msgpack.encode(time.perf_counter())
-                sock.send_multipart(
-                    (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
-                )
+                if metadata is not None:
+                    payload = metadata.get(target_rank)
+                else:
+                    payload = self._encoded_handshake_data.get(target_rank)
+                if payload is None:
+                    logger.warning(
+                        "No NIXL metadata for PP rank %s, TP rank %s",
+                        target_pp_rank,
+                        target_tp_rank,
+                    )
+                    sock.send_multipart((identity, b"", b"error", b""))
+                    continue
+                sock.send_multipart((identity, b"", payload, ts))
 
     def _prefill_backoff(self) -> int:
         """Trailing prompt tokens the prefiller must not compute; the decoder

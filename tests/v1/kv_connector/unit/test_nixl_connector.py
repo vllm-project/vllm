@@ -7,6 +7,7 @@ import os
 import queue
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -20,7 +21,9 @@ import numpy as np
 import pytest
 import ray
 import torch
+import zmq
 
+from tests.utils import ensure_current_vllm_config
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import LLM
 from vllm.config import KVTransferConfig, set_current_vllm_config
@@ -47,13 +50,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorWorker,
     NixlHandshakePayload,
     NixlKVConnectorStats,
+    NixlPushConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_META_MSG,
+    UPDATE_META_MSG,
     compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_shutdown,
     has_kv_transfer_group,
+)
+from vllm.distributed.parallel_state import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
 )
 from vllm.forward_context import ForwardContext
 from vllm.outputs import RequestOutput
@@ -100,6 +111,28 @@ def clear_kv_transfer():
     yield
     if has_kv_transfer_group():
         ensure_kv_transfer_shutdown()
+
+
+@pytest.fixture
+def gloo_dist_init():
+    """Initialize a CPU process group for NIXL resource-cleanup tests."""
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                local_rank=0,
+                backend="gloo",
+            )
+            initialize_model_parallel(1, 1)
+            yield
+        cleanup_dist_env_and_memory()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_file)
 
 
 def get_default_xfer_telemetry(
@@ -2491,19 +2524,19 @@ def test_kv_buffer_to_nixl_memory_types(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
+def test_shutdown_cleans_up_resources(default_vllm_config, gloo_dist_init):
     """Test that shutdown() properly cleans up all resources."""
-    vllm_config = create_vllm_config()
+    vllm_config = create_vllm_config(block_size=32)
 
     scheduler = NixlConnectorScheduler(
         vllm_config,
         vllm_config.kv_transfer_config.engine_id,
-        make_kv_cache_config(block_size=16),
+        make_kv_cache_config(block_size=32),
     )
     worker = NixlConnectorWorker(
         vllm_config,
         vllm_config.kv_transfer_config.engine_id,
-        make_kv_cache_config(block_size=16),
+        make_kv_cache_config(block_size=32),
     )
     nixl_wrapper = worker.nixl_wrapper
 
@@ -2537,7 +2570,10 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.shutdown()
         worker.shutdown()
 
-        mock_exec.shutdown.assert_called_with(wait=False)
+        # shutdown() must not block engine teardown on an in-flight handshake
+        # to a dead peer; only quiesce() needs the wait=True ordering
+        # guarantee against a concurrent add_remote_agent.
+        mock_exec.shutdown.assert_called_with(wait=False, cancel_futures=True)
 
         # Same sequence on scheduler.shutdown()
         scheduler.shutdown()
@@ -2557,7 +2593,451 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         mock_dereg.assert_any_call("desc2")
 
 
+def _releasable_worker(worker_cls):
+    """Worker with the empty transport state _release_transport_state reads."""
+    worker = object.__new__(worker_cls)
+    worker.shutdown = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    worker._registered_kv_caches = {}
+    worker.device_kv_caches = {}
+    worker.host_xfer_buffers = {}
+    worker._handshake_initiation_executor = None
+    worker._recving_transfers = {}
+    worker.src_xfer_handles_by_block_size = {}
+    worker.src_xfer_handles_by_tp_ratio = {}
+    worker._remote_agents = {}
+    worker._engine_clock_offset = {}
+    worker.kv_caches_base_addr = defaultdict(dict)
+    worker.dst_xfer_side_handles = defaultdict(dict)
+    worker.dst_num_blocks = {}
+    worker._handshake_futures = {}
+    worker._engine_last_active = {}
+    worker._registered_descs = []
+    worker.xfer_handshake_metadata = None
+    worker.compat_hash = None
+    worker.transfer_topo = None
+    worker.block_len_per_layer = []
+    worker.block_stride_per_layer = []
+    worker._region_is_mla = []
+    worker._ssm_region_indices = []
+    worker._scratch_region_indices = []
+    worker._ple_region_index = None
+    worker.region_mem_types = []
+    worker.region_group_ids = []
+    worker.region_names = []
+    worker.region_num_blocks = []
+    worker._uses_region_group_mapping = False
+    worker._mixed_mem_types = False
+    worker._desc_is_dram_by_block_size = {}
+    worker._desc_pos_by_block_size = {}
+    worker._dram_src_handles_by_block_size = {}
+    worker._dram_src_handles_by_tp_ratio = {}
+    worker.src_blocks_data_by_block_size = {}
+    worker.dst_region_num_blocks = {}
+    worker.dst_region_group_ids = {}
+    worker.dst_uses_region_group_mapping = {}
+    worker.dst_region_mem_types = {}
+    return worker
+
+
+def test_release_transport_state_retains_registered_cache_mapping():
+    """Releasing NIXL state must not discard tensors needed for rebuild."""
+    worker = _releasable_worker(NixlConnectorWorker)
+    caches = {"layer": MagicMock()}
+    # register_kv_caches aliases the caller's dict, which other connectors
+    # may share, so release must not mutate it.
+    runner_caches = dict(caches)
+    worker._registered_kv_caches = dict(caches)
+    worker.device_kv_caches = runner_caches
+
+    worker._release_transport_state()
+
+    assert worker._registered_kv_caches == caches
+    assert worker.device_kv_caches == {}
+    assert runner_caches == caches
+
+
+def test_release_transport_state_resets_region_geometry():
+    """register_kv_caches appends region geometry, so rebuild needs it reset."""
+    worker = _releasable_worker(NixlConnectorWorker)
+    worker.engine_id = "engine"
+    worker.region_mem_types = ["VRAM"]
+    worker.region_group_ids = [0]
+    worker.region_names = ["layer"]
+    worker.region_num_blocks = [8]
+    worker._uses_region_group_mapping = True
+    worker._mixed_mem_types = True
+    worker._desc_is_dram_by_block_size = {16: MagicMock()}
+    worker._desc_pos_by_block_size = {16: MagicMock()}
+    worker.src_blocks_data_by_block_size = {16: MagicMock()}
+    worker.dst_region_num_blocks = {"engine": [8]}
+    worker.dst_region_group_ids = {"engine": [0]}
+    worker.dst_uses_region_group_mapping = {"engine": True}
+    worker.dst_region_mem_types = {"engine": ["VRAM"]}
+
+    worker._release_transport_state()
+
+    assert not worker.region_mem_types
+    assert not worker.region_group_ids
+    assert not worker.region_names
+    assert not worker.region_num_blocks
+    assert not worker._uses_region_group_mapping
+    assert not worker._mixed_mem_types
+    assert not worker._desc_is_dram_by_block_size
+    assert not worker._desc_pos_by_block_size
+    assert not worker.src_blocks_data_by_block_size
+    assert not worker.dst_region_num_blocks
+    assert not worker.dst_region_group_ids
+    assert not worker.dst_uses_region_group_mapping
+    assert not worker.dst_region_mem_types
+
+
+def test_release_transport_state_releases_dram_handles():
+    """Mixed-memory DRAM dlist handles must not leak across a rebuild."""
+    worker = _releasable_worker(NixlConnectorWorker)
+    worker._dram_src_handles_by_block_size = {16: 7}
+    worker._dram_src_handles_by_tp_ratio = {(-2, 16): [8, 9]}
+
+    worker._release_transport_state()
+
+    released = [c.args[0] for c in worker.nixl_wrapper.release_dlist_handle.mock_calls]
+    assert sorted(released) == [7, 8, 9]
+    assert not worker._dram_src_handles_by_block_size
+    assert not worker._dram_src_handles_by_tp_ratio
+
+
+def test_shutdown_drops_cache_references_when_release_fails():
+    """Handshake futures may outlive shutdown; they must not pin KV tensors."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._handshake_initiation_executor = None
+    worker._stop_push_writer = MagicMock()
+    worker._stop_handshake_executor = MagicMock()
+    worker._release_transport_state = MagicMock(side_effect=RuntimeError("release"))
+    worker._registered_kv_caches = {"layer": MagicMock()}
+    worker.device_kv_caches = {"layer": MagicMock()}
+    worker.host_xfer_buffers = {"layer": MagicMock()}
+
+    with pytest.raises(RuntimeError, match="release"):
+        worker.shutdown()
+
+    assert worker._registered_kv_caches == {}
+    assert worker.device_kv_caches == {}
+    assert worker.host_xfer_buffers == {}
+
+
+def test_release_transport_state_locks_push_handle_release():
+    """Releasing push-mode's outgoing transfers must hold the same lock
+    push_worker.shutdown() takes, so a concurrent submit can't race the
+    handle release."""
+    worker = _releasable_worker(NixlPushConnectorWorker)
+    released = []
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.release_xfer_handle = lambda h: released.append(h)
+    worker._sending_transfers = {"req": ["handle-1"]}
+
+    lock_events = []
+
+    class _TrackingLock:
+        def __enter__(self):
+            lock_events.append("enter")
+
+        def __exit__(self, *args):
+            lock_events.append("exit")
+
+    worker._sending_transfers_lock = _TrackingLock()
+
+    worker._release_transport_state()
+
+    assert released == ["handle-1"]
+    assert worker._sending_transfers == {}
+    assert lock_events == ["enter", "exit"]
+
+
+def test_push_lifecycle_rejects_a_writer_that_does_not_stop():
+    """Reinitialization must not proceed while the old push writer is alive."""
+    worker = object.__new__(NixlPushConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker._push_writer_stop = threading.Event()
+    worker._push_writer_wake = threading.Event()
+    worker._push_writer_thread = MagicMock()
+    worker._push_writer_thread.is_alive.return_value = True
+
+    with pytest.raises(RuntimeError, match="push writer did not stop"):
+        worker._stop_push_writer()
+
+    worker._push_writer_thread.join.assert_called_once_with(timeout=2)
+    assert worker._push_writer_stop.is_set()
+    assert worker._push_writer_wake.is_set()
+
+
+def test_push_lifecycle_discards_queued_work():
+    """Queued push requests must not be replayed after transport rebuild."""
+    worker = object.__new__(NixlPushConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker._reg_send_inbox = queue.Queue()
+    worker._finished_blocks_inbox = queue.Queue()
+    worker._deferred_push_inbox = queue.Queue()
+    worker._pending_completion_notifs = queue.Queue()
+    worker._evict_finished_inbox = queue.Queue()
+    worker._push_finished_blocks = {"request": [1]}
+    worker._pending_d_registrations = {"request": {"agent": "old"}}
+    for work_queue in (
+        worker._reg_send_inbox,
+        worker._finished_blocks_inbox,
+        worker._deferred_push_inbox,
+        worker._pending_completion_notifs,
+        worker._evict_finished_inbox,
+    ):
+        work_queue.put("stale")
+
+    worker._discard_push_work()
+
+    assert all(
+        work_queue.empty()
+        for work_queue in (
+            worker._reg_send_inbox,
+            worker._finished_blocks_inbox,
+            worker._deferred_push_inbox,
+            worker._pending_completion_notifs,
+            worker._evict_finished_inbox,
+        )
+    )
+    assert not worker._push_finished_blocks
+    assert not worker._pending_d_registrations
+
+
 # ── TTL-based remote engine eviction tests ──────────────────────────
+
+
+def test_reinitialize_rebuilds_transport_from_retained_caches():
+    """Reinitialization replaces transport state without replacing KV tensors."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.nixl_wrapper = None
+    worker.shutdown = MagicMock()
+    caches = {"layer": MagicMock()}
+    replacement = MagicMock()
+    worker._registered_kv_caches = caches
+    worker._nixl_wrapper_cls = MagicMock(return_value=replacement)
+    worker._nixl_config = MagicMock()
+    worker.quiesce = MagicMock()
+    executor = MagicMock()
+    worker._create_handshake_executor = MagicMock(return_value=executor)
+    worker.register_kv_caches = MagicMock()
+    worker._publish_handshake_metadata = MagicMock()
+    worker._refresh_local_scheduler = MagicMock()
+
+    worker.reinitialize()
+
+    assert worker.nixl_wrapper is replacement
+    worker.quiesce.assert_not_called()
+    worker._create_handshake_executor.assert_called_once_with()
+    assert worker._handshake_initiation_executor is executor
+    worker.register_kv_caches.assert_called_once_with(caches)
+    worker._publish_handshake_metadata.assert_called_once_with()
+
+
+def test_reinitialize_releases_replacement_state_on_failure():
+    """A failed rebuild must release the newly-created transport state."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.nixl_wrapper = None
+    worker.shutdown = MagicMock()
+    worker._registered_kv_caches = {"layer": MagicMock()}
+    worker._nixl_wrapper_cls = MagicMock(return_value=MagicMock())
+    worker._nixl_config = MagicMock()
+    worker.quiesce = MagicMock()
+    worker._create_handshake_executor = MagicMock(return_value=MagicMock())
+    worker.register_kv_caches = MagicMock(side_effect=RuntimeError("register"))
+    worker._release_transport_state = MagicMock()
+    worker._refresh_local_scheduler = MagicMock()
+
+    with pytest.raises(RuntimeError, match="register"):
+        worker.reinitialize()
+
+    worker._release_transport_state.assert_called_once_with()
+
+
+def _quiescing_worker(xfer_state: str):
+    """Worker with one in-flight receive whose NIXL state is ``xfer_state``."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker.engine_id = "engine"
+    worker.tp_rank = 0
+    worker.transfer_topo = MagicMock()
+    worker.use_host_buffer = False
+    worker._has_mamba = False
+    worker._is_hma_required = False
+    worker.enable_heterogeneous_attn_post_process = False
+    worker.xfer_stats = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.check_xfer_state.return_value = xfer_state
+    worker._get_new_notifs = lambda: set()
+    worker._recving_transfers = {"request": [1]}
+    worker._recving_metadata = {
+        "request": SimpleNamespace(remote=None, local_block_ids=[[1]])
+    }
+    worker._failed_recv_reqs = queue.Queue()
+    worker._invalid_block_ids = queue.Queue()
+    worker._failed_inflight_recvs = set()
+    worker._pending_recv_notifs = {}
+    worker._replicated_pcp_done_sending = set()
+    worker._reqs_to_send = {}
+    worker._quiesce_drained_sending = set()
+    worker._quiesce_drained_recving = set()
+    worker._quiesce_drained_failed = set()
+    worker._stop_push_writer = MagicMock()
+    worker._stop_handshake_executor = MagicMock()
+    worker._discard_push_work = MagicMock()
+    worker._release_transport_state = MagicMock()
+    return worker
+
+
+def test_quiesce_drains_failed_transfer_as_failed_recv():
+    """A failed transfer is terminal: it drains, and is reported as failed."""
+    worker = _quiescing_worker("ERROR")
+
+    worker.quiesce(timeout=1.0)
+
+    worker._release_transport_state.assert_called_once_with()
+    assert worker._quiesce_drained_failed == {"request"}
+    assert worker._quiesce_drained_recving == {"request"}
+
+
+def test_quiesce_rejects_timed_out_transfers():
+    """Transport state remains intact when a transfer cannot be drained."""
+    worker = _quiescing_worker("PROC")
+
+    with pytest.raises(TimeoutError):
+        worker.quiesce(timeout=0)
+
+    worker._release_transport_state.assert_not_called()
+    assert not worker._checkpoint_quiescing
+
+
+def test_scheduler_metadata_replacement_updates_one_worker_payload():
+    """A lifecycle refresh replaces the metadata served for one worker."""
+    scheduler = object.__new__(NixlConnectorScheduler)
+    scheduler._handshake_metadata_lock = threading.Lock()
+    scheduler._encoded_handshake_data = {(0, 0): b"old"}
+    payload = NixlHandshakePayload(b"compat", b"new-agent")
+
+    scheduler.update_handshake_metadata(0, 0, payload)
+
+    assert scheduler._encoded_handshake_data[(0, 0)] == msgspec.msgpack.encode(payload)
+
+
+@pytest.mark.parametrize(
+    "request_data",
+    [
+        (UPDATE_META_MSG, 0, 0),
+        (GET_META_MSG, 0, 0),
+    ],
+)
+def test_scheduler_metadata_listener_replies_immediately_to_invalid_requests(
+    request_data,
+):
+    """Invalid or missing metadata must produce an error reply, not a timeout."""
+
+    class FakeSocket:
+        def __init__(self):
+            self.replies = []
+
+        def setsockopt(self, *_args):
+            pass
+
+        def recv_multipart(self):
+            if self.replies:
+                raise zmq.Again
+            self.replies.append(None)
+            return [b"client", b"", msgspec.msgpack.encode(request_data)]
+
+        def send_multipart(self, reply):
+            self.replies.append(reply)
+
+    class FakeContext:
+        def __init__(self, socket):
+            self.socket = socket
+
+        def __enter__(self):
+            return self.socket
+
+        def __exit__(self, *_args):
+            pass
+
+    socket = FakeSocket()
+    stop_event = threading.Event()
+    stop_event.set()
+    scheduler = object.__new__(NixlConnectorScheduler)
+    scheduler._handshake_metadata_lock = threading.Lock()
+    scheduler._encoded_handshake_data = {}
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.zmq_ctx",
+        return_value=FakeContext(socket),
+    ):
+        scheduler._nixl_handshake_listener(
+            threading.Event(), stop_event, "localhost", 1234
+        )
+
+    assert socket.replies[-1] == (b"client", b"", b"error", b"")
+
+
+def test_scheduler_metadata_listener_reads_without_metadata_lock():
+    """The hot GET metadata path must not serialize on the update lock."""
+
+    class LockThatMustNotBeAcquired:
+        def __enter__(self):
+            raise AssertionError("GET metadata acquired the update lock")
+
+        def __exit__(self, *_args):
+            pass
+
+    class FakeSocket:
+        def __init__(self):
+            self.replies = []
+            self.received = False
+
+        def setsockopt(self, *_args):
+            pass
+
+        def recv_multipart(self):
+            if self.received:
+                raise zmq.Again
+            self.received = True
+            return [
+                b"client",
+                b"",
+                msgspec.msgpack.encode((GET_META_MSG, 0, 0)),
+            ]
+
+        def send_multipart(self, reply):
+            self.replies.append(reply)
+
+    class FakeContext:
+        def __init__(self, socket):
+            self.socket = socket
+
+        def __enter__(self):
+            return self.socket
+
+        def __exit__(self, *_args):
+            pass
+
+    socket = FakeSocket()
+    stop_event = threading.Event()
+    stop_event.set()
+    scheduler = object.__new__(NixlConnectorScheduler)
+    scheduler._handshake_metadata_lock = LockThatMustNotBeAcquired()
+    scheduler._encoded_handshake_data = {(0, 0): b"metadata"}
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.zmq_ctx",
+        return_value=FakeContext(socket),
+    ):
+        scheduler._nixl_handshake_listener(
+            threading.Event(), stop_event, "localhost", 1234
+        )
+
+    assert socket.replies[-1][2] == b"metadata"
 
 
 def _setup_worker_with_remote_engine(
