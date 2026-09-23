@@ -6,7 +6,10 @@ import queue
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
+from tokenizers import Tokenizer, processors
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
+from transformers.models.auto.tokenization_auto import get_tokenizer_config
+from transformers.utils import cached_file
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
@@ -156,6 +159,12 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         def __len__(self) -> int:
             return tokenizer_len
 
+        def save_pretrained(self, *args, **kwargs):
+            # Serialize the original class, not this process-local cache wrapper.
+            uncached_tokenizer = copy.copy(self)
+            uncached_tokenizer.__class__ = tokenizer.__class__
+            return uncached_tokenizer.save_pretrained(*args, **kwargs)
+
         def __reduce__(self):
             return get_cached_tokenizer, (tokenizer,)
 
@@ -163,6 +172,76 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
     cached_tokenizer.__class__ = CachedTokenizer
     return cached_tokenizer
+
+
+def _maybe_fix_gte_tokenizer(
+    tokenizer: HfTokenizer,
+    path_or_repo_id: str | Path,
+    *,
+    revision: str | None,
+    download_dir: str | None,
+    **kwargs,
+) -> None:
+    config = kwargs.get("config")
+    if (
+        getattr(config, "model_type", None) != "qwen2"
+        or getattr(config, "is_causal", True) is not False
+        or not isinstance(tokenizer, TokenizersBackend)
+        or type(tokenizer).__name__ != "Qwen2TokenizerFast"
+        or "add_eos_token" in kwargs
+    ):
+        return
+
+    # GTE's old initializer replaces the serialized rules with this empty template.
+    empty_template = processors.TemplateProcessing(single="$A:0", pair="$A:0 $B:1")
+    post_processor = tokenizer.backend_tokenizer.post_processor
+    if (
+        not isinstance(post_processor, processors.TemplateProcessing)
+        or post_processor.__getstate__() != empty_template.__getstate__()
+    ):
+        return
+
+    asset_kwargs = dict(
+        revision=revision,
+        cache_dir=download_dir,
+        token=kwargs.get("token"),
+        local_files_only=kwargs.get("local_files_only", False),
+        subfolder=kwargs.get("subfolder", ""),
+    )
+    tokenizer_config = get_tokenizer_config(path_or_repo_id, **asset_kwargs)
+    auto_map = tokenizer_config.get("auto_map", {})
+    if isinstance(auto_map, dict):
+        auto_map = auto_map.get("AutoTokenizer")
+    if auto_map != [
+        "tokenization_qwen.Qwen2Tokenizer",
+        "tokenization_qwen.Qwen2TokenizerFast",
+    ]:
+        return
+
+    tokenizer_file = kwargs.get("tokenizer_file") or cached_file(
+        path_or_repo_id,
+        "tokenizer.json",
+        _raise_exceptions_for_missing_entries=False,
+        **asset_kwargs,
+    )
+    if tokenizer_file is None:
+        return
+    saved_processor = Tokenizer.from_file(str(tokenizer_file)).post_processor
+    if isinstance(saved_processor, processors.ByteLevel):
+        if tokenizer_config.get("add_eos_token") is not True:
+            return
+        eos, eos_id = tokenizer.eos_token, tokenizer.eos_token_id
+        if eos is None or eos_id is None:
+            return
+        saved_processor = processors.TemplateProcessing(
+            single=["$A:0", f"{eos}:0"],
+            pair=["$A:0", f"{eos}:0", "$B:1", f"{eos}:1"],
+            special_tokens=[(eos, eos_id)],
+        )
+    if isinstance(saved_processor, processors.TemplateProcessing):
+        tokenizer.backend_tokenizer.post_processor = saved_processor
+        # Keep the custom class's EOS property consistent with its restored rules.
+        tokenizer._add_eos_token = tokenizer.encode("")[-1:] == [tokenizer.eos_token_id]
 
 
 class CachedHfTokenizer(TokenizerLike):
@@ -206,6 +285,14 @@ class CachedHfTokenizer(TokenizerLike):
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
+
+        _maybe_fix_gte_tokenizer(
+            tokenizer,
+            path_or_repo_id,
+            revision=revision,
+            download_dir=download_dir,
+            **kwargs,
+        )
 
         # The special_tokens in tokenizer should also be
         # controlled by do_lower_case in encoder_config
