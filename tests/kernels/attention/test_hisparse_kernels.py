@@ -14,10 +14,6 @@ DEVICE = current_platform.device_type
 FP8_DS_MLA_ROW_BYTES = 656
 
 # Straddles both the 32-lane (NVIDIA warp) and 64-lane (CDNA wavefront)
-# boundaries. The HIP port rewrote each op's parallel structure around
-# wavefront 64; at CUDA shapes a NUM_WARPS/kWarpSize mix-up is invisible
-# because 32 warps and 32 lanes coincide, so these widths are the coverage
-# upstream's CUDA-shaped tests structurally cannot provide.
 LANE_BOUNDARY_TOP_K = [1, 31, 32, 33, 63, 64, 65, 128]
 
 

@@ -892,13 +892,7 @@ class ROCMAiterMLASparseImpl(
                 )
             )
 
-        # HiSparse points attention at a view over the whole multi-layer KV
-        # slab, so its row indices scale with the total block count. AITER's ASM
-        # sparse decode kernel addresses KV with a 32-bit byte offset from the
-        # cache base and wraps silently past 4 GiB, answering with near-zero
-        # attention rather than failing; the Triton ragged kernel indexes rows
-        # in int64. HiSparse therefore always takes the Triton path, which is
-        # what lets the GPU pool be sized by memory rather than by int32.
+        # HiSparse KV addressing breaks AITER ASM sparse decode for now
         self.use_hisparse_triton_attn = isinstance(
             self.index_group, HiSparseMLAIndexGroup
         )

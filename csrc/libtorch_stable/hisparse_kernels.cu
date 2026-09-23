@@ -30,10 +30,7 @@
 
 namespace {
 
-// Warp/wavefront width. `WARP_SIZE` (cuda_compat.h) is 32 on CUDA and, on
-// ROCm, a device-side constexpr 64 for CDNA (gfx9). It cannot be a
-// namespace-scope constexpr: the ROCm host overload queries the device at
-// runtime, so host-side launch math must stay non-constexpr.
+// CUDA vs ROCm distinction
 #define kWarpSize WARP_SIZE
 // Sentinel in the shared top-k scratch: entry already resolved (hit /
 // newest / invalid), no miss handling needed.
@@ -51,13 +48,6 @@ bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
   return attributes.type == cudaMemoryTypeHost;
 }
 
-// Streaming (non-temporal) row copies: these bytes are consumed once by the
-// attention kernel, so they should not evict resident working set.
-//
-// CUDA uses __ldcg/__stcg (.cg = cache-global, bypass L1). HIP has no such
-// intrinsic; the equivalent is __builtin_nontemporal_load/store. Those
-// builtins reject HIP's `uint4` (a HIP_vector_type class), so the 16-byte
-// path uses a native ext_vector_type instead.
 #ifdef USE_ROCM
 typedef unsigned int vec16_t __attribute__((ext_vector_type(4)));
   #define VLLM_LOAD_STREAM(ptr) __builtin_nontemporal_load(ptr)
@@ -155,19 +145,7 @@ __device__ __forceinline__ void zero_cache_row_warp(int lane_id, char* cache,
                 row_bytes);
 }
 
-// In-place inclusive scan performed by warp 0 over the `width` entries its
-// block wrote this round, s_data[offset, min(offset + width, count)),
-// carrying `accumulator` across calls. Returns the running total.
-//
-// `width` is the number of chunk counters the block just produced -- one per
-// warp -- and is deliberately NOT the wavefront width. With 1024 threads on
-// CUDA the two coincide (1024/32 = 32 warps = 32 lanes), so the original
-// could let every lane read. On a 64-wide wavefront there are only 16 warps,
-// so lanes 16-63 would read entries left over from an earlier iteration's
-// write-back -- already-accumulated prefix sums, not fresh counts -- and fold
-// them into the running total. Nothing crashes; the compaction offsets in
-// phases 2 and 3 just come out wrong, which is why the LRU-order assertions
-// check state and not set membership.
+// In-place inclusive scan performed by warp 0 over num chunk counters produced
 __device__ __forceinline__ int warp_inclusive_scan(int32_t* s_data, int lane_id,
                                                    int offset, int count,
                                                    int width, int accumulator) {
@@ -183,9 +161,6 @@ __device__ __forceinline__ int warp_inclusive_scan(int32_t* s_data, int lane_id,
   if (active) {
     s_data[idx] = val;
   }
-  // Inactive lanes contribute 0, so the last lane carries the full total
-  // regardless of `width`; broadcasting from `width - 1` would break if a
-  // caller ever passed width == 0.
   return VLLM_SHFL_SYNC(val, kWarpSize - 1);
 }
 
@@ -1084,10 +1059,6 @@ void hisparse_resolve_residency(
       valid_counts.has_value() ? valid_counts.value().stride(0) : 0;
   auto kernel = hisparse_resolve_residency_kernel;
 #ifdef USE_ROCM
-  // CDNA has no opt-in shared-memory expansion: LDS is a hard 64 KB per
-  // workgroup, so an over-budget launch must be rejected here rather than
-  // failing opaquely at launch. Real GLM-5.3 configs fit comfortably
-  // (~40 KB plain decode, ~53 KB with MTP-3 at top_k=2048).
   constexpr size_t kMaxLdsBytes = 64 * 1024;
   STD_TORCH_CHECK(smem_bytes <= kMaxLdsBytes, "HiSparse residency needs ",
                   smem_bytes, " bytes of LDS but CDNA allows at most ",

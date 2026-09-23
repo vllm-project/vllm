@@ -106,9 +106,6 @@ class WorkerBase:
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
-        # A backend's supported set can depend on the config (HiSparse changes
-        # how ROCm sparse MLA addresses pages, for one), and this RPC runs
-        # outside the worker's config scope.
         with set_current_vllm_config(self.vllm_config):
             backends = get_current_attn_backends(self.vllm_config)
             return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
