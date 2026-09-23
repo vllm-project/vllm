@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Triton implementation of NVFP4 GEMM (FP4 x FP4 -> BF16/FP16).
+"""Triton implementation of NVFP4 GEMM (FP4 x FP4 -> BF16/FP16).
 
 Uses tl.dot_scaled for block-scaled FP4 matrix multiplication on SM100+.
 This serves as a portable reference/fallback when CUTLASS kernels are
@@ -18,7 +17,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["alpha_ptr"])
 def _triton_nvfp4_gemm_kernel(
     # Pointers to matrices
     a_ptr,
@@ -27,8 +26,9 @@ def _triton_nvfp4_gemm_kernel(
     # Pointers to block scales
     a_scale_ptr,
     b_scale_ptr,
-    # Global alpha = 1/(global_scale_a * global_scale_b)
-    alpha,
+    # Pointer to the global alpha = 1/(global_scale_a * global_scale_b),
+    # a single float32 on the device (read in the kernel, no host sync)
+    alpha_ptr,
     # Matrix dimensions
     M,
     N,
@@ -49,6 +49,8 @@ def _triton_nvfp4_gemm_kernel(
     BLOCK_K: tl.constexpr,
     # NVFP4 block scale group size (elements per scale)
     VEC_SIZE: tl.constexpr,
+    # True when K is a multiple of BLOCK_K, so no K step needs a mask
+    EVEN_K: tl.constexpr,
 ):
     """Triton kernel for NVFP4 GEMM: C = alpha * (A @ B^T).
 
@@ -66,9 +68,11 @@ def _triton_nvfp4_gemm_kernel(
     pid_m = pid % num_pid_m
     pid_n = pid // num_pid_m
 
-    # Offsets for the M and N tile
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    # Row and column indices used for loads. Indices past M or N wrap back
+    # into range, so every load reads a real row of A or B. The rows they
+    # produce are thrown away by the masked store at the end.
+    offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
+    offs_n = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
 
     # K is packed: 2 FP4 values per uint8 byte
     BLOCK_K_PACKED: tl.constexpr = BLOCK_K // 2
@@ -87,24 +91,37 @@ def _triton_nvfp4_gemm_kernel(
 
     # Scale pointers
     # a_scale [M, K//VEC_SIZE]: a_scale[m, g] = a_scale_ptr + m * stride + g
-    a_scale_ptrs = (a_scale_ptr + offs_m[:, None] * stride_a_scale_m +
-                    offs_scale_k[None, :])
+    a_scale_ptrs = (
+        a_scale_ptr + offs_m[:, None] * stride_a_scale_m + offs_scale_k[None, :]
+    )
     # b_scale [N, K//VEC_SIZE]: b_scale[n, g] = b_scale_ptr + n * stride + g
-    b_scale_ptrs = (b_scale_ptr + offs_n[:, None] * stride_b_scale_n +
-                    offs_scale_k[None, :])
+    b_scale_ptrs = (
+        b_scale_ptr + offs_n[:, None] * stride_b_scale_n + offs_scale_k[None, :]
+    )
 
     # Accumulator in float32
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     # Main loop over K dimension
-    for _ in tl.range(0, tl.cdiv(K, BLOCK_K)):
-        # Load A tile [BLOCK_M, BLOCK_K_PACKED] and B^T tile [BLOCK_K_PACKED, BLOCK_N]
-        a = tl.load(a_ptrs)
-        b = tl.load(b_ptrs)
-
-        # Load block scales
-        scale_a = tl.load(a_scale_ptrs)
-        scale_b = tl.load(b_scale_ptrs)
+    for k_iter in tl.range(0, tl.cdiv(K, BLOCK_K)):
+        if EVEN_K:
+            # Every K step is a full tile
+            a = tl.load(a_ptrs)
+            b = tl.load(b_ptrs)
+            scale_a = tl.load(a_scale_ptrs)
+            scale_b = tl.load(b_scale_ptrs)
+        else:
+            # The last K step may be partial. Positions past the end of a row
+            # load as zero, for both the packed values and their scales. The
+            # scales must be masked too: a stray scale byte can be NaN, and
+            # NaN times a zeroed value is still NaN.
+            k_left = K - k_iter * BLOCK_K  # logical elements left in the row
+            k_packed_ok = offs_k < k_left // 2
+            k_scale_ok = offs_scale_k < k_left // VEC_SIZE
+            a = tl.load(a_ptrs, mask=k_packed_ok[None, :], other=0)
+            b = tl.load(b_ptrs, mask=k_packed_ok[:, None], other=0)
+            scale_a = tl.load(a_scale_ptrs, mask=k_scale_ok[None, :], other=0.0)
+            scale_b = tl.load(b_scale_ptrs, mask=k_scale_ok[None, :], other=0.0)
 
         # Block-scaled FP4 dot product
         # tl.dot_scaled handles: dequant(a, scale_a) @ dequant(b, scale_b)
@@ -127,12 +144,16 @@ def _triton_nvfp4_gemm_kernel(
         b_scale_ptrs += SCALE_K
 
     # Apply global scale: C = alpha * accumulator
+    alpha = tl.load(alpha_ptr)
     c = (accumulator * alpha).to(c_ptr.dtype.element_ty)
 
     # Store output with bounds checking
     offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    # int64 row offset: stride_cm * row passes 2**31 once M * N does.
+    c_ptrs = (
+        c_ptr + offs_cm[:, None].to(tl.int64) * stride_cm + offs_cn[None, :] * stride_cn
+    )
     mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=mask)
 
@@ -157,6 +178,7 @@ def triton_scaled_fp4_mm(
 
     Returns:
         C: [M, N] tensor in out_dtype
+
     """
     assert a.ndim == 2 and b.ndim == 2
     assert a.dtype == torch.uint8 and b.dtype == torch.uint8
@@ -170,18 +192,29 @@ def triton_scaled_fp4_mm(
 
     # Validate scale shapes
     VEC_SIZE = 16  # NVFP4 block scale group size
+    # A partial scale group would get no scale and drop up to 15 K values.
+    assert K % VEC_SIZE == 0, f"K={K} must be a multiple of {VEC_SIZE}"
     assert a_scale.shape == (M, K // VEC_SIZE), (
         f"a_scale shape {a_scale.shape} != expected ({M}, {K // VEC_SIZE})"
     )
     assert b_scale.shape == (N, K // VEC_SIZE), (
         f"b_scale shape {b_scale.shape} != expected ({N}, {K // VEC_SIZE})"
     )
+    # The kernel reads each row of scales with unit stride along K.
+    assert a_scale.shape[1] <= 1 or a_scale.stride(1) == 1, "a_scale K stride != 1"
+    assert b_scale.shape[1] <= 1 or b_scale.stride(1) == 1, "b_scale K stride != 1"
 
-    # Convert alpha to float
+    # The kernel reads alpha from device memory, so no path here syncs the
+    # host and the call can be captured in a CUDA graph. A CUDA tensor is
+    # passed through, so a graph replay reads its current value. A float or
+    # CPU tensor is written by a device fill (torch.tensor(x, device=...) is a
+    # blocking host-to-device copy), so under capture it is fixed at capture.
     if isinstance(alpha, torch.Tensor):
-        alpha_val = alpha.item()
+        assert alpha.numel() == 1, f"alpha must have one element, got {alpha.numel()}"
+    if isinstance(alpha, torch.Tensor) and alpha.is_cuda:
+        alpha_t = alpha.to(device=a.device, dtype=torch.float32)
     else:
-        alpha_val = float(alpha)
+        alpha_t = torch.full((), float(alpha), device=a.device, dtype=torch.float32)
 
     # Allocate output
     c = torch.empty((M, N), device=a.device, dtype=out_dtype)
@@ -198,6 +231,7 @@ def triton_scaled_fp4_mm(
         BLOCK_N = max(16, triton.next_power_of_2(N))
 
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
+    EVEN_K = K % BLOCK_K == 0
 
     # Strides for A [M, K//2] — row-major
     stride_am = a.stride(0)
@@ -218,7 +252,7 @@ def triton_scaled_fp4_mm(
         c,
         a_scale,
         b_scale,
-        alpha_val,
+        alpha_t,
         M,
         N,
         K,
@@ -234,6 +268,7 @@ def triton_scaled_fp4_mm(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         VEC_SIZE=VEC_SIZE,
+        EVEN_K=EVEN_K,
     )
 
     return c
