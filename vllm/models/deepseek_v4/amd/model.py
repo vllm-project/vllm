@@ -12,7 +12,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -75,6 +75,8 @@ from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
+
+from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
 logger = init_logger(__name__)
 
@@ -502,11 +504,28 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         return routed + shared_out
 
 
-def _fuse_shared_experts_enabled(config) -> bool:
+def _fuse_shared_experts_enabled(config, parallel_config: ParallelConfig) -> bool:
+    if (
+        getattr(config, "n_shared_experts", None)
+        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        and not parallel_config.enable_expert_parallel
+        and parallel_config.data_parallel_size > 1
+    ):
+        # Fused shared experts are not supported under data parallelism:
+        # the fused path cannot load the FP8 shared expert into the MXFP4
+        # routed slot, which fails obscurely during weight loading. Fail
+        # fast with an actionable message instead.
+        raise ValueError(
+            "DeepSeek-V4 fused shared experts "
+            "(VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1) are not supported "
+            "with data parallelism (data_parallel_size > 1). Set "
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to run the shared "
+            "expert as an unfused FP8 MLP."
+        )
     return bool(
         getattr(config, "n_shared_experts", None)
         and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        and not get_current_vllm_config().parallel_config.enable_expert_parallel
+        and not parallel_config.enable_expert_parallel
     )
 
 
@@ -544,6 +563,10 @@ class DeepseekV4MoE(nn.Module):
 
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
+        self.gate.bias_vl = None
+        self.image_sentinel_lo = (
+            IMAGE_SENTINEL_BASE_ID if getattr(config, "vision_n_layers", 0) > 0 else 0
+        )
         is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
@@ -559,8 +582,16 @@ class DeepseekV4MoE(nn.Module):
                 ),
                 requires_grad=False,
             )
-        elif getattr(config, "topk_method", None) == "noaux_tc":
+        if getattr(config, "topk_method", None) == "noaux_tc" and (
+            not is_hash_moe or getattr(config, "vision_n_layers", 0) > 0
+        ):
             self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(config.n_routed_experts, dtype=torch.float32),
+                requires_grad=False,
+            )
+
+        if getattr(config, "vision_n_layers", 0) > 0:
+            self.gate.bias_vl = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32),
                 requires_grad=False,
             )
@@ -572,7 +603,7 @@ class DeepseekV4MoE(nn.Module):
         # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
         self.fuse_heterogeneous_shared_expert = fuse_heterogeneous_shared_expert
         fse_requested = (
-            _fuse_shared_experts_enabled(config)
+            _fuse_shared_experts_enabled(config, vllm_config.parallel_config)
             and not self.fuse_heterogeneous_shared_expert
         )
         fse_compatible = False
@@ -633,6 +664,8 @@ class DeepseekV4MoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             hash_indices_table=self.gate.tid2eid,
+            bias_vl=self.gate.bias_vl,
+            image_sentinel_lo=self.image_sentinel_lo,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
             routed_experts_cls=(
@@ -655,6 +688,8 @@ class DeepseekV4MoE(nn.Module):
     ) -> torch.Tensor:
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
+        if self.gate.bias_vl is not None and input_ids is None:
+            raise ValueError("DeepSeek V4 vision MoE routing requires input_ids.")
 
         org_shape = hidden_states.shape
         final_hidden_states = self.experts(
@@ -934,16 +969,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4Attention._run_parallel_input_projections
-        # (compressor kv_score, indexer.weights_proj, indexer.compressor
-        # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
@@ -1346,6 +1372,7 @@ def _make_deepseek_v4_weights_mapper(
 
 class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     model_cls = DeepseekV4Model
+    finalizes_weights_during_load = False
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
@@ -1391,6 +1418,9 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def forward(
         self,

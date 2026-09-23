@@ -25,6 +25,7 @@ from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
+    MLACommonBaseImpl,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
     _use_masked_mha,
@@ -166,6 +167,25 @@ def test_glm5_flashinfer_masked_mha_routing(
     )
 
 
+@pytest.mark.parametrize("qk_rope_head_dim", [64, 0], ids=["rope", "nope"])
+def test_concat_k_nope_k_pe_matches_torch_cat(qk_rope_head_dim):
+    """The K concat used by the MLA prefill context loop must equal torch.cat of
+    k_nope with the broadcast k_pe; with no RoPE part it returns k_nope itself
+    instead of allocating and copying."""
+    torch.manual_seed(0)
+    num_tokens, num_heads, qk_nope_head_dim = 5, 4, 256
+    k_nope = torch.randn(num_tokens, num_heads, qk_nope_head_dim, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, 1, qk_rope_head_dim, dtype=torch.bfloat16)
+    impl = SimpleNamespace(_use_flashinfer_concat_mla_k=False)
+
+    k = MLACommonBaseImpl._concat_k_nope_k_pe(impl, k_nope, k_pe)
+
+    expected = torch.cat([k_nope, k_pe.expand(-1, num_heads, -1)], dim=-1)
+    assert k.shape == (num_tokens, num_heads, qk_nope_head_dim + qk_rope_head_dim)
+    torch.testing.assert_close(k, expected, rtol=0, atol=0)
+    assert (k.data_ptr() == k_nope.data_ptr()) == (qk_rope_head_dim == 0)
+
+
 def test_masked_mha_routing_is_dimension_specific():
     assert _use_masked_mha(
         backend_name="FLASHMLA_SPARSE",
@@ -200,6 +220,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     layer = SimpleNamespace(
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,
     )
@@ -494,6 +515,7 @@ def create_and_prepopulate_kv_cache(
 
     Returns:
         MLA KV cache tensor
+
     """
     batch_size = len(kv_c_contexts)
     seq_lens = common_attn_metadata.seq_lens.cpu()
@@ -1245,6 +1267,7 @@ def test_flashmla_dcp_decode_metadata_uses_gathered_query_heads(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=2,
+        max_query_len=1,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -1286,7 +1309,6 @@ def run_attention_backend(
     chunked_prefill_workspace_size: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
-
     builder_cls, impl_cls = try_get_attention_backend(backend)
 
     # Force the prefill backend selection (None means auto-select).
@@ -1413,8 +1435,7 @@ def _run_backend_correctness(
     v_head_dim: int,
     chunked_prefill_workspace_size: int | None = None,
 ):
-    """
-    Test that all backends produce similar outputs to a reference implementation
+    """Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
 
     This test works by:
@@ -1433,7 +1454,6 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
-
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b

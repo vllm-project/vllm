@@ -41,6 +41,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
+    from .fusion.collective_fusion import AsyncTPPass
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
     from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
     from .fusion.qk_norm_rope_kvcache_fusion import QkNormRopeKvCacheFusionPass
@@ -50,7 +51,6 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
-    from .fusion.collective_fusion import AsyncTPPass
 
 if current_platform.is_xpu():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
@@ -71,8 +71,7 @@ R = TypeVar("R")
 
 
 def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
-    """
-    Function decorator that turns on inductor pattern match debug
+    """Function decorator that turns on inductor pattern match debug
     for the duration of the call.
     Used to avoid logging builtin Inductor pattern matching.
     """
@@ -89,8 +88,7 @@ def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
 
 
 class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
-    """
-    The pass manager for post-grad passes.
+    """The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
     It supports uuid for the Inductor code cache. That includes torch<2.6
     support using pickling (in .inductor_pass.CustomGraphPass).
@@ -236,8 +234,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         self.passes.append(pass_)
 
     def uuid(self) -> str:
-        """
-        The PostGradPassManager is set as a custom pass in the Inductor and
+        """The PostGradPassManager is set as a custom pass in the Inductor and
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
