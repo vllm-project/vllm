@@ -17,12 +17,12 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -125,10 +125,9 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate",
         )
@@ -556,6 +555,7 @@ class Lfm2MoeForCausalLM(
         Returns:
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config

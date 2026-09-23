@@ -15,6 +15,7 @@ vLLM currently supports the following reasoning models:
 | Model Series | Parser Name | Structured Output Support | Tool Calling |
 | ------------ | ----------- | ---------------- | ----------- |
 | [Cohere Command A Reasoning](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025) | `cohere_command3` | `json`, `regex` | ✅ |
+| [Cohere Command A Plus](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16) | `cohere_command4` | `json`, `regex` | ✅ |
 | [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `json`, `regex` | ❌ |
 | [Gemma 4 series](https://huggingface.co/google/gemma-4-26B-A4B-it) | `gemma4` | `json`, `regex` | ✅ |
 | [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
