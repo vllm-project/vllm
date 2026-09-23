@@ -1663,6 +1663,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         if self.compress_ratio > 1:
             get_compressed_slot_mapping(
                 metadata.num_decode_tokens,
+                self.arange_buffer[: metadata.num_decode_tokens],
                 self.arange_buffer[: metadata.num_decode_tokens + 1],
                 metadata.seq_lens,
                 decode.block_table,
