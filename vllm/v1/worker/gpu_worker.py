@@ -550,6 +550,11 @@ class Worker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
+        # Preserve parallel weight loading, then use serving's thread count
+        # for profiling and compilation so Dynamo's global-state guards remain
+        # valid when requests arrive.
+        set_torch_threads_for_runtime()
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
@@ -800,6 +805,15 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        # All warmup phases below run synthetic steps whose sampled outputs are
+        # discarded. The PP sampled-token broadcast would carry no payload, and
+        # its side-stream NCCL ops can overlap the next step's activation p2p
+        # and deadlock the pipeline, so keep it disabled for the whole warmup
+        # window and restore it before serving.
+        pp_handler = getattr(self.model_runner, "pp_handler", None)
+        if pp_handler is not None:
+            pp_handler.set_disabled(True)
+
         warmup_sizes: list[int] = []
 
         if (
@@ -978,9 +992,8 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
-        # Startup is done; steady-state serving gets no benefit from torch
-        # intra-op parallelism.
-        set_torch_threads_for_runtime()
+        if pp_handler is not None:
+            pp_handler.set_disabled(False)
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
