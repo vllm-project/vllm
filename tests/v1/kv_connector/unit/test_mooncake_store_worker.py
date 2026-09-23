@@ -2177,6 +2177,8 @@ def test_recv_thread_partial_load_failure_reports_request_with_hma():
 
     assert thread.get_and_clear_block_ids_with_load_errors() == set()
     assert thread.get_and_clear_failed_requests() == {"req-a"}
+    assert thread.get_and_clear_failed_request_block_ids() == {"req-a": ({0},)}
+    assert thread.get_and_clear_failed_request_block_ids() == {}
     assert thread.get_and_clear_finished_requests() == {"req-a"}
 
 
@@ -2194,6 +2196,8 @@ def test_recv_thread_oversized_key_reports_request_with_hma():
     assert store.batch_get_into_multi_buffers.call_count == 0
     assert thread.get_and_clear_block_ids_with_load_errors() == set()
     assert thread.get_and_clear_failed_requests() == {"req-a"}
+    assert thread.get_and_clear_failed_request_block_ids() == {"req-a": ({0, 1, 2},)}
+    assert thread.get_and_clear_failed_request_block_ids() == {}
     assert thread.get_and_clear_finished_requests() == {"req-a"}
 
 

@@ -81,6 +81,25 @@ CopyBlocksOp = Callable[
 
 logger = init_logger(__name__)
 
+FailedRecvingBlockIds = dict[str, tuple[set[int], ...]]
+
+
+def merge_failed_recving_block_ids(
+    target: FailedRecvingBlockIds,
+    source: FailedRecvingBlockIds,
+) -> None:
+    """Merge request/group-scoped failures, failing closed on shape mismatch."""
+    for req_id, block_groups in source.items():
+        existing = target.get(req_id)
+        if existing is None:
+            target[req_id] = tuple(set(group) for group in block_groups)
+        elif not existing or len(existing) != len(block_groups):
+            target[req_id] = ()
+        else:
+            target[req_id] = tuple(
+                left | right for left, right in zip(existing, block_groups, strict=True)
+            )
+
 
 @dataclass
 class KVConnectorTransferResults:
@@ -93,6 +112,7 @@ class KVConnectorTransferResults:
     finished_sending: set[str] = field(default_factory=set)
     finished_recving: set[str] = field(default_factory=set)
     failed_recving: set[str] = field(default_factory=set)
+    failed_recving_block_ids: FailedRecvingBlockIds = field(default_factory=dict)
 
 
 class SupportsHMA(ABC):
