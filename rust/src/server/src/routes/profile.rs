@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::Deserialize;
@@ -33,9 +34,13 @@ fn valid_profile_prefix(prefix: &str) -> bool {
 /// Start profiling the engine.
 pub async fn start_profile(
     State(state): State<Arc<AppState>>,
-    body: Option<Json<StartProfileRequest>>,
+    body: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let body = if body.is_empty() {
+        StartProfileRequest::default()
+    } else {
+        Json::<StartProfileRequest>::from_bytes(&body)?.0
+    };
     if body
         .profile_prefix
         .as_deref()
