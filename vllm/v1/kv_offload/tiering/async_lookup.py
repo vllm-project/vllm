@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-AsyncLookupManager: per-tier async lookup manager for secondary tier
+"""AsyncLookupManager: per-tier async lookup manager for secondary tier
 existence checks.
 
 Each secondary tier that wants non-blocking lookups composes its own
@@ -65,8 +64,7 @@ class LookupState:
 
 
 class AsyncLookupManager(ABC):
-    """
-    Per-tier async lookup manager for secondary tier existence checks.
+    """Per-tier async lookup manager for secondary tier existence checks.
 
     Each secondary tier that wants non-blocking lookups composes its own
     AsyncLookupManager instance internally. The manager maintains lookup
@@ -126,8 +124,7 @@ class AsyncLookupManager(ABC):
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
-        """
-        Check whether a batch of blocks exist in this tier.
+        """Check whether a batch of blocks exist in this tier.
 
         Called from the worker thread — must be synchronous and must not
         touch the primary tier or scheduler state.
@@ -141,13 +138,13 @@ class AsyncLookupManager(ABC):
     # ------------------------------------------------------------------
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        """
-        Non-blocking lookup called from the scheduler thread.
+        """Non-blocking lookup called from the scheduler thread.
 
         Returns:
             True  — block is present in this tier.
             False — block is not present in this tier.
             None  — result not yet available; retry next step.
+
         """
         if self._need_to_drain:
             self.drain_results()

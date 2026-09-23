@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.metadata
 import os
 import platform
 from datetime import timedelta
@@ -21,6 +22,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -187,8 +189,7 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
 
 
 def _get_gcn_arch() -> str:
-    """
-    Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
+    """Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
     """
     try:
@@ -224,8 +225,7 @@ _ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
-    """
-    Parse (major, minor) from a GCN arch string, mirroring how
+    """Parse (major, minor) from a GCN arch string, mirroring how
     HIP derives hipDeviceProp_t.major / .minor.
 
     Format: gfx<MAJOR><MINOR><STEPPING>
@@ -239,6 +239,7 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     Returns None only when the string is not gfx-prefixed at all
     (i.e. not a ROCm arch string). Raises on any string that looks
     like a GCN arch but does not match a known layout.
+
     """
     m = re.match(r"gfx(\d+)", gcn_arch)
     if not m:
@@ -364,6 +365,25 @@ def get_cdna_version() -> int:
     if on_gfx1250():
         return 5
     return 0
+
+
+@cache
+def get_rocm_version() -> tuple[int, ...] | None:
+    """Return the installed ROCm release as (major, minor, patch), or None."""
+    # ROCm 10+ ships as the `rocm` pip SDK; older releases install to /opt/rocm.
+    try:
+        version = importlib.metadata.version("rocm")
+    except importlib.metadata.PackageNotFoundError:
+        rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+        try:
+            with open(os.path.join(rocm_path, ".info", "version")) as f:
+                version = f.read()
+        except OSError:
+            return None
+    match = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", version)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups() if part is not None)
 
 
 # Enable HIP online tuning early, before hipBLASLt initializes.
@@ -499,6 +519,9 @@ class RocmPlatform(Platform):
     dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    # Set in pre_register_and_update, so it exists only on the driver; Ray
+    # workers are separate processes and copy env vars by allowlist.
+    additional_env_vars: list[str] = ["GPU_PINNED_MIN_XFER_SIZE"]
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
@@ -783,9 +806,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.cuda.set_device(device)
 
     @classmethod
@@ -810,9 +831,7 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """
-        Query if the set of gpus are fully connected by xgmi (1 hop)
-        """
+        """Query if the set of gpus are fully connected by xgmi (1 hop)."""
         handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
@@ -873,27 +892,20 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(device_id).total_memory
 
     @classmethod
+    def pre_register_and_update(
+        cls, parser: "FlexibleArgumentParser | None" = None
+    ) -> None:
+        # Keep mmap'd weight pages on the HIP staging path: above this
+        # threshold the runtime registers the pageable source instead, and each
+        # registration's MMU notifier makes KFD suspend our queues. In KB, so
+        # 4 GiB.
+        os.environ.setdefault("GPU_PINNED_MIN_XFER_SIZE", str(4 * 1024 * 1024))
+
+    @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.config.compilation import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
-        model_config = vllm_config.model_config
-        if (
-            compilation_config.cudagraph_mode is None
-            and model_config is not None
-            and on_gfx950()
-            and vllm_config.use_v2_model_runner
-            and model_config.architecture
-            in {
-                "DeepseekV4ForCausalLM",
-                "DeepseekV4ForConditionalGeneration",
-            }
-        ):
-            # Default to eager after reported gfx950/MRV2 accuracy regressions:
-            # https://github.com/vllm-project/vllm/issues/52644
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()

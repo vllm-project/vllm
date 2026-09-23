@@ -83,6 +83,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     # Distinguishes push from pull in the NIXL compatibility hash.
     _TRANSFER_MODE: str = "push"
 
+    _supports_pp_hma = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -101,6 +103,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # (``_pop_done_transfers``); guarded by
         # ``_sending_transfers_lock``.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        self._send_failures: set[ReqId] = set()
         self._sending_transfers_lock = threading.Lock()
 
         # Writer-thread owned matching state.
@@ -160,6 +163,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 for handle in handles:
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
+            self._send_failures.clear()
         super().shutdown()
 
     # --- Engine-main-thread entry point -------------------------------- #
@@ -341,7 +345,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._log_failure(
                     failure_type="push_reg_handshake_failed", req_id=rid, error=e
                 )
-                self._handle_failed_transfer(rid, None)
+                self._failed_recv_reqs.put(rid)
                 return
             # Re-queue for the writer to send now that the handshake is done.
             self._reg_send_inbox.put((rid, rd))
@@ -363,7 +367,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
                 req_id,
             )
-            self._handle_failed_transfer(req_id, None)
+            self.xfer_stats.record_failed_notification()
+            self._failed_recv_reqs.put(req_id)
             return
         for rank, agent_name in agents.items():
             try:
@@ -375,6 +380,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     error=e,
                     remote_rank=rank,
                 )
+                self.xfer_stats.record_failed_notification()
+                # Earlier registrations may still trigger WRITEs into D's blocks.
+                # Keep the receive pending until those writes are finished.
         logger.debug(
             "Sent PUSH_REG for %s to engine %s (%dB)", req_id, engine_id, len(notif_msg)
         )
@@ -530,7 +538,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         local_region_groups = self.region_group_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        if groups_differ and not self._transfer_layer_group_ids:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"
@@ -722,9 +730,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # don't have a ``_recving_metadata`` entry to invalidate, so
             # we just release the handle and let the engine reschedule
             # via the lease / watchdog.
-            if handle is not None:
-                self.nixl_wrapper.release_xfer_handle(handle)
-            self.xfer_stats.record_failed_transfer()
+            with self._sending_transfers_lock:
+                self._send_failures.add(request_id)
+            if not self._handle_failed_transfer(request_id, handle):
+                return handle
             return None
 
     # --- Notification handling on engine main thread ------------------ #
@@ -803,7 +812,19 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
         with self._sending_transfers_lock:
-            done_pushing = self._pop_done_transfers(self._sending_transfers)
+            done_pushing, failed_pushing = self._pop_done_transfers(
+                self._sending_transfers
+            )
+            # Remember failures until the final sibling WRITE completes.
+            self._send_failures.update(failed_pushing)
+            successful = {
+                req_id
+                for req_id in done_pushing - self._send_failures
+                if req_id in self._reqs_to_send or req_id in self._reqs_to_process
+            }
+            self._send_failures.difference_update(done_pushing | done_sending)
+        # Expired requests were already reported, even if their WRITEs finish later.
+        done_pushing = successful
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
