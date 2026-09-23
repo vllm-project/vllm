@@ -1235,7 +1235,17 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 
 # Install the EFA userspace stack for NIXL's bundled LIBFABRIC plugin. Kernel
 # modules and host limits remain the responsibility of the container host.
+#
+# `set -eu` is required: this body is a `;`-separated sequence run by /bin/sh,
+# so without it only the final command decides the RUN exit status and a failed
+# install silently produces an empty layer.
+#
+# Note that efa_installer.sh replaces Ubuntu's libibverbs1/ibverbs-providers
+# with AWS's rdma-core build. That is deliberate -- the bundled libfabric needs
+# IBVERBS_1.18 and EFA_1.4-1.7, which Ubuntu's rdma-core does not export -- so
+# later layers must not reinstall the distro packages over it.
 RUN if [ "${INSTALL_KV_CONNECTORS}" = "true" ]; then \
+        set -eu; \
         EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
         curl -fsSL --retry 3 --retry-all-errors \
             "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
@@ -1243,12 +1253,22 @@ RUN if [ "${INSTALL_KV_CONNECTORS}" = "true" ]; then \
         echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" \
             | sha256sum -c -; \
         tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+        # efa_installer.sh apt-installs pciutils/environment-modules/tcl, and
+        # earlier layers purge /var/lib/apt/lists, so refresh the lists first.
+        apt-get update -y; \
+        # --minimal is not usable here: it installs rdma-core but skips
+        # libfabric, which is the only piece the LIBFABRIC plugin needs.
         (cd /tmp/aws-efa-installer && \
             ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify); \
         test -x /opt/amazon/efa/bin/fi_info; \
         /opt/amazon/efa/bin/fi_info --version; \
-        find /usr/local/lib -name libplugin_LIBFABRIC.so -print -quit \
-            | grep -q .; \
+        # Verify the plugin resolves libfabric at load time. Checking only that
+        # the file exists is useless: the NIXL wheel always ships the plugin,
+        # so that passes even when no libfabric is installed at all.
+        EFA_NIXL_PLUGIN=$(find /usr/local/lib -name libplugin_LIBFABRIC.so \
+            -print -quit); \
+        test -n "${EFA_NIXL_PLUGIN}"; \
+        ldd "${EFA_NIXL_PLUGIN}" | grep -q 'libfabric\.so\.1 => /'; \
         rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer \
             /var/lib/apt/lists/*; \
     fi
