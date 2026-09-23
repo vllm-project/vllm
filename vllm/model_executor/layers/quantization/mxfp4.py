@@ -479,11 +479,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
 
 def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
-    """Whether Kimi-K3's SiTU MXFP4 MoE should use the AITER A16W4 kernel.
-
-    K3 is weight-only MXFP4 (W4A16) with SiTU activation, which the generic
-    MXFP4 backend selector does not cover; route it to AITER on gfx950.
-    """
+    """Route Kimi-K3 weight-only MXFP4 SiTU MoE to AITER A16W4 on gfx950."""
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
@@ -502,15 +498,7 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
 
 
 def _use_k3_situ_int4_gfx942(moe: FusedMoEConfig) -> bool:
-    """Whether Kimi-K3's SiTU MXFP4 experts should be requantized to int4 on gfx942.
-
-    gfx942 has no scaled MXFP4 MFMA, so the native MXFP4 kernels do not compile
-    there. Requantizing to groupwise int4 lets AITER's bf16 x int4 FlyDSL path
-    serve the model, at the cost of a lossy weight conversion. That trade is the
-    user's to make, so it is opt-in through
-    ``--quantization-config.moe.weight int4_per_group_32`` rather than inferred from the
-    hardware.
-    """
+    """Opt-in gfx942 MXFP4-to-int4 requant for Kimi-K3 SiTU experts."""
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
@@ -529,11 +517,7 @@ def _use_k3_situ_int4_gfx942(moe: FusedMoEConfig) -> bool:
 
 
 def _moe_weight_override_is_int4() -> bool:
-    """True when the user asked for int4 MoE weights on the command line.
-
-    Set with ``--quantization-config.moe.weight int4_per_group_32``. The
-    requantization is lossy, so it never happens unless it was requested.
-    """
+    """True when --quantization-config.moe.weight int4_per_group_32 was set."""
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
@@ -577,9 +561,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             from vllm._aiter_ops import rocm_aiter_ops
 
             if rocm_aiter_ops.is_fused_moe_situv2_enabled():
-                # AITER keeps bf16 activations below this token count, which
-                # would not match the fp8 a8w4 kernels the interleaved SiTU
-                # path is tuned for. The a16w4 path never reads it.
+                # a16w4 does not read this bound. Force 0 so leftover a8w4
+                # config cannot keep bf16 activations.
                 # TODO: Remove once AITER takes this as a kernel argument.
                 os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
         else:
@@ -883,16 +866,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _setup_kernel_k3_situ_gfx942(self, layer: RoutedExperts) -> None:
-        # Convert the weights to groupwise int4 once at load time for AITER's
-        # replacement bf16 x int4 FlyDSL path.
         import inspect
 
         from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import (
             flydsl_a16w4_gemm1,
         )
 
-        # Refuse any AITER build whose replacement int4 stage1 cannot apply the
-        # requested SiTUv2 activation.
+        # Fail closed if this AITER build would silently run SiLU.
         if "act" not in inspect.signature(flydsl_a16w4_gemm1).parameters:
             raise RuntimeError(
                 "This AITER build ignores the SiTUv2 activation on the "
@@ -912,35 +892,24 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         fp4_dtype = torch.float4_e2m1fn_x2
         e8m0_dtype = torch.float8_e8m0fnu
 
-        # The dequant chain cannot run in place: mxfp4_to_f32 does a
-        # repeat_interleave to split the packed nibbles, then an f32 LUT
-        # gather, so the working tensor grows 8x over the packed weight
-        # before per_1x32_i4_quant shrinks it again. Materializing that for
-        # a whole expert tensor peaks well above 20 GiB per rank, which does
-        # not fit once the weights are resident. Convert a slice of experts
-        # at a time and free each slice before the next, so the transient is
-        # bounded by _CONVERT_CHUNK / num_experts of the full tensor.
+        # mxfp4_to_f32 grows the packed weight 8x and peaks above 20 GiB per
+        # rank if all experts convert at once. Convert 8 experts at a time.
         _CONVERT_CHUNK = 8
 
         def convert(
             weight: torch.nn.Parameter,
             scale: torch.nn.Parameter,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            # Releases its source parameter before returning: the packed int4
-            # output is the same size as the packed MXFP4 source, so holding
-            # both doubles the expert footprint. Under expert parallel each
-            # rank owns 1/ep_size of the experts and both fit, but under pure
-            # tensor parallel every rank holds all experts and the second copy
-            # does not. The caller must install each result before converting
-            # the next tensor.
+            # Drop the source before returning. Packed int4 is the same size as
+            # packed MXFP4, so holding both doubles the footprint. That fits
+            # under expert parallel (1/ep_size experts per rank) and does not
+            # fit under pure tensor parallel.
             w_all = weight.data.view(fp4_dtype)
             s_all = scale.data.view(e8m0_dtype)
             num_experts = w_all.shape[0]
 
-            # Preallocate the outputs and write each chunk into its slice.
-            # Accumulating chunks in a list and torch.cat-ing at the end holds
-            # the whole result twice at the join, which is what the transient
-            # chunking was meant to avoid in the first place.
+            # Write chunks into a preallocated output. torch.cat of a list
+            # would hold the full result twice at the join.
             out_packed: torch.Tensor | None = None
             out_scale: torch.Tensor | None = None
             scale_stride = 0
@@ -999,8 +968,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 del weight_packed, weight_scale, chunk_packed, chunk_scale
                 torch.accelerator.empty_cache()
 
-            # Every chunk has been read, so let the source storage go before
-            # the caller converts the next tensor.
             del w_all, s_all
             assert out_packed is not None
             assert out_scale is not None
@@ -1009,8 +976,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             torch.accelerator.empty_cache()
             return out_packed, out_scale
 
-        # Install each result before converting the next tensor so only one
-        # source is ever live alongside its output.
         w13, w13_scale = convert(layer.w13_weight, layer.w13_weight_scale)
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)

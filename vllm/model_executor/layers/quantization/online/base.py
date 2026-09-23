@@ -232,9 +232,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
         """
         if spec is None or spec.weight is None:
             return None
-        # int4_per_group_32 is a load-time MXFP4 requantization for gfx942
-        # Kimi-K3, not an online conversion of unquantized weights. Leave it
-        # to Mxfp4MoEMethod instead of failing the online MoE table lookup.
+        # Load-time gfx942 requant, not online conversion. Mxfp4MoEMethod owns it.
         if spec.weight == kInt4Static32:
             return None
         cls = table.get(spec.weight)

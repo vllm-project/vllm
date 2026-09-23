@@ -86,9 +86,7 @@ def test_k3_situ_int4_gfx942_requires_explicit_override(int4_requested):
 
 
 def test_int4_per_group_32_is_not_an_online_moe_method():
-    # --quantization-config.moe.weight int4_per_group_32 is a load-time
-    # MXFP4 requantization for gfx942 Kimi-K3. It must not fail-close in
-    # the online MoE table, or Mxfp4MoEMethod never runs.
+    # Load-time gfx942 requant. Must not match the online MoE table.
     config = OnlineQuantizationConfig(
         QuantizationConfigArgs(moe={"weight": "int4_per_group_32"})
     )
