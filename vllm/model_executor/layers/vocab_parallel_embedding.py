@@ -278,12 +278,12 @@ class VocabParallelEmbedding(PluggableLayer):
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
-        num_added_embeddings = num_embeddings - self.org_vocab_size
+        self.num_added_embeddings = num_embeddings - self.org_vocab_size
         self.org_vocab_size_padded = pad_vocab_size(
             self.org_vocab_size, self.padding_size
         )
         self.num_embeddings_padded = pad_vocab_size(
-            self.org_vocab_size_padded + num_added_embeddings, self.padding_size
+            self.org_vocab_size_padded + self.num_added_embeddings, self.padding_size
         )
         assert self.org_vocab_size_padded <= self.num_embeddings_padded
 
@@ -301,7 +301,8 @@ class VocabParallelEmbedding(PluggableLayer):
             self.num_embeddings_padded, self.tp_size
         )
 
-        # Quantization methods share the same weight factory as linear layers.
+        # Quantization methods share the same weight factory as linear layers,
+        # so setup standard linear metadata.
         self.input_size = self.input_size_per_partition = embedding_dim
         self.output_size = self.num_embeddings_padded
         self.output_size_per_partition = self.num_embeddings_per_partition
@@ -333,7 +334,6 @@ class VocabParallelEmbedding(PluggableLayer):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
-        self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
         assert (
             self.shard_indices.num_elements_padded == self.num_embeddings_per_partition
         )

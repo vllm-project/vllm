@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQLinearMeth
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
 )
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
@@ -66,6 +67,7 @@ def test_lm_head(
         ("FP8_DYNAMIC", "float-quantized"),
         ("NVFP4A16", "nvfp4-pack-quantized"),
         ("W4A16", "pack-quantized"),
+        ("W4A16_NVFP4", None),
     ],
 )
 @pytest.mark.parametrize("bias", [False, True])
@@ -78,10 +80,18 @@ def test_quantized_lm_head_matches_linear(
         dtype=torch.bfloat16, head_dtype=None
     )
     default_vllm_config.kernel_config.linear_backend = "humming"
-    scheme = preset_name_to_scheme(preset, targets=["Linear", "lm_head"])
-    quant_config = CompressedTensorsConfig.from_config(
-        {"config_groups": {"group_0": scheme.model_dump()}, "format": quant_format}
-    )
+    if quant_format is None:
+        quant_config = ModelOptNvFp4Config(
+            quant_method=preset,
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        )
+    else:
+        scheme = preset_name_to_scheme(preset, targets=["Linear", "lm_head"])
+        quant_config = CompressedTensorsConfig.from_config(
+            {"config_groups": {"group_0": scheme.model_dump()}, "format": quant_format}
+        )
     with torch.device("cuda"):
         kwargs = dict(
             bias=bias,
