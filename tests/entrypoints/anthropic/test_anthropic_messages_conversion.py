@@ -231,6 +231,40 @@ class TestVllmXargs:
         }
 
 
+class TestThinkingConfig:
+    """Claude Code side queries (e.g. the auto mode classifier) send
+    ``thinking: {"type": "disabled"}`` with a small ``max_tokens`` and
+    expect an immediate answer, so reasoning must be switched off."""
+
+    def test_disabled_turns_off_template_thinking(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "disabled"},
+        )
+        assert _convert(request).chat_template_kwargs == {"enable_thinking": False}
+
+    def test_disabled_keeps_explicit_chat_template_kwargs(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "disabled"},
+            chat_template_kwargs={"enable_thinking": True, "foo": 1},
+        )
+        assert _convert(request).chat_template_kwargs == {
+            "enable_thinking": True,
+            "foo": 1,
+        }
+
+    @pytest.mark.parametrize(
+        "thinking",
+        [None, {"type": "adaptive", "display": "omitted"}, {"type": "enabled"}],
+    )
+    def test_other_modes_leave_template_untouched(self, thinking):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}], thinking=thinking
+        )
+        assert _convert(request).chat_template_kwargs is None
+
+
 # ======================================================================
 # tool_result content handling
 # ======================================================================

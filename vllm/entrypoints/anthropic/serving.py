@@ -214,6 +214,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req = cls._build_base_request(anthropic_request, openai_messages)
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
+        cls._handle_thinking(req, anthropic_request)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
         return req
@@ -514,6 +515,27 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
         if output_config and output_config.effort is not None:
             req.reasoning_effort = output_config.effort
+
+    @classmethod
+    def _handle_thinking(
+        cls,
+        req: ChatCompletionRequest,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    ) -> None:
+        """Disable reasoning in the chat template when thinking is disabled.
+
+        Claude Code sends ``thinking: {"type": "disabled"}`` with small
+        ``max_tokens`` for side queries such as the auto mode classifier, so
+        reasoning models must answer directly instead of exhausting the budget.
+        """
+        if isinstance(anthropic_request, AnthropicCountTokensRequest):
+            return
+        thinking = anthropic_request.thinking
+        if thinking is None or thinking.type != "disabled":
+            return
+        kwargs = dict(req.chat_template_kwargs or {})
+        kwargs.setdefault("enable_thinking", False)
+        req.chat_template_kwargs = kwargs
 
     @classmethod
     def _handle_streaming_options(
