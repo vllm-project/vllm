@@ -128,8 +128,11 @@ FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
     ),
     "rms_quant_fusion": re.compile(r"rms_quant_fusion.py:\d+] Replaced (\d+) patterns"),
     "act_quant_fusion": re.compile(r"act_quant_fusion.py:\d+] Replaced (\d+) patterns"),
+    # The combined pass can consume these sites before the standalone pass.
     "norm_rope_fusion": re.compile(
-        r"qk_norm_rope_fusion.py:\d+] Fused QK Norm\+RoPE on (\d+) sites"
+        r"(?:qk_norm_rope_fusion.py:\d+] Fused QK Norm\+RoPE on|"
+        r"qk_norm_rope_kvcache_fusion.py:\d+] "
+        r"QK-Norm\+RoPE(?:/MRoPE)?\+KVCache fusion: replaced) (\d+)"
     ),
     "attn_quant_fusion": re.compile(
         r"attn_quant_fusion.py:\d+] Fused quant onto (\d+) attention nodes"
