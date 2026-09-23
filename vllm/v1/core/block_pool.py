@@ -736,11 +736,14 @@ class BlockPool:
             self.get_num_free_blocks(),
             _CONTIGUOUS_ALLOC_WINDOW_FACTOR * num_blocks,
         )
-        window_blocks = []
+        window_blocks: list[KVCacheBlock] = []
         if window_size:
-            for block in self.free_block_queue.iter_blocks_after(None):
-                window_blocks.append(block)
-                if len(window_blocks) == window_size:
+            for index, block in enumerate(
+                self.free_block_queue.iter_blocks_after(None), start=1
+            ):
+                if block.block_id not in self._reuse_watchers:
+                    window_blocks.append(block)
+                if index == window_size:
                     break
 
         runs: list[list[KVCacheBlock]] = []

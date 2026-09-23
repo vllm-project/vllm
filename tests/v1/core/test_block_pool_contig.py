@@ -83,6 +83,28 @@ def test_contiguous_alloc_preserves_queue_links_after_free():
     )
 
 
+def test_contiguous_alloc_keeps_unpinned_blocks_as_last_resort():
+    pool = BlockPool(num_gpu_blocks=17, enable_caching=False, hash_block_size=16)
+    blocks = pool.get_new_blocks(16)
+    blocks_by_id = {block.block_id: block for block in blocks}
+    ordinary_order = [1, 3, 5, 7, 2, 4, 6, 8]
+    pool.free_blocks([blocks_by_id[block_id] for block_id in ordinary_order])
+    reused: list[int] = []
+    pool.unpin_blocks(
+        [blocks_by_id[block_id] for block_id in range(9, 17)],
+        lambda block: reused.append(block.block_id),
+    )
+    pool.use_contiguous_allocation = True
+
+    allocated = pool.get_new_blocks(8)
+
+    assert [block.block_id for block in allocated] == ordinary_order
+    assert not reused
+
+    pool.get_new_blocks(1)
+    assert reused == [9]
+
+
 def test_contiguous_alloc_disabled_keeps_lru_order():
     free_order = [12, 4, 5, 6, 7, 8, 9, 10, 11, 3, 2, 1]
     pool = make_pool_with_free_order(free_order)
