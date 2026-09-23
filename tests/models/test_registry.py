@@ -224,3 +224,22 @@ def test_hf_registry_coverage():
         "Please add the following architectures to "
         f"`tests/models/registry.py`: {untested_archs}"
     )
+
+
+def test_structural_pp_model_does_not_require_boundary_layout_attribute():
+    from vllm.model_executor.models.interfaces import supports_pp
+
+    class StructuralPPModel:
+        supports_pp = True
+
+        def make_empty_intermediate_tensors(self, batch_size, dtype, device):
+            raise NotImplementedError
+
+        def forward(self, input_ids, positions, *, intermediate_tensors):
+            return intermediate_tensors
+
+    assert supports_pp(StructuralPPModel)
+    assert supports_pp(StructuralPPModel())
+    assert not hasattr(
+        StructuralPPModel(), "pp_intermediate_tensors_are_sequence_sharded"
+    )
