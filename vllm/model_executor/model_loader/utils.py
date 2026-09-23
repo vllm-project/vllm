@@ -12,7 +12,13 @@ from torch import nn
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    LoadConfig,
+    ModelConfig,
+    VllmConfig,
+    replace,
+    set_current_vllm_config,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import (
@@ -23,6 +29,9 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     set_torchao_reload_attrs,
 )
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    is_draft_model_cacheable,
+)
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.utils import is_weights_pre_processed
@@ -32,6 +41,33 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+
+def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
+    """Get load config for the speculative draft model."""
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is not None
+        and speculative_config.draft_load_config is not None
+    ):
+        return speculative_config.draft_load_config
+    load_config = vllm_config.load_config
+    if load_config is not None and load_config.load_format != "ipc_cache":
+        return load_config
+    kwargs = (
+        # Route the draft to the daemon's draft group.
+        {
+            "model_loader_extra_config": {
+                **load_config.model_loader_extra_config,
+                "is_draft": True,
+            }
+        }
+        if is_draft_model_cacheable(speculative_config)
+        # No daemon draft group for this method; load from disk instead of
+        # hitting the target daemon with a mismatching fingerprint.
+        else {"load_format": "auto", "model_loader_extra_config": {}}
+    )
+    return replace(load_config, **kwargs)
 
 
 @instrument(span_name="Initialize model")

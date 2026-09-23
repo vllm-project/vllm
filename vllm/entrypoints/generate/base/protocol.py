@@ -6,10 +6,8 @@
 import json
 from typing import Annotated, Any, Literal, TypeAlias
 
-import regex as re
 from pydantic import (
     BaseModel,
-    ConfigDict,
     Field,
     model_serializer,
 )
@@ -21,7 +19,6 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
@@ -259,53 +256,6 @@ class FunctionDefinition(OpenAIBaseModel):
         if self.defer_loading is None:
             data.pop("defer_loading", None)
         return data
-
-
-# extra="forbid" is a workaround to have kwargs as a field,
-# see https://github.com/pydantic/pydantic/issues/3125
-class LogitsProcessorConstructor(BaseModel):
-    qualname: str
-    args: list[Any] | None = None
-    kwargs: dict[str, Any] | None = None
-
-    model_config = ConfigDict(extra="forbid")
-
-
-LogitsProcessors = list[str | LogitsProcessorConstructor]
-
-
-def get_logits_processors(
-    processors: LogitsProcessors | None, pattern: str | None
-) -> list[Any] | None:
-    if processors and pattern:
-        logits_processors = []
-        for processor in processors:
-            qualname = processor if isinstance(processor, str) else processor.qualname
-            if not re.match(pattern, qualname):
-                raise ValueError(
-                    f"Logits processor '{qualname}' is not allowed by this "
-                    "server. See --logits-processor-pattern engine argument "
-                    "for more information."
-                )
-            try:
-                logits_processor = resolve_obj_by_qualname(qualname)
-            except Exception as e:
-                raise ValueError(
-                    f"Logits processor '{qualname}' could not be resolved: {e}"
-                ) from e
-            if isinstance(processor, LogitsProcessorConstructor):
-                logits_processor = logits_processor(
-                    *processor.args or [], **processor.kwargs or {}
-                )
-            logits_processors.append(logits_processor)
-        return logits_processors
-    elif processors:
-        raise ValueError(
-            "The `logits_processors` argument is not supported by this "
-            "server. See --logits-processor-pattern engine argument "
-            "for more information."
-        )
-    return None
 
 
 class FunctionCall(OpenAIBaseModel):
