@@ -75,24 +75,22 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     assert nonbinding["prompt_token_ids"] == expected
 
 
-def test_llm_reranker_keeps_composed_prompt_within_doc_limit(
+def test_llm_reranker_preserves_document_at_its_token_limit(
     llm_reranker_processor: CrossEncoderIOProcessor,
 ):
-    llm_reranker_processor.tokenizer.truncation_side = "left"
-
+    assert (
+        len(llm_reranker_processor.tokenizer.encode("bc", add_special_tokens=False))
+        == 1
+    )
     full_prompt, engine_prompt = llm_reranker_processor.get_score_prompt(
         "a",
         "bc",
-        {
-            "add_special_tokens": True,
-            "truncation": True,
-            "max_length": 4,
-        },
+        {"add_special_tokens": True},
         max_tokens_per_doc=1,
     )
 
-    assert full_prompt == "ab"
-    assert engine_prompt["prompt_token_ids"] == [1, 3, 5, 2]
+    assert full_prompt == "abc"
+    assert engine_prompt["prompt_token_ids"] == [1, 3, 5, 6, 2]
 
 
 def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():

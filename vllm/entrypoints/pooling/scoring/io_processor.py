@@ -621,7 +621,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             model_config,
         )
 
-        # Apply truncation before defining closures
+        # Limit the query and document separately before composing them.
         if max_tokens_per_query > 0 and isinstance(prompt_1, str):
             prompt_1 = truncate_text_to_tokens(
                 prompt_1, tokenizer, max_tokens_per_query
@@ -666,15 +666,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
                 else:
                     # `llm as reranker` defaults to not using separating token.
-                    composed_prompt_2 = prompt_2
-                    if max_tokens_per_doc > 0 and isinstance(composed_prompt_2, str):
-                        composed_prompt_2 = truncate_text_to_tokens(
-                            composed_prompt_2,
-                            tokenizer,
-                            max_tokens_per_doc,
-                            prefix=prompt_1,
-                        )
-                    full_prompt = prompt_1 + composed_prompt_2
+                    full_prompt = prompt_1 + prompt_2
                     prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
