@@ -1163,6 +1163,12 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.rocm_mxfp4 = current_platform.is_rocm() and dsa_indexer_uses_fp4(
             vllm_config
         )
+        # The kernel's page order depends on the page size, which is final only
+        # once the cache is bound.
+        self.mxfp4_layout: RocmPagedMxfp4CacheLayout | None = None
+        if self.rocm_mxfp4:
+            hf_config = vllm_config.model_config.hf_text_config
+            self.index_geometry = (hf_config.index_n_heads, hf_config.index_head_dim)
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -1171,6 +1177,14 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        if self.rocm_mxfp4:
+            from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+                rocm_paged_mxfp4_cache_layout,
+            )
+
+            self.mxfp4_layout = rocm_paged_mxfp4_cache_layout(
+                *self.index_geometry, self.kv_cache.shape[1]
+            )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding
@@ -1379,18 +1393,6 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_block_size=candidate_block_size,
                 candidate_write=candidate_write,
             )
-        # The ROCm MXFP4 cache is stored in the scorer's dot-operand order.
-        self.k_cache_layout: RocmPagedMxfp4CacheLayout | None = None
-        if self.use_fp4_kv and current_platform.is_rocm():
-            from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-                rocm_paged_mxfp4_cache_layout,
-            )
-
-            self.k_cache_layout = rocm_paged_mxfp4_cache_layout(
-                self.n_head,
-                self.head_dim,
-                cache_config.block_size // self.compress_ratio,
-            )
 
     def _produce_k(
         self,
@@ -1424,7 +1426,7 @@ class DeepseekV4Indexer(nn.Module):
             indexer_metadata.slot_mapping,
             self.compress_ratio,
             self.use_fp4_kv,
-            mxfp4_layout=self.k_cache_layout,
+            mxfp4_layout=self.k_cache.mxfp4_layout,
         )
 
     def forward(
