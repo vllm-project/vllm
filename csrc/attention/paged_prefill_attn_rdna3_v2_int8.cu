@@ -35,11 +35,11 @@ using vllm::prefill_attn_rdna3::to_f;
 using vllm::prefill_attn_rdna3::to_T;
 using vllm::prefill_attn_rdna3::v16bf16;
 using vllm::prefill_attn_rdna3::v16fp16;
+using vllm::prefill_attn_rdna3::v16i8;
 using vllm::prefill_attn_rdna3::v8fp32;
+using vllm::prefill_attn_rdna3::v8i32;
 using vllm::prefill_attn_rdna3::wmma_mma;
 using vllm::prefill_attn_rdna3::wmma_mma_ii8;
-using vllm::prefill_attn_rdna3::v16i8;
-using vllm::prefill_attn_rdna3::v8i32;
 using vllm::prefill_attn_rdna3::WmmaNative;
 
 constexpr int K_TILE = 16;
@@ -350,11 +350,12 @@ __device__ __forceinline__ void attn_step_wave_int8(
 template <typename T, int HEAD_SIZE>
 __device__ __forceinline__ void load_k_tile_int8_raw(
     int8_t* __restrict__ K_lds_i8, const int8_t* __restrict__ k_cache,
-    const float* __restrict__ k_scale_cache, const int* __restrict__ block_table,
-    int seq_idx, int kv_head_idx, int start_n, int seq_ctx_len, int block_size,
-    int max_blocks_per_seq, int64_t stride_kc_block, int64_t stride_kc_head,
-    int64_t stride_kc_slot, int64_t stride_ks_blk, int64_t stride_ks_slot,
-    int64_t stride_ks_head, float* __restrict__ scale_lds, int tid) {
+    const float* __restrict__ k_scale_cache,
+    const int* __restrict__ block_table, int seq_idx, int kv_head_idx,
+    int start_n, int seq_ctx_len, int block_size, int max_blocks_per_seq,
+    int64_t stride_kc_block, int64_t stride_kc_head, int64_t stride_kc_slot,
+    int64_t stride_ks_blk, int64_t stride_ks_slot, int64_t stride_ks_head,
+    float* __restrict__ scale_lds, int tid) {
   constexpr int X_INT8 = 16;
   constexpr int D_CHUNKS = HEAD_SIZE / X_INT8;
   const int my_k_idx = tid / D_CHUNKS;
@@ -367,16 +368,21 @@ __device__ __forceinline__ void load_k_tile_int8_raw(
       valid_k ? block_table[seq_idx * max_blocks_per_seq + log_block] : 0;
   if (my_dh == 0) {
     scale_lds[my_k_idx] =
-        valid_k ? k_scale_cache[p_block * stride_ks_blk + slot * stride_ks_slot +
-                                kv_head_idx * stride_ks_head]
-                : 0.0f;
+        valid_k
+            ? k_scale_cache[p_block * stride_ks_blk + slot * stride_ks_slot +
+                            kv_head_idx * stride_ks_head]
+            : 0.0f;
   }
   const int d_base = my_dh * X_INT8;
   const int8_t* src = k_cache + (int64_t)p_block * stride_kc_block +
                       (int64_t)slot * stride_kc_slot +
                       (int64_t)kv_head_idx * stride_kc_head + (int64_t)d_base;
   int4 v;
-  if (valid_k) v = *(const int4*)src; else { v.x=v.y=v.z=v.w=0; }
+  if (valid_k)
+    v = *(const int4*)src;
+  else {
+    v.x = v.y = v.z = v.w = 0;
+  }
   *(int4*)&K_lds_i8[my_dh * (K_TILE * 16) + my_k_idx * 16] = v;
 }
 
@@ -410,8 +416,8 @@ __device__ __forceinline__ void attn_step_int8qk(
     const int m_row = 2 * i + lane_hi;
     const bool m_in = (m_row < valid_q_count);
     const float q_sc = qscale_lds[m_row];
-    s_acc[i] = (m_in && k_in) ? ((float)s_i[i] * sm_scale * k_sc * q_sc)
-                              : -INFINITY;
+    s_acc[i] =
+        (m_in && k_in) ? ((float)s_i[i] * sm_scale * k_sc * q_sc) : -INFINITY;
   }
 
   // ---- online softmax (lazy rescale of out_acc) ----
@@ -432,9 +438,9 @@ __device__ __forceinline__ void attn_step_int8qk(
   #pragma unroll
   for (int i = 0; i < 8; ++i) need_rescale |= (alpha[i] != 1.0f);
   if (need_rescale) {
-    #pragma unroll
+  #pragma unroll
     for (int dh = 0; dh < FRAGS; ++dh)
-      #pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; ++i) out_acc[dh][i] *= alpha[i];
   }
 
@@ -473,8 +479,7 @@ __device__ __forceinline__ void attn_step_int8qk(
 // thread scratch spill at HS=256). Declaring the real 256-thread bound lets it
 // use up to 256 VGPRs, cutting the spill and ~1.27x on long-context prefill.
 template <typename T, int HEAD_SIZE>
-__global__ void __launch_bounds__(HEAD_SIZE)
-paged_prefill_attn_kernel_v2_int8(
+__global__ void __launch_bounds__(HEAD_SIZE) paged_prefill_attn_kernel_v2_int8(
     T* __restrict__ out, const T* __restrict__ q,
     const T* __restrict__ k_chunk,            // current chunk K (fp16/bf16)
     const T* __restrict__ v_chunk,            // current chunk V (fp16/bf16)
@@ -563,7 +568,10 @@ paged_prefill_attn_kernel_v2_int8(
   float m_state[8], l_state[8];
   v8fp32 out_acc[FRAGS];
   #pragma unroll
-  for (int i = 0; i < 8; ++i) { m_state[i] = -INFINITY; l_state[i] = 0.0f; }
+  for (int i = 0; i < 8; ++i) {
+    m_state[i] = -INFINITY;
+    l_state[i] = 0.0f;
+  }
   #pragma unroll
   for (int dh = 0; dh < FRAGS; ++dh)
     out_acc[dh] = (v8fp32){0, 0, 0, 0, 0, 0, 0, 0};
@@ -576,27 +584,28 @@ paged_prefill_attn_kernel_v2_int8(
   {
     V16 q_frags[FRAGS];
     if (valid_q) {
-      const T* q_row = q + (int64_t)(q_start_token + my_q_pos) * stride_q_token +
+      const T* q_row = q +
+                       (int64_t)(q_start_token + my_q_pos) * stride_q_token +
                        (int64_t)head_idx * stride_q_head;
-      #pragma unroll
+  #pragma unroll
       for (int dh = 0; dh < FRAGS; ++dh)
         __builtin_memcpy(&q_frags[dh], q_row + dh * 16, sizeof(V16));
     } else {
-      #pragma unroll
+  #pragma unroll
       for (int dh = 0; dh < FRAGS; ++dh)
-        #pragma unroll
+  #pragma unroll
         for (int k = 0; k < 16; ++k) q_frags[dh][k] = (E)0;
     }
     float qmax = 1e-8f;
-    #pragma unroll
+  #pragma unroll
     for (int dh = 0; dh < FRAGS; ++dh)
-      #pragma unroll
+  #pragma unroll
       for (int k = 0; k < 16; ++k)
         qmax = fmaxf(qmax, fabsf(to_f<T>((T)q_frags[dh][k])));
     const float qinv = 127.0f / qmax;
-    #pragma unroll
+  #pragma unroll
     for (int dh = 0; dh < FRAGS; ++dh)
-      #pragma unroll
+  #pragma unroll
       for (int k = 0; k < 16; ++k) {
         int v = (int)lrintf(to_f<T>((T)q_frags[dh][k]) * qinv);
         v = max(-127, min(127, v));
@@ -606,7 +615,8 @@ paged_prefill_attn_kernel_v2_int8(
   }
   __syncthreads();
 
-  // ---- PHASE 1: Cached prefix (INT8 paged cache, int8 WMMA QK, no causal) ----
+  // ---- PHASE 1: Cached prefix (INT8 paged cache, int8 WMMA QK, no causal)
+  // ----
   for (int start_n = 0; start_n < ctx_len; start_n += K_TILE) {
     load_k_tile_int8_raw<T, HEAD_SIZE>(
         K_lds_i8, k_cache, k_scale_cache, block_table, seq_idx, kv_head_idx,
@@ -643,13 +653,13 @@ paged_prefill_attn_kernel_v2_int8(
   if (valid_q) {
     const T* q_row = q + (int64_t)(q_start_token + my_q_pos) * stride_q_token +
                      (int64_t)head_idx * stride_q_head;
-    #pragma unroll
+  #pragma unroll
     for (int dh = 0; dh < FRAGS; ++dh)
       __builtin_memcpy(&q_frags[dh], q_row + dh * 16, sizeof(V16));
   } else {
-    #pragma unroll
+  #pragma unroll
     for (int dh = 0; dh < FRAGS; ++dh)
-      #pragma unroll
+  #pragma unroll
       for (int k = 0; k < 16; ++k) q_frags[dh][k] = (E)0;
   }
 
