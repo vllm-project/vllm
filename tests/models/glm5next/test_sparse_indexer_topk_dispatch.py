@@ -53,3 +53,49 @@ def test_kpool_indexer_dispatches_through_shared_topk_backend_rocm(
     from vllm.models.glm5next.amd.sparse_indexer import SparseAttnIndexerKpool
 
     assert _build(SparseAttnIndexerKpool, backend).topk_backend == backend
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only dispatch")
+@pytest.mark.parametrize(
+    "configured,full_cudagraph,expected",
+    [
+        ("auto", False, "aiter"),
+        ("auto", True, "auto"),
+        ("aiter", True, "aiter"),
+        ("per_row", False, "per_row"),
+    ],
+)
+def test_kpool_decode_topk_backend_never_auto_selects_aiter_under_full_cudagraph(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str,
+    full_cudagraph: bool,
+    expected: str,
+) -> None:
+    """A FULL cudagraph bakes in one kernel for every replay, so "auto" cannot
+    use the context length to pick AITER and must stay on the in-tree kernel.
+    Explicit backends keep working, and outside FULL the long-context heuristic
+    still narrows to AITER."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.glm5next.amd import sparse_indexer
+
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_indexer_top_k_enabled", lambda: True, raising=False
+    )
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_indexer_top_k_supported",
+        lambda **kwargs: True,
+        raising=False,
+    )
+
+    assert (
+        sparse_indexer._kpool_decode_topk_backend(
+            configured,
+            num_rows=8,
+            max_valid_seq_len=64 * 1024,
+            select_k=512,
+            index_kpool=4,
+            full_cudagraph=full_cudagraph,
+        )
+        == expected
+    )

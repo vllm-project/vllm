@@ -99,15 +99,25 @@ def _kpool_decode_topk_backend(
     max_valid_seq_len: int,
     select_k: int,
     index_kpool: int,
+    full_cudagraph: bool,
 ) -> str:
-    """Narrow "auto" to AITER when it beats the in-tree hip decode top-k kernel.
+    """Select the topk backend for decodes.
 
-    Heuristic:
+    Heuristic based on ctx lengths:
     - <16k pools: in-tree hip kernel
     - 16-256k pools: use aiter
     - >256k pools: in-tree because not measured on >1m ctx
+
+    Since under FULL cudagraphs we cannot access the context length,
+    and the aiter kernel does not always outperform the in-tree kernel,
+    we default to in-tree kernel under FULL cudagraphs. Users can opt in
+    if they know their context length is long enough to benefit from aiter.
     """
-    if configured != "auto" or not rocm_aiter_ops.is_indexer_top_k_enabled():
+    if (
+        configured != "auto"
+        or full_cudagraph
+        or not rocm_aiter_ops.is_indexer_top_k_enabled()
+    ):
         return configured
     if rocm_aiter_ops.is_indexer_top_k_supported(
         is_prefill=False,
@@ -621,10 +631,10 @@ def sparse_attn_indexer_kpool(
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        # FULL graphs are not keyed by context length, so the kernel choice
-        # baked in at capture must hold for any replay: use the worst-case
-        # bound instead of this batch's context length.
-        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        full_cudagraph = (
+            get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+        )
+        if full_cudagraph:
             topk_max_seq_len = max_pool_len * index_kpool
         else:
             topk_max_seq_len = attn_metadata_narrowed.max_seq_len
@@ -635,6 +645,7 @@ def sparse_attn_indexer_kpool(
             max_valid_seq_len=cdiv(topk_max_seq_len, index_kpool),
             select_k=select_k,
             index_kpool=index_kpool,
+            full_cudagraph=full_cudagraph,
         )
         get_indexer_topk(resolved_backend)(
             logits,
