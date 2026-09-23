@@ -276,48 +276,6 @@ def generate_sparse_seqlen_triton(
     return out
 
 
-@triton.jit
-def fetch_id_to_ragged_kernel(
-    in_tensor_ptr,  # [num_seq, topk]
-    cumsum_ptr,  # [num_seq + 1]
-    out_tensor_ptr,  # [max_num_seq * topk]
-    in_tensor_ptr_stride,
-    TOPK: tl.constexpr,
-    TOKEN_NUM: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    seq_id = tl.program_id(0)
-    block_id = tl.program_id(1)
-    offset = tl.arange(0, BLOCK_SIZE)
-    token_start = tl.load(cumsum_ptr + seq_id)
-    token_end = tl.load(cumsum_ptr + seq_id + 1)
-    token_num = token_end - token_start
-    row_offset = block_id * BLOCK_SIZE
-    if row_offset >= token_num:
-        return
-    in_tensor_offset = seq_id * in_tensor_ptr_stride + row_offset + offset
-    in_tensor_mask = (row_offset + offset) < TOPK
-    in_tensor_val = tl.load(in_tensor_ptr + in_tensor_offset, mask=in_tensor_mask)
-    out_tensor_offset = token_start + row_offset + offset
-    out_tensor_mask = (out_tensor_offset < token_end) & in_tensor_mask
-    tl.store(out_tensor_ptr + out_tensor_offset, in_tensor_val, mask=out_tensor_mask)
-
-
-def fetch_id_to_ragged_triton(
-    in_tensor: torch.Tensor, cumsum: torch.Tensor, out_tensor: torch.Tensor, topk
-):
-    num_tokens = in_tensor.size(0)
-    block_size = 64
-    num_block_per_row = triton.cdiv(topk, block_size)
-    grid = (
-        num_tokens,
-        num_block_per_row,
-    )
-    fetch_id_to_ragged_kernel[grid](
-        in_tensor, cumsum, out_tensor, in_tensor.stride(0), topk, num_tokens, block_size
-    )
-
-
 class ROCMAiterMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [

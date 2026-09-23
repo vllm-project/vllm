@@ -111,6 +111,23 @@ steps:
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s kernels/test_top_k_per_row.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) DeepSeek V4 Fused Kernels"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 60
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+      - vllm/models/deepseek_v4/common/ops/
+      - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
 
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
@@ -196,6 +213,8 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
@@ -209,6 +228,24 @@ steps:
   - tests/kernels/attention/test_triton_unified_attention_diffkv.py
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Attention DiffKV Kernels"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 35
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention/ops/triton_unified_attention_diffkv.py
+      - vllm/v1/attention/backends/triton_attn_diffkv.py
+      - tests/kernels/attention/test_triton_unified_attention.py
+      - tests/kernels/attention/test_triton_unified_attention_diffkv.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
 - label: ":nvidia: (H100) MLA Kernel Test"
   key: kernels-flashmla-test-h100
@@ -231,6 +268,31 @@ steps:
     - pytest -v -s kernels/attention/test_flashmla_sparse.py
     - pytest -v -s kernels/attention/test_flashinfer_mla_decode.py
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) MLA Kernels"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 40
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+      - vllm/v1/attention/selector.py
+      - vllm/platforms/rocm.py
+      - vllm/_aiter_ops.py
+      - tests/kernels/attention/test_rocm_aiter_mla_decode.py
+      - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+      - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+      - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+      commands:
+      - amd-smi
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+      - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
@@ -268,6 +330,8 @@ steps:
       - vllm/envs.py
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test
@@ -316,6 +380,7 @@ steps:
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
   commands:
     - pytest -v -s kernels/mamba
@@ -329,6 +394,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/platforms/rocm.py
+      - vllm/third_party/flash_linear_attention/
 
 - label: ":nvidia: (H100) DeepGEMM Kernels"
   key: kernels-deepgemm-test-h100
@@ -459,6 +525,32 @@ steps:
           exit 1
           ;;
       esac
+  mirror:
+    amd:
+      label: ":amd: (MI355) NVFP4 Dense Emulation Shard %N"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 10
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/kernels/quantization/test_nvfp4_emulation.py
+      - tests/kernels/quantization/nvfp4_utils.py
+      - tests/conftest.py
+      - vllm/model_executor/kernels/linear/
+      - vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py
+      - vllm/config/kernel.py
+      - vllm/platforms/
+      - vllm/envs.py
+      - vllm/utils/torch_utils.py
+      - requirements/rocm-test.txt
+      # W4A4 format numerics and replay via emulation. TODO: native packed
+      # activation/KV-cache layouts and CUDA-only kernels need AMD backends.
+      commands:
+      - amd-smi
+      - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (DGX) Spark b12x Linear Kernels Nightly"
   key: b12x-linear-kernels-dgx-spark-nightly
@@ -638,31 +730,38 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
-
-- label: ":amd: (MI355) MLA Kernels"
-  key: amd-mla-kernels-mi355
-  dind: false
-  device: mi355_1
-  num_devices: 1
-  timeout_in_minutes: 25
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
-  - vllm/v1/attention/selector.py
-  - vllm/platforms/rocm.py
-  - vllm/_aiter_ops.py
-  - tests/kernels/attention/test_rocm_aiter_mla_decode.py
-  - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
-  - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
-  - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
-  commands:
-  - amd-smi
-  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
-  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
-  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
-  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) MoRI EP Numerics"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 20
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/kernels/moe/test_mori_moe.py
+      - tests/kernels/moe/utils.py
+      - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
+      - tests/kernels/utils.py
+      - tests/utils.py
+      - tests/conftest.py
+      - vllm/utils/torch_utils.py
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/distributed/
+      - vllm/config/
+      - vllm/forward_context.py
+      - vllm/v1/worker/workspace.py
+      - vllm/platforms/
+      - vllm/_aiter_ops.py
+      - requirements/rocm-test.txt
+      # Same-node MoRI/AITER BF16 and per-token/channel FP8. TODO: the
+      # DeepEP v2 FlashInfer backend matrix has no direct AMD implementation.
+      commands:
+      - amd-smi
+      - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 pytest -v -s kernels/moe/test_mori_moe.py
 
 - label: ":amd: (MI355) FP8 MoE Kernels"
   key: amd-fp8-moe-kernels-mi355
@@ -719,9 +818,7 @@ steps:
   - vllm/_aiter_ops.py
   - examples/basic/offline_inference/chat.py
   - tests/kernels/attention/test_attention_selector.py
-  - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   commands:
   - amd-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
-  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
