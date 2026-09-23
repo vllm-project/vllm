@@ -53,7 +53,7 @@ TRITON_SHAPES = [
 TRITON_TAIL_M = [1, 3, 17, 150]
 TRITON_TAIL_N = [100, 130]
 # Multiples of 32 that are not multiples of 128.
-TRITON_TAIL_K = [160, 320, 2880]
+TRITON_TAIL_K = [64, 160, 320, 2880]
 # FP4 values of poison that with_poisoned_k_tail appends to every row.
 POISON_K = 256
 # The Triton reference is float64, so unlike a bf16 reference it does not round
@@ -430,3 +430,32 @@ def test_triton_nvfp4_gemm_cuda_graph(
     graph.replay()
     eager = triton_fp4_mm(a.fp4, b.fp4, a.sf, b.sf, alpha, dtype)
     torch.testing.assert_close(captured, eager, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("alpha_kind", ["float", "cpu"])
+@torch.inference_mode()
+def test_triton_nvfp4_gemm_host_alpha(
+    triton_fp4_mm: Callable[..., torch.Tensor], alpha_kind: str
+) -> None:
+    """A float or CPU-tensor alpha matches the CUDA-tensor result and captures.
+
+    A host-to-device copy of alpha would sync the stream, which fails inside
+    CUDA graph capture.
+    """
+    set_random_seed(SEEDS[0])
+    m, n, k = 128, 256, 256
+    dtype = torch.bfloat16
+    a, b = linear_nvfp4(m, k, dtype), linear_nvfp4(n, k, dtype)
+    alpha = 1.0 / (a.global_scale * b.global_scale)
+    host_alpha = alpha.item() if alpha_kind == "float" else alpha.cpu()
+
+    expected = triton_fp4_mm(a.fp4, b.fp4, a.sf, b.sf, alpha, dtype)
+    eager = triton_fp4_mm(a.fp4, b.fp4, a.sf, b.sf, host_alpha, dtype)
+    torch.testing.assert_close(eager, expected, atol=0, rtol=0)
+
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = triton_fp4_mm(a.fp4, b.fp4, a.sf, b.sf, host_alpha, dtype)
+    graph.replay()
+    torch.testing.assert_close(captured, expected, atol=0, rtol=0)
