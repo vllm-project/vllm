@@ -116,14 +116,26 @@ class MMPrefixAttentionRouting(CompositeAttentionRouting):
 
 
 def _intersect_kernel_block_sizes(
-    first: type[AttentionBackend], second: type[AttentionBackend]
+    first: type[AttentionBackend],
+    second: type[AttentionBackend],
+    kv_cache_spec: KVCacheSpec | None = None,
 ):
     from vllm.v1.attention.backend import MultipleOf
 
     result: list[int | MultipleOf] = []
     seen: set[tuple[type, int]] = set()
-    for lhs in first.get_supported_kernel_block_sizes():
-        for rhs in second.get_supported_kernel_block_sizes():
+    first_sizes = (
+        first.get_supported_kernel_block_sizes()
+        if kv_cache_spec is None
+        else first.get_supported_kernel_block_sizes(kv_cache_spec)
+    )
+    second_sizes = (
+        second.get_supported_kernel_block_sizes()
+        if kv_cache_spec is None
+        else second.get_supported_kernel_block_sizes(kv_cache_spec)
+    )
+    for lhs in first_sizes:
+        for rhs in second_sizes:
             candidate: int | MultipleOf | None = None
             if isinstance(lhs, MultipleOf) and isinstance(rhs, MultipleOf):
                 candidate = MultipleOf(math.lcm(lhs.base, rhs.base))
@@ -378,7 +390,9 @@ def create_composite_attention_backend(
             return CompositeAttentionMetadataBuilder
 
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(
+            kv_cache_spec: KVCacheSpec | None = None,
+        ):
             if kernel_block_sizes:
                 return [
                     size
@@ -388,7 +402,9 @@ def create_composite_attention_backend(
                         for backend in (general_backend, causal_backend)
                     )
                 ]
-            return _intersect_kernel_block_sizes(general_backend, causal_backend)
+            return _intersect_kernel_block_sizes(
+                general_backend, causal_backend, kv_cache_spec
+            )
 
         @classmethod
         def supports_block_size(cls, block_size):

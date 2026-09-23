@@ -292,15 +292,27 @@ class FlashAttentionBackend(AttentionBackend):
     head_size_v: int | None = None
 
     @staticmethod
-    def _get_sm90_fa4_fp8_kv_block_size() -> int | None:
-        vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is None or vllm_config.model_config is None:
-            return None
+    def _get_sm90_fa4_fp8_kv_block_size(
+        kv_cache_spec: KVCacheSpec | None = None,
+    ) -> int | None:
+        if kv_cache_spec is None:
+            vllm_config = get_current_vllm_config_or_none()
+            if vllm_config is None or vllm_config.model_config is None:
+                return None
+            head_size = vllm_config.model_config.get_head_size()
+            uses_fp8_kv = vllm_config.cache_config.cache_dtype in (
+                "fp8",
+                "fp8_e4m3",
+            )
+        else:
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                return None
+            head_size = kv_cache_spec.head_size
+            uses_fp8_kv = kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
 
-        head_size = vllm_config.model_config.get_head_size()
         if (
             current_platform.is_device_capability_family(90)
-            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+            and uses_fp8_kv
             and head_size == 512
             and get_flash_attn_version(head_size=head_size) == 4
         ):
@@ -309,17 +321,26 @@ class FlashAttentionBackend(AttentionBackend):
         return None
 
     @classmethod
-    def _get_fa4_hd256_block_size(cls) -> int | None:
-        vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is None or vllm_config.model_config is None:
-            return None
+    def _get_fa4_hd256_block_size(
+        cls, kv_cache_spec: KVCacheSpec | None = None
+    ) -> int | None:
+        if kv_cache_spec is None:
+            vllm_config = get_current_vllm_config_or_none()
+            if vllm_config is None or vllm_config.model_config is None:
+                return None
+            head_size = vllm_config.model_config.get_head_size()
+            head_size_v = cls.head_size_v
+        else:
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                return None
+            head_size = kv_cache_spec.head_size
+            head_size_v = kv_cache_spec.head_size_v
 
-        head_size = vllm_config.model_config.get_head_size()
         if (
-            uses_fa4_hd256_kernel(head_size, cls.head_size_v)
+            uses_fa4_hd256_kernel(head_size, head_size_v)
             and get_flash_attn_version(
                 head_size=head_size,
-                head_size_v=cls.head_size_v,
+                head_size_v=head_size_v,
                 supports_fa4_hd256=True,
             )
             == 4
@@ -328,10 +349,12 @@ class FlashAttentionBackend(AttentionBackend):
         return None
 
     @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
+    def get_supported_kernel_block_sizes(
+        cls, kv_cache_spec: KVCacheSpec | None = None
+    ) -> list[int | MultipleOf]:
+        if block_size := cls._get_sm90_fa4_fp8_kv_block_size(kv_cache_spec):
             return [block_size]
-        if block_size := cls._get_fa4_hd256_block_size():
+        if block_size := cls._get_fa4_hd256_block_size(kv_cache_spec):
             # Sliding-window specs select the smallest advertised size.
             return [block_size]
         return [MultipleOf(16)]

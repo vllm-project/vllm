@@ -11,7 +11,6 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
     get_current_vllm_config,
-    set_current_vllm_config,
 )
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -101,10 +100,10 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
 
 def _largest_kernel_block_within(
     attn_backend: "type[AttentionBackend]",
-    vllm_config: VllmConfig,
     per_token_bytes: int,
     page_budget: int,
     fallback: int,
+    kv_cache_spec: KVCacheSpec | None = None,
 ) -> int:
     """Largest supported kernel block size whose page fits in ``page_budget``.
 
@@ -116,8 +115,10 @@ def _largest_kernel_block_within(
     """
     from vllm.v1.attention.backend import MultipleOf
 
-    with set_current_vllm_config(vllm_config):
+    if kv_cache_spec is None:
         sizes = attn_backend.get_supported_kernel_block_sizes()
+    else:
+        sizes = attn_backend.get_supported_kernel_block_sizes(kv_cache_spec)
     max_block_size = page_budget // per_token_bytes
     candidates = [s for s in sizes if isinstance(s, int)]
     candidates.extend(
@@ -638,7 +639,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # ``unify`` scales it up by an integer ratio.
             shared_page = vllm_config.cache_config.skip_page_size_padded
             # The backend owns its packing
-            sw_per_token = self.attn_backend.customize_spec(
+            kv_cache_spec = self.attn_backend.customize_spec(
                 SlidingWindowSpec(
                     block_size=1,
                     num_kv_heads=self.num_kv_heads,
@@ -648,14 +649,15 @@ class Attention(nn.Module, AttentionLayerBase):
                     kv_quant_mode=quant_mode,
                     sliding_window=self.sliding_window,
                 )
-            ).real_page_size_bytes
+            )
+            sw_per_token = kv_cache_spec.real_page_size_bytes
             page_budget = shared_page or sw_per_token * block_size
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend,
-                vllm_config,
                 sw_per_token,
                 page_budget,
                 block_size,
+                kv_cache_spec=kv_cache_spec,
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
