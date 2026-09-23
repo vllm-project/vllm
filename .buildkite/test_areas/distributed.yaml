@@ -320,10 +320,13 @@ steps:
   - vllm/v1/executor/uniproc_executor.py
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/test_mnnvl_alltoall.py
+  - tests/distributed/test_lora_mla.py
+  - vllm/lora/
 
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s distributed/test_lora_mla.py
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
   mirror:
