@@ -51,7 +51,11 @@ if _needs_fbgemm:
 
 try:
     from triton_nvfp4_gemm import triton_scaled_fp4_mm
-except ImportError:
+except ImportError as e:
+    print(
+        "WARNING: Triton NVFP4 providers are skipped because "
+        f"triton_nvfp4_gemm failed to import: {e}"
+    )
     # Disable Triton providers if kernel is not available
     for cfg in PROVIDER_CFGS.values():
         if cfg.get("triton"):
@@ -227,7 +231,31 @@ if __name__ == "__main__":
         choices=list(WEIGHT_SHAPES.keys()),
     )
     parser.add_argument("--tp-sizes", nargs="+", type=int, default=[1])
+    parser.add_argument(
+        "--batch-sizes",
+        nargs="+",
+        type=int,
+        default=benchmark.benchmarks.x_vals,
+        help="M values to sweep (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--providers",
+        nargs="+",
+        type=str,
+        default=_enabled,
+        choices=_enabled,
+        help="Providers to run (default: all enabled)",
+    )
     args = parser.parse_args()
+
+    args.providers = list(dict.fromkeys(args.providers))
+    args.batch_sizes = list(dict.fromkeys(args.batch_sizes))
+    if any(m <= 0 for m in args.batch_sizes):
+        parser.error("--batch-sizes must be positive")
+
+    benchmark.benchmarks.x_vals = args.batch_sizes
+    benchmark.benchmarks.line_vals = args.providers
+    benchmark.benchmarks.line_names = args.providers
 
     for K, N, model in prepare_shapes(args):
         print(f"{model}, N={N} K={K}, BF16 vs NVFP4 GEMMs TFLOP/s:")
