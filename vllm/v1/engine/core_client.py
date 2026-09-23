@@ -537,11 +537,11 @@ class BackgroundResources:
             # aren't explicitly closed first.
             close_sockets((self.output_socket, self.input_socket))
 
-            if self.shutdown_path is not None:
+            if (shutdown_path := self.shutdown_path) is not None:
                 # We must ensure that the sync output socket is
                 # closed cleanly in its own thread.
                 with self.ctx.socket(zmq.PAIR) as shutdown_sender:
-                    shutdown_sender.connect(self.shutdown_path)
+                    shutdown_sender.connect(shutdown_path)
                     # Send shutdown signal.
                     shutdown_sender.send(b"")
 
@@ -983,6 +983,7 @@ class SyncMPClient(MPClient):
                 outputs_queue.put_nowait(e)
             finally:
                 resources.engine_dead = True
+                resources.shutdown_path = None
                 _fail_pending_utility_calls(utility_results, error)
                 # Close sockets.
                 shutdown_socket.close(linger=0)

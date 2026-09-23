@@ -1800,8 +1800,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MQ_MAX_CHUNK_BYTES_MB": lambda: int(
         os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
     ),
-    # Timeout in seconds for execute_model RPC calls in multiprocessing
-    # executor (only applies when TP > 1).
+    # Timeout in seconds for execute_model/sample_tokens RPC calls and for
+    # draining replies after a worker error in the multiprocessing executor.
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")
     ),
