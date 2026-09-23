@@ -58,15 +58,16 @@ def _row_stats_kernel(
 
         block_max = tl.max(x, 0)
         new_m = tl.maximum(m, block_max)
-        # Rescale the running sums to the new max. Before the first block
-        # z is 0, so the shift term is dropped rather than -inf * 0.
+        # Rescale the running sums to the new max. Before the first block m is
+        # -inf and z is 0, and (m - new_m) * inv * z is NaN, so the shift is
+        # zeroed.
         alpha = tl.exp((m - new_m) * inv)
         shift = tl.where(z > 0, (m - new_m) * inv * z, 0.0)
         d = (x - new_m) * inv
         e = tl.exp(d)
         z = z * alpha + tl.sum(e, 0)
         # A -inf logit (top_k/top_p, or the row's padding) has d = -inf and
-        # e = 0, and -inf * 0 is NaN; it contributes nothing to the sum.
+        # e = 0, and -inf * 0 is NaN. The where drops it from the sum.
         s = (s + shift) * alpha + tl.sum(tl.where(e > 0, d * e, 0.0), 0)
         m = new_m
 
@@ -87,8 +88,8 @@ def _row_stats_kernel(
 
     # With d = (x - m) * inv: p = e^d / z, log Z = log z in d units, and
     # H = -sum p (d - log z) = log z - s / z.
-    # tl.store casts to the pointee dtype; the explicit .to() reads as an int
-    # method to mypy, which type-checks the kernel body as Python.
+    # tl.store casts to the pointee dtype. mypy type-checks the kernel body
+    # as Python and rejects .to() on the int accumulators.
     tl.store(argmax_ptr + row, best_idx)
     tl.store(sample_ptr + row, best_noisy_idx)
     tl.store(entropy_ptr + row, tl.log(z) - s / z)
@@ -112,10 +113,10 @@ def sample_row_stats(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Argmax, Gumbel-max sample, entropy and (optionally) softmax per row.
 
-    ``logits`` is ``[rows, vocab]``; row ``i`` uses temperature
-    ``temps[i // canvas_len]``. A zero temperature means greedy: the sample is
-    the argmax and the entropy is that of the unscaled row's limit, matching
-    the PyTorch reference, which clamps the temperature at 1e-10.
+    ``logits`` is ``[rows, vocab]`` and row ``i`` uses temperature
+    ``temps[i // canvas_len]``. A zero temperature is greedy: the sample is
+    the argmax, and the entropy is the reference's, which clamps the
+    temperature at 1e-10.
     """
     rows, vocab = logits.shape
     device = logits.device

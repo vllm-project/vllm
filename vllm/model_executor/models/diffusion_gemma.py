@@ -1535,8 +1535,6 @@ class DiffusionSampler:
                     )
                 )
 
-                # One pass over the tile's logits: argmax, Gumbel-max sample,
-                # entropy and the softmax for self-conditioning.
                 temp = _denoise_temperature(
                     states.step,
                     tile_slots,

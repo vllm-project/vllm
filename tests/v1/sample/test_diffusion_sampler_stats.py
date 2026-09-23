@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The fused row statistics of the DiffusionGemma sampler against the PyTorch
-reference: argmax, entropy and softmax must match; a zero temperature must
-sample the argmax; a positive temperature must sample from the distribution."""
+reference: argmax, entropy and softmax must match. A zero temperature must
+sample the argmax and a positive one must sample from the distribution."""
 
 import math
 
@@ -60,7 +60,7 @@ def test_zero_temperature_is_greedy_and_probs_optional():
 def test_positive_temperature_samples_from_the_distribution():
     torch.manual_seed(0)
     rows, vocab = 2000, 4099
-    # A peaked row samples its argmax almost always; a flat row rarely.
+    # A peaked row samples its argmax almost always and a flat row rarely.
     peaked = torch.zeros(rows, vocab, device="cuda")
     peaked[:, 17] = 16.0  # p(17) = e^16 / (e^16 + 4098) > 0.999
     flat = torch.zeros(rows, vocab, device="cuda")
@@ -69,7 +69,7 @@ def test_positive_temperature_samples_from_the_distribution():
     _, s_flat, _, _ = sample_row_stats(flat, temps, 1, 99, None)
     assert (s_peaked == 17).float().mean().item() > 0.99
     assert s_flat.unique().numel() > rows // 2
-    # Different seeds give different draws; the same seed repeats them.
+    # The same seed repeats the draws and another seed changes them.
     _, s_again, _, _ = sample_row_stats(flat, temps, 1, 99, None)
     _, s_other, _, _ = sample_row_stats(flat, temps, 1, 100, None)
     assert torch.equal(s_flat, s_again)
@@ -87,8 +87,8 @@ def test_empty_batch():
 
 
 def test_masked_logits_keep_a_finite_entropy():
-    """top_k/top_p leave -inf logits; masked columns must not turn the
-    entropy into NaN, and a row with one live column has zero entropy."""
+    """top_k/top_p leave -inf logits. Masked columns gave NaN entropy, and a
+    row with one live column has zero entropy."""
     logits = torch.full((4, 5000), float("-inf"), device="cuda")
     logits[:, 3] = 0.0
     logits[2, 9] = 0.0  # two live columns: entropy log 2
