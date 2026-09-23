@@ -3,10 +3,9 @@
 
 from typing import TYPE_CHECKING
 
-from pydantic import Field, model_validator
+from pydantic import model_validator
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.utils import config, get_hash_factors, hash_factors
 
 if TYPE_CHECKING:
@@ -20,10 +19,6 @@ _NGRAM_LAYER_FIELDS = {
     "Qwen4ExpForCausalLM": "ple_layer_ids",
     "Qwen4ExpForConditionalGeneration": "ple_layer_ids",
 }
-
-
-def _default_cpu_offload() -> bool:
-    return envs.VLLM_PLE_CPU_OFFLOAD
 
 
 def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
@@ -40,10 +35,8 @@ def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
 class EngramConfig:
     """Configuration for Engram embedding storage and sharding."""
 
-    cpu_offload: bool = Field(default_factory=_default_cpu_offload)
-    """Store embedding weights in pinned CPU memory for UVA lookup.
-    Defaults to VLLM_PLE_CPU_OFFLOAD, which is enabled by default. An explicit
-    value takes precedence over the environment variable."""
+    cpu_offload: bool = True
+    """Store embedding weights in pinned CPU memory for UVA lookup."""
 
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
