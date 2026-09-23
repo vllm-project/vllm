@@ -19,7 +19,8 @@ Both 2D and 3D launches are supported:
   - 3D: one program per (q-block, kv-head, segm); each program covers a
     KV slice and writes per-segment partials (max/expsum/output).  A
     follow-up ``kernel_reduce_segments_diffkv`` combines them.  Selected
-    for decode-only batches whose 2D grid would under-fill the GPU.
+    for small decode and multi-token batches whose 2D grid would under-fill
+    the GPU.
 """
 
 from typing import Any
@@ -29,6 +30,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -330,6 +332,9 @@ def kernel_reduce_segments_diffkv(
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
 
+    if query_token_idx >= tl.load(query_start_len_ptr + num_seqs):
+        return
+
     seq_idx = find_seq_idx(
         query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False
     )
@@ -351,6 +356,8 @@ def kernel_reduce_segments_diffkv(
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
     overall_max = tl.max(segm_max)
+    # Graph-capture dummy lengths can leave a query with no causal keys.
+    overall_max = tl.where(overall_max > float("-inf"), overall_max, 0.0)
 
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
     segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
@@ -396,8 +403,7 @@ def unified_attention_diffkv(
     alibi_slopes=None,
     sinks=None,
     use_alibi_sqrt=False,
-    # 3D / split-KV softmax buffers.  When all four are provided and the
-    # batch is decode-only with few sequences, the 3D path is taken.
+    # 3D / split-KV softmax buffers, indexed by query token.
     seq_threshold_3D: int | None = None,
     num_par_softmax_segments: int | None = None,
     softmax_segm_output: torch.Tensor | None = None,
@@ -428,17 +434,23 @@ def unified_attention_diffkv(
 
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
 
-    # Decide between 2D and 3D launch.  Mirrors the standard launcher:
-    # 3D requires preallocated softmax buffers, decode-only batches, and
-    # a small number of sequences (otherwise 2D already saturates the SM).
+    # The split-KV scratch is indexed by query token. Multi-token batches need one
+    # query token per CTA, so segments past a row's causal bound keep a -inf max,
+    # and split-KV only pays off for them while the 2D grid leaves SMs idle.
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
+        or q.shape[0] > seq_threshold_3D
+        or (
+            max_seqlen_q > 1
+            and (
+                num_queries_per_kv != BLOCK_M
+                or q.shape[0] * num_kv_heads >= num_compute_units(q.device.index)
+            )
+        )
         or is_batch_invariant
     )
 
