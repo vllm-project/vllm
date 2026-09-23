@@ -12,7 +12,10 @@ import torch
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
 )
-from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import plan_prefill_chunks
+from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import (
+    native_decode,
+    plan_prefill_chunks,
+)
 
 
 def _chunk(block_table, token_start, token_end, row_ends):
@@ -78,3 +81,26 @@ def test_no_gather_without_candidates():
         None,
     )
     assert plan.block_ends is None and not plan.use_gather
+
+
+def test_decode_launches_native_on_uniform_steps():
+    """A decode step goes to the kernel as next_n-row sequences only when its
+    shape says so: each request has next_n rows, and cudagraph padding (query
+    length 0) comes only after them. A FULL graph captured on a uniform batch
+    then replays the same launch on a padded one."""
+    rows = torch.zeros(8, dtype=torch.int32)
+    row_block_table = torch.arange(32, dtype=torch.int32).view(8, 4)
+    context_lens = torch.tensor([9, 4, 7, 0, 5], dtype=torch.int32)
+
+    native = native_decode(rows, row_block_table, [2, 2, 2, 0], 2, context_lens)
+    assert native is not None and native.next_n == 2
+    assert native.context_lens.tolist() == [9, 4, 7, 0]
+    # every request's first flattened row, as a view
+    assert native.block_table.tolist() == row_block_table[::2].tolist()
+    assert native.block_table.data_ptr() == row_block_table.data_ptr()
+
+    assert native_decode(rows, row_block_table, [2, 0, 2, 2], 2, context_lens) is None
+    # a ragged step, rows padded past the requests, and no speculation
+    assert native_decode(rows[:5], row_block_table, [2, 1, 2], 2, context_lens) is None
+    assert native_decode(rows, row_block_table, [2, 2, 2], 2, context_lens) is None
+    assert native_decode(rows[:4], row_block_table, [1] * 4, 1, context_lens) is None

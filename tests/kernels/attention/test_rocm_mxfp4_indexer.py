@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import (
     DeepseekV41RocmMxfp4IndexerMetadata,
+    native_decode,
     plan_prefill_chunks,
 )
 from vllm.v1.attention.ops import rocm_mxfp4_indexer as ops
@@ -116,6 +117,8 @@ class _Case:
         norm = torch.rand(HEAD_DIM, device=DEVICE) + 0.5
         n_per_tile = ops.rocm_mxfp4_n_per_tile(HEADS, HEAD_DIM)
         for req, n in enumerate(seq_lens):
+            if n == 0:
+                continue
             k_pre = torch.randn(n, HEAD_DIM, device=DEVICE).to(torch.bfloat16)
             pos = torch.arange(n, device=DEVICE)
             for ratio, cache in self.cache.items():
@@ -174,6 +177,8 @@ def _assert_topk(row, scores, k):
 
 def _block_maxima(scores):
     end = scores.numel()
+    if end == 0:
+        return scores
     padded = torch.full((cdiv(end, CAND_BLOCK) * CAND_BLOCK,), float("-inf"))
     padded[:end] = scores.cpu()
     out = padded.view(-1, CAND_BLOCK).amax(1)
@@ -189,13 +194,16 @@ def _forward_context(monkeypatch, metadata):
     monkeypatch.setattr(ops, "get_forward_context", lambda: context)
 
 
-def _decode_metadata(case, rows, ratio):
+def _decode_metadata(case, rows, ratio, query_lens):
     lens = torch.tensor([(p + 1) // ratio for _, p in rows], dtype=torch.int32)
     lens = lens.to(DEVICE)
     block_table = case.block_table[[req for req, _ in rows]].contiguous()
     entries = case.cache[ratio].shape[1]
+    next_n = max(query_lens)
+    context_lens = (torch.tensor(case.seq_lens, dtype=torch.int32) // ratio).to(DEVICE)
+    native = native_decode(lens, block_table, query_lens, next_n, context_lens)
     schedule = torch.empty(
-        ops.rocm_mxfp4_decode_schedule_words(HEADS, HEAD_DIM, entries),
+        ops.rocm_mxfp4_decode_schedule_words(HEADS, HEAD_DIM, entries, next_n),
         dtype=torch.int32,
         device=DEVICE,
     )
@@ -210,9 +218,9 @@ def _decode_metadata(case, rows, ratio):
         decode=types.SimpleNamespace(block_table=block_table, seq_lens=lens[:, None]),
         decode_row_lens=lens,
         decode_block_ends=(lens + CAND_BLOCK - 1) // CAND_BLOCK,
-        # six rows, so the step gets a work schedule rather than the static grid
+        decode_native=native,
         decode_schedule=ops.build_rocm_mxfp4_decode_schedule(
-            lens, HEADS, HEAD_DIM, entries, schedule
+            lens, HEADS, HEAD_DIM, entries, schedule, native
         ),
     )
 
@@ -381,11 +389,29 @@ def _run_layers(monkeypatch, case, rows, metadata):
 
 
 @BLOCKS
-def test_decode_layers_match_reference(monkeypatch, block):
-    """Flattened speculative decode: two query rows per request."""
-    case = _Case([900, 333, 610], block)
-    rows = [(req, n - 2 + j) for req, n in enumerate(case.seq_lens) for j in range(2)]
-    _run_layers(monkeypatch, case, rows, lambda r: _decode_metadata(case, rows, r))
+@pytest.mark.parametrize(
+    "query_lens",
+    # Uniform steps launch the dense layers on next_n-row sequences, also with
+    # cudagraph padding (query length 0) after them; a ragged step keeps a row
+    # per token.
+    [[6, 6, 6, 6], [2, 2, 2], [2, 2, 2, 0], [2, 1, 2]],
+    ids=["native6", "native2", "padded", "ragged"],
+)
+def test_decode_layers_match_reference(monkeypatch, block, query_lens):
+    next_n = max(query_lens)
+    case = _Case([q and n for q, n in zip(query_lens, [900, 333, 610, 1200])], block)
+    # a padding request has next_n rows of its own and no context
+    rows = [
+        (req, n - q + j if q else -1)
+        for req, (n, q) in enumerate(zip(case.seq_lens, query_lens))
+        for j in range(q or next_n)
+    ]
+    _run_layers(
+        monkeypatch,
+        case,
+        rows,
+        lambda r: _decode_metadata(case, rows, r, query_lens),
+    )
 
 
 @pytest.mark.parametrize(

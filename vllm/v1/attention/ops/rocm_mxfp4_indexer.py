@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     )
     from vllm.v1.attention.backends.mla.rocm_mxfp4_indexer import (
         DeepseekV41RocmMxfp4IndexerMetadata,
+        RocmMxfp4NativeDecode,
         RocmMxfp4PrefillPlan,
     )
 
@@ -76,11 +77,14 @@ def check_rocm_mxfp4_cache_geometry(
 
 
 def rocm_mxfp4_decode_schedule_words(
-    num_heads: int, head_dim: int, page_entries: int
+    num_heads: int, head_dim: int, page_entries: int, next_n: int = 1
 ) -> int:
-    """int32 words of a flattened decode step's work schedule."""
-    config = _aiter().select_config(num_heads, head_dim, 1, page_entries)
-    return 4 * config["target_wgs"]
+    """int32 words of a decode step's work schedule, flattened or not."""
+    words = 0
+    for rows in {1, next_n}:
+        config = _aiter().select_config(num_heads, head_dim, rows, page_entries)
+        words = max(words, 4 * config["target_wgs"])
+    return words
 
 
 def build_rocm_mxfp4_decode_schedule(
@@ -89,12 +93,23 @@ def build_rocm_mxfp4_decode_schedule(
     head_dim: int,
     page_entries: int,
     out: torch.Tensor,
+    native: "RocmMxfp4NativeDecode | None" = None,
 ) -> torch.Tensor | None:
-    """Work descriptors that even out a flattened decode step's rows, or None
-    where the static grid already fills the machine. Depends only on the rows'
-    lengths and the cache geometry, so one serves every layer of a group."""
+    """Work descriptors that even out a decode step, or None where the static
+    grid already fills the machine. Depends only on the rows' lengths and the
+    cache geometry, so one serves every layer of a group."""
+    if native is None:
+        return _aiter().build_schedule(
+            row_lens, 1, num_heads, head_dim, page_entries, out=out
+        )
     return _aiter().build_schedule(
-        row_lens, 1, num_heads, head_dim, page_entries, out=out
+        native.context_lens,
+        native.next_n,
+        num_heads,
+        head_dim,
+        page_entries,
+        out=out,
+        cu_ends=row_lens,
     )
 
 
@@ -376,24 +391,36 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
     metadata = layer.metadata
     lengths = metadata.decode_row_lens
     assert metadata.decode is not None and lengths is not None
-    block_table = metadata.decode.block_table
     rows = lengths.shape[0]
-    assert block_table.shape[0] == rows, "one block-table row per query row"
     specs = [((rows, logits_width), torch.float32)]
     if candidate_write:
         specs.append(((rows, triton.cdiv(logits_width, layer.block)), torch.float32))
     logits, *scores = current_workspace_manager().get_simultaneous(*specs)
-    q, q_scale, weights = layer.decode_rows(rows)
+    native = metadata.decode_native
+    if native is not None:
+        # A request's next_n rows go in as one sequence, so a workgroup walks
+        # each KV tile once for all of them.
+        q, q_scale, weights = layer.rows(0, rows, native.context_lens.shape[0])
+        context_lens, block_table, cu_ends = (
+            native.context_lens,
+            native.block_table,
+            lengths,
+        )
+    else:
+        q, q_scale, weights = layer.decode_rows(rows)
+        context_lens, block_table, cu_ends = lengths, metadata.decode.block_table, None
+        assert block_table.shape[0] == rows, "one block-table row per query row"
     _aiter().paged_mxfp4_mqa_logits(
         q,
         q_scale,
         layer.kv,
         weights,
-        lengths,
+        context_lens,
         block_table,
         logits_width,
         out_logits=logits,
         clean_logits=False,
+        cu_ends=cu_ends,
         schedule=metadata.decode_schedule,
         **_block_scores(layer, scores[0] if scores else None),
     )
