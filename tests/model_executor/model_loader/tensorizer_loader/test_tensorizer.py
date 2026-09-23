@@ -28,16 +28,9 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.tensorizer_loader import (
     BLACKLISTED_TENSORIZER_ARGS,
 )
-from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 
 from .conftest import DummyExecutor, assert_from_collective_rpc
-
-ROCM_GFX950 = False
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx950
-
-    ROCM_GFX950 = on_gfx950()
 
 try:
     import tensorizer
@@ -114,11 +107,6 @@ def write_keyfile(keyfile_path: str):
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
-@pytest.mark.xfail(
-    ROCM_GFX950,
-    reason="Tensorizer output mismatch on gfx950",
-    strict=False,
-)
 def test_deserialized_encrypted_vllm_model_has_same_outputs(
     model_ref, vllm_runner, tmp_path, model_path
 ):
