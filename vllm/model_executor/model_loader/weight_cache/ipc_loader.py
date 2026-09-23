@@ -4,7 +4,9 @@
 daemon via CUDA IPC instead of loading from disk."""
 
 import dataclasses
+import errno
 import socket
+import time
 from copy import copy
 
 import torch
@@ -46,6 +48,11 @@ logger = init_logger(__name__)
 
 _CONNECT_TIMEOUT_S = 5.0
 _STATE_TIMEOUT_S = 300.0
+_STARTUP_RETRY_INTERVAL_S = 0.5
+
+
+class _WeightCacheDaemonNotReadyError(WeightCacheUnavailableError):
+    """Raised when the daemon has not started listening yet."""
 
 
 class IpcModelLoader(BaseModelLoader):
@@ -68,6 +75,8 @@ class IpcModelLoader(BaseModelLoader):
       the fingerprints mismatch (default: True).
     - connect_timeout_s: socket connect timeout (default: 5.0).
     - state_timeout_s: timeout for the weight-transfer request (default: 300.0).
+    - daemon_startup_timeout_s: total time to wait for a daemon that is still
+      starting (default: 0, which disables startup retries).
 
     Note: in zero-copy mode the weights live in the daemon's CUDA IPC
     allocations, so sleep mode (CuMemAllocator weight offloading) must not be
@@ -96,6 +105,11 @@ class IpcModelLoader(BaseModelLoader):
         self.state_timeout_s: float = float(
             extra_config.pop("state_timeout_s", _STATE_TIMEOUT_S)
         )
+        self.daemon_startup_timeout_s: float = float(
+            extra_config.pop("daemon_startup_timeout_s", 0.0)
+        )
+        if self.daemon_startup_timeout_s < 0:
+            raise ValueError("daemon_startup_timeout_s must be non-negative")
         if self.mode not in ("zero_copy", "copy"):
             raise ValueError(
                 f"Invalid weight cache mode {self.mode!r}, "
@@ -295,7 +309,40 @@ class IpcModelLoader(BaseModelLoader):
             dp_rank=dp_group.rank_in_group,
             is_draft=self.is_draft,
         )
-        return self._request_state(cache_config)
+        return self._request_state_with_startup_wait(cache_config)
+
+    def _request_state_with_startup_wait(
+        self, cache_config: WeightCacheKey
+    ) -> WeightCacheState:
+        deadline = (
+            time.monotonic() + self.daemon_startup_timeout_s
+            if self.daemon_startup_timeout_s > 0
+            else None
+        )
+        waiting_logged = False
+        while True:
+            try:
+                return self._request_state(cache_config)
+            except _WeightCacheDaemonNotReadyError as e:
+                if deadline is None or time.monotonic() >= deadline:
+                    if deadline is None:
+                        raise
+                    raise WeightCacheUnavailableError(
+                        "Weight cache daemon did not become ready within "
+                        f"{self.daemon_startup_timeout_s:.1f}s"
+                    ) from e
+                if not waiting_logged:
+                    logger.info(
+                        "Waiting up to %.1fs for the weight cache daemon to start",
+                        self.daemon_startup_timeout_s,
+                    )
+                    waiting_logged = True
+                time.sleep(
+                    max(
+                        0.0,
+                        min(_STARTUP_RETRY_INTERVAL_S, deadline - time.monotonic()),
+                    )
+                )
 
     def _request_state(self, cache_config: WeightCacheKey) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:
@@ -326,6 +373,10 @@ class IpcModelLoader(BaseModelLoader):
         try:
             verify_socket_owner(socket_path, strict_perms=strict_perms)
         except OSError as e:
+            if e.errno in (errno.ENOENT, errno.ENOTDIR):
+                raise _WeightCacheDaemonNotReadyError(
+                    f"Weight cache socket {socket_path} is not ready: {e}"
+                ) from e
             raise WeightCacheUnavailableError(
                 f"Weight cache socket {socket_path} is unavailable: {e}"
             ) from e
@@ -335,6 +386,10 @@ class IpcModelLoader(BaseModelLoader):
             sock.connect(socket_path)
         except OSError as e:
             sock.close()
+            if e.errno in (errno.ENOENT, errno.ECONNREFUSED):
+                raise _WeightCacheDaemonNotReadyError(
+                    f"Weight cache daemon at {socket_path} is not ready: {e}"
+                ) from e
             raise WeightCacheUnavailableError(
                 f"Cannot connect to weight cache daemon at {socket_path}: {e}"
             ) from e

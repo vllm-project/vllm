@@ -7,14 +7,11 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
-import glob
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,14 +32,9 @@ class WeightCacheDaemon:
         model: str,
         tp_size: int,
         extra_args: list[str] | None = None,
-        num_groups: int = 1,
     ):
         # Short base path: Unix socket paths are limited to ~107 characters.
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
-        self.tp_size = tp_size
-        # Each daemon group (target plus cached drafts) binds one socket per
-        # local rank.
-        self.num_sockets = tp_size * num_groups
         self._cmd = [
             sys.executable,
             "-m",
@@ -57,18 +49,12 @@ class WeightCacheDaemon:
             *(extra_args or []),
         ]
         self._proc: subprocess.Popen | None = None
-        self._lines: list[str] = []
 
     def __enter__(self) -> "WeightCacheDaemon":
         self._proc = subprocess.Popen(
             self._cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
         )
         threading.Thread(target=self._drain_stderr, daemon=True).start()
-        try:
-            self._wait_ready(DAEMON_TIMEOUT_S)
-        except Exception:
-            self._stop()
-            raise
         return self
 
     def __exit__(self, *exc_info) -> None:
@@ -76,32 +62,7 @@ class WeightCacheDaemon:
 
     def _drain_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
-        for line in self._proc.stderr:
-            self._lines.append(line)
-
-    def _logs(self) -> str:
-        return "".join(self._lines)
-
-    def _wait_ready(self, timeout_s: float) -> None:
-        assert self._proc is not None
-        # Each rank binds its socket only once the model is fully cached.
-        # Poll for the socket files rather than a log line: model loading can
-        # pull in JIT compilers that swap the process's stderr and swallow
-        # everything logged afterwards, making log-based readiness flaky.
-        pattern = os.path.join(self.socket_dir, "vllm_weight_cache_*.sock")
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if self._proc.poll() is not None:
-                raise RuntimeError(
-                    f"Weight cache daemon exited with {self._proc.returncode}:\n"
-                    f"{self._logs()}"
-                )
-            if len(glob.glob(pattern)) >= self.num_sockets:
-                return
-            time.sleep(1.0)
-        raise TimeoutError(
-            f"Weight cache daemon not ready after {timeout_s}s:\n{self._logs()}"
-        )
+        self._proc.stderr.read()
 
     def _stop(self) -> None:
         assert self._proc is not None
@@ -121,9 +82,6 @@ class ModelCase:
     images: list | None = None
     llm_kwargs: dict[str, Any] = field(default_factory=dict)
     daemon_args: list[str] = field(default_factory=list)
-    # Daemon groups the launcher starts; 2 when a cached draft group joins the
-    # target group (MTP/EAGLE speculative decoding).
-    daemon_groups: int = 1
 
 
 def generate(
@@ -131,10 +89,13 @@ def generate(
     case: ModelCase,
     socket_dir: str | None,
     fallback: bool,
+    daemon_startup_timeout_s: float = 0.0,
 ):
     extra_config = (
         {} if socket_dir is None else {"socket_dir": socket_dir, "fallback": fallback}
     )
+    if daemon_startup_timeout_s:
+        extra_config["daemon_startup_timeout_s"] = daemon_startup_timeout_s
     with vllm_runner(
         case.model,
         load_format="auto" if socket_dir is None else "ipc_cache",
@@ -203,7 +164,6 @@ QWEN_MTP_CASE = ModelCase(
         "--speculative-config",
         '{"method": "mtp", "num_speculative_tokens": 1}',
     ],
-    daemon_groups=2,
 )
 
 
@@ -242,11 +202,22 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
         case.model,
         tp_size=1,
         extra_args=case.daemon_args,
-        num_groups=case.daemon_groups,
     ) as d:
-        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        warm_outputs = generate(
+            vllm_runner,
+            case,
+            d.socket_dir,
+            fallback=False,
+            daemon_startup_timeout_s=DAEMON_TIMEOUT_S,
+        )
         # Warm restart: a second engine lifetime against the same daemon.
-        restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        restart_outputs = generate(
+            vllm_runner,
+            case,
+            d.socket_dir,
+            fallback=False,
+            daemon_startup_timeout_s=DAEMON_TIMEOUT_S,
+        )
 
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs

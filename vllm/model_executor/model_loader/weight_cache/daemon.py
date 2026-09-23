@@ -77,6 +77,7 @@ cached and keep loading from disk in the engine.
 """
 
 import contextlib
+import datetime
 import fcntl
 import multiprocessing
 import os
@@ -97,6 +98,7 @@ from vllm.config import (
 )
 from vllm.distributed import (
     ensure_model_parallel_initialized,
+    get_tp_group,
     init_distributed_environment,
 )
 from vllm.engine.arg_utils import EngineArgs
@@ -428,6 +430,7 @@ def _run_daemon(
     distributed_init_method: str,
     socket_dir: str | None,
     ready_queue: "multiprocessing.Queue[tuple[str, int]]",
+    weight_cache_timeout_s: int,
     is_draft: bool = False,
     dp_rank: int = 0,
 ) -> None:
@@ -441,9 +444,30 @@ def _run_daemon(
         dp_rank,
     )
     daemon.load_model()
+    _wait_for_daemon_group(weight_cache_timeout_s)
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
     )
+
+
+def _wait_for_daemon_group(timeout_s: int) -> None:
+    """Wait for every daemon rank in the TP group to finish loading."""
+    if timeout_s <= 0:
+        raise ValueError(f"--weight-cache-timeout must be positive, got {timeout_s}")
+
+    try:
+        torch.distributed.monitored_barrier(
+            group=get_tp_group().cpu_group,
+            timeout=datetime.timedelta(seconds=timeout_s),
+            wait_all_ranks=True,
+        )
+    except RuntimeError:
+        logger.exception(
+            "Weight cache daemon readiness barrier failed; exiting without serving"
+        )
+        # Let the parent launcher observe the failed rank and terminate the
+        # remaining group members instead of leaving them in the collective.
+        os._exit(1)
 
 
 def plan_local_ranks(parallel_config: ParallelConfig) -> list[tuple[int, int, int]]:
@@ -534,7 +558,16 @@ def main() -> None:
         "--weight-cache-master-port + 1 for multi-node, or a free port for "
         "single-node.",
     )
+    parser.add_argument(
+        "--weight-cache-timeout",
+        type=int,
+        default=600,
+        help="Maximum seconds for all daemon ranks in a group to finish loading "
+        "before serving (default: 600).",
+    )
     args = parser.parse_args()
+    if args.weight_cache_timeout <= 0:
+        parser.error("--weight-cache-timeout must be positive")
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
     if vllm_config.load_config.load_format == "ipc_cache":
@@ -622,6 +655,7 @@ def main() -> None:
                 init_method,
                 args.weight_cache_socket_dir,
                 ready_queue,
+                args.weight_cache_timeout,
                 is_draft,
                 dp_rank,
             ),
