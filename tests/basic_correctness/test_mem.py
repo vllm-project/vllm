@@ -527,7 +527,9 @@ def test_deep_sleep_async(gpu_memory_cleared):
 
 
 @requires_fp8
-def test_deep_sleep_fp8_kvcache_mrv1(monkeypatch: pytest.MonkeyPatch, gpu_memory_cleared):
+def test_deep_sleep_fp8_kvcache_mrv1(
+    monkeypatch: pytest.MonkeyPatch, gpu_memory_cleared
+):
     # Regression test for https://github.com/vllm-project/vllm/pull/28783.
     # In particular, verify that MRV1 does not rely on post_kv_cache_wake_up()
     # to restore correct output after level-2 sleep.

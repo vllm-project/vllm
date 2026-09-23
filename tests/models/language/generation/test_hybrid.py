@@ -73,6 +73,7 @@ def _set_conv_state_layout(monkeypatch, layout: str) -> None:
 def test_models(
     hf_runner,
     vllm_runner,
+    gpu_memory_cleared,
     example_prompts,
     monkeypatch,
     model: str,

@@ -37,11 +37,6 @@ MODELS = [
     not is_quant_method_supported("auto_gptq"),
     reason="auto_gptq is not supported on this GPU type.",
 )
-@pytest.mark.skipif(
-    __import__("vllm.platforms", fromlist=["current_platform"]).current_platform.is_rocm()
-    and "gfx950" in (__import__("vllm.platforms", fromlist=["current_platform"]).current_platform.get_device_name() or ""),
-    reason="GPTQ kernel not compiled for gfx950 (MI355 DPX) — qweight key missing",
-)
 @pytest.mark.parametrize("model_id", MODELS)
 def test_auto_gptq_quantization_method(
     model_id: str, monkeypatch, dist_init, workspace_init
