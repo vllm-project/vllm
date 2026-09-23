@@ -30,6 +30,7 @@ from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
+from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -53,6 +54,7 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        self.diffusion_config = vllm_config.diffusion_config
         # Load the custom logits processor classes once; the returned callable
         # runs their validate_params hooks per request at admission.
         self.validate_logits_processors_params = (
@@ -128,6 +130,20 @@ class InputProcessor:
             )
 
             self.validate_logits_processors_params(params)
+
+            if self.model_config.is_diffusion:
+                # Without --diffusion-config the served canvas is unknown here;
+                # the ids and the read-only normalisation are still checked.
+                validate_diffusion_sampling_params(
+                    params,
+                    canvas_length=(
+                        self.diffusion_config.canvas_length
+                        if self.diffusion_config is not None
+                        else None
+                    ),
+                    vocab_size=self.model_config.get_vocab_size(),
+                    async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
+                )
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
@@ -397,6 +413,13 @@ class InputProcessor:
                 sampling_params.max_tokens = (
                     self.model_config.max_model_len - prompt_len
                 )
+                # min_tokens is not checked while max_tokens is unset.
+                if sampling_params.min_tokens > sampling_params.max_tokens:
+                    raise VLLMValidationError(
+                        f"min_tokens must be less than or equal to "
+                        f"max_tokens={sampling_params.max_tokens}, got "
+                        f"{sampling_params.min_tokens}."
+                    )
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
@@ -532,6 +555,15 @@ class InputProcessor:
 
         prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
         self._validate_prompt_len(prompt_len, prompt_type)
+
+        if prompt_input["type"] == "embeds":
+            is_token_ids = prompt_input.get("is_token_ids")
+            if is_token_ids is not None and len(is_token_ids) != prompt_len:
+                raise VLLMValidationError(
+                    "prompt_is_token_ids must have the same length as prompt_embeds "
+                    f"(expected {prompt_len}, got {len(is_token_ids)}).",
+                    parameter="prompt_is_token_ids",
+                )
 
         if prompt_input["type"] == "multimodal":
             decoder_mm_positions = prompt_input["mm_placeholders"]
