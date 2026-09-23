@@ -52,6 +52,26 @@ class AsyncScheduler(Scheduler):
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
         status_before_update = request.status
+
+        if not is_stale and len(new_token_ids) > request.num_output_placeholders:
+            # The runner may only return tokens for steps that the scheduler
+            # reserved output placeholders for, and must return none while a
+            # request is still being prefilled. If it returns one anyway, that
+            # token was sampled from an incomplete prefix and is not a valid
+            # continuation: drop it rather than appending garbage to the
+            # response and driving num_output_placeholders negative, which trips
+            # the invariant below and kills EngineCore.
+            num_reserved = request.num_output_placeholders
+            logger.warning(
+                "Request %s: model runner returned %d token(s) but only %d output "
+                "placeholder(s) were reserved; dropping the extra token(s). This "
+                "means a token was sampled while the request was still prefilling.",
+                request.request_id,
+                len(new_token_ids),
+                num_reserved,
+            )
+            new_token_ids = new_token_ids[:num_reserved]
+
         new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids
         )
