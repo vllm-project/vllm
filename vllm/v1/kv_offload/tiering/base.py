@@ -66,6 +66,7 @@ class TieringOffloadingMetrics:
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
+    CHECKSUM_FAILURES = "vllm:kv_offload_tiering_checksum_failures"
 
 
 @dataclass
@@ -93,6 +94,8 @@ class JobResult:
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
     transfer_bytes: int | None = None
+    # Set only by tiers that define CHECKSUM_FAILURES in build_metric_definitions.
+    checksum_failed: bool = False
 
 
 class ParentManager(ABC):
