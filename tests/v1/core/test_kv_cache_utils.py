@@ -390,6 +390,75 @@ def test_kv_cache_config_selects_prefix_cacheable_groups():
     assert config.prefix_cacheable_groups == (full_group,)
 
 
+@pytest.mark.skip_global_cleanup
+def test_dsv41_encoder_only_profile_transfers_global_groups_only():
+    global_group = KVCacheGroupSpec(
+        [
+            "language_model.model.layers.2.attn",
+            "language_model.model.layers.2.attn.indexer.k_cache",
+            "language_model.model.layers.20.attn",
+            "language_model.model.layers.20.attn.indexer.k_cache",
+        ],
+        new_kv_cache_spec(),
+    )
+    swa_group = KVCacheGroupSpec(
+        ["swa"],
+        SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float32,
+            sliding_window=128,
+            bounded_replay=True,
+        ),
+    )
+    continuation_group = KVCacheGroupSpec(
+        ["compressor_state"],
+        CircularBufferSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=0,
+            dtype=torch.float32,
+        ),
+    )
+    draft_group = KVCacheGroupSpec(
+        ["language_model.speculator.layers.0.attn"], new_kv_cache_spec()
+    )
+    groups = [global_group, swa_group, continuation_group, draft_group]
+
+    kv_cache_utils._apply_dsv41_encoder_only_transfer_profile(groups, (2, 20), (2, 20))
+
+    assert [group.enable_kv_transfer for group in groups] == [
+        True,
+        False,
+        False,
+        False,
+    ]
+
+
+@pytest.mark.skip_global_cleanup
+def test_dsv41_encoder_only_profile_rejects_missing_or_mixed_global_state():
+    global_name = "model.layers.20.attn"
+    index_name = "model.layers.20.attn.indexer.k_cache"
+    with pytest.raises(ValueError, match="missing required global cache groups"):
+        kv_cache_utils._apply_dsv41_encoder_only_transfer_profile(
+            [KVCacheGroupSpec([global_name], new_kv_cache_spec())], (20,), (20,)
+        )
+
+    with pytest.raises(ValueError, match="do not mix with local state"):
+        kv_cache_utils._apply_dsv41_encoder_only_transfer_profile(
+            [
+                KVCacheGroupSpec(
+                    [global_name, index_name, "draft.layers.0.attn"],
+                    new_kv_cache_spec(),
+                )
+            ],
+            (20,),
+            (20,),
+        )
+
+
 def test_kv_cache_blocks_selects_requested_groups():
     blocks = KVCacheBlocks(
         (

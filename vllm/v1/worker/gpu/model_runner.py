@@ -84,6 +84,7 @@ from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
+    AsyncCacheOnlyOutput,
     AsyncOutput,
     AsyncPoolingOutput,
     StepTimingCollector,
@@ -198,6 +199,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
+        self.is_dsv41_encoder_only_prefill = vllm_config.is_dsv41_encoder_only_prefill
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -2000,7 +2002,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @step_eplb_after()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
-    ) -> AsyncOutput | ModelRunnerOutput | None:
+    ) -> AsyncOutput | AsyncCacheOnlyOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
@@ -2035,6 +2037,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+
+        if self.is_dsv41_encoder_only_prefill:
+            self.postprocess_num_computed_tokens(input_batch)
+            self.model_state.postprocess_state(input_batch.idx_mapping, 0)
+            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+            output = ModelRunnerOutput(
+                req_ids=input_batch.req_ids,
+                req_id_to_index={
+                    req_id: i for i, req_id in enumerate(input_batch.req_ids)
+                },
+                sampled_token_ids=[[] for _ in input_batch.req_ids],
+                kv_connector_output=kv_connector_output,
+                ec_connector_output=ec_connector_output,
+                cudagraph_stats=cudagraph_stats,
+            )
+            return AsyncCacheOnlyOutput(output, self.main_stream)
 
         # Last rank: sample tokens
         draft_hidden_states = hidden_states

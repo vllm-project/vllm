@@ -253,6 +253,52 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             ]
         else:
             remote_logical_block_ids = meta.remote.block_ids
+            if (
+                getattr(
+                    getattr(self, "vllm_config", None),
+                    "uses_dsv41_encoder_only_handoff",
+                    False,
+                )
+                and not dcp_active
+            ):
+                if (
+                    self.block_size != remote_info.remote_block_size
+                    or self._physical_blocks_per_logical_kv_block
+                    != remote_info.remote_physical_blocks_per_logical
+                ):
+                    raise NotImplementedError(
+                        "Encoder-only NIXL pulls require matching producer and "
+                        "consumer KV block geometry."
+                    )
+                transfer_groups = self.kv_cache_config.transfer_group_ids
+                if (
+                    len(remote_logical_block_ids) != len(transfer_groups)
+                    or len(meta.local_block_ids) != len(transfer_groups)
+                    or len(meta.local_num_computed_blocks)
+                    != len(self.kv_cache_config.kv_cache_groups)
+                ):
+                    raise ValueError("Encoder-only NIXL transfer groups do not match.")
+                aligned_remote: list[list[int]] = []
+                for group_index, (remote_group, local_group) in enumerate(
+                    zip(remote_logical_block_ids, meta.local_block_ids, strict=True)
+                ):
+                    if not local_group:
+                        aligned_remote.append([])
+                        continue
+                    cached = meta.local_num_computed_blocks[
+                        transfer_groups[group_index]
+                    ]
+                    end = cached + len(local_group)
+                    if end > len(remote_group):
+                        raise ValueError(
+                            "Encoder-only NIXL producer blocks do not cover "
+                            "the consumer's uncached range."
+                        )
+                    # The producer may hold a partial final block that D
+                    # discarded before bounded replay. Match positions using
+                    # D's actual local hit, not the difference in list lengths.
+                    aligned_remote.append(list(remote_group[cached:end]))
+                remote_logical_block_ids = aligned_remote
             meta.remote.block_ids = self._logical_to_kernel_block_ids(
                 remote_logical_block_ids,
                 remote_info.remote_physical_blocks_per_logical,

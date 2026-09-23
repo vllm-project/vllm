@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MLAAttentionSpec,
 )
+from vllm.v1.request import RequestStatus
 
 from .utils import (
     create_request,
@@ -164,6 +165,70 @@ def test_region_pull_ignores_allocation_padding(
         )
         for base in (30, 40)
     ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "prompt_tokens,cached_blocks",
+    [(512, 0), (513, 0), (600, 0), (768, 0), (769, 2)],
+)
+def test_encoder_only_pull_matches_accepted_prefix_positions(
+    region_pull_worker, prompt_tokens, cached_blocks
+):
+    """A discarded P tail block must not shift D's global KV reads."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    worker = region_pull_worker
+    worker.vllm_config = SimpleNamespace(uses_dsv41_encoder_only_handoff=True)
+    worker._uses_region_group_mapping = True
+    worker.dst_uses_region_group_mapping = {"P": True}
+    worker.dst_region_group_ids = {"P": [0, 1]}
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_tp_size=1,
+        remote_dcp_size=1,
+        remote_block_size=64,
+        remote_physical_blocks_per_logical=1,
+    )
+
+    accepted_blocks = prompt_tokens // 64
+    received_blocks = accepted_blocks - cached_blocks
+    producer_blocks = (prompt_tokens + 63) // 64
+    local_blocks = [
+        list(range(40, 40 + received_blocks)),
+        list(range(60, 60 + received_blocks)),
+    ]
+    remote_blocks = [
+        list(range(1, 1 + producer_blocks)),
+        list(range(21, 21 + producer_blocks)),
+    ]
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="request",
+        local_block_ids=local_blocks,
+        local_num_computed_blocks=(0, cached_blocks, cached_blocks),
+        awaiting_kvs=True,
+        kv_transfer_params={
+            "remote_engine_id": "P",
+            "remote_request_id": "request-P",
+            "remote_host": "localhost",
+            "remote_port": 1,
+            "remote_num_tokens": prompt_tokens,
+            "remote_block_ids": remote_blocks,
+        },
+    )
+    meta = metadata.reqs_to_recv["request"]
+    meta.local_physical_block_ids = local_blocks
+
+    worker._read_blocks_for_req("request", meta)
+
+    read = worker._read_blocks_mixed.call_args.kwargs
+    expected = remote_blocks[0][cached_blocks:accepted_blocks] + [
+        block_id + 100 for block_id in remote_blocks[1][cached_blocks:accepted_blocks]
+    ]
+    assert read["remote_block_descs_ids"].tolist() == expected
 
 
 @pytest.mark.cpu_test
@@ -439,6 +504,30 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
     _, local_block_ids, _, awaiting_kvs = scheduler._reqs_need_recv[request.request_id]
     assert not local_block_ids  # full local hit: nothing to pull
     assert awaiting_kvs is False
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_cache_only_prefill_returns_pull_metadata_without_sampling():
+    """A zero-token producer completion must give D the blocks to pull."""
+    scheduler = make_nixl_scheduler(heartbeat=True)
+    scheduler.vllm_config.parallel_config = SimpleNamespace(
+        decode_context_parallel_size=1, pipeline_parallel_size=1
+    )
+    request = create_request(num_tokens=32, do_remote_decode=True)
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["cache_only"] = True
+    request.num_computed_tokens = request.num_prompt_tokens
+    request.status = RequestStatus.FINISHED_STOPPED
+
+    delay_free, params = scheduler.request_finished(request, ([1, 2],))
+
+    assert delay_free
+    assert request.num_output_tokens == 0
+    assert params["remote_num_tokens"] == request.num_prompt_tokens
+    assert params["remote_block_ids"] == ([1, 2],)
+    assert params["do_remote_prefill"]
+    assert params["transfer_mode"] == "pull"
 
 
 @pytest.mark.cpu_test
