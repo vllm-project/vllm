@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from argparse import ArgumentError
+from unittest.mock import patch
 
 import pytest
 
+from vllm.config import ModelConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -18,6 +20,7 @@ def test_prefix_caching_from_cli():
     assert vllm_config.cache_config.enable_prefix_caching, (
         "V1 turns on prefix caching by default."
     )
+    assert vllm_config.cache_config.prefix_cache_retention_interval == 0
 
     # Turn it off possible with flag.
     args = parser.parse_args(["--no-enable-prefix-caching"])
@@ -46,6 +49,10 @@ def test_prefix_caching_from_cli():
     parser.exit_on_error = False
     with pytest.raises(ArgumentError):
         args = parser.parse_args(["--prefix-caching-hash-algo", "invalid"])
+
+    args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_cache_retention_interval == 64
 
 
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
@@ -115,4 +122,77 @@ def test_data_parallel_start_rank_zero_infers_hybrid_lb():
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.parallel_config.data_parallel_hybrid_lb is True
+    assert vllm_config.parallel_config.data_parallel_rank == 0
+
+
+def test_external_lb_preserves_explicit_rank_when_dp_exceeds_nodes():
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=4,
+        data_parallel_rank=3,
+        data_parallel_external_lb=True,
+        nnodes=2,
+        node_rank=1,
+    )
+
+    with patch.object(ModelConfig, "is_moe", new=property(lambda self: True)):
+        vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    assert vllm_config.parallel_config.data_parallel_rank == 3
+
+
+@pytest.mark.parametrize(
+    ("data_parallel_size", "nnodes", "tensor_parallel_size"),
+    [(4, 2, 1), (2, 3, 3)],
+)
+def test_external_lb_requires_explicit_rank_when_nodes_are_not_evenly_partitioned(
+    data_parallel_size, nnodes, tensor_parallel_size
+):
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=data_parallel_size,
+        data_parallel_external_lb=True,
+        tensor_parallel_size=tensor_parallel_size,
+        nnodes=nnodes,
+        node_rank=1,
+    )
+
+    with (
+        patch.object(ModelConfig, "is_moe", new=property(lambda self: True)),
+        pytest.raises(
+            ValueError,
+            match="Set a unique `--data-parallel-rank`",
+        ),
+    ):
+        engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+def test_external_lb_infers_rank_when_dp_does_not_exceed_nodes():
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=2,
+        data_parallel_external_lb=True,
+        nnodes=2,
+        node_rank=1,
+    )
+
+    with patch.object(ModelConfig, "is_moe", new=property(lambda self: True)):
+        vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    assert vllm_config.parallel_config.data_parallel_rank == 1
+
+
+def test_external_lb_infers_rank_for_multinode_replicas():
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=2,
+        data_parallel_external_lb=True,
+        tensor_parallel_size=12,
+        nnodes=4,
+        node_rank=1,
+    )
+
+    with patch.object(ModelConfig, "is_moe", new=property(lambda self: True)):
+        vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
     assert vllm_config.parallel_config.data_parallel_rank == 0

@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts import triton_moe
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     _valid_deep_gemm_shape,
 )
@@ -106,7 +107,16 @@ SEEDS = [0]
 
 
 def torch_w8a8_block_fp8_moe(
-    a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block_shape, silu_fp32=False
+    a,
+    w1,
+    w2,
+    w1_s,
+    w2_s,
+    topk_weight,
+    topk_ids,
+    block_shape,
+    silu_fp32=False,
+    expert_map=None,
 ):
     """Fused MoE with block-wise fp8 quantization using native torch.
 
@@ -122,6 +132,9 @@ def torch_w8a8_block_fp8_moe(
 
     topk_weight = topk_weight.view(-1)
     topk_ids = topk_ids.view(-1)
+    if expert_map is not None:
+        # w1/w2 hold this rank's experts; slots mapped to -1 contribute nothing.
+        topk_ids = expert_map[topk_ids]
 
     _, block_k = block_shape[0], block_shape[1]
     # Quantize with the production per-token-group fp8 kernel (same HIP/CUDA op the
@@ -246,6 +259,108 @@ def test_w8a8_block_fp8_fused_moe(
     torch.testing.assert_close(m_out, ref_out_m, atol=tol, rtol=tol)
 
 
+@pytest.mark.parametrize("clamp_limit", [None, 10.0])
+@torch.inference_mode()
+def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
+    clamp_limit, monkeypatch, workspace_init, disable_deepgemm_ue8m0
+):
+    """A SwiGLU clamp must bypass the fused SiLU+quant kernel, which cannot clamp."""
+    torch.manual_seed(0)
+    M, N, K, E, topk = 16, 256, 512, 8, 2
+    block_size = [128, 128]
+
+    a = torch.randn((M, K), dtype=torch.bfloat16) / 10
+    score = torch.randn((M, E), dtype=torch.bfloat16)
+    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
+        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
+    )
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        block_shape=block_size,
+        gemm1_clamp_limit=clamp_limit,
+    )
+    m_fused_moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    fused_calls = 0
+    fused_op = triton_moe.ops.silu_and_mul_per_block_quant
+
+    def counting_fused_op(*args, **kwargs):
+        nonlocal fused_calls
+        fused_calls += 1
+        return fused_op(*args, **kwargs)
+
+    monkeypatch.setattr(
+        triton_moe.ops, "silu_and_mul_per_block_quant", counting_fused_op
+    )
+
+    with set_current_vllm_config(vllm_config):
+        m_fused_moe.apply(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+            global_num_experts=E,
+        )
+
+    assert (fused_calls > 0) == (clamp_limit is None), (
+        f"fused fast path ran {fused_calls} times with clamp_limit={clamp_limit}"
+    )
+
+
+@pytest.mark.parametrize(("M", "N", "K"), [(83, 512, 512), (2048, 4608, 512)])
+@pytest.mark.parametrize("topk", [2, 6])
+@pytest.mark.parametrize("ep_size", [2, 4])
+@torch.inference_mode()
+def test_w8a8_block_fp8_fused_moe_expert_map(M, N, K, topk, ep_size, workspace_init):
+    """One EP rank: local expert shard plus an expert_map with -1 entries."""
+    E, block_size, dtype = 16, [128, 128], torch.bfloat16
+    torch.manual_seed(0)
+
+    a = torch.randn((M, K), dtype=dtype) / 10
+    score = torch.randn((M, E), dtype=dtype)
+    w1, w2, quant_config = make_test_quant_config(
+        E, N, K, dtype, quant_dtype=torch.float8_e4m3fn, block_shape=block_size
+    )
+
+    local_e = E // ep_size
+    e_ids = torch.randperm(E, dtype=torch.int32)[:local_e]
+    e_map = torch.full((E,), -1, dtype=torch.int32)
+    e_map[e_ids] = torch.arange(local_e, dtype=torch.int32)
+    w1, w2 = w1[e_ids].contiguous(), w2[e_ids].contiguous()
+    w1_s = quant_config.w1_scale[e_ids].contiguous()
+    w2_s = quant_config.w2_scale[e_ids].contiguous()
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s, w2_scale=w2_s, block_shape=block_size
+    )
+
+    m_fused_moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    with set_current_vllm_config(vllm_config):
+        ref_out = torch_w8a8_block_fp8_moe(
+            a, w1, w2, w1_s, w2_s, topk_weights, topk_ids, block_size, expert_map=e_map
+        )
+        m_out = m_fused_moe.apply(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=e_map,
+            global_num_experts=E,
+        )
+
+    torch.testing.assert_close(m_out, ref_out, atol=0.035, rtol=0.035)
+
+
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
 @pytest.mark.parametrize("E", E)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -349,5 +464,109 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             torch.accelerator.synchronize()
             graph.replay()
             torch.accelerator.synchronize()
+
+    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
+
+
+def _dequant_block_fp8(
+    w_fp8: torch.Tensor, w_s: torch.Tensor, block_shape: list[int]
+) -> torch.Tensor:
+    """Dequantize a [N, K] fp8 weight with [Nb, Kb] block scales to fp32."""
+    n, k = w_fp8.shape
+    bn, bk = block_shape
+    s = w_s.repeat_interleave(bn, dim=0).repeat_interleave(bk, dim=1)
+    return w_fp8.to(torch.float32) * s[:n, :k]
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1, 2, 3])
+@torch.inference_mode()
+def test_w8a8_block_fp8_fused_moe_refined_block_scales(tp_rank, workspace_init):
+    """TP-misaligned blockwise FP8 MoE (e.g. Qwen4Exp, intermediate
+    640 at TP=4 -> 160 per rank, not divisible by the checkpoint's 128 block).
+
+    The per-rank scale grid is refined from 128 to 32 (lossless: each 32-block
+    lies inside one global 128-block) so the Triton kernel can consume exact
+    per-shard scales. Simulates one TP rank's shard and checks:
+      1. the refined+sharded scales dequantize exactly like the global scales;
+      2. the Triton fused MoE kernel with block_shape=[32, 32] matches the
+         native-torch blockwise reference on the same shard.
+    """
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    M, E, topk = 8, 4, 2
+    hidden = 256
+    inter_full = 640
+    tp_size = 4
+    n_shard = inter_full // tp_size  # 160
+    ckpt_block = [128, 128]
+    refined_block = [32, 32]
+    factor = ckpt_block[0] // refined_block[0]  # 4
+
+    a = torch.randn((M, hidden), dtype=dtype) / 10
+    score = torch.randn((M, E), dtype=dtype)
+
+    (_, w1_full, w1_s_full, _), (_, w2_full, w2_s_full, _) = make_test_weights(
+        E,
+        inter_full,
+        hidden,
+        dtype,
+        torch.float8_e4m3fn,
+        per_out_ch_quant=False,
+        block_shape=ckpt_block,
+    )
+    assert w1_s_full is not None
+    assert w2_s_full is not None
+
+    # TP shard the weights (exact slicing, no scale involvement).
+    lo, hi = tp_rank * n_shard, (tp_rank + 1) * n_shard
+    w1 = torch.cat(
+        [w1_full[:, lo:hi], w1_full[:, inter_full + lo : inter_full + hi]], dim=1
+    )
+    w2 = w2_full[:, :, lo:hi]
+
+    # Refine the global 128-block scales to 32 blocks, then take the shard's
+    # slice -- mirrors the Fp8MoEMethod/RoutedExperts loading path.
+    w1_s32 = w1_s_full.repeat_interleave(factor, dim=-2).repeat_interleave(
+        factor, dim=-1
+    )
+    nb = n_shard // refined_block[0]  # 5 local 32-blocks per projection
+    gate_hi = w1_s32.shape[1] // 2
+    w1_s = torch.cat(
+        [
+            w1_s32[:, tp_rank * nb : (tp_rank + 1) * nb],
+            w1_s32[:, gate_hi + tp_rank * nb : gate_hi + (tp_rank + 1) * nb],
+        ],
+        dim=1,
+    )
+    w2_s32 = w2_s_full.repeat_interleave(factor, dim=-2).repeat_interleave(
+        factor, dim=-1
+    )
+    w2_s = w2_s32[:, :, tp_rank * nb : (tp_rank + 1) * nb]
+
+    # The refined per-shard scales must reproduce the global-scale dequant
+    # exactly (dequant full-width, then slice to the shard).
+    for e in range(E):
+        d32 = _dequant_block_fp8(w1[e, :n_shard], w1_s[e, :nb], refined_block)
+        d128 = _dequant_block_fp8(w1_full[e], w1_s_full[e], ckpt_block)[lo:hi]
+        assert torch.equal(d32, d128)
+        d32 = _dequant_block_fp8(w2[e], w2_s[e], refined_block)
+        d128 = _dequant_block_fp8(w2_full[e], w2_s_full[e], ckpt_block)[:, lo:hi]
+        assert torch.equal(d32, d128)
+
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        block_shape=refined_block,
+    )
+
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    with set_current_vllm_config(vllm_config):
+        ref_out = torch_w8a8_block_fp8_moe(
+            a, w1, w2, w1_s, w2_s, topk_weights, topk_ids, refined_block
+        )
+        out = fused_experts(
+            a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
+        )
 
     torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)

@@ -27,8 +27,7 @@ from .utils import PPMissingLayer, extract_layer_index, maybe_prefix
 
 
 class MellumAttention(Qwen3MoeAttention):
-    """
-    Differences from `Qwen3MoeAttention`:
+    """Differences from `Qwen3MoeAttention`:
     - Supports `per_layer_sliding_window` for `Attention`.
     """
 
@@ -92,32 +91,37 @@ class MellumAttention(Qwen3MoeAttention):
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            per_layer_sliding_window=per_layer_sliding_window,
-            prefix=f"{prefix}.attn",
-            **(
-                {
-                    "layer_idx": extract_layer_index(prefix),
-                    "dual_chunk_attention_config": dual_chunk_attention_config,
-                }
-                if dual_chunk_attention_config
-                else {}
-            ),
-        )
+        if dual_chunk_attention_config:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                per_layer_sliding_window=per_layer_sliding_window,
+                prefix=f"{prefix}.attn",
+                layer_idx=extract_layer_index(prefix),
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                per_layer_sliding_window=per_layer_sliding_window,
+                prefix=f"{prefix}.attn",
+            )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
 
 class MellumDecoderLayer(Qwen3MoeDecoderLayer):
-    """
-    Differences from `Qwen3MoeDecoderLayer`:
+    """Differences from `Qwen3MoeDecoderLayer`:
     - Supports interleaved SWA and per-layer RoPE scaling.
     """
 
@@ -179,8 +183,7 @@ class MellumDecoderLayer(Qwen3MoeDecoderLayer):
 
 @support_torch_compile
 class MellumModel(Qwen3MoeModel):
-    """
-    Differences from `Qwen3MoeModel`:
+    """Differences from `Qwen3MoeModel`:
     - Uses `MellumDecoderLayer`.
     """
 
@@ -198,8 +201,7 @@ class MellumModel(Qwen3MoeModel):
 
 
 class MellumForCausalLM(Qwen3MoeForCausalLM):
-    """
-    Differences from `Qwen3MoeForCausalLM`:
+    """Differences from `Qwen3MoeForCausalLM`:
     - Uses `MellumModel`.
     """
 

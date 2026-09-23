@@ -128,14 +128,13 @@ class WorkerLoRAManager:
             # loading weights, throwing an exception if validation fails.
             peft_helper.validate_legal(self.lora_config)
 
-            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
-            # to ensure correct loading of lora weights. Drop the QKV/MLP fusion
-            # substr maps so constituent names (e.g. `q_proj`) survive for the
-            # LoRA manager to pack, while keeping genuine renames/prefixes.
+            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper to ensure
+            # correct loading of lora weights. We only need to know about renames for
+            # this, so we use get_rename_mapper() to ignore stacking and deletions.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
             if hf_to_vllm_mapper is not None:
-                hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
+                hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
@@ -157,6 +156,10 @@ class WorkerLoRAManager:
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
+
+            # Validate classification-head weights.
+            self._adapter_manager._validate_modules_to_save(lora)
+            self._adapter_manager._validate_token_classification_lora(lora)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
