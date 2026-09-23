@@ -998,30 +998,15 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
+class MultiModalProcessorCacheMissError(ValueError):
+    """A processor cache miss for an item whose media data was omitted."""
+
+
 MultiModalIsCached = dict[str, list[bool]]
 """
 A collection of the `is_cached` flag for each item, with a similar structure as
 [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
 """
-
-
-@dataclass(frozen=True)
-class MissingMultiModalMedia:
-    modality: str
-    item_idx: int
-
-
-class MultiModalProcessorCacheMissError(ValueError):
-    """A processor cache miss for an item whose media data was omitted."""
-
-    def __init__(self, missing_media: Sequence[MissingMultiModalMedia]) -> None:
-        self.missing_media = tuple(missing_media)
-        first = self.missing_media[0]
-        super().__init__(
-            f"Cache miss for {first.modality} at index {first.item_idx} "
-            "but data is not provided."
-        )
-
 
 MultiModalPromptUpdates = Mapping[str, Sequence[Sequence[ResolvedPromptUpdate]]]
 """
@@ -1300,21 +1285,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         }
 
         mm_missing_data = {}
-        missing_media = []
         for modality, idxs in mm_missing_idxs.items():
             missing_modality_data = []
             for idx in idxs:
                 data = mm_data_items[modality][idx]
                 if data is None:
-                    missing_media.append(
-                        MissingMultiModalMedia(modality=modality, item_idx=idx)
+                    raise MultiModalProcessorCacheMissError(
+                        f"Cache miss for {modality} at index {idx} "
+                        f"but data is not provided."
                     )
                 else:
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
-
-        if missing_media:
-            raise MultiModalProcessorCacheMissError(missing_media)
 
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 

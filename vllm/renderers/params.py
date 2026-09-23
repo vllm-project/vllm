@@ -100,7 +100,7 @@ class ChatParams:
     """The kwargs to pass to the multi-modal processor."""
 
     skip_early_mm_lookup: bool = False
-    """Skip early UUID-based multi-modal cache lookups."""
+    """Skip the UUID-only rendering attempt."""
 
     return_assistant_tokens_mask: bool = False
     """Request a per-token assistant mask from apply_chat_template."""
