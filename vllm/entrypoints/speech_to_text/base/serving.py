@@ -762,7 +762,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         output.text, output.finish_reason is not None
                     )
 
-                    # dont add separator to the first chunk
+                    # don't add separator to the first chunk
                     if (
                         result_generator is not list_result_generator[0]
                         and beginning_of_chunk
