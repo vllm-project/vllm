@@ -26,6 +26,7 @@ class SpecDecodingStats:
     num_spec_tokens: int
     num_drafts: int = 0
     num_draft_tokens: int = 0
+    num_verified_draft_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
     num_draft_tokens_per_pos: list[int] = field(default_factory=list)
@@ -85,6 +86,9 @@ class SpecDecodingLogging:
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
+        if num_drafts == 0:
+            self.reset()
+            return
         draft_throughput = 0
         accepted_throughput = 0
 
@@ -193,6 +197,14 @@ class SpecDecodingProm:
 
       vllm:spec_decode_num_accepted_tokens_per_pos_total[$interval] /
       vllm:spec_decode_num_drafts_total[$interval]
+
+    With adaptive verification, the mean verified draft width is:
+
+      rate(vllm:spec_decode_num_verified_draft_tokens_total[$interval]) /
+      rate(vllm:spec_decode_num_drafts_total[$interval])
+
+    The verified count excludes bonus tokens and can be smaller than the
+    proposed draft count.
     """
 
     _counter_cls = prometheus_client.Counter
@@ -244,6 +256,19 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_draft_tokens = counters[1]
         self.counter_spec_decode_num_accepted_tokens = counters[2]
 
+        self.counter_spec_decode_num_verified_draft_tokens = None
+        if not is_diffusion:
+            assert speculative_config is not None
+            if speculative_config.enable_adaptive_verification:
+                metric = self._counter_cls(
+                    name="vllm:spec_decode_num_verified_draft_tokens",
+                    documentation="Draft tokens actually verified by the target.",
+                    labelnames=labelnames,
+                )
+                self.counter_spec_decode_num_verified_draft_tokens = (
+                    create_metric_per_engine(metric, per_engine_labelvalues)
+                )
+
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]
         ] = {}
@@ -275,6 +300,10 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_accepted_tokens[engine_idx].inc(
             spec_decoding_stats.num_accepted_tokens
         )
+        if self.counter_spec_decode_num_verified_draft_tokens is not None:
+            self.counter_spec_decode_num_verified_draft_tokens[engine_idx].inc(
+                spec_decoding_stats.num_verified_draft_tokens
+            )
         for pos, counter in enumerate(
             self.counter_spec_decode_num_accepted_tokens_per_pos.get(engine_idx, [])
         ):
