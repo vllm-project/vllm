@@ -3400,7 +3400,26 @@ class VllmConfig:
                 "Triton ReplaySSM requires Model Runner V1; use "
                 "--mamba-backend flashinfer or Model Runner V1"
             )
-        # ROCm ATOM ReplaySSM is compatible with KV connectors / CPU offload.
+        # ATOM KDA ReplaySSM on ROCm is compatible with KV connectors / CPU
+        # offload (the MLA offload tier). NVIDIA RecoverSSM and other
+        # ReplaySSM backends are not; keep the upstream rejection there.
+        kimi_kda_rocm = current_platform.is_rocm() and (
+            self.model_config is not None
+            and self.model_config.architecture
+            in (
+                "KimiLinearForCausalLM",
+                "KimiK3ForConditionalGeneration",
+            )
+        )
+        if (
+            not kimi_kda_rocm
+            and self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            raise ValueError(
+                "--use-replayssm is incompatible with KV connectors "
+                "(P/D disaggregation, KV cache offload)"
+            )
         return self
 
 

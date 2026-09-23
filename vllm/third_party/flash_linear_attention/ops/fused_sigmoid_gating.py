@@ -232,6 +232,18 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
+    # CUDA Qwen GDN (is_kda=False, lower_bound=None) must keep the original
+    # contiguous HV-strided a/b layout. KDA a is [T, HV, K], so token strides
+    # are taken from the tensor instead of forcing contiguous().
+    if not is_kda:
+        a = a.contiguous()
+        b = b.contiguous()
+        stride_a_token = HV
+        stride_b_token = HV
+    else:
+        stride_a_token = a.stride(-3)
+        stride_b_token = b.stride(-2)
+
     grid = (NK, NV, N * HV)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,
@@ -260,8 +272,8 @@ def fused_sigmoid_gating_delta_rule_update(
         V=V,
         BK=BK,
         BV=BV,
-        stride_a_token=a.stride(-3) if is_kda else a.stride(-2),
-        stride_b_token=b.stride(-2),
+        stride_a_token=stride_a_token,
+        stride_b_token=stride_b_token,
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,

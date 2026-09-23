@@ -154,9 +154,8 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         if num_slots is None:
             return False
         device = self.device
-        self.replayssm_write_pos = torch.zeros(
-            num_slots, dtype=torch.int32, device=device
-        )
+        write_pos = torch.zeros(num_slots, dtype=torch.int32, device=device)
+        self.replayssm_write_pos = write_pos
         self.replayssm_pending_reset = torch.zeros(
             num_slots, dtype=torch.int32, device=device
         )
@@ -173,7 +172,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             "write_pos_slots=%d.",
             self.replayssm_cache_len,
             self.replayssm_max_query_len,
-            self.replayssm_write_pos.numel(),
+            write_pos.numel(),
         )
         return True
 

@@ -57,7 +57,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -103,9 +103,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
         return base
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
-        if spec is None or not self._use_kda_replayssm():
+        if spec is None:
+            return None
+        assert isinstance(spec, MambaSpec)
+        if not self._use_kda_replayssm():
             return spec
         # Only the per-draft states are dropped. page_size_padded must be left
         # alone: the platform pads the mamba page to exactly the attention page
@@ -696,7 +699,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     assert m.replayssm_fold_slots is not None
                     replayssm_fold(
                         recurrent_state,
-                        *self.kv_cache[2:5],
+                        self.kv_cache[2],
+                        self.kv_cache[3],
+                        self.kv_cache[4],
                         m.replayssm_fold_len,
                         m.replayssm_fold_slots,
                     )
@@ -762,6 +767,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in mixed_qkv_ns.split(self.local_projection_size, dim=-1)
                 )
+                assert non_spec_query_start_loc is not None
                 core_attn_out_non_spec = self._run_kda_sigmoid_gating(
                     q=q_ns,
                     k=k_ns,
