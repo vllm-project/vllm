@@ -240,7 +240,6 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     impl = object.__new__(FlashInferMLASparseSM120Impl if sm120 else FlashMLASparseImpl)
     impl.kv_lora_rank = kv_lora_rank
     impl.qk_rope_head_dim = rope_dim
-    impl._allow_compact_fp8_kv_cache = True
     layer = SimpleNamespace(
         impl=impl,
         kv_cache_dtype=cache_dtype,
