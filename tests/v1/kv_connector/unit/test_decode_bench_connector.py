@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import 
     DecodeBenchConnectorMetadata,
 )
 from vllm.forward_context import ForwardContext
+from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
@@ -34,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVQuantMode,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -778,6 +780,80 @@ def test_decode_bench_connector_concurrent_requests():
     # Run second step - should NOT fill again (already filled)
     _, metadata2 = runner.run_single_step()
     assert len(metadata2.reqs_to_fill) == 0
+
+
+def _fill_single_block(cache_dtype, spec_dtype, kv_quant_mode, cache, fill_std=0.0):
+    """Fill block 1 of a one-layer cache through the worker connector."""
+    vllm_config = create_vllm_config(
+        block_size=16,
+        kv_connector="DecodeBenchConnector",
+        kv_connector_extra_config={"fill_std": fill_std},
+        cache_dtype=cache_dtype,
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=spec_dtype,
+        kv_quant_mode=kv_quant_mode,
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        KVCacheConfig(
+            num_blocks=cache.shape[0],
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        ),
+    )
+    connector.register_kv_caches({"layer": cache})
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([1],), 16)})
+    )
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,spec_dtype,kv_quant_mode,fp8_dtype",
+    [
+        (
+            "fp8",
+            torch.uint8,
+            KVQuantMode.FP8_PER_TENSOR,
+            current_platform.fp8_dtype(),
+        ),
+        ("fp8_e5m2", torch.uint8, KVQuantMode.FP8_PER_TENSOR, torch.float8_e5m2),
+        ("auto", torch.float8_e4m3fn, KVQuantMode.NONE, torch.float8_e4m3fn),
+    ],
+)
+@pytest.mark.parametrize("fill_std", [0.0, 0.1])
+def test_decode_bench_connector_fills_fp8_caches(
+    cache_dtype, spec_dtype, kv_quant_mode, fp8_dtype, fill_std
+):
+    """fp8 caches, including ones stored as uint8, get encoded fill values."""
+    cache = torch.zeros(4, 16, 8, dtype=spec_dtype)
+    _fill_single_block(cache_dtype, spec_dtype, kv_quant_mode, cache, fill_std)
+
+    values = cache.view(fp8_dtype).float()
+    assert torch.count_nonzero(values[[0, 2, 3]]) == 0
+    filled = values[1]
+    if fill_std == 0:
+        expected = torch.tensor(0.015).to(fp8_dtype).float()
+        torch.testing.assert_close(filled, expected.expand_as(filled))
+    else:
+        assert torch.isfinite(filled).all()
+        assert filled.std() > 0
+
+
+def test_decode_bench_connector_zero_fills_packed_uint8_caches():
+    """uint8 layouts that do not hold plain fp8 values are zeroed."""
+    cache = torch.full((4, 16, 8), 7, dtype=torch.uint8)
+    _fill_single_block("nvfp4", torch.uint8, KVQuantMode.NVFP4, cache)
+
+    assert torch.count_nonzero(cache[1]) == 0
+    assert torch.all(cache[[0, 2, 3]] == 7)
 
 
 if __name__ == "__main__":

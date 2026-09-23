@@ -45,13 +45,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import (
     dcp_world_size_for_kv_cache_spec,
     resolve_dcp_kv_block_size,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec, iter_layer_specs
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CircularBufferSpec,
+    KVCacheSpec,
+    KVQuantMode,
+    UniformTypeKVCacheSpecs,
+    iter_layer_specs,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -62,6 +70,27 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _get_fp8_dtype(spec: KVCacheSpec, cache_dtype: str) -> torch.dtype | None:
+    """The fp8 dtype of a KV cache that stores plain fp8 values as uint8.
+
+    Returns None for other layouts, including packed ones that embed scales
+    or other metadata in the uint8 page.
+    """
+    if (
+        not isinstance(spec, AttentionSpec)
+        or spec.dtype != torch.uint8
+        or spec.kv_quant_mode != KVQuantMode.FP8_PER_TENSOR
+        or spec.state_content_bytes is not None
+    ):
+        return None
+    cache_dtype = getattr(spec, "cache_dtype_str", None) or cache_dtype
+    if cache_dtype in ("fp8", "fp8_e4m3"):
+        return current_platform.fp8_dtype()
+    if cache_dtype == "fp8_e5m2":
+        return torch.float8_e5m2
+    return None
 
 
 @dataclass
@@ -360,6 +389,17 @@ class DecodeBenchConnectorWorker:
         # Will be populated via register_kv_caches
         self.kv_caches: dict[str, torch.Tensor] | None = None
 
+        # Layers whose uint8 KV cache stores plain fp8 values
+        self._fp8_dtypes: dict[str, torch.dtype] = {}
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                spec = group.kv_cache_spec
+                if isinstance(spec, UniformTypeKVCacheSpecs):
+                    spec = spec.kv_cache_specs[layer_name]
+                fp8_dtype = _get_fp8_dtype(spec, vllm_config.cache_config.cache_dtype)
+                if fp8_dtype is not None:
+                    self._fp8_dtypes[layer_name] = fp8_dtype
+
         # Mapping from KV cache group index to list of layer names in that group
         self.group_to_layers = {
             group_idx: list(group.layer_names)
@@ -455,7 +495,10 @@ class DecodeBenchConnectorWorker:
             # dimension — so fill each tensor in its entirety with the same
             # dummy values.
             if isinstance(kv_cache, torch.Tensor):
-                self._fill_block_tensor(kv_cache, block_ids, fill_mean, fill_std)
+                fill_dtype = self._fp8_dtypes.get(layer_name, kv_cache.dtype)
+                self._fill_block_tensor(
+                    kv_cache, block_ids, fill_mean, fill_std, fill_dtype
+                )
             elif isinstance(kv_cache, (list, tuple)) and all(
                 isinstance(t, torch.Tensor) for t in kv_cache
             ):
@@ -486,6 +529,7 @@ class DecodeBenchConnectorWorker:
         block_ids: list[int],
         fill_mean: float,
         fill_std: float,
+        fill_dtype: torch.dtype,
     ):
         """Fill the requested block rows of a block-indexed KV cache tensor.
 
@@ -495,6 +539,8 @@ class DecodeBenchConnectorWorker:
                 tensor's first dim are ignored.
             fill_mean: Mean value for the fill.
             fill_std: Standard deviation for the fill.
+            fill_dtype: Dtype the values are encoded as, e.g. the fp8 dtype
+                of a uint8 fp8 cache.
 
         """
         # Convert block_ids to tensor on device
@@ -509,28 +555,45 @@ class DecodeBenchConnectorWorker:
         if len(valid_block_ids) == 0:
             return
 
-        # Create fill values - either constant or random
-        block_shape = kv_cache.shape[1:]
-        if fill_std > 0:
-            # Random normal sampling
-            fill_values = torch.normal(
-                mean=fill_mean,
-                std=fill_std,
-                size=(len(valid_block_ids),) + block_shape,
-                dtype=kv_cache.dtype,
-                device=kv_cache.device,
-            )
-        else:
-            # Constant fill value
-            fill_values = torch.full(
-                (len(valid_block_ids),) + block_shape,
-                fill_mean,
-                dtype=kv_cache.dtype,
-                device=kv_cache.device,
-            )
+        fill_values = self._make_fill_values(
+            (len(valid_block_ids),) + kv_cache.shape[1:],
+            kv_cache.device,
+            fill_dtype,
+            fill_mean,
+            fill_std,
+        )
 
         # Batch fill operation
-        kv_cache[valid_block_ids] = fill_values
+        kv_cache[valid_block_ids] = fill_values.view(kv_cache.dtype)
+
+    def _make_fill_values(
+        self,
+        size: tuple[int, ...],
+        device: torch.device,
+        dtype: torch.dtype,
+        fill_mean: float,
+        fill_std: float,
+    ) -> torch.Tensor:
+        """Create constant or random fill values of ``dtype``, clamped to its
+        finite range. Non-floating dtypes (packed layouts) are filled with
+        zeros.
+        """
+        if not dtype.is_floating_point:
+            if fill_mean or fill_std:
+                logger.warning_once(
+                    "DecodeBenchConnector: %s KV caches do not hold plain "
+                    "floating-point values; filling them with zeros.",
+                    dtype,
+                )
+            return torch.zeros(size, dtype=dtype, device=device)
+
+        finfo = torch.finfo(dtype)
+        if fill_std > 0:
+            # Sample in float32, which also covers fp8 dtypes.
+            values = torch.normal(fill_mean, fill_std, size=size, device=device)
+            return values.clamp_(finfo.min, finfo.max).to(dtype)
+        fill_mean = min(max(fill_mean, finfo.min), finfo.max)
+        return torch.full(size, fill_mean, dtype=dtype, device=device)
 
     def _fill_state_tensor(
         self, kv_cache: torch.Tensor, fill_mean: float, fill_std: float
