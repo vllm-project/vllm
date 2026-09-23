@@ -55,8 +55,7 @@ pub struct WeightOperationResultLabels {
 pub(crate) type HttpRequestCounterFamily = Family<HttpRequestLabels, U64Counter>;
 pub(crate) type HttpHandlerHistogramFamily =
     Family<HttpHandlerLabels, Histogram, fn() -> Histogram>;
-pub(crate) type WeightOperationCounterFamily =
-    Family<WeightOperationResultLabels, U64Counter>;
+pub(crate) type WeightOperationCounterFamily = Family<WeightOperationResultLabels, U64Counter>;
 pub(crate) type WeightOperationHistogramFamily =
     Family<WeightOperationLabels, Histogram, fn() -> Histogram>;
 pub(crate) type WeightOperationGaugeFamily = Family<WeightOperationLabels, U64Gauge>;
@@ -97,18 +96,17 @@ impl ApiServerMetrics {
             http_request_duration_highr_seconds.clone(),
         );
 
-        let weight_operation_operations = WeightOperationCounterFamily::default();
+        let weight_operations = WeightOperationCounterFamily::default();
         registry.register(
             "vllm:rl_weight_update_operations",
             "Logical frontend weight operations by outcome, one observation per \
              dispatched engine call. 'finish' covers only finish_weight_update(); the \
              weight-version handshake is counted separately as 'set_version'.",
-            weight_operation_operations.clone(),
+            weight_operations.clone(),
         );
 
-        let weight_operation_duration_seconds = Family::new_with_constructor(
-            weight_operation_duration_histogram as fn() -> Histogram,
-        );
+        let weight_operation_duration_seconds =
+            Family::new_with_constructor(weight_operation_duration_histogram as fn() -> Histogram);
         registry.register(
             "vllm:rl_weight_update_operation_duration_seconds",
             "Duration of one logical frontend weight operation.",
@@ -126,31 +124,24 @@ impl ApiServerMetrics {
             http_requests,
             http_request_duration_seconds,
             http_request_duration_highr_seconds,
-            weight_operations: weight_operation_operations,
+            weight_operations,
             weight_operation_duration_seconds,
             weight_operations_in_flight,
         }
     }
 
     /// Record one dispatched logical frontend weight operation.
-    pub fn record_weight_operation(
-        &self,
-        operation: &'static str,
-    ) -> WeightOperationRecorder {
+    pub fn record_weight_operation(&self, operation: &'static str) -> WeightOperationRecorder {
         let labels = WeightOperationLabels { operation };
-        let in_flight = self
-            .weight_operations_in_flight
-            .get_or_create_owned(&labels);
+        let in_flight = self.weight_operations_in_flight.get_or_create_owned(&labels);
         in_flight.inc();
         WeightOperationRecorder {
             operation,
             started_at: Instant::now(),
             operations: self.weight_operations.clone(),
-            duration: self
-                .weight_operation_duration_seconds
-                .get_or_create_owned(&labels),
+            duration: self.weight_operation_duration_seconds.get_or_create_owned(&labels),
             in_flight,
-            completed: false,
+            status: "error",
         }
     }
 }
@@ -162,35 +153,27 @@ pub struct WeightOperationRecorder {
     operations: WeightOperationCounterFamily,
     duration: Histogram,
     in_flight: U64Gauge,
-    completed: bool,
+    status: &'static str,
 }
 
 impl WeightOperationRecorder {
     /// Mark the observed operation as successful.
     pub fn success(mut self) {
-        self.complete("success");
-    }
-
-    fn complete(&mut self, status: &'static str) {
-        if self.completed {
-            return;
-        }
-        self.in_flight.dec();
-        self.duration.observe(self.started_at.elapsed().as_secs_f64());
-        self.operations
-            .get_or_create(&WeightOperationResultLabels {
-                operation: self.operation,
-                status,
-            })
-            .inc();
-        self.completed = true;
+        // `self` is dropped when this method returns, which records the outcome.
+        self.status = "success";
     }
 }
 
 impl Drop for WeightOperationRecorder {
     fn drop(&mut self) {
-        // A dropped future (client disconnect) or an early `?` return is an error.
-        self.complete("error");
+        self.in_flight.dec();
+        self.duration.observe(self.started_at.elapsed().as_secs_f64());
+        self.operations
+            .get_or_create(&WeightOperationResultLabels {
+                operation: self.operation,
+                status: self.status,
+            })
+            .inc();
     }
 }
 
@@ -217,8 +200,8 @@ mod tests {
         assert!(rendered.contains(
             "vllm:rl_weight_update_operations_total{operation=\"update\",status=\"error\"} 1"
         ));
-        assert!(rendered.contains(
-            "vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0"
-        ));
+        assert!(
+            rendered.contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0")
+        );
     }
 }

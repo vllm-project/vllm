@@ -72,58 +72,29 @@ class WeightOperationMetrics:
     """
 
     def __init__(self, registry: CollectorRegistry | None = None):
-        # Passing ``registry=None`` explicitly means "do not register" to
-        # prometheus_client, so the default has to be the registry object itself.
-        try:
-            if registry is None:
-                self.operations = Counter(
-                    _OPERATIONS_NAME, _OPERATION_HELP, ["operation", "status"]
-                )
-                self.duration = Histogram(
-                    _DURATION_NAME,
-                    "Duration of one logical frontend weight operation.",
-                    ["operation"],
-                    buckets=_BUCKETS,
-                )
-                self.in_flight = Gauge(
-                    _IN_FLIGHT_NAME,
-                    "Logical frontend weight operations currently awaited.",
-                    ["operation"],
-                    multiprocess_mode="livesum",
-                )
-            else:
-                self.operations = Counter(
-                    _OPERATIONS_NAME,
-                    _OPERATION_HELP,
-                    ["operation", "status"],
-                    registry=registry,
-                )
-                self.duration = Histogram(
-                    _DURATION_NAME,
-                    "Duration of one logical frontend weight operation.",
-                    ["operation"],
-                    registry=registry,
-                    buckets=_BUCKETS,
-                )
-                self.in_flight = Gauge(
-                    _IN_FLIGHT_NAME,
-                    "Logical frontend weight operations currently awaited.",
-                    ["operation"],
-                    registry=registry,
-                    multiprocess_mode="livesum",
-                )
-        except ValueError:
-            # The collectors are already registered (module reload, or a test that
-            # resets the singleton). The default registry keeps one collector per
-            # sample name for the process lifetime, so adopt the existing ones.
-            if registry is not None:
-                raise
-            self._adopt_registered_collectors()
-
-    def _adopt_registered_collectors(self) -> None:
-        self.operations = REGISTRY._names_to_collectors[_OPERATIONS_NAME]
-        self.duration = REGISTRY._names_to_collectors[_DURATION_NAME]
-        self.in_flight = REGISTRY._names_to_collectors[_IN_FLIGHT_NAME]
+        # ``prometheus_client`` reads an explicit ``registry=None`` as "do not
+        # register", so resolve the default here instead of passing None through.
+        registry = REGISTRY if registry is None else registry
+        self.operations = Counter(
+            _OPERATIONS_NAME,
+            _OPERATION_HELP,
+            ["operation", "status"],
+            registry=registry,
+        )
+        self.duration = Histogram(
+            _DURATION_NAME,
+            "Duration of one logical frontend weight operation.",
+            ["operation"],
+            registry=registry,
+            buckets=_BUCKETS,
+        )
+        self.in_flight = Gauge(
+            _IN_FLIGHT_NAME,
+            "Logical frontend weight operations currently awaited.",
+            ["operation"],
+            registry=registry,
+            multiprocess_mode="livesum",
+        )
 
     @contextmanager
     def record(self, operation: Operation) -> Iterator[None]:

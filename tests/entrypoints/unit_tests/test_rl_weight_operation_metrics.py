@@ -107,19 +107,13 @@ def test_finish_and_set_version_are_distinct_operations():
 
 
 def test_metrics_are_created_lazily(monkeypatch):
-    """Nothing is registered at import time - only on first use.
+    """The accessor constructs once, on first call, and caches it.
 
-    The reset keeps this independent of other tests that exercise the production
-    singleton in the same process.
+    Uses a counting subclass on a private registry so this does not depend on the
+    process-wide default registry. That importing the module registers no
+    collector is asserted in the multiprocess subprocess test, and the real
+    default-registry path in test_rl_weight_operation_single_process.py.
     """
-    monkeypatch.setattr(rlhf_metrics, "_metrics", None)
-    assert rlhf_metrics._metrics is None
-
-    created = rlhf_metrics.weight_operation_metrics()
-    assert created is not None
-
-
-def test_recorder_is_created_once(monkeypatch):
     created = []
 
     class _Counting(WeightOperationMetrics):

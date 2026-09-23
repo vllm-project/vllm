@@ -3,6 +3,7 @@
 """Every weight-operation route records its operation; rejected input never does."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from fastapi import HTTPException
 from prometheus_client import CollectorRegistry
 
 from vllm.entrypoints.serve.dev.rlhf import api_router
+from vllm.entrypoints.serve.dev.rlhf import metrics as rlhf_metrics
 from vllm.entrypoints.serve.dev.rlhf.metrics import WeightOperationMetrics
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -41,6 +43,11 @@ OPERATION_ROUTES = [
 ]
 OPERATION_IDS = [case[0] for case in OPERATION_ROUTES]
 
+ROUTES_BY_OPERATION = {
+    "init": api_router.init_weight_transfer_engine,
+    "update": api_router.update_weights,
+}
+
 
 class _Request:
     def __init__(self, engine, body):
@@ -48,6 +55,8 @@ class _Request:
         self._body = body
 
     async def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
         return self._body
 
 
@@ -103,6 +112,19 @@ class _FinishingEngine:
         self.versions.append(new_version)
 
 
+class _Engine:
+    """Records the engine calls it receives without blocking."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def init_weight_transfer_engine(self, *args, **kwargs):
+        self.calls.append("init_weight_transfer_engine")
+
+    async def update_weights(self, *args, **kwargs):
+        self.calls.append("update_weights")
+
+
 class _UnreachableEngine:
     """Fails loudly if a route reaches the engine before validating input."""
 
@@ -116,7 +138,7 @@ class _UnreachableEngine:
 def _metrics(monkeypatch) -> CollectorRegistry:
     registry = CollectorRegistry()
     metrics = WeightOperationMetrics(registry)
-    monkeypatch.setattr(api_router, "_weight_metrics", lambda: metrics)
+    monkeypatch.setattr(rlhf_metrics, "_metrics", metrics)
     return registry
 
 
@@ -289,3 +311,131 @@ async def test_finish_without_version_records_one_operation(monkeypatch):
         )
         is None
     )
+
+
+def _assert_no_series(registry: CollectorRegistry, operation: str) -> None:
+    """Rejected input must not touch any of the three families."""
+    for status in ("success", "error"):
+        assert (
+            registry.get_sample_value(
+                PREFIX + "operations_total",
+                {"operation": operation, "status": status},
+            )
+            is None
+        )
+    assert (
+        registry.get_sample_value(
+            PREFIX + "operations_in_flight", {"operation": operation}
+        )
+        is None
+    )
+    assert (
+        registry.get_sample_value(
+            PREFIX + "operation_duration_seconds_count", {"operation": operation}
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path,body,operation",
+    [
+        # A valid JSON scalar or array must not reach body.get() (AttributeError).
+        ("/init_weight_transfer_engine", 1, "init"),
+        ("/init_weight_transfer_engine", [], "init"),
+        ("/init_weight_transfer_engine", "x", "init"),
+        ("/init_weight_transfer_engine", None, "init"),
+        ("/init_weight_transfer_engine", True, "init"),
+        ("/update_weights", 1, "update"),
+        ("/update_weights", [], "update"),
+        ("/update_weights", "x", "update"),
+        ("/update_weights", None, "update"),
+        ("/update_weights", True, "update"),
+    ],
+)
+async def test_non_object_body_is_rejected_before_recording(
+    monkeypatch, path, body, operation
+):
+    registry = _metrics(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await ROUTES_BY_OPERATION[operation](_Request(_UnreachableEngine(), body))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Request body must be a JSON object"
+    _assert_no_series(registry, operation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path,body,operation",
+    [
+        ("/init_weight_transfer_engine", {"init_info": 1}, "init"),
+        ("/init_weight_transfer_engine", {"init_info": []}, "init"),
+        ("/init_weight_transfer_engine", {"init_info": [{"rank": 0}]}, "init"),
+        ("/init_weight_transfer_engine", {"init_info": "x"}, "init"),
+        ("/update_weights", {"update_info": 1}, "update"),
+        ("/update_weights", {"update_info": "x"}, "update"),
+        ("/update_weights", {"update_info": [{}, None]}, "update"),
+        ("/update_weights", {"update_info": [1]}, "update"),
+        ("/update_weights", {"update_info": [None]}, "update"),
+    ],
+)
+async def test_invalid_inner_shape_is_rejected_before_recording(
+    monkeypatch, path, body, operation
+):
+    registry = _metrics(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await ROUTES_BY_OPERATION[operation](_Request(_UnreachableEngine(), body))
+
+    assert exc_info.value.status_code == 400
+    _assert_no_series(registry, operation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation,body",
+    [
+        ("init", {"init_info": {}}),
+        ("init", {"init_info": {"rank": 0}}),
+        ("update", {"update_info": {}}),
+        ("update", {"update_info": [{"rank": 0}]}),
+        # An empty list is accepted on both frontends: all([]) is true, as is the
+        # Rust iter().all(...) over an empty array.
+        ("update", {"update_info": []}),
+    ],
+)
+async def test_valid_payload_shapes_are_recorded(monkeypatch, operation, body):
+    registry = _metrics(monkeypatch)
+    engine = _Engine()
+
+    response = await ROUTES_BY_OPERATION[operation](_Request(engine, body))
+
+    assert response.status_code == 200
+    assert engine.calls, "engine was not called for a valid payload"
+    assert (
+        registry.get_sample_value(
+            PREFIX + "operations_total", {"operation": operation, "status": "success"}
+        )
+        == 1
+    )
+    assert (
+        registry.get_sample_value(
+            PREFIX + "operations_total", {"operation": operation, "status": "error"}
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_is_rejected_before_recording(monkeypatch):
+    registry = _metrics(monkeypatch)
+    body = json.JSONDecodeError("bad json", "{}", 0)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api_router.update_weights(_Request(_UnreachableEngine(), body))
+
+    assert exc_info.value.status_code == 400
+    _assert_no_series(registry, "update")

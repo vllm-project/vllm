@@ -6548,9 +6548,7 @@ async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
                 &metrics_before,
                 &metrics_after,
                 "vllm:rl_weight_update_operations_total",
-                Some(&format!(
-                    "operation=\"{operation}\",status=\"{status}\""
-                )),
+                Some(&format!("operation=\"{operation}\",status=\"{status}\"")),
             ),
             0.0
         );
