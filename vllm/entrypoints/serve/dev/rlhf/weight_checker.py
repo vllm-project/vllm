@@ -59,17 +59,6 @@ def _optional_extra_reports(body: dict) -> list[dict[str, str]]:
     return reports
 
 
-async def _require_awake_engine(client: EngineClient) -> None:
-    # A pause or sleep drops the weight storage, so hashing it or rewriting it
-    # is meaningless. Checked before the per-action arguments so that every
-    # action reports the engine state rather than a missing argument.
-    if await client.is_paused():
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT.value,
-            detail="weight_checker requires an awake, unpaused engine",
-        )
-
-
 async def handle_weight_checker(body: dict, client: EngineClient) -> dict:
     """Run one Weight Checker request and return its response body.
 
@@ -94,17 +83,18 @@ async def handle_weight_checker(body: dict, client: EngineClient) -> dict:
     passed several reports can tell whether they reached the ranks it expected
     rather than only that the ones they did reach agree.
 
-    A paused engine returns HTTP 409, and so does a duplicate key from the
-    workers. A sleeping engine is the caller's responsibility to wake first.
-    The RL workflow is in docs/features/weight_checker.md.
+    Every action works whether or not the engine is paused: hashing and
+    rewriting weights do not need the scheduler. Deciding whether serving must
+    stop is the caller's business, not this endpoint's, because only the caller
+    knows what it intends to do with the weights next. A sleeping engine is
+    likewise the caller's responsibility to wake first, since sleep level 2
+    discards the weight storage.
 
     Raises:
-        HTTPException: For an unknown action, a missing baseline or a
-            malformed checksum list, a paused engine, or duplicate keys from
-            the workers.
+        HTTPException: For an unknown action, a missing baseline, a malformed
+            checksum list, or duplicate keys from the workers.
     """
     action = _require_action(body)
-    await _require_awake_engine(client)
 
     if action == "reset":
         await client.reset_weights()
