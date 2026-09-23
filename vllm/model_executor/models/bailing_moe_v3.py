@@ -115,23 +115,10 @@ def bailing_v3_kda_attention(
     )
 
 
-def bailing_v3_kda_attention_fake(
-    q_proj_states: torch.Tensor,
-    k_proj_states: torch.Tensor,
-    v_proj_states: torch.Tensor,
-    g1: torch.Tensor,
-    beta: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="bailing_v3_kda_attention",
     op_func=bailing_v3_kda_attention,
     mutates_args=["core_attn_out"],
-    fake_impl=bailing_v3_kda_attention_fake,
 )
 
 
@@ -182,6 +169,27 @@ def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
         rope_parameters.update(rope_scaling)
 
     return rope_parameters or None
+
+
+def _build_mla_rotary_embedding(
+    config: PretrainedConfig,
+    head_size: int,
+) -> nn.Module:
+    rope_parameters = _build_rope_parameters(config)
+    if rope_parameters is not None and "mrope_section" in rope_parameters:
+        rope_type = rope_parameters.get("rope_type", "default")
+        if rope_type != "default":
+            raise ValueError(
+                f"Bailing M-RoPE only supports rope_type='default', got {rope_type!r}"
+            )
+        rope_parameters["rope_type"] = "bailing_mrope"
+
+    return get_rope(
+        head_size=head_size,
+        max_position=getattr(config, "max_position_embeddings", 8192),
+        is_neox_style=False,
+        rope_parameters=rope_parameters,
+    )
 
 
 def _get_layer_swiglu_limit(limit_list: list | None, layer_idx: int) -> float | None:
@@ -537,11 +545,9 @@ class BailingMoeV3MLAAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.rotary_emb = get_rope(
+        self.rotary_emb = _build_mla_rotary_embedding(
+            config,
             head_size=self.qk_rope_head_dim,
-            max_position=getattr(config, "max_position_embeddings", 8192),
-            is_neox_style=False,
-            rope_parameters=_build_rope_parameters(config),
         )
         mla_modules = MLAModules(
             kv_a_layernorm=self.kv_a_layernorm,

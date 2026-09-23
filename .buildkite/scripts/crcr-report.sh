@@ -39,10 +39,30 @@ fi
 # the agent exposes only its own step, so the job list comes from the REST API.
 TOKEN_SECRET_KEY="${CRCR_BUILDKITE_TOKEN_SECRET_KEY:-CRCR_BUILDKITE_API_TOKEN}"
 BK_TOKEN="${BUILDKITE_API_TOKEN:-}"
-if [[ -z "${BK_TOKEN}" ]] && command -v buildkite-agent >/dev/null 2>&1; then
-    # Not in the job environment, so read it from a Buildkite secret. The agent
-    # redacts values fetched this way from the log.
-    BK_TOKEN="$(buildkite-agent secret get "${TOKEN_SECRET_KEY}" 2>/dev/null)" || BK_TOKEN=""
+if [[ -z "${BK_TOKEN}" ]]; then
+    # Not in the job environment, so read it from a Buildkite secret.
+    #
+    # Report why a lookup failed. Swallowing stderr made a missing secret, a
+    # denied policy and an unusable agent indistinguishable, all surfacing as the
+    # same "no token" line. Only stderr is echoed -- stdout is the secret.
+    if ! command -v buildkite-agent >/dev/null 2>&1; then
+        echo "buildkite-agent is not on PATH; cannot read secret '${TOKEN_SECRET_KEY}'"
+    else
+        secret_err="$(mktemp)"
+        # Requires agent >= 3.107.0: the Docker plugin does not mount the Job API
+        # socket needed for redaction. Capture the value without logging it.
+        if BK_TOKEN="$(buildkite-agent secret get --skip-redaction "${TOKEN_SECRET_KEY}" 2>"${secret_err}")"; then
+            if [[ -z "${BK_TOKEN}" ]]; then
+                echo "secret '${TOKEN_SECRET_KEY}' resolved but is empty"
+            fi
+        else
+            BK_TOKEN=""
+            echo "buildkite-agent secret get '${TOKEN_SECRET_KEY}' failed" \
+                "(agent $(buildkite-agent --version 2>&1 | head -1)):"
+            sed 's/^/    /' "${secret_err}"
+        fi
+        rm -f "${secret_err}"
+    fi
 fi
 if [[ -z "${BK_TOKEN}" ]]; then
     echo "no Buildkite API token (env BUILDKITE_API_TOKEN or secret" \
@@ -51,7 +71,8 @@ if [[ -z "${BK_TOKEN}" ]]; then
 fi
 
 AUDIENCE="pytorch-cross-repo-ci-relay"
-OIDC_TOKEN="$(buildkite-agent oidc request-token --audience "${AUDIENCE}" 2>/dev/null)"
+# OIDC redaction also requires the unavailable Job API socket.
+OIDC_TOKEN="$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)"
 if [[ -z "${OIDC_TOKEN}" ]]; then
     echo "could not mint a Buildkite OIDC token -- skipping report"
     exit 0
