@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -15,6 +17,36 @@ from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
+
+# The DeepSeek-V4 encoder joins the text parts of a tool result with a blank
+# line (``"\n\n".join(text_parts)`` in ``deepseek_v4_encoding``); chat_utils
+# would otherwise flatten them with a single ``"\n"`` before the encoder sees
+# them, because most templates only accept string content for tool messages.
+_TOOL_TEXT_SEPARATOR = "\n\n"
+
+
+def _join_tool_text_parts(
+    messages: list[ChatCompletionMessageParam],
+) -> list[ChatCompletionMessageParam]:
+    """Pre-join list-of-text ``tool`` results the way the encoder would."""
+    out: list[ChatCompletionMessageParam] = []
+    for message in messages:
+        content = message.get("content")
+        if (
+            message.get("role") == "tool"
+            and isinstance(content, list)
+            and content
+            and all(
+                isinstance(part, dict) and part.get("type") == "text"
+                for part in content
+            )
+        ):
+            joined = _TOOL_TEXT_SEPARATOR.join(
+                cast(dict, part).get("text", "") for part in content
+            )
+            message = cast(ChatCompletionMessageParam, {**message, "content": joined})
+        out.append(message)
+    return out
 
 
 class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
@@ -37,6 +69,7 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
+        messages = _join_tool_text_parts(messages)
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             self.model_config,
@@ -64,6 +97,7 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
+        messages = _join_tool_text_parts(messages)
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             self.model_config,
