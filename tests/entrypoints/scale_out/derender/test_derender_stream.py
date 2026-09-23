@@ -1738,6 +1738,575 @@ class TestDerenderChatStreamParsed:
         assert state.logprob_context_token_ids == ids
 
 
+def _make_parsed_derenderer(tokenizer, cache_size: int = 0, ttl: float = 300.0):
+    from concurrent.futures import ThreadPoolExecutor
+    from unittest.mock import MagicMock
+
+    from vllm.renderers.online_derenderer import OnlineDerenderer
+
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = tokenizer
+    renderer._executor = ThreadPoolExecutor(max_workers=2)
+
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "llama"
+    model_config.model = MODEL_NAME
+
+    dr = OnlineDerenderer(
+        model_config=model_config,
+        renderer=renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="string",
+        parser_cache_size=cache_size,
+        parser_cache_ttl=ttl,
+    )
+    dr.parser = _FakeParser
+    return dr
+
+
+class TestParserCache:
+    """Unit tests for OnlineDerenderer's parser cache:
+    - On/off parity: streaming output with cache_size=0 vs cache_size=100 is identical
+    - Replay bypass: warm cache hits skip history replay
+    - Eviction on finish: finished streams are removed from the cache
+    - Exception safety: failed parse_delta calls are not cached
+    - TTL expiration and chunk mismatch fallback
+    - LRU capacity eviction
+    """
+
+    @pytest.mark.asyncio
+    async def test_on_off_parity(self, tokenizer):
+        """Streaming chat derender with cache size 0 vs 100 yields identical output."""
+        dr_off = _make_parsed_derenderer(tokenizer, cache_size=0)
+        dr_on = _make_parsed_derenderer(tokenizer, cache_size=100)
+
+        chunks_tids = [
+            [_FakeParser.REASON, _FakeParser.REASON],
+            [_FakeParser.TOOL_START],
+            [],
+            [_FakeParser.TOOL_ARG, _FakeParser.TOOL_ARG],
+            [_FakeParser.CONTENT],
+        ]
+        chat_request = _chat_request(
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+            tool_choice="auto",
+            include_reasoning=True,
+        )
+
+        async def _run(dr, req_id: str):
+            state = None
+            responses = []
+            for i, tids in enumerate(chunks_tids):
+                if not tids:
+                    gen_chunk = _make_usage_chunk(
+                        completion_tokens=i, request_id=req_id
+                    )
+                else:
+                    finish = "stop" if i == len(chunks_tids) - 1 else None
+                    gen_chunk = _make_stream_chunk(
+                        tids, finish_reason=finish, request_id=req_id
+                    )
+                chunk, state = await dr.derender_chat_stream(
+                    model=MODEL_NAME,
+                    generate_chunk=gen_chunk,
+                    state=state,
+                    chat_request=chat_request,
+                )
+                responses.append(chunk)
+            return responses, state
+
+        res_off, state_off = await _run(dr_off, "req-off")
+        res_on, state_on = await _run(dr_on, "req-on")
+
+        assert len(res_off) == len(res_on)
+        for c_off, c_on in zip(res_off, res_on):
+            assert len(c_off.choices) == len(c_on.choices)
+            if not c_off.choices:
+                continue
+            assert c_off.choices[0].finish_reason == c_on.choices[0].finish_reason
+            assert c_off.choices[0].delta.content == c_on.choices[0].delta.content
+            assert c_off.choices[0].delta.reasoning == c_on.choices[0].delta.reasoning
+            assert len(c_off.choices[0].delta.tool_calls) == len(
+                c_on.choices[0].delta.tool_calls
+            )
+            for tc_off, tc_on in zip(
+                c_off.choices[0].delta.tool_calls, c_on.choices[0].delta.tool_calls
+            ):
+                assert tc_off.index == tc_on.index
+                assert tc_off.function.name == tc_on.function.name
+                assert tc_off.function.arguments == tc_on.function.arguments
+
+        assert state_off.output_token_ids == state_on.output_token_ids
+        assert state_off.output_chunk_lens == state_on.output_chunk_lens
+        assert state_off.role_sent == state_on.role_sent
+        assert state_off.tools_streamed == state_on.tools_streamed
+
+    @pytest.mark.asyncio
+    async def test_replay_bypassed_on_cache_hit(self, tokenizer):
+        """When cache is hit, parse_delta is only called for the new chunk,
+        bypassing replay."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+
+        call_log = []
+
+        class _LoggingParser(_FakeParser):
+            def parse_delta(
+                self,
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids=None,
+                *,
+                finished,
+            ):
+                call_log.append((delta_token_ids, finished))
+                return super().parse_delta(
+                    delta_text,
+                    delta_token_ids,
+                    request,
+                    prompt_token_ids=prompt_token_ids,
+                    finished=finished,
+                )
+
+        dr.parser = _LoggingParser
+        chat_request = _chat_request()
+
+        # Chunk 1
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="cache-test"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+        assert len(call_log) == 1
+        assert ("cache-test", 0) in dr._parser_cache
+
+        # Chunk 2 (cache hit)
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="cache-test"
+            ),
+            state=state,
+            chat_request=chat_request,
+        )
+        # Without cache, chunk 2 would replay chunk 1 first (1 + 2 = 3 calls).
+        # With cache hit, replay is bypassed, so exactly 1 new call happens.
+        assert len(call_log) == 2
+
+    @pytest.mark.asyncio
+    async def test_eviction_on_finish(self, tokenizer):
+        """When the stream finishes, its cache entry is evicted."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+        chat_request = _chat_request()
+
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="finish-test"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+        assert ("finish-test", 0) in dr._parser_cache
+
+        # Finish chunk
+        await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], finish_reason="stop", request_id="finish-test"
+            ),
+            state=state,
+            chat_request=chat_request,
+        )
+        assert ("finish-test", 0) not in dr._parser_cache
+
+    @pytest.mark.asyncio
+    async def test_no_cache_on_exception(self, tokenizer):
+        """If parse_delta raises an exception, the cache does not retain the entry."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+
+        class _FailingParser(_FakeParser):
+            fail = False
+
+            def parse_delta(self, *args, **kwargs):
+                if self.fail:
+                    raise RuntimeError("parse failed")
+                return super().parse_delta(*args, **kwargs)
+
+        dr.parser = _FailingParser
+        chat_request = _chat_request()
+
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="err-test"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+        assert ("err-test", 0) in dr._parser_cache
+
+        # Make next call fail
+        _FailingParser.fail = True
+        with pytest.raises(RuntimeError, match="parse failed"):
+            await dr.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    [_FakeParser.CONTENT], request_id="err-test"
+                ),
+                state=state,
+                chat_request=chat_request,
+            )
+        # Entry was popped before parse_delta and must not be in cache
+        assert ("err-test", 0) not in dr._parser_cache
+
+    @pytest.mark.asyncio
+    async def test_ttl_expiration_and_chunk_mismatch(self, tokenizer):
+        """Expired TTL or chunk count mismatch triggers fresh replay."""
+        import asyncio
+
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10, ttl=0.01)
+        chat_request = _chat_request()
+
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="ttl-test"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+        await asyncio.sleep(0.02)  # Wait for TTL to expire
+
+        # Next chunk will detect expired TTL and fall back to fresh replay
+        chunk, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="ttl-test"
+            ),
+            state=state,
+            chat_request=chat_request,
+        )
+        assert chunk.choices[0].delta.content == "c"
+
+    @pytest.mark.asyncio
+    async def test_lru_capacity_eviction(self, tokenizer):
+        """When cache capacity is exceeded, oldest entries are evicted."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=2)
+        chat_request = _chat_request()
+
+        for req in ["req1", "req2", "req3"]:
+            await dr.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    [_FakeParser.CONTENT], request_id=req
+                ),
+                state=None,
+                chat_request=chat_request,
+            )
+
+        assert len(dr._parser_cache) == 2
+        assert ("req1", 0) not in dr._parser_cache
+        assert ("req2", 0) in dr._parser_cache
+        assert ("req3", 0) in dr._parser_cache
+
+    @pytest.mark.asyncio
+    async def test_intermediate_usage_chunk_preserves_cache(self, tokenizer):
+        """Intermediate usage chunk (empty choices) does not evict cache."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+        chat_request = _chat_request()
+
+        # Chunk 1: content
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="usage-test"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+        assert ("usage-test", 0) in dr._parser_cache
+
+        # Chunk 2: empty choices (usage only)
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_usage_chunk(1, request_id="usage-test"),
+            state=state,
+            chat_request=chat_request,
+        )
+        # Cache entry preserved
+        assert ("usage-test", 0) in dr._parser_cache
+
+        # Chunk 3: next content chunk hits cache
+        chunk, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="usage-test"
+            ),
+            state=state,
+            chat_request=chat_request,
+        )
+        assert chunk.choices[0].delta.content == "c"
+
+    @pytest.mark.asyncio
+    async def test_history_or_tools_mismatch_bypasses_cache(self, tokenizer):
+        """Streams with matching ID and chunk count but different history or
+        tools bypass cache and fall back to clean replay."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+
+        call_log = []
+
+        class _LoggingParser(_FakeParser):
+            def parse_delta(
+                self,
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids=None,
+                *,
+                finished,
+            ):
+                call_log.append((delta_token_ids, finished))
+                return super().parse_delta(
+                    delta_text,
+                    delta_token_ids,
+                    request,
+                    prompt_token_ids=prompt_token_ids,
+                    finished=finished,
+                )
+
+        dr.parser = _LoggingParser
+        chat_request = _chat_request()
+
+        # Stream 1 Chunk 1
+        _, state1 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="collision-test"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+        assert len(call_log) == 1
+
+        # Divergent Stream 2 with identical request ID and chunk count,
+        # but different token history
+        state_divergent = state1.model_copy(
+            update={"output_token_ids": [99999]}
+        )
+
+        _, state2 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="collision-test"
+            ),
+            state=state_divergent,
+            chat_request=chat_request,
+        )
+        # Because history mismatched, cache hit is rejected and replay runs:
+        # 1 initial call + 1 replay call + 1 current chunk call = 3 total
+        assert len(call_log) == 3
+
+    @pytest.mark.asyncio
+    async def test_finish_only_chunk_flushes_and_evicts(self, tokenizer):
+        """A finish-only chunk (empty token list with finish_reason) flushes
+        buffered parser state and evicts the stream from the cache."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+        chat_request = _chat_request()
+
+        # Chunk 1: content token
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="finish-test"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+        assert ("finish-test", 0) in dr._parser_cache
+
+        # Chunk 2: finish-only chunk (empty tokens, finish_reason="stop")
+        chunk2, _ = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [], finish_reason="stop", request_id="finish-test"
+            ),
+            state=state,
+            chat_request=chat_request,
+        )
+        assert chunk2.choices[0].delta.content == "FLUSH"
+        assert chunk2.choices[0].finish_reason == "stop"
+        assert ("finish-test", 0) not in dr._parser_cache
+
+    @pytest.mark.asyncio
+    async def test_eviction_midstream_safely_falls_back_to_replay(self, tokenizer):
+        """When an entry is evicted midstream (e.g. via TTL or LRU), the next
+        chunk seamlessly falls back to full replay and re-caches."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+        chat_request = _chat_request()
+
+        # Chunk 1: content
+        _, state = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="midstream-evict"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+        assert ("midstream-evict", 0) in dr._parser_cache
+
+        # Midstream eviction: clear the cache manually
+        with dr._parser_cache_lock:
+            dr._parser_cache.clear()
+        assert len(dr._parser_cache) == 0
+
+        # Chunk 2: arrives after eviction, must replay and produce valid delta
+        chunk2, state2 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="midstream-evict"
+            ),
+            state=state,
+            chat_request=chat_request,
+        )
+        assert chunk2.choices[0].delta.content == "c"
+        assert state2.output_token_ids == [_FakeParser.CONTENT, _FakeParser.CONTENT]
+        assert ("midstream-evict", 0) in dr._parser_cache
+
+    @pytest.mark.asyncio
+    async def test_retried_chunk_safely_replays(self, tokenizer):
+        """When a client retries sending a chunk with older state, the cache
+        digest mismatch safely triggers full replay instead of corruption."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+        chat_request = _chat_request()
+
+        # Chunk 1
+        _, state1 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="retry-test"
+            ),
+            state=None,
+            chat_request=chat_request,
+        )
+
+        # Chunk 2
+        chunk2, state2 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="retry-test"
+            ),
+            state=state1,
+            chat_request=chat_request,
+        )
+        assert chunk2.choices[0].delta.content == "c"
+
+        # Client retries Chunk 2 with state1 instead of state2
+        chunk2_retry, state2_retry = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], request_id="retry-test"
+            ),
+            state=state1,
+            chat_request=chat_request,
+        )
+        assert chunk2_retry.choices[0].delta.content == "c"
+        assert state2_retry.output_token_ids == [_FakeParser.CONTENT, _FakeParser.CONTENT]
+
+    @pytest.mark.asyncio
+    async def test_different_chunk_boundaries_over_same_tokens(self, tokenizer):
+        """Streams with identical tokens but different chunk boundaries
+        (e.g. [1, 2] vs [2, 1]) produce different digests, preventing bad hits."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+
+        call_log = []
+
+        class _BoundaryLoggingParser(_FakeParser):
+            def parse_delta(
+                self,
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids=None,
+                *,
+                finished,
+            ):
+                call_log.append(list(delta_token_ids))
+                return super().parse_delta(
+                    delta_text,
+                    delta_token_ids,
+                    request,
+                    prompt_token_ids=prompt_token_ids,
+                    finished=finished,
+                )
+
+        dr.parser = _BoundaryLoggingParser
+        chat_request = _chat_request()
+
+        # Stream 1 arrives as [1, 2]
+        _, s1 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([_FakeParser.CONTENT], request_id="bound-test"),
+            state=None,
+            chat_request=chat_request,
+        )
+        _, s1 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT, _FakeParser.CONTENT], request_id="bound-test"
+            ),
+            state=s1,
+            chat_request=chat_request,
+        )
+
+        # Stream 2 has chunk boundaries [2, 1] over the same tokens
+        s2_divergent = s1.model_copy(update={"output_chunk_lens": [2, 1]})
+
+        call_log.clear()
+        _, s2 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([_FakeParser.CONTENT], request_id="bound-test"),
+            state=s2_divergent,
+            chat_request=chat_request,
+        )
+        assert len(call_log) == 3
+        assert call_log == [
+            [_FakeParser.CONTENT, _FakeParser.CONTENT],
+            [_FakeParser.CONTENT],
+            [_FakeParser.CONTENT],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_reused_request_id_with_different_settings_misses_cache(self, tokenizer):
+        """Reusing request_id with different tool_choice, include_reasoning, or
+        chat_template_kwargs produces a digest mismatch and rebuilds fresh parser."""
+        dr = _make_parsed_derenderer(tokenizer, cache_size=10)
+
+        req1 = _chat_request(include_reasoning=True)
+        _, state1 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([_FakeParser.CONTENT], request_id="reuse-id"),
+            state=None,
+            chat_request=req1,
+        )
+        assert ("reuse-id", 0) in dr._parser_cache
+
+        # Reused request_id with different include_reasoning setting
+        req2 = _chat_request(include_reasoning=False)
+        chunk2, state2 = await dr.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([_FakeParser.CONTENT], request_id="reuse-id"),
+            state=state1,
+            chat_request=req2,
+        )
+        assert chunk2.choices[0].delta.content == "c"
+
+
 # ---------------------------------------------------------------------------
 # Harmony / GPT-OSS replay — unit, no server
 # ---------------------------------------------------------------------------
@@ -2478,14 +3047,16 @@ _PARSER_TOOLS = [
 ]
 
 
-@pytest.fixture(scope="module")
-def parser_server():
+@pytest.fixture(scope="module", params=[0, 100])
+def parser_server(request):
     args = [
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "hermes",
         "--reasoning-parser",
         "deepseek_r1",
+        "--parser-cache-size",
+        str(request.param),
     ]
     with RemoteLaunchRenderServer(PARSER_MODEL, args) as remote_server:
         yield remote_server
