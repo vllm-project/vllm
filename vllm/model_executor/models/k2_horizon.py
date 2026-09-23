@@ -49,6 +49,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -398,7 +399,7 @@ class K2HorizonSparseMoeBlock(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
             bias=config.moe_gate_bias,

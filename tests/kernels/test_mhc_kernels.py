@@ -11,6 +11,7 @@ import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
 from vllm.model_executor.kernels.mhc.tilelang import (
     _torch_hc_prenorm_gemm,
+    mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
 from vllm.model_executor.kernels.mhc.tilelang_kernels import (
@@ -39,10 +40,48 @@ from vllm.models.deepseek_v4.nvidia.model import (
 from vllm.models.deepseek_v41.nvidia.model import (
     DeepseekV4DecoderLayer as DeepseekV41DecoderLayer,
 )
+from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
+    is_mega_mhc_supported,
+    mhc_shifted_post_pre_deep_gemm,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    "tp,ep,hidden,hc,multicast,expected",
+    [
+        (4, False, 5120, 4, 1, True),
+        (2, False, 5120, 4, 1, False),
+        (4, True, 5120, 4, 1, False),
+        (4, False, 4096, 4, 1, False),
+        (4, False, 5120, 2, 1, False),
+        (4, False, 5120, 4, 0, False),
+    ],
+)
+def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
+    monkeypatch, tp, ep, hidden, hc, multicast, expected
+):
+    """Eligibility depends on kernel inputs, not serving or attention settings."""
+    from vllm.models.deepseek_v41.nvidia.ops import mhc
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp, enable_expert_parallel=ep
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(hidden_size=hidden, hc_mult=hc)
+        ),
+    )
+    group = SimpleNamespace(
+        device_communicator=SimpleNamespace(
+            ca_comm=SimpleNamespace(mnnvl_lamport_ag_multicast_ptr=multicast)
+        )
+    )
+    monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    assert mhc.supports_mhc_all_reduce(config) is expected
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -127,6 +166,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
 
     monkeypatch.setattr(dspark, "mhc_post_tilelang", lambda *args: streams)
     draft = SimpleNamespace(
+        use_mega_moe=False,
         use_sequence_parallel=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
@@ -145,6 +185,27 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     torch.testing.assert_close(
         actual, expected.to(streams.dtype), atol=1.6e-2, rtol=1e-2
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("num_tokens", [1, 7, 32])
+@pytest.mark.parametrize("tp_size", [4, 8])
+def test_hc_collapse_before_gather_is_bitwise_equal(num_tokens, tp_size):
+    """Simulate SP on one GPU, including padding and ranks without valid tokens."""
+    set_random_seed(0)
+    padded_tokens = num_tokens + (-num_tokens) % tp_size
+    streams = torch.randn(padded_tokens, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
+    pre_mix = torch.rand(padded_tokens, 4, device=DEVICE)
+    stream_shards = streams.chunk(tp_size)
+    mix_shards = pre_mix.chunk(tp_size)
+    before = hc_collapse_triton(
+        torch.cat(stream_shards)[:num_tokens], torch.cat(mix_shards)[:num_tokens]
+    )
+    after = torch.cat(
+        [hc_collapse_triton(x, pre) for x, pre in zip(stream_shards, mix_shards)]
+    )[:num_tokens]
+    assert after.shape == (num_tokens, 5120)
+    torch.testing.assert_close(after, before, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
@@ -237,6 +298,77 @@ def test_deepseek_v41_mhc_pre_delayed(
         torch.testing.assert_close(actual[2], expected[2], atol=0, rtol=0)
     else:
         torch.testing.assert_close(actual[2], expected[2], atol=1.6e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_device_capability_family(100),
+    reason="SM100 TileLang mHC required",
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 8, 9, 32, 128, 256])
+@pytest.mark.parametrize("entry", ["broadcast", "identity", "carried"])
+@pytest.mark.parametrize("hidden_size,hc_mult", [(4096, 2), (5120, 4), (7168, 4)])
+def test_deepseek_v41_mhc_overlap_preserves_outputs_on_replay(
+    num_tokens, entry, hidden_size, hc_mult
+):
+    """The input is usable before joining; coefficients stay exact on graph replay."""
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_pre_delayed_overlap
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM required")
+    set_random_seed(42)
+    mix_size = hc_mult * (hc_mult + 2)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    fn = torch.randn(mix_size, hc_mult, hidden_size, device=DEVICE) * 0.02
+    x = None
+    pre_mix = None
+    if entry == "broadcast":
+        x = residual[:, 0].contiguous()
+        residual = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
+        fn = fn.sum(1)
+    else:
+        fn = fn.flatten(1)
+        if entry == "carried":
+            pre_mix = torch.rand(num_tokens, hc_mult, device=DEVICE)
+    scale = torch.tensor([0.5, 0.25, 1.0], device=DEVICE)
+    base = torch.randn(mix_size, device=DEVICE)
+    weight = torch.empty(hidden_size, dtype=torch.bfloat16, device=DEVICE).uniform_(
+        0.5, 1.5
+    )
+    args = (residual, fn, scale, base, 1e-20, 1e-6, 1e-6, 2.0, 20)
+    kwargs = dict(pre_mix=pre_mix, x=x, norm_weight=weight, norm_eps=1e-20)
+    side = torch.cuda.Stream()
+
+    def run():
+        outputs = mhc_pre_delayed_overlap(*args, **kwargs, stream=side)
+        consumed_input = outputs[2].clone()
+        torch.cuda.current_stream().wait_stream(side)
+        return (*outputs, consumed_input)
+
+    def check(actual):
+        expected = mhc_pre_delayed_tilelang(*args, **kwargs)
+        for a, b in zip(actual[:4], expected, strict=True):
+            torch.testing.assert_close(a, b, atol=0, rtol=0)
+        torch.testing.assert_close(actual[4], expected[2], atol=0, rtol=0)
+
+    check(run())
+    if num_tokens == 0:
+        return
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    for _ in range(5):
+        if x is not None:
+            x.normal_()
+            residual.copy_(x.unsqueeze(1).expand_as(residual))
+        else:
+            residual.normal_()
+        if pre_mix is not None:
+            pre_mix.uniform_()
+        graph.replay()
+        check(captured)
 
 
 def mhc_fused_post_pre_delayed_ref(
@@ -406,10 +538,16 @@ def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried, capture_
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("entry", ["broadcast", "pipeline", "residual", "engram"])
+@pytest.mark.parametrize(
+    "mhc_mode", ["disabled", "eager", "overlap", "piecewise", "large_batch"]
+)
 def test_deepseek_v41_decoder_mixes_match_torch(
-    entry, monkeypatch, default_vllm_config
+    entry, mhc_mode, monkeypatch, default_vllm_config
 ):
     """Preserve carried pre-mixes and Engram ordering at every decoder entry."""
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
+
+    num_tokens = MHC_OVERLAP_MAX_TOKENS + 1 if mhc_mode == "large_batch" else 3
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -419,6 +557,30 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.rms_norm_eps = 1e-20
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
+    decoder.fuse_mhc_all_reduce = False
+    decoder.mhc_stream = None
+    if mhc_mode != "disabled":
+        from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+        if (
+            not current_platform.is_device_capability_family(100)
+            or not is_deep_gemm_supported()
+        ):
+            pytest.skip("SM100 DeepGEMM required for overlap")
+        decoder.mhc_stream = torch.cuda.Stream()
+    if mhc_mode in ("eager", "piecewise", "large_batch"):
+
+        def unexpected_overlap(*args, **kwargs):
+            pytest.fail("unsupported execution must retain native mHC")
+
+        monkeypatch.setattr(
+            "vllm.models.deepseek_v41.nvidia.model.mhc_pre_delayed_overlap",
+            unexpected_overlap,
+        )
+        monkeypatch.setattr(
+            "vllm.models.deepseek_v41.nvidia.ops.mhc.mhc_pre_delayed_overlap",
+            unexpected_overlap,
+        )
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
 
@@ -426,7 +588,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         device=DEVICE, dtype=torch.bfloat16
     )
     decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -434,18 +596,18 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         decoder.hc_attn_scale = decoder.hc_ffn_scale = torch.ones(3)
         decoder.hc_attn_base = torch.randn(24)
         decoder.hc_ffn_base = torch.randn(24)
-        x = torch.randn(3, 5120, dtype=torch.bfloat16)
-        positions = torch.arange(3)
+        x = torch.randn(num_tokens, 5120, dtype=torch.bfloat16)
+        positions = torch.arange(num_tokens)
         kwargs = {}
         if entry != "broadcast":
-            kwargs["pre_mix"] = torch.rand(3, 4)
+            kwargs["pre_mix"] = torch.rand(num_tokens, 4)
         if entry == "pipeline":
-            x = torch.randn(3, 4, 5120, dtype=torch.bfloat16)
+            x = torch.randn(num_tokens, 4, 5120, dtype=torch.bfloat16)
         if entry in ("residual", "engram"):
             kwargs.update(
-                residual=torch.randn(3, 4, 5120, dtype=torch.bfloat16),
-                post_mix=torch.rand(3, 4, 1),
-                res_mix=torch.rand(3, 4, 4),
+                residual=torch.randn(num_tokens, 4, 5120, dtype=torch.bfloat16),
+                post_mix=torch.rand(num_tokens, 4, 1),
+                res_mix=torch.rand(num_tokens, 4, 4),
             )
         if entry == "engram":
 
@@ -456,15 +618,49 @@ def test_deepseek_v41_decoder_mixes_match_torch(
                     return residual + 0.125
 
             decoder.engram = FakeEngram()
-            kwargs["engram_hashes"] = torch.zeros(3, 1, 1, dtype=torch.int32)
+            kwargs["engram_hashes"] = torch.zeros(num_tokens, 1, 1, dtype=torch.int32)
 
-    actual = decoder(x, positions, None, **kwargs)
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import set_forward_context
+
+    mode = CUDAGraphMode.PIECEWISE if mhc_mode == "piecewise" else CUDAGraphMode.NONE
+    overlap_calls = []
+    if mhc_mode == "overlap":
+        from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_pre_delayed_overlap
+
+        def checked_overlap(*args, **kwargs):
+            overlap_calls.append(torch.cuda.is_current_stream_capturing())
+            return mhc_pre_delayed_overlap(*args, **kwargs)
+
+        for module in ("model", "ops.mhc"):
+            monkeypatch.setattr(
+                f"vllm.models.deepseek_v41.nvidia.{module}.mhc_pre_delayed_overlap",
+                checked_overlap,
+            )
+    with set_forward_context(None, default_vllm_config, cudagraph_runtime_mode=mode):
+        actual = decoder(x, positions, None, **kwargs)
+        if mhc_mode == "overlap":
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = decoder(x, positions, None, **kwargs)
+            graph.replay()
+            assert overlap_calls and all(overlap_calls)
 
     def reference(*args, norm_weight, norm_eps, **kwargs):
         post, res, collapsed, pre = mhc_pre_delayed_torch(*args, **kwargs)
         return post, res, decoder.attn_norm(collapsed), pre
 
-    def fused_reference(x, residual, post_mix, res_mix, *args, capture_aux=False, **kw):
+    def fused_reference(
+        x,
+        residual,
+        post_mix,
+        res_mix,
+        *args,
+        capture_aux=False,
+        stream=None,
+        reduce_results=False,
+        **kw,
+    ):
         residual = mhc_post_torch(x, residual, post_mix, res_mix)
         aux = residual.mean(dim=1) if capture_aux else residual.new_empty(0)
         return residual, *reference(residual, *args, **kw), aux
@@ -473,8 +669,9 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         "vllm.models.deepseek_v41.nvidia.model.mhc_pre_delayed_tilelang",
         reference,
     )
+    decoder.mhc_stream = None
     monkeypatch.setattr(
-        "vllm.models.deepseek_v41.nvidia.model.mhc_fused_post_pre_delayed_tilelang",
+        "vllm.models.deepseek_v41.nvidia.model.mhc_shifted_post_pre",
         fused_reference,
     )
     expected = decoder(x, positions, None, **kwargs)
@@ -503,6 +700,8 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.rms_norm_eps = 1e-6
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
+    decoder.fuse_mhc_all_reduce = False
+    decoder.mhc_stream = None
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
 
@@ -510,7 +709,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
         device=DEVICE, dtype=torch.bfloat16
     )
     decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -559,6 +758,104 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
     )
 
 
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
+@pytest.mark.parametrize("hidden_size", [5120, 7168])
+def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
+    set_random_seed(0)
+    hc_mult = 4
+    if not is_mega_mhc_supported(hidden_size, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    previous_mix = torch.rand(num_tokens, hc_mult, device=DEVICE)
+    post_mix = torch.rand(num_tokens, hc_mult, 1, device=DEVICE)
+    res_mix = torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE)
+    fn = torch.randn(24, hc_mult * hidden_size, device=DEVICE) * 0.01
+    scale = torch.randn(3, device=DEVICE) * 0.1
+    base = torch.randn(24, device=DEVICE) * 0.1
+    norm_weight = torch.empty(
+        hidden_size, dtype=torch.bfloat16, device=DEVICE
+    ).uniform_(0.9, 1.1)
+
+    expected_residual = (
+        mhc_post_tilelang(x, residual, post_mix, res_mix) if num_tokens else residual
+    )
+    (
+        expected_post_mix,
+        expected_res_mix,
+        expected_y_bf16,
+        expected_previous_mix,
+    ) = mhc_pre_delayed_tilelang(
+        expected_residual,
+        fn,
+        scale,
+        base,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+        pre_mix=previous_mix,
+        norm_weight=norm_weight,
+        norm_eps=7e-6,
+    )
+    args = (
+        x,
+        residual,
+        previous_mix,
+        post_mix,
+        res_mix,
+        fn,
+        scale,
+        base,
+        2e-5,
+        3e-4,
+        1.25,
+        2e-6,
+        10,
+        norm_weight,
+        7e-6,
+    )
+    actual = mhc_shifted_post_pre_deep_gemm(*args)
+    expected = (
+        expected_residual,
+        expected_post_mix,
+        expected_res_mix,
+        expected_y_bf16,
+        expected_previous_mix,
+    )
+    for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
+        # Match the existing mHC BF16 tolerance: post rounding differences
+        # can be amplified by cancellation in the carried collapse.
+        atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
+        torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
+
+    if num_tokens:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            # DeepGEMM initializes barriers per stream before capture.
+            mhc_shifted_post_pre_deep_gemm(*args)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                captured = mhc_shifted_post_pre_deep_gemm(*args)
+            for multiplier in (0.5, -1.0):
+                x.mul_(multiplier)
+                graph.replay()
+                eager = mhc_shifted_post_pre_deep_gemm(*args)
+                for result, ref in zip(captured, eager, strict=True):
+                    torch.testing.assert_close(result, ref, atol=0, rtol=0)
+        torch.cuda.current_stream().wait_stream(stream)
+
+
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
     x = x.softmax(-1) + eps
     x = x / (x.sum(-2, keepdim=True) + eps)
@@ -579,7 +876,7 @@ def mhc_pre_ref(
     hc_post_mult_value: float,
     sinkhorn_repeat: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """mHC pre reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_pre.py#L303"""
+    """MHC pre reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_pre.py#L303."""
     hc_mult = residual.shape[-2]
 
     residual_flat = residual.flatten(-2, -1).float()
@@ -618,7 +915,7 @@ def mhc_post_ref(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
-    """mHC post reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_post.py#L68"""
+    """MHC post reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_post.py#L68."""
     term2 = torch.bmm(comb_res_mix.mT, residual.float())
     return (x.float().unsqueeze(-2) * post_layer_mix + term2).bfloat16()
 
@@ -647,7 +944,8 @@ def hc_head_ref(
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("hc_mult", [4])
-def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
+@pytest.mark.parametrize("fused_norm", [False, True])
+def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult, fused_norm):
     torch.set_default_device(DEVICE)
     set_random_seed(0)
 
@@ -677,6 +975,12 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
         hc_post_alpha,
         sinkhorn_repeat,
     )
+    norm_kwargs = {}
+    if fused_norm:
+        # Non-shifted mHC must still use its freshly computed pre-mix.
+        weight = torch.ones(hidden_size, dtype=torch.bfloat16)
+        norm_kwargs = dict(norm_weight=weight, norm_eps=rms_eps)
+        ref = (*ref[:2], F.rms_norm(ref[2], (hidden_size,), weight, rms_eps))
     out = torch.ops.vllm.mhc_pre_tilelang(
         residual,
         fn,
@@ -687,6 +991,7 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
         hc_sinkhorn_eps,
         hc_post_alpha,
         sinkhorn_repeat,
+        **norm_kwargs,
     )
 
     for actual, expected in zip(out, ref, strict=True):
