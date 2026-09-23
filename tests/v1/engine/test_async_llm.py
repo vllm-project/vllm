@@ -167,6 +167,52 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
     )
 
 
+def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    frontend_profiler = MagicMock()
+
+    engine = AsyncLLM(
+        vllm_config,
+        MagicMock(),
+        log_stats=False,
+        profiler=frontend_profiler,
+    )
+
+    async def profile():
+        start_rpc_entered = asyncio.Event()
+        release_start_rpc = asyncio.Event()
+        frontend_started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        async def profile_async(is_start, *args):
+            if is_start:
+                start_rpc_entered.set()
+                await release_start_rpc.wait()
+
+        engine_core.profile_async.side_effect = profile_async
+        frontend_profiler.start.side_effect = lambda: loop.call_soon_threadsafe(
+            frontend_started.set
+        )
+
+        start_task = asyncio.create_task(engine.start_profile())
+        await asyncio.gather(start_rpc_entered.wait(), frontend_started.wait())
+
+        stop_task = asyncio.create_task(engine.stop_profile())
+        await asyncio.sleep(0)
+        release_start_rpc.set()
+        await asyncio.gather(start_task, stop_task)
+
+    asyncio.run(profile())
+
+    frontend_profiler.start.assert_called_once_with()
+    frontend_profiler.stop.assert_called_once_with()
+    assert engine._profile_session_active is False
+    assert engine._frontend_profiler_running is False
+
+
 def test_frontend_profiler_ignores_worker_iteration_bounds(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):

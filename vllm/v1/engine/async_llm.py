@@ -212,6 +212,7 @@ class AsyncLLM(EngineClient):
 
         self.profiler = profiler
         self._frontend_profiler_injected = profiler is not None
+        self._profile_lock = asyncio.Lock()
         self._frontend_profiler_running = False
         self._profile_session_active = False
         if (
@@ -1075,37 +1076,39 @@ class AsyncLLM(EngineClient):
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
     ) -> None:
-        if self._profile_session_active:
-            raise ProfilerAlreadyActiveError()
-        if profile_prefix is not None:
-            validate_profile_prefix(profile_prefix)
+        async with self._profile_lock:
+            if self._profile_session_active:
+                raise ProfilerAlreadyActiveError()
+            if profile_prefix is not None:
+                validate_profile_prefix(profile_prefix)
 
-        self._profile_session_active = True
-        coros = [
-            self.engine_core.profile_async(
-                True,
-                profile_prefix,
-                delay_iterations,
-                max_iterations,
-            )
-        ]
-        if self.profiler is not None and not self._frontend_profiler_running:
-            if not self._frontend_profiler_injected:
-                worker_name = self._frontend_profiler_worker_name
-                if profile_prefix is not None:
-                    worker_name = f"{profile_prefix}_{worker_name}"
-                self.profiler.set_output_name(worker_name)
-            coros.append(asyncio.to_thread(self.profiler.start))
-        await asyncio.gather(*coros)
-        self._frontend_profiler_running = self.profiler is not None
+            self._profile_session_active = True
+            coros = [
+                self.engine_core.profile_async(
+                    True,
+                    profile_prefix,
+                    delay_iterations,
+                    max_iterations,
+                )
+            ]
+            if self.profiler is not None and not self._frontend_profiler_running:
+                if not self._frontend_profiler_injected:
+                    worker_name = self._frontend_profiler_worker_name
+                    if profile_prefix is not None:
+                        worker_name = f"{profile_prefix}_{worker_name}"
+                    self.profiler.set_output_name(worker_name)
+                coros.append(asyncio.to_thread(self.profiler.start))
+            await asyncio.gather(*coros)
+            self._frontend_profiler_running = self.profiler is not None
 
     async def stop_profile(self) -> None:
-        coros = [self.engine_core.profile_async(False)]
-        if self.profiler is not None and self._frontend_profiler_running:
-            coros.append(asyncio.to_thread(self.profiler.stop))
-        await asyncio.gather(*coros)
-        self._frontend_profiler_running = False
-        self._profile_session_active = False
+        async with self._profile_lock:
+            coros = [self.engine_core.profile_async(False)]
+            if self.profiler is not None and self._frontend_profiler_running:
+                coros.append(asyncio.to_thread(self.profiler.stop))
+            await asyncio.gather(*coros)
+            self._frontend_profiler_running = False
+            self._profile_session_active = False
 
     async def reset_mm_cache(self) -> None:
         # Join the background MM warmup first: the mm_processor_cache is not
