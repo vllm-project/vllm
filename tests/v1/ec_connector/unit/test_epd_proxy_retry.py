@@ -8,6 +8,7 @@ change to them is what these tests catch.
 
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +28,7 @@ def proxy():
     spec = importlib.util.spec_from_file_location("disagg_epd_proxy_retry", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -48,7 +50,7 @@ def test_maybe_prefill_leaves_the_caller_body_untouched(proxy, monkeypatch):
     """
     served = [{"remote_block_ids": [1, 2]}, {}]
 
-    async def _stage(req_data, p_url, req_id):
+    async def _stage(req_data, p_url, req_id, dp_rank=None):
         assert "kv_transfer_params" not in req_data
         return _Response(served.pop(0))
 
@@ -222,7 +224,7 @@ def test_a_decode_retry_does_not_inherit_the_previous_handles(proxy, monkeypatch
         _EncoderSession([{"encoder-side-hash": handle}, {}]),
     )
 
-    async def _no_prefill(req_data, p_url, req_id):
+    async def _no_prefill(req_data, p_url, req_id, dp_rank=None):
         return req_data
 
     monkeypatch.setattr(proxy, "maybe_prefill", _no_prefill)
@@ -280,6 +282,7 @@ def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("prefill", [False, True])
+@pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize(
     "request_options",
     [
@@ -293,7 +296,7 @@ def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
     ],
 )
 async def test_http_roundtrip_preserves_payload_and_response_bytes(
-    proxy, monkeypatch, stream, prefill, request_options
+    proxy, monkeypatch, stream, prefill, dynamic, request_options
 ):
     """Preserve media and scheduling context across HTTP hops and retries."""
     seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
@@ -307,6 +310,10 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
 
     async def backend(request):
         stage = request.match_info["stage"]
+        if dynamic:
+            consumer = "prefill" if prefill else "decode"
+            expected_rank = "0" if stage == consumer else None
+            assert request.headers.get("X-data-parallel-rank") == expected_rank
         assert request.content_type == "application/json"
         body = await request.json()
         seen[stage].append(body)
@@ -354,6 +361,10 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         monkeypatch.setattr(proxy.app.state, "ec_consumer_dp_size", 1, raising=False)
         monkeypatch.setattr(proxy, "DECODE_RETRIES", 1)
         monkeypatch.setattr(proxy, "NO_REWRITE", False)
+        target_app = proxy.app
+        if dynamic:
+            monkeypatch.setenv("ADMIN_API_KEY", "test-key")
+            target_app = proxy.build_app(proxy.EPDProxyConfig(probe_interval=0))
         item = {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}}
         body = {
             "model": "test",
@@ -377,9 +388,37 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         await proxy.on_startup()
         try:
             async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=proxy.app), base_url="http://proxy"
+                transport=httpx.ASGITransport(app=target_app), base_url="http://proxy"
             ) as client:
+                if dynamic:
+                    registrations = [("encode", "encode")]
+                    registrations += (
+                        [("prefill", "prefill"), ("decode", "decode")]
+                        if prefill
+                        else [("prefill_decode", "decode")]
+                    )
+                    for role, stage in registrations:
+                        consumer = "prefill" if prefill else "decode"
+                        registered = await client.post(
+                            "/instances",
+                            headers={"X-API-Key": "test-key"},
+                            json={
+                                "role": role,
+                                "url": str(server.make_url(f"/{stage}")),
+                                "dp_size": 2 if stage == consumer else 1,
+                            },
+                        )
+                        assert registered.status_code == 200
                 response = await client.post("/v1/chat/completions", json=body)
+                if dynamic:
+                    removed = await client.delete(
+                        "/instances",
+                        headers={"X-API-Key": "test-key"},
+                        params={"url": str(server.make_url("/decode"))},
+                    )
+                    assert removed.json() == {"removed": True}
+                    unavailable = await client.post("/v1/chat/completions", json=body)
+                    assert unavailable.status_code == 503
             assert response.status_code == 200
             assert response.content == expected
             assert response.headers["content-type"].startswith(
