@@ -6,7 +6,7 @@ import json
 import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -759,11 +759,16 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         raise NotImplementedError
 
 
-def _decode_media_ref(data: object, modality: str) -> None:
+def _decode_media_ref(data: object, modality: str, index: int) -> None:
     """Trigger decoding of a media ref.
 
     Decode failures are wrapped as VLLMUnprocessableEntityError so corrupt
     media surfaces as a client error (422) instead of a server error.
+
+    Unlike the processor's `_decode_error`, this can name a request field:
+    only image and video are remapped to `vision_chunk`, and only a
+    URL-fetched item is a `MediaRef`, so `{modality}_url` is where it came
+    from.
     """
     if not isinstance(data, MediaRef) or data.is_decoded:
         return
@@ -771,9 +776,28 @@ def _decode_media_ref(data: object, modality: str) -> None:
         data.decode()
     except Exception as error:
         raise VLLMUnprocessableEntityError(
-            f"Failed to decode {modality} media: {error}",
+            f"Failed to decode {modality} media at index {index}: {error}",
             parameter=f"{modality}_url",
         ) from error
+
+
+def _indexed_vision_chunks(
+    vision_chunk_items: list[tuple[object, str | None]],
+    vision_chunks_modality_order: list[str],
+) -> Iterator[tuple[int, str, object, str | None]]:
+    """Pair each vision_chunk item with its index within its own modality.
+
+    Numbering per modality rather than per chunk matches the index the mm
+    processor reports for the same item, so a decode failure names the same
+    position whichever layer caught it.
+    """
+    seen: dict[str, int] = {}
+    for inner_modality, (data, uuid) in zip(
+        vision_chunks_modality_order, vision_chunk_items
+    ):
+        index = seen.get(inner_modality, 0)
+        seen[inner_modality] = index + 1
+        yield index, inner_modality, data, uuid
 
 
 def _resolve_vision_chunk_items(
@@ -792,12 +816,12 @@ def _resolve_vision_chunk_items(
 
     processed_chunks: list[VisionChunk] = []
     video_idx = 0
-    for inner_modality, (data, uuid) in zip(
-        vision_chunks_modality_order, vision_chunk_items
+    for index, inner_modality, data, uuid in _indexed_vision_chunks(
+        vision_chunk_items, vision_chunks_modality_order
     ):
         # Decode media refs up front: decode failures must propagate instead
         # of being swallowed by the split_video_chunks fallback below.
-        _decode_media_ref(data, inner_modality)
+        _decode_media_ref(data, inner_modality, index)
         if inner_modality == "image":
             # Pass the decoded PIL.Image on to avoid a redundant bytes->PIL
             # conversion in media_processor.
@@ -850,9 +874,9 @@ async def _predecode_vision_chunk_items(
     (already wrapped as VLLMUnprocessableEntityError by `_decode_media_ref`).
     """
     lazy_items = [
-        (inner_modality, data)
-        for inner_modality, (data, _uuid) in zip(
-            vision_chunks_modality_order, vision_chunk_items
+        (index, inner_modality, data)
+        for index, inner_modality, data, _uuid in _indexed_vision_chunks(
+            vision_chunk_items, vision_chunks_modality_order
         )
         if isinstance(data, MediaRef) and not data.is_decoded
     ]
@@ -863,9 +887,9 @@ async def _predecode_vision_chunk_items(
     results = await asyncio.gather(
         *(
             loop.run_in_executor(
-                global_thread_pool, _decode_media_ref, data, inner_modality
+                global_thread_pool, _decode_media_ref, data, inner_modality, index
             )
-            for inner_modality, data in lazy_items
+            for index, inner_modality, data in lazy_items
         ),
         return_exceptions=True,
     )

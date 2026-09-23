@@ -3153,6 +3153,32 @@ def test_resolve_items_lazy_vision_chunk_decode_error_propagates_sync(caplog):
     assert "Failed to split video chunks" not in caplog.text
 
 
+def test_resolve_items_vision_chunk_decode_error_numbers_within_modality():
+    """The index counts items of the failing item's own modality rather than
+    chunk positions, so it matches what the mm processor reports for the same
+    item. Here the corrupt video is the third chunk but the second video."""
+
+    def _corrupt():
+        raise ValueError("corrupt media")
+
+    tracker = MultiModalItemTracker(MagicMock())
+    tracker._model_config.is_multimodal_model = True
+    tracker._model_config.hf_config.use_unified_vision_chunk = True
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [
+        (MediaRef(lambda: object(), b"image-bytes"), None),
+        (MediaRef(lambda: object(), b"video-bytes"), None),
+        (MediaRef(_corrupt, b"corrupt-video-bytes"), None),
+    ]
+    tracker._modality_order["vision_chunk"] = ["image", "video", "video"]
+
+    with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+        tracker.resolve_items()
+
+    assert "video media at index 1" in str(exc_info.value)
+    assert exc_info.value.parameter == "video_url"
+
+
 def _assistant_tool_call(arguments, name="write"):
     return [
         {
