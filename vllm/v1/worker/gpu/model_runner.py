@@ -200,7 +200,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
         kv_transfer_config = vllm_config.kv_transfer_config
         self.is_kv_consumer = (
-            kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_role == "kv_consumer"
         )
 
         self.device = device
