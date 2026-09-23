@@ -11,7 +11,7 @@ Launch (one torchrun per host, same rendezvous, one host as rank 0):
     MASTER_ADDR=<node0-ip> MASTER_PORT=29525 \\
     torchrun --nnodes 4 --nproc-per-node 8 --node-rank <0..3> \\
       --rdzv_backend=c10d --rdzv_endpoint=<node0-ip>:29525 \\
-      -m pytest -v -s kernels/moe/test_mori_aiter_ep_trim_regression.py
+      -m pytest -v -s kernels/moe/test_rocm_mori_moe_ep.py
 """
 
 import importlib.util
@@ -20,8 +20,11 @@ import os
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("mori") is None, reason="mori not installed"
+    not current_platform.is_rocm() or importlib.util.find_spec("mori") is None,
+    reason="requires ROCm and mori",
 )
 
 GPU_PER_NODE = 8
