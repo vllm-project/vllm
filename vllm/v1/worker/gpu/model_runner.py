@@ -137,7 +137,7 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
-from vllm.v1.worker.gpu.prompt_tail import get_padded_prompt_tail_query_len
+from vllm.v1.worker.gpu.prompt_tail import is_padded_prompt_tail_batch
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_logits,
@@ -1255,8 +1255,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=is_prefilling_np,
             has_prefill=bool(is_prefilling_np.any()),
         )
+        is_padded_prompt_tail = is_padded_prompt_tail_batch(
+            scheduler_output,
+            batch_state,
+            decode_query_len=self.decode_query_len,
+            num_speculative_tokens=(
+                self.speculative_config.num_speculative_tokens
+                if self.speculative_config is not None
+                else 0
+            ),
+            supported=(
+                self.speculative_config is not None
+                and self.speculator is not None
+                and self.speculator.supports_padded_prompt_tail_graph
+                and not self.model_config.is_hybrid
+                and not self.model_config.is_attention_free
+                and not self.is_encoder_decoder
+                and not self.supports_mm_inputs
+                and self.adaptive_verification is None
+                and self.pcp_manager is None
+                and self.parallel_config.pipeline_parallel_size == 1
+                and self.model_state.num_new_sampled_tokens_per_step == 1
+            ),
+        )
+        batch_state = batch_state._replace(is_padded_prompt_tail=is_padded_prompt_tail)
         return batch_state, get_uniform_decode_token_count(
-            num_reqs, num_toks, max_query_len, batch_state.has_prefill
+            num_reqs,
+            num_toks,
+            max_query_len,
+            batch_state.has_prefill,
+            is_padded_prompt_tail=is_padded_prompt_tail,
         )
 
     def _prepare_padding_mask(
@@ -1690,31 +1718,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
-        padded_prompt_tail_query_len = get_padded_prompt_tail_query_len(
-            scheduler_output,
-            batch_req_state,
-            decode_query_len=self.decode_query_len,
-            num_speculative_tokens=(
-                self.speculative_config.num_speculative_tokens
-                if self.speculative_config is not None
-                else 0
-            ),
-            supported=(
-                self.speculator is not None
-                and self.speculator.supports_padded_prompt_tail_graph
-                and not self.model_config.is_hybrid
-                and not self.model_config.is_attention_free
-                and not self.is_encoder_decoder
-                and not self.supports_mm_inputs
-                and self.adaptive_verification is None
-                and self.pcp_manager is None
-                and self.parallel_config.pipeline_parallel_size == 1
-                and self.model_state.num_new_sampled_tokens_per_step == 1
-            ),
-        )
-        if padded_prompt_tail_query_len is not None:
-            uniform_tok_count = padded_prompt_tail_query_len
-
         batch_desc, dp_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
@@ -1747,7 +1750,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch = self.prepare_inputs(
                 scheduler_output, batch_req_state, batch_desc, num_active_loras
             )
-            input_batch.padded_prompt_tail_query_len = padded_prompt_tail_query_len
+            input_batch.is_padded_prompt_tail = batch_req_state.is_padded_prompt_tail
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
@@ -2364,6 +2367,7 @@ class BatchReqState(NamedTuple):
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
     has_prefill: bool
+    is_padded_prompt_tail: bool = False
 
 
 def sort_batch_req_ids(

@@ -120,7 +120,7 @@ class InputBatch:
 
     # Local verifier classification shared with the first draft pass, which
     # reuses target DP synchronization. This does not change has_prefill.
-    padded_prompt_tail_query_len: int | None = None
+    is_padded_prompt_tail: bool = False
 
     @classmethod
     def make_dummy(

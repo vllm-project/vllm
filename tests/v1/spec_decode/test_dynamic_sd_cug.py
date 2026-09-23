@@ -19,7 +19,7 @@ from vllm.config import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.prompt_tail import get_padded_prompt_tail_query_len
+from vllm.v1.worker.gpu.prompt_tail import is_padded_prompt_tail_batch
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 pytestmark = pytest.mark.cpu_test
@@ -51,14 +51,14 @@ def test_padded_prompt_tail_preserves_prefill_state(k, mixed):
         del output.num_scheduled_tokens["decode"]
         del output.scheduled_spec_decode_tokens["decode"]
     assert (
-        get_padded_prompt_tail_query_len(
+        is_padded_prompt_tail_batch(
             output,
             state,
             decode_query_len=k + 1,
             num_speculative_tokens=k,
             supported=True,
         )
-        == k + 1
+        is True
     )
     assert state.has_prefill
     assert state.is_prefilling_np[0]
@@ -117,14 +117,14 @@ def test_padded_prompt_tail_rejects_incompatible_batches(case):
         state.prefill_len_np[1] = 102
         output.scheduled_spec_decode_tokens["decode"] = [-1] * k
     assert (
-        get_padded_prompt_tail_query_len(
+        is_padded_prompt_tail_batch(
             output,
             state,
             decode_query_len=width,
             num_speculative_tokens=k,
             supported=supported,
         )
-        is None
+        is False
     )
 
 
@@ -264,9 +264,7 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
     runner.pcp_manager = runner.lora_config = runner.adaptive_verification = None
     runner.ubatch_runner = None
     runner.is_encoder_decoder = runner.supports_mm_inputs = False
-    prepared_batch = SimpleNamespace(
-        has_prefill=True, padded_prompt_tail_query_len=None
-    )
+    prepared_batch = SimpleNamespace(has_prefill=True, is_padded_prompt_tail=False)
 
     def prepare_inputs(scheduled, state, desc, num_active_loras):
         assert scheduled is output
@@ -282,7 +280,7 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
     def prepare_attn(batch):
         assert batch is prepared_batch
         assert batch.has_prefill
-        assert batch.padded_prompt_tail_query_len == expected_width
+        assert batch.is_padded_prompt_tail is (expected_width is not None)
         raise ReachedAttentionPreparation
 
     runner.prepare_inputs = prepare_inputs

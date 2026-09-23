@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -56,6 +57,7 @@ def _make_runner(
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = decode_query_len
     runner.adaptive_verification = None
+    runner.speculative_config = None
     runner.req_states = SimpleNamespace(
         req_id_to_index={req_id: i for i, req_id in enumerate(req_states)},
         # The runner keeps this as min(num_computed_tokens, prefill_len).
@@ -185,6 +187,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = 8
     runner.adaptive_verification = None
+    runner.speculative_config = None
     # State arrays in state-index order: a prefilling request, then two decodes.
     runner.req_states = SimpleNamespace(
         req_id_to_index={"prefilling": 0, "decode_a": 1, "decode_b": 2},
@@ -213,12 +216,37 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     assert uniform_tok_count is None
 
 
-def test_uniform_decode_predicate():
-    # Shape and prefill state must both pass.
-    assert get_uniform_decode_token_count(2, 16, 8, False) == 8
-    assert get_uniform_decode_token_count(2, 16, 8, True) is None
-    # 12 tokens over 2 requests is no shared query length.
-    assert get_uniform_decode_token_count(2, 12, 8, False) is None
+@pytest.mark.parametrize(
+    ("num_reqs", "num_tokens", "max_query_len", "has_prefill", "padded", "expected"),
+    [
+        (2, 16, 8, False, False, 8),
+        (2, 16, 8, True, False, None),
+        (2, 12, 8, False, False, None),
+        (2, 8, 4, True, True, 4),
+        (2, 16, 8, True, True, 8),
+        (2, 12, 8, True, True, None),
+        (0, 0, 4, True, True, None),
+    ],
+)
+def test_uniform_decode_predicate(
+    num_reqs,
+    num_tokens,
+    max_query_len,
+    has_prefill,
+    padded,
+    expected,
+):
+    # Validated padding permits prefill state, but never bypasses the shape test.
+    assert (
+        get_uniform_decode_token_count(
+            num_reqs,
+            num_tokens,
+            max_query_len,
+            has_prefill,
+            is_padded_prompt_tail=padded,
+        )
+        == expected
+    )
 
 
 def test_no_speculator_dispatches_on_query_length_alone():

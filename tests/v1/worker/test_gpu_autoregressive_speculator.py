@@ -133,10 +133,10 @@ def test_padded_prompt_tail_draft_capability(
     assert speculator.supports_padded_prompt_tail_graph is expected
 
 
-@pytest.mark.parametrize("tail_width", [None, 4])
+@pytest.mark.parametrize("is_padded_prompt_tail", [False, True])
 def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
     monkeypatch,
-    tail_width,
+    is_padded_prompt_tail,
 ):
     """A tail classified as prefill must retain the target's verifier DP shape."""
     speculator = _make_speculator(monkeypatch, torch.zeros(4, 3))
@@ -155,7 +155,7 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
         seq_lens_cpu_upper_bound=torch.tensor([4099]),
         idx_mapping=None,
         has_prefill=True,
-        padded_prompt_tail_query_len=tail_width,
+        is_padded_prompt_tail=is_padded_prompt_tail,
     )
     sync = DPSyncState(
         num_tokens_across_dp=torch.tensor([4, 4]),
@@ -182,7 +182,7 @@ def test_prompt_tail_draft_prefill_reuses_target_dp_classification(
         raise Dispatched
 
     monkeypatch.setattr(spec_module, "dispatch_cg_and_sync_dp", dispatch)
-    expected = Dispatched if tail_width is not None else AssertionError
+    expected = Dispatched if is_padded_prompt_tail else AssertionError
     with pytest.raises(expected):
         speculator.propose(
             batch,

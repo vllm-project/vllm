@@ -302,9 +302,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens,
             max_query_len,
             input_batch.has_prefill,
+            is_padded_prompt_tail=input_batch.is_padded_prompt_tail,
         )
-        if input_batch.padded_prompt_tail_query_len is not None:
-            uniform_token_count = input_batch.padded_prompt_tail_query_len
         prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,

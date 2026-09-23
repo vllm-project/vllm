@@ -9,15 +9,15 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 
-def get_padded_prompt_tail_query_len(
+def is_padded_prompt_tail_batch(
     output: "SchedulerOutput",
     state: "BatchReqState | None",
     *,
     decode_query_len: int,
     num_speculative_tokens: int,
     supported: bool,
-) -> int | None:
-    """Return the verifier width without changing any prefill state.
+) -> bool:
+    """Validate padded prompt tails without changing any prefill state.
 
     Shape alone is insufficient: every row must carry the complete verifier
     layout, and every prefilling row must be exactly one cached prompt-tail
@@ -34,19 +34,19 @@ def get_padded_prompt_tail_query_len(
         or len(state.req_ids) != len(output.num_scheduled_tokens)
         or state.num_tokens != len(state.req_ids) * decode_query_len
     ):
-        return None
+        return False
 
     for i, req_id in enumerate(state.req_ids):
         if output.num_scheduled_tokens[req_id] != decode_query_len:
-            return None
+            return False
         drafts = output.scheduled_spec_decode_tokens.get(req_id, ())
         if len(drafts) != num_speculative_tokens:
-            return None
+            return False
         if state.is_prefilling_np[i]:
             computed = int(state.num_computed_prefill_tokens_np[i])
             if computed <= 0 or int(state.prefill_len_np[i]) - computed != 1:
-                return None
+                return False
             if any(token != -1 for token in drafts):
-                return None
+                return False
 
-    return decode_query_len
+    return True
