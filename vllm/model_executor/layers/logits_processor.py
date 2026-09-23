@@ -289,7 +289,6 @@ class LogitsProcessor(PluggableLayer):
         if num_pad > 0:
             logits[..., -num_pad:] = -float("inf")
 
-        log_partition = None
         if return_log_probs:
             log_partition = torch.logsumexp(logits.float(), dim=-1, keepdim=True)
             if lm_head.tp_size > 1:
@@ -310,7 +309,7 @@ class LogitsProcessor(PluggableLayer):
             ids = ids.gather(-1, selected)
 
         values = values.float()
-        if log_partition is not None:
+        if return_log_probs:
             return ids, values - log_partition
         if self.scale != 1.0:
             values = values * self.scale

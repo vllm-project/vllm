@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -102,9 +103,14 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
     )
 
 
-@pytest.mark.parametrize("head_width", [8, 16])
-@pytest.mark.parametrize("slots", [1, 3])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "head_width,slots,dtype",
+    [
+        pytest.param(8, 3, torch.float32, id="projected-multi-slot"),
+        pytest.param(16, 1, torch.float32, id="identity-single-slot"),
+        pytest.param(8, 3, torch.bfloat16, id="bf16-projected-multi-slot"),
+    ],
+)
 def test_lilicorr_matches_exported_head(head_width, slots, dtype):
     torch.manual_seed(7)
     with set_current_vllm_config(
@@ -241,6 +247,86 @@ def test_context_anchor_is_last_committed_normalized_feature():
     LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([1]))
     torch.testing.assert_close(spec.anchor_hidden[0], norm(hidden[1]))
     assert not spec.anchor_hidden[1:].any()
+
+
+@pytest.mark.parametrize("lilicorr", [False, True])
+def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lilicorr):
+    """Both heads share the walk, including a padded request and adaptive scores."""
+    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+    from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+
+    key = "lilicorr_candidate_topk" if lilicorr else "selector_top_k"
+
+    def init_base(self, config, device):
+        self.draft_model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(hidden_size=4, dflash_config={key: 4})
+        )
+        self.max_num_reqs = 3
+        self.num_speculative_steps = 2
+        self.num_query_per_req = 3
+        self.dtype = torch.float32
+
+    monkeypatch.setattr(DFlashSpeculator, "__init__", init_base)
+    cls = LiLiCorrSpeculator if lilicorr else DFlash2Speculator
+    spec = cls(None, torch.device("cpu"))
+    hidden = torch.arange(36).float().view(9, 4)
+    spec._run_model = lambda *args: hidden
+    spec.sample_indices = torch.tensor([1, 2, 4, 5, 7, 8])
+    spec.sample_pos = torch.arange(6)
+    spec.sample_idx_mapping = torch.tensor([1, 1, 0, 0, -1, -1])
+    spec.sample_col = torch.tensor([0, 1, 0, 1, 0, 1])
+    spec.temperature = torch.ones(3)
+    spec.seeds = torch.arange(3)
+    spec.draft_tokens = torch.empty(3, 2, dtype=torch.long)
+    spec.draft_logits = None
+    spec.use_fp64_gumbel = False
+    spec.enable_adaptive_verification = True
+    spec.input_buffers = SimpleNamespace(input_ids=torch.arange(9))
+    candidates = torch.arange(24).view(6, 4)
+    log_probs = candidates.float().log_softmax(-1)
+    scores = torch.randn(3, 2, 4, 4)
+    scoring_inputs: list[torch.Tensor] = []
+    sampling_inputs: list[Any] = []
+    adaptive_inputs: list[torch.Tensor] = []
+
+    def score(*args):
+        scoring_inputs.extend(args)
+        return scores
+
+    def sample(*args):
+        sampling_inputs.extend(args)
+        spec.candidate_sampler.scores.copy_(scores[:, :, 0])
+
+    spec.model = SimpleNamespace(
+        compute_candidates=lambda h: (candidates, log_probs),
+        model=SimpleNamespace(lilicorr=score, candidate_selector=score),
+    )
+    spec.target_embeddings = lambda ids: ids.float().unsqueeze(-1).expand(*ids.shape, 4)
+    if lilicorr:
+        spec.anchor_hidden.copy_(torch.arange(12).view(3, 4))
+        spec.anchor_valid[:2] = True
+    spec.candidate_sampler.sample = sample
+    spec._maybe_predict_acceptance = lambda *args: adaptive_inputs.extend(args)
+    spec._generate_draft(3, 9, None, None, None)
+
+    expected_ids = candidates.view(3, 2, 4)
+    expected_first = spec.target_embeddings(expected_ids) if lilicorr else expected_ids
+    torch.testing.assert_close(scoring_inputs[0], expected_first)
+    torch.testing.assert_close(scoring_inputs[1], log_probs.view(3, 2, 4))
+    torch.testing.assert_close(
+        scoring_inputs[2], hidden[spec.sample_indices].view(3, 2, 4)
+    )
+    if lilicorr:
+        torch.testing.assert_close(scoring_inputs[3], spec.anchor_hidden)
+        torch.testing.assert_close(scoring_inputs[4], spec.anchor_valid)
+    else:
+        torch.testing.assert_close(scoring_inputs[3], torch.tensor([0, 3, 6]))
+    torch.testing.assert_close(sampling_inputs[0], expected_ids)
+    assert sampling_inputs[1] is scores
+    assert sampling_inputs[4] is spec.sample_idx_mapping
+    torch.testing.assert_close(adaptive_inputs[0], scores[:, :, 0].flatten(0, 1))
+    torch.testing.assert_close(adaptive_inputs[1], spec.sample_idx_mapping)
+    torch.testing.assert_close(adaptive_inputs[2], spec.sample_col)
 
 
 @pytest.mark.parametrize(

@@ -1,39 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
-
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
+from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
 
-class LiLiCorrSpeculator(DFlashSpeculator):
+class LiLiCorrSpeculator(DFlash2Speculator):
     _speculator_name = "LiLiCorr"
+    _candidate_top_k_key = "lilicorr_candidate_topk"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         config = self.draft_model_config.hf_config
-        self.top_k = int(config.dflash_config["lilicorr_candidate_topk"])
-        self.candidate_sampler = CandidateSampler(
-            self.max_num_reqs, self.num_speculative_steps, self.top_k, device
-        )
         self.anchor_hidden = torch.zeros(
             self.max_num_reqs, config.hidden_size, dtype=self.dtype, device=device
         )
         self.anchor_valid = torch.zeros(
             self.max_num_reqs, dtype=torch.bool, device=device
         )
-
-    def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
-        return torch.float32, -float("inf")
 
     def load_draft_model(
         self, target_model: nn.Module, target_attn_layer_names: set[str]
@@ -87,48 +77,17 @@ class LiLiCorrSpeculator(DFlashSpeculator):
         )
         self.anchor_valid[:num_reqs].copy_(valid)
 
-    def _generate_draft(
+    def _score_candidates(
         self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> None:
-        hidden = self._run_model(
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-        )
-        num_sample = num_reqs * self.num_speculative_steps
-        hidden = hidden[self.sample_indices[:num_sample]]
-        candidates, log_probs = self.model.compute_candidates(hidden)
-        candidates = candidates.view(num_reqs, self.num_speculative_steps, self.top_k)
-        scores = self.model.model.lilicorr(
-            self.target_embeddings(candidates),
-            log_probs.view_as(candidates),
-            hidden.view(num_reqs, self.num_speculative_steps, -1),
+        candidate_ids: torch.Tensor,
+        unary_logits: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        num_reqs = candidate_ids.shape[0]
+        return self.model.model.lilicorr(
+            self.target_embeddings(candidate_ids),
+            unary_logits,
+            hidden_states,
             self.anchor_hidden[:num_reqs],
             self.anchor_valid[:num_reqs],
         )
-        self.candidate_sampler.sample(
-            candidates,
-            scores,
-            num_reqs,
-            self.sample_pos,
-            self.sample_idx_mapping,
-            self.temperature,
-            self.seeds,
-            self.draft_tokens,
-            self.draft_logits,
-            self.use_fp64_gumbel,
-        )
-        if self.enable_adaptive_verification:
-            self._maybe_predict_acceptance(
-                self.candidate_sampler.scores[:num_reqs].flatten(0, 1),
-                self.sample_idx_mapping[:num_sample],
-                self.sample_col[:num_sample],
-            )

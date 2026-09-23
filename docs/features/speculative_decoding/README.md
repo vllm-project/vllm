@@ -9,6 +9,7 @@ To train your own draft models for optimized speculative decoding, see [vllm-pro
 vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models, PARD and MLP provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
 
 - [EAGLE](eagle.md)
+- [LiLiCorr](lilicorr.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
@@ -233,34 +234,3 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 - [What is Lookahead Scheduling in vLLM?](https://docs.google.com/document/d/1Z9TvqzzBPnh5WHcRwjvK2UEeFeq5zMZb5mFE8jR0HCs/edit#heading=h.1fjfb0donq5a)
 - [Information on batch expansion](https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit#heading=h.kk7dq05lc6q8)
 - [Dynamic speculative decoding](https://github.com/vllm-project/vllm/issues/4565)
-
-## LiLiCorr
-
-LiLiCorr checkpoints use the DFlash backbone and rerank its per-position candidates
-with a learned correlator. Model Runner V2 is required and selected automatically.
-Both plain and grouped-convolution checkpoints are supported, with the geometry
-read from the checkpoint's `dflash_config`. The draft token count must equal the
-trained `block_size - 1`.
-
-For a checkpoint trained with block size 16:
-
-```bash
-vllm serve /path/to/target --dtype bfloat16 \
-    --speculative-config '{"method":"dflash","model":"/path/to/lilicorr","num_speculative_tokens":15,"draft_sample_method":"probabilistic"}'
-```
-
-Use `"draft_sample_method":"greedy"` for deterministic proposals. Probabilistic
-proposals use each request's temperature and the existing rejection sampler.
-The checkpoint must declare `LiLiCorrDraftModel` and include all `lilicorr_*`
-geometry fields and trained head weights. Convolution tensors must match the
-configured `conv_kernel_size` and `conv_group_size`. Target input embeddings and
-the target LM head must be available on the draft rank. Correlator linear layers
-and convolution kernel projections use the draft quantization configuration
-and its module exclusions.
-
-Lattice QKV `in_proj_weight` and `in_proj_bias` must remain in floating-point
-model dtype; they use the original exported parameter layout.
-
-The split factor and fused edge projections also require floating-point
-`lilicorr.factor_input_proj`, `lilicorr.out_head`, and `lilicorr.in_head` weights.
-Exclude these modules when exporting a quantized checkpoint.

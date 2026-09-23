@@ -327,10 +327,10 @@ def test_conv_projections_use_draft_quant_config(monkeypatch):
     from torch import nn
 
     from vllm.distributed import parallel_state
-    from vllm.model_executor.layers import linear
+    from vllm.model_executor.layers.quantization import modelopt
     from vllm.model_executor.models.qwen3_dflash import DFlashQwen3DecoderLayer
     from vllm.model_executor.models.qwen3_dflash2 import DFlash2Qwen3DecoderLayer
-    from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+    from vllm.model_executor.models.utils import AutoWeightsLoader
 
     monkeypatch.setattr(
         parallel_state, "_TP", SimpleNamespace(rank_in_group=0, world_size=1)
@@ -340,54 +340,23 @@ def test_conv_projections_use_draft_quant_config(monkeypatch):
         "__init__",
         lambda self, *a, **kw: nn.Module.__init__(self),
     )
-    quant_config = SimpleNamespace(
-        get_cache_scale_mapper=WeightsMapper,
-        get_checkpoint_weight_mapper=WeightsMapper,
-        _ignore_unexpected_suffixes=(),
+    # Exercise the real quantized parameter allocation without selecting a GPU kernel.
+    monkeypatch.setattr(
+        modelopt,
+        "select_linear_kernel",
+        lambda *a, **kw: SimpleNamespace(input_quant_key=lambda: None),
     )
-    selected = []
-
-    class PackedMethod(linear.LinearMethodBase):
-        def create_weights(
-            self,
-            layer,
-            input_size_per_partition,
-            output_partition_sizes,
-            *args,
-            **kwargs,
-        ):
-            layer.register_parameter(
-                "weight",
-                nn.Parameter(
-                    torch.empty(
-                        sum(output_partition_sizes),
-                        input_size_per_partition // 2,
-                        dtype=torch.uint8,
-                    ),
-                    requires_grad=False,
-                ),
-            )
-
-        def apply(self, layer, x, bias=None):
-            raise AssertionError("Loading test does not execute quantized kernels")
-
-    def resolve(config, layer, prefix):
-        assert config is quant_config
-        selected.append(prefix)
-        return PackedMethod()
-
-    monkeypatch.setattr(linear, "resolve_quant_method", resolve)
+    quant_config = modelopt.ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
+    )
     layer = DFlash2Qwen3DecoderLayer(
         SimpleNamespace(
             speculative_config=SimpleNamespace(num_speculative_tokens=7),
             model_config=SimpleNamespace(dtype=torch.bfloat16),
         ),
         config=SimpleNamespace(
-            hidden_size=8,
-            dflash_config={
-                "conv_kernel_size": 2,
-                "conv_group_size": 2,
-            },
+            hidden_size=16,
+            dflash_config={"conv_kernel_size": 2, "conv_group_size": 2},
         ),
         layer_idx=0,
         prefix="model.layers.0",
@@ -395,14 +364,13 @@ def test_conv_projections_use_draft_quant_config(monkeypatch):
     )
     for name in ("attention_conv", "mlp_conv"):
         module = getattr(layer, name)
-        weight = torch.ones(16, 4, dtype=torch.uint8)
+        projection = module.kernel_projection
+        assert projection.weight.dtype == torch.uint8
+        assert projection.weight.shape == (32, 8)
+        weight = torch.ones_like(projection.weight)
         AutoWeightsLoader(module).load_weights([("kernel_projection.weight", weight)])
-        torch.testing.assert_close(module.kernel_projection.weight, weight)
+        torch.testing.assert_close(projection.weight, weight)
         assert module.base_kernel.dtype == torch.bfloat16
-    assert selected == [
-        "model.layers.0.attention_conv.kernel_projection",
-        "model.layers.0.mlp_conv.kernel_projection",
-    ]
 
 
 def test_context_kv_uses_quantized_projection_fallback(monkeypatch):

@@ -187,17 +187,14 @@ class CandidateSampler:
 
 class DFlash2Speculator(DFlashSpeculator):
     _speculator_name = "DFlash2"
+    _candidate_top_k_key = "selector_top_k"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         draft_config = self.draft_model_config.hf_config.dflash_config
-        self.selector_top_k = int(draft_config["selector_top_k"])
-        self._anchor_indices = (
-            torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
-            * self.num_query_per_req
-        )
+        self.top_k = int(draft_config[self._candidate_top_k_key])
         self.candidate_sampler = CandidateSampler(
-            self.max_num_reqs, self.num_speculative_steps, self.selector_top_k, device
+            self.max_num_reqs, self.num_speculative_steps, self.top_k, device
         )
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
@@ -230,16 +227,10 @@ class DFlash2Speculator(DFlashSpeculator):
             hidden_states.flatten(0, 1)
         )
         candidate_ids = candidate_ids.view(
-            num_reqs, self.num_speculative_steps, self.selector_top_k
+            num_reqs, self.num_speculative_steps, self.top_k
         )
         unary_logits = unary_logits.view_as(candidate_ids)
-        anchor_token_ids = self.input_buffers.input_ids[self._anchor_indices[:num_reqs]]
-        scores = self.model.model.candidate_selector(
-            candidate_ids,
-            unary_logits,
-            hidden_states,
-            anchor_token_ids,
-        )
+        scores = self._score_candidates(candidate_ids, unary_logits, hidden_states)
         self.candidate_sampler.sample(
             candidate_ids,
             scores,
@@ -258,3 +249,17 @@ class DFlash2Speculator(DFlashSpeculator):
                 self.sample_idx_mapping[:num_sample],
                 self.sample_col[:num_sample],
             )
+
+    def _score_candidates(
+        self,
+        candidate_ids: torch.Tensor,
+        unary_logits: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        num_reqs = candidate_ids.shape[0]
+        anchor_token_ids = self.input_buffers.input_ids[
+            : num_reqs * self.num_query_per_req : self.num_query_per_req
+        ]
+        return self.model.model.candidate_selector(
+            candidate_ids, unary_logits, hidden_states, anchor_token_ids
+        )
