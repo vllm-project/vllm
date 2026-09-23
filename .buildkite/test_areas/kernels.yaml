@@ -330,6 +330,8 @@ steps:
       - vllm/envs.py
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test
@@ -392,6 +394,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/platforms/rocm.py
+      - vllm/third_party/flash_linear_attention/
 
 - label: ":nvidia: (H100) DeepGEMM Kernels"
   key: kernels-deepgemm-test-h100
@@ -522,6 +525,32 @@ steps:
           exit 1
           ;;
       esac
+  mirror:
+    amd:
+      label: ":amd: (MI355) NVFP4 Dense Emulation Shard %N"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 10
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/kernels/quantization/test_nvfp4_emulation.py
+      - tests/kernels/quantization/nvfp4_utils.py
+      - tests/conftest.py
+      - vllm/model_executor/kernels/linear/
+      - vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py
+      - vllm/config/kernel.py
+      - vllm/platforms/
+      - vllm/envs.py
+      - vllm/utils/torch_utils.py
+      - requirements/rocm-test.txt
+      # W4A4 format numerics and replay via emulation. TODO: native packed
+      # activation/KV-cache layouts and CUDA-only kernels need AMD backends.
+      commands:
+      - amd-smi
+      - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (DGX) Spark b12x Linear Kernels Nightly"
   key: b12x-linear-kernels-dgx-spark-nightly
@@ -701,6 +730,38 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) MoRI EP Numerics"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 20
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/kernels/moe/test_mori_moe.py
+      - tests/kernels/moe/utils.py
+      - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
+      - tests/kernels/utils.py
+      - tests/utils.py
+      - tests/conftest.py
+      - vllm/utils/torch_utils.py
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/distributed/
+      - vllm/config/
+      - vllm/forward_context.py
+      - vllm/v1/worker/workspace.py
+      - vllm/platforms/
+      - vllm/_aiter_ops.py
+      - requirements/rocm-test.txt
+      # Same-node MoRI/AITER BF16 and per-token/channel FP8. TODO: the
+      # DeepEP v2 FlashInfer backend matrix has no direct AMD implementation.
+      commands:
+      - amd-smi
+      - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 pytest -v -s kernels/moe/test_mori_moe.py
 
 - label: ":amd: (MI355) FP8 MoE Kernels"
   key: amd-fp8-moe-kernels-mi355

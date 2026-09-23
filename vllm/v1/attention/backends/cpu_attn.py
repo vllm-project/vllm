@@ -406,6 +406,15 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 kv_cache_dtype=self.kv_cache_dtype,
             )
 
+        # The CPU kernel executes attention sinks natively in bf16. If the
+        # sinks tensor is anything other than bf16, cast it to fp32 so it is
+        # executed in full float precision (done lazily here, after weights
+        # are loaded, rather than at __init__ time).
+        if self.sinks is not None and self.sinks.dtype not in [
+            torch.bfloat16,
+            torch.float32,
+        ]:
+            self.sinks = self.sinks.to(torch.float32)
         ops.cpu_attention_with_kv_cache(
             query=query[:num_actual_tokens],
             key_cache=key_cache,
