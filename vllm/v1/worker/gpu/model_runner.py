@@ -198,6 +198,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self.is_kv_consumer = (
+            kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
+        )
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -1263,8 +1267,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=is_prefilling_np,
             has_prefill=bool(is_prefilling_np.any()),
         )
+        graph_has_prefill = batch_state.has_prefill
+        if (
+            graph_has_prefill
+            and self.is_kv_consumer
+            and self.decode_query_len == 1
+            and self.pcp_manager is None
+        ):
+            # A one-token prompt tail over existing context (e.g. the P/D
+            # last-token replay) is decode-shaped. Only first chunks, which
+            # have no prior state, must stay off FULL decode graphs.
+            graph_has_prefill = bool(
+                (is_prefilling_np & (num_computed_prefill_tokens_np == 0)).any()
+            )
         return batch_state, get_uniform_decode_token_count(
-            num_reqs, num_toks, max_query_len, batch_state.has_prefill
+            num_reqs, num_toks, max_query_len, graph_has_prefill
         )
 
     def _prepare_padding_mask(
