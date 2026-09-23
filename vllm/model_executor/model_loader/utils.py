@@ -20,10 +20,13 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.model_loader.post_load import (
+    PostLoadPhase,
+    iter_post_load_modules,
 )
 from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
@@ -143,7 +146,16 @@ def process_weights_after_loading(
     # loaded, but it is identical to the input embeddings.
     maybe_retie_word_embeddings(model, model_config)
 
-    for name, module in model.named_modules():
+    for name, module, phase in iter_post_load_modules(model):
+        if phase is PostLoadPhase.ATTENTION:
+            with device_loading_context(module, target_device):
+                module.process_weights_after_loading()
+            continue
+        if phase is PostLoadPhase.MODEL:
+            if hasattr(module, "process_weights_after_loading"):
+                module.process_weights_after_loading()
+            continue
+
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             if (
@@ -178,20 +190,6 @@ def process_weights_after_loading(
             # Repacking transients above can leave large amounts of memory in
             # the caching allocator, which starves the OS on UMA devices.
             release_device_memory_under_pressure(target_device)
-
-    # Initialize post-load attention weights for any attention layer and MM
-    # encoder. NOTE: Happens after other modules so we can easily decompress
-    # weights.
-    for _, module in model.named_modules():
-        if is_deferred_attention_layer(module):
-            # TODO(lucas): see if there is a way to unify the signatures
-            # of process_weights_after_loading
-            with device_loading_context(module, target_device):
-                module.process_weights_after_loading(model_config.dtype)
-
-    # Model-level post-load hook, after the per-layer quant finalize.
-    if hasattr(model, "process_weights_after_loading"):
-        model.process_weights_after_loading()
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`

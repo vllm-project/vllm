@@ -582,8 +582,8 @@ class Attention(nn.Module, AttentionLayerBase):
         s += f", backend={self.impl.__class__.__name__}"
         return s
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        self.impl.process_weights_after_loading(act_dtype)
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None):
+        self.impl.process_weights_after_loading(act_dtype or self.dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]

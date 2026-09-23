@@ -119,7 +119,7 @@ class _ReloadableMMEncoderAttention(MMEncoderAttention):
         self.weight.weight_loader = default_weight_loader
         self.post_load_called = False
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self, act_dtype=None) -> None:
         self.post_load_called = True
 
 
@@ -139,7 +139,7 @@ class _ReloadableAttentionLayer(
     def get_kv_cache_spec(self, vllm_config):
         return None
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self, act_dtype=None) -> None:
         self.post_load_called = True
 
 
@@ -155,6 +155,120 @@ def test_move_metatensors():
     assert tensor.shape == meta_tensor.shape == materialized_tensor.shape
     assert tensor.__class__ == meta_tensor.__class__ == materialized_tensor.__class__
     assert tensor.__dict__ == meta_tensor.__dict__ == materialized_tensor.__dict__
+
+
+def test_cold_start_tolerates_model_without_post_load_hook(default_vllm_config):
+    """MODEL is offered for every model, so cold start must not crash when
+    the root module has no ``process_weights_after_loading``."""
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+    cfg = types.SimpleNamespace(
+        word_embeddings_untied_by_checkpoint=False, quantization=None
+    )
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+    assert not hasattr(model, "process_weights_after_loading")
+    process_weights_after_loading(model, cfg, torch.device("cpu"))
+
+
+class _RecordingImpl:
+    """Records the dtype the layer hands its backend impl."""
+
+    seen: list[torch.dtype] = []
+    supports_quant_query_input = False
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        type(self).seen.append(act_dtype)
+
+
+class _RecordingBackend:
+    @staticmethod
+    def get_name():
+        return "TRITON_ATTN"
+
+    @staticmethod
+    def supports_alibi_sqrt():
+        return False
+
+    @staticmethod
+    def get_impl_cls():
+        return _RecordingImpl
+
+
+def test_attention_hook_defaults_to_construction_dtype(default_vllm_config):
+    """A zero-argument hook call must reach the impl with the dtype the layer
+    was built under -- the value the loader used to pass explicitly. Built
+    through `__init__` on purpose: a stub with `dtype` assigned by hand would
+    still pass if the constructor stopped recording it."""
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    _RecordingImpl.seen = []
+    with set_default_torch_dtype(torch.float16):
+        layer = Attention(
+            num_heads=1, head_size=64, scale=0.125, attn_backend=_RecordingBackend
+        )
+
+    assert layer.dtype is torch.float16
+    layer.process_weights_after_loading()
+    layer.process_weights_after_loading(torch.bfloat16)
+
+    assert _RecordingImpl.seen == [torch.float16, torch.bfloat16]
+
+
+def _check_mla_absorbed_dtype(model):
+    """Run inside the worker via apply_model: verify every MLA layer's absorbed
+    weights have the same dtype as the layer's construction dtype."""
+    import torch
+
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+
+    results = []
+    for name, mod in model.named_modules():
+        if not is_deferred_attention_layer(mod):
+            continue
+        layer_dtype = getattr(mod, "dtype", None)
+        for attr in ("W_UV", "W_UK_T"):
+            t = getattr(mod, attr, None)
+            if not isinstance(t, torch.Tensor):
+                continue
+            results.append(
+                {
+                    "name": name,
+                    "attr": attr,
+                    "layer_dtype": str(layer_dtype),
+                    "weight_dtype": str(t.dtype),
+                    "match": t.dtype == layer_dtype,
+                }
+            )
+    return results
+
+
+def test_mla_absorbed_weight_dtype(vllm_runner, monkeypatch):
+    """After cold start, every MLA layer's absorbed W_UV/W_UK_T must have the
+    dtype the layer was constructed with."""
+    if _fp8_reload_unsupported():
+        pytest.skip(reason="Requires FP8 support")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        model_name="inference-optimization/DeepSeek-V3-debug-empty-FP8_DYNAMIC",
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        results = llm.apply_model(_check_mla_absorbed_dtype)
+        for rank, rank_results in enumerate(results):
+            assert rank_results, f"rank {rank}: no absorbed weights found"
+            for r in rank_results:
+                assert r["match"], (
+                    f"rank {rank} {r['name']}.{r['attr']}: "
+                    f"weight dtype {r['weight_dtype']} != "
+                    f"layer dtype {r['layer_dtype']}"
+                )
 
 
 @pytest.mark.parametrize(
