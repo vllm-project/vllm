@@ -1054,10 +1054,13 @@ class SamplingParams(
         # Diffusion models denoise a whole canvas per step with a fixed
         # temperature schedule, so per-request sampling parameters are not
         # supported. Penalties are ignored by the sampler with a warning.
+        # A seed only seeds the noise of a diffusion_samples request.
+        extra = self.extra_args or {}
+        seed_used = int(extra.get("diffusion_samples") or 1) > 1
         if (
             self.temperature != 1.0
             or self.min_p > _SAMPLING_EPS
-            or self.seed is not None
+            or (self.seed is not None and not seed_used)
             or self.min_tokens > 0
             or self.logit_bias
             or self.bad_words
@@ -1066,7 +1069,8 @@ class SamplingParams(
             raise VLLMValidationError(
                 "The temperature, min_p, seed, min_tokens, logit_bias, "
                 "bad_words, and allowed_token_ids sampling parameters "
-                "are not yet supported with diffusion models."
+                "are not yet supported with diffusion models. seed is "
+                "accepted only with diffusion_samples."
             )
 
     def _validate_structured_outputs(

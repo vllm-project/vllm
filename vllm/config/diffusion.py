@@ -24,3 +24,7 @@ class DiffusionConfig:
     max_denoising_steps: int | None = None
     """Maximum number of denoising iterations per canvas block.
     If not set, read from the model's generation_config.json."""
+
+    max_samples: int = Field(default=32, ge=1)
+    """Largest ``diffusion_samples`` a request may ask for: the number of
+    child requests one seeded canvas fans out into."""
