@@ -5,4 +5,4 @@ cupy-cuda13x != 14.1.0
 nixl == 1.4.1
 # CUDA 12 build. On the CUDA 13 image install-kv-connectors.sh swaps this for
 # the mooncake-transfer-engine-cuda13 variant of the same version.
-mooncake-transfer-engine >= 0.3.12
+mooncake-transfer-engine-efa >= 0.3.12
