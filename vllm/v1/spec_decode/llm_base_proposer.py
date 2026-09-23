@@ -578,7 +578,7 @@ class SpecDecodeBaseProposer:
         # Step 0 of index_share_for_mtp_iteration: let the MTP layer
         # compute its own indices (skip_topk=False) so subsequent steps
         # can reuse them.
-        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
+        if self._share_mtp_indices:
             self.model.model.set_skip_topk(False)
 
         if self.eplb_state is not None:
@@ -606,7 +606,7 @@ class SpecDecodeBaseProposer:
 
         # After step 0: switch to reuse mode so steps 1+ skip the indexer
         # and read the indices that step 0 just wrote into the shared buffer.
-        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
+        if self._share_mtp_indices:
             self.model.model.set_skip_topk(True)
             # The topk indices were written for each query token in the multi-token
             # batch. Compact the topk indices for each request's last token.
@@ -1598,8 +1598,14 @@ class SpecDecodeBaseProposer:
             if spec_config is not None
             else None
         )
-        self._share_mtp_indices = getattr(
-            draft_hf_config, "index_share_for_mtp_iteration", False
+        # Index sharing calls both set_skip_topk and compact_topk_indices, so a
+        # drafter must have both; with only the first it would reuse indices it
+        # never compacted.
+        draft_predictor = getattr(self.model, "model", None)
+        self._share_mtp_indices = bool(
+            getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+            and hasattr(draft_predictor, "set_skip_topk")
+            and hasattr(draft_predictor, "compact_topk_indices")
         )
 
         if self.use_local_argmax_reduction:
