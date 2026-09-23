@@ -293,7 +293,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # The first inference worker publishes one placement per parameter.
         # Every trainer rank receives the complete plan in this single,
         # initialization-time broadcast.
-        placements = publish_destination_placements(self.group, first_worker_rank, None)
+        placements = publish_destination_placements(
+            self.group, first_worker_rank, None, len(self._metas)
+        )
         # The send loop matches placements to metadata by position, so reject
         # an incomplete or oversized plan before entering any M2N collective.
         if len(placements) != len(self._metas):

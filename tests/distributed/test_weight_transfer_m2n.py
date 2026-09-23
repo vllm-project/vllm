@@ -29,6 +29,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NParamMeta,
     check_placements,
     check_transferable,
+    publish_destination_placements,
     resolve_layout,
     validate_layout,
 )
@@ -148,6 +149,19 @@ class TestWireTypes:
         )
         assert info.nccl_unique_id_bytes == b"\x00" * 128
         assert VALID_UID_B64 not in repr(info)
+
+    def test_destination_plan_uses_uid_communicator_without_group(self):
+        comm = Mock(rank=0, device=torch.device("cpu"), group=None)
+
+        def receive_plan(tensor, src):
+            assert src == 1
+            tensor.copy_(torch.tensor([[-1, 0], [-2, -2]], dtype=torch.int8))
+
+        comm.broadcast.side_effect = receive_plan
+
+        placements = publish_destination_placements(comm, 1, None, 2)
+
+        assert placements == [(REPLICATE, 0), REPLICATED]
 
     def test_rejects_both_rendezvous_modes(self):
         with pytest.raises(ValueError, match="not both"):
@@ -584,6 +598,18 @@ class _Model(torch.nn.Module):
         self.fused = torch.nn.Parameter(torch.zeros(24, 16))
 
 
+class _MixedModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = torch.nn.Module()
+        self.proj.weight = torch.nn.Parameter(torch.zeros(16, 8))
+        self.proj.weight.input_dim = 1
+        self.proj.weight.weight_loader = MethodType(
+            RowParallelLinear.weight_loader, Mock(tp_size=2)
+        )
+        self.proj.bias = torch.nn.Parameter(torch.zeros(16))
+
+
 def _resolve(names, dtypes, shapes, **kwargs):
     defaults = dict(num_workers=2, shard_axis_size=2, allow_direct=True)
     defaults.update(kwargs)
@@ -626,6 +652,21 @@ class TestDestinationResolution:
         [destination] = _resolve(["mlp.gate_proj.weight"], [torch.float32], [(16, 16)])
         assert not destination.direct
         assert destination.placements is REPLICATED
+
+    def test_fallback_parameter_demotes_direct_sibling_in_same_module(self):
+        """Layerwise finalization must not overwrite a directly loaded weight
+        when a sibling bias takes the fallback path."""
+        destinations = resolve_parameter_destinations(
+            _MixedModel(),
+            ["proj.weight", "proj.bias"],
+            [torch.float32, torch.float32],
+            [(16, 16), (16,)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+
+        assert not any(destination.direct for destination in destinations)
 
     def test_unknown_loader_falls_back_despite_matching_name_and_shape(self):
         model = _Model()

@@ -11,7 +11,7 @@ so the engine module stays about the transfer itself.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -282,20 +282,47 @@ def publish_destination_placements(
     comm: "PyNcclCommunicator",
     first_worker_rank: int,
     placements: "Sequence[Placements | None] | None",
+    num_parameters: int,
 ) -> list[Placements | None]:
     """Share the worker-side destination plan with every rank in the group.
 
     The trainer must issue each reshard with the same destination the workers
     use, but once destinations are per-parameter they depend on the inference
     model, which only the workers can see. The first worker publishes them here,
-    over the same stateless group that bootstrapped the communicator; trainer
-    ranks pass `None` and receive them, and the other workers pass their own so
-    a disagreement is caught rather than deadlocking later.
+    over the shared NCCL communicator; trainer ranks pass `None` and receive
+    them, and the other workers pass their own so a disagreement is caught
+    rather than deadlocking later.
 
     Only placements travel: the destination *mesh* is still derived from the
-    rank split, identically on both sides.
+    rank split, identically on both sides. Use the NCCL communicator directly
+    because unique-id rendezvous deliberately has no bootstrap process group.
     """
-    return comm.group.broadcast_obj(placements, src=first_worker_rank)
+    replicated_sentinel = REPLICATE - 1
+    encoded = torch.full(
+        (num_parameters, MESH_NDIMS),
+        replicated_sentinel,
+        dtype=torch.int8,
+        device=comm.device,
+    )
+    if comm.rank == first_worker_rank:
+        if placements is None or len(placements) != num_parameters:
+            raise ValueError(
+                f"publishing rank needs {num_parameters} destination placements"
+            )
+        rows = [
+            [replicated_sentinel] * MESH_NDIMS if placement is REPLICATED else placement
+            for placement in placements
+        ]
+        if rows:
+            encoded.copy_(torch.tensor(rows, dtype=torch.int8, device=comm.device))
+
+    comm.broadcast(encoded, src=first_worker_rank)
+    return [
+        REPLICATED
+        if all(code == replicated_sentinel for code in row)
+        else cast(Placements, tuple(row))
+        for row in encoded.tolist()
+    ]
 
 
 def comm_ptr(comm: "PyNcclCommunicator") -> int:

@@ -200,6 +200,21 @@ def resolve_parameter_destinations(
                 M2NDestination(name, _destination_placements(dim), param.data)
             )
 
+    # Layerwise reload finalizes a module as a unit. Mixing direct and fallback
+    # parameters within one module can copy stale storage over the direct load.
+    fallback_modules = {
+        name.rpartition(".")[0]
+        for name, destination in zip(names, destinations)
+        if not destination.direct and name in params
+    }
+    destinations = [
+        M2NDestination(destination.name, REPLICATED, None)
+        if destination.direct
+        and destination.name.rpartition(".")[0] in fallback_modules
+        else destination
+        for destination in destinations
+    ]
+
     num_direct = sum(d.direct for d in destinations)
     parameter_bytes = [
         math.prod(shape) * dtype.itemsize for dtype, shape in zip(dtypes, shapes)

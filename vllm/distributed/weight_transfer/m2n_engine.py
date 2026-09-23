@@ -309,7 +309,7 @@ class M2NWeightTransferEngine(
         # disagreement between workers would mean mismatched collectives.
         mine = [destination.placements for destination in self._parameter_destinations]
         agreed = publish_destination_placements(
-            self.model_update_group, init_info.rank_offset, mine
+            self.model_update_group, init_info.rank_offset, mine, len(self._metas)
         )
         if agreed != mine:
             mismatched = next(
