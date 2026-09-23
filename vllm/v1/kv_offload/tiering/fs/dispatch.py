@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import ctypes
 import dataclasses
-import enum
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -46,19 +45,6 @@ class WorkItem:
             tasks=self.tasks[quanta:],
         )
         return stolen, remainder
-
-
-class ThreadMode(enum.Enum):
-    """Operating mode for a pool worker thread."""
-
-    READ = "read"
-    """Load-priority: serve load jobs first, steal store jobs when idle."""
-
-    WRITE = "write"
-    """Store-priority: serve store jobs first, steal load jobs when idle."""
-
-    WRITE_EXCL = "write_excl"
-    """Store-exclusive: serve store jobs only, never steal from the load queue."""
 
 
 class JobQueue(ABC):
@@ -264,17 +250,15 @@ class WorkDispatcher:
         store_job_q: JobQueue,
         n_read_threads: int,
         n_write_threads: int,
-        n_write_excl_threads: int,
     ):
         self._locality = locality
         self._load_job_q = load_job_q
         self._store_job_q = store_job_q
-        self._n_write_excl_threads = n_write_excl_threads
 
-        _rw_threads = n_read_threads + n_write_threads
+        self._rw_threads = n_read_threads + n_write_threads
         if self._locality == Locality.LOCAL:
             # Assume local SSD
-            self._n_read_batch_threads = n_read_threads or _rw_threads
+            self._n_read_batch_threads = n_read_threads or self._rw_threads
             # Limit concurrent SSD writes to 1 thread. When a NAND die is
             # busy with a write, any read to that die stalls until the write
             # completes. More write threads means more dies occupied at once,
@@ -283,10 +267,8 @@ class WorkDispatcher:
             self._n_write_batch_threads = 1
         else:
             # Assume remote disk(s)
-            self._n_read_batch_threads = n_read_threads or _rw_threads
-            self._n_write_batch_threads = (
-                n_write_threads + n_write_excl_threads
-            ) or _rw_threads
+            self._n_read_batch_threads = n_read_threads or self._rw_threads
+            self._n_write_batch_threads = n_write_threads or self._rw_threads
 
         # Running mean of store job sizes — used as the steal quanta.
         self._avg_store_tasks: float = 0.0
@@ -313,10 +295,7 @@ class WorkDispatcher:
         n_wake_threads = 0
         if is_load:
             self._load_job_q.put(job_id, n_tasks)
-            # wakeup of write_excl threads will be a no-op for loads.
-            # Wake up extra (n_write_excl_threads) threads to make sure
-            # the load is not left in the queue with threads sleeping.
-            n_wake_threads = self._n_write_excl_threads + self._n_read_batch_threads
+            n_wake_threads = self._n_read_batch_threads
         else:
             self._store_job_q.put(job_id, n_tasks)
             # Update running mean — used as the steal quanta for write threads.
@@ -324,16 +303,13 @@ class WorkDispatcher:
             self._avg_store_tasks += (
                 n_tasks - self._avg_store_tasks
             ) / self._n_store_jobs
-            # Any woken up thread can do this store
             n_wake_threads = self._n_write_batch_threads
 
         return n_wake_threads
 
-    def has_work(self, mode: ThreadMode) -> bool:
+    def has_work(self, load_priority: bool) -> bool:
         has_load_work = bool(self._load_q or self._load_job_q.maybe_has_work())
         has_store_work = bool(self._store_q or self._store_job_q.maybe_has_work())
-        if mode is ThreadMode.WRITE_EXCL:
-            return has_store_work
         return has_load_work or has_store_work
 
     def n_batch_threads(self, is_load: bool) -> int:
@@ -372,18 +348,16 @@ class WorkDispatcher:
         self._maybe_populate_work_q(work_q, job_q)
         return work_q.popleft().unpack() if work_q else None
 
-    def fetch_work(self, mode: ThreadMode):
-        if mode is ThreadMode.READ:
+    def fetch_work(self, load_priority: bool):
+        if load_priority:
             return self._pop(self._load_q, self._load_job_q) or self._pop(
                 self._store_q, self._store_job_q
             )
-        elif mode is ThreadMode.WRITE:
+        else:
             if (item := self._pop(self._store_q, self._store_job_q)) is not None:
                 return item
             self._maybe_populate_work_q(self._load_q, self._load_job_q)
             return self._steal_from_load_q() if self._load_q else None
-        else:  # WRITE_EXCL
-            return self._pop(self._store_q, self._store_job_q)
 
     def clear(
         self,

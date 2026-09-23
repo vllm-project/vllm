@@ -18,7 +18,6 @@ from vllm.v1.kv_offload.tiering.fs.dispatch import (
     LoadQueue,
     SJFBucketQueue,
     StoreQueue,
-    ThreadMode,
     WorkDispatcher,
     make_batches,
 )
@@ -35,7 +34,6 @@ def _make_dispatcher(
     locality: Locality = Locality.LOCAL,
     n_read: int = 4,
     n_write: int = 2,
-    n_write_excl: int = 0,
 ) -> WorkDispatcher:
     return WorkDispatcher(
         locality=locality,
@@ -43,7 +41,6 @@ def _make_dispatcher(
         store_job_q=StoreQueue(_BS),
         n_read_threads=n_read,
         n_write_threads=n_write,
-        n_write_excl_threads=n_write_excl,
     )
 
 
@@ -89,7 +86,7 @@ def _drain_load(dispatcher: WorkDispatcher) -> list[tuple[Any, int, Any]]:
     """Fetch all available work for a READ thread."""
     results = []
     while True:
-        work = dispatcher.fetch_work(ThreadMode.READ)
+        work = dispatcher.fetch_work(True)
         if work is None:
             break
         results.append(work)
@@ -100,7 +97,7 @@ def _drain_store(dispatcher: WorkDispatcher) -> list[tuple[Any, int, Any]]:
     """Fetch all available work for a WRITE thread."""
     results = []
     while True:
-        work = dispatcher.fetch_work(ThreadMode.WRITE)
+        work = dispatcher.fetch_work(False)
         if work is None:
             break
         results.append(work)
@@ -375,60 +372,50 @@ class TestWorkDispatcherConstruction:
 
 class TestWorkDispatcher:
     def test_lifecycle(self):
-        s = _make_dispatcher(n_read=1, n_write=1, n_write_excl=1)
+        s = _make_dispatcher(n_read=1, n_write=1)
 
         # empty: no thread mode has work
-        assert not s.has_work(ThreadMode.READ)
-        assert not s.has_work(ThreadMode.WRITE)
-        assert not s.has_work(ThreadMode.WRITE_EXCL)
-        assert s.fetch_work(ThreadMode.READ) is None
-        assert s.fetch_work(ThreadMode.WRITE) is None
-        assert s.fetch_work(ThreadMode.WRITE_EXCL) is None
+        assert not s.has_work(True)
+        assert not s.has_work(False)
+        assert s.fetch_work(True) is None
+        assert s.fetch_work(False) is None
 
-        # load: visible to READ and WRITE (steal), not WRITE_EXCL
+        # load: visible to READ; WRITE can steal
         _submit_load(s, job_id=1, tasks=list(range(4)))
-        assert s.has_work(ThreadMode.READ)
-        assert s.has_work(ThreadMode.WRITE)
-        assert not s.has_work(ThreadMode.WRITE_EXCL)
-        assert s.fetch_work(ThreadMode.WRITE_EXCL) is None
+        assert s.has_work(True)
+        assert s.has_work(False)
 
         # READ thread consumes the load work; 1 read thread -> 1 batch
-        work = s.fetch_work(ThreadMode.READ)
+        work = s.fetch_work(True)
         assert work is not None
         _, batch_size, _ = work
         assert batch_size == 4
 
-        # store: visible to WRITE, WRITE_EXCL, and READ (steal)
+        # store: visible to WRITE and READ (steal)
         _submit_store(s, job_id=2, tasks=list(range(6)))
-        assert s.has_work(ThreadMode.WRITE)
-        assert s.has_work(ThreadMode.WRITE_EXCL)
-        assert s.has_work(ThreadMode.READ)
-
-        # WRITE_EXCL serves store, ignores load
-        _submit_load(s, job_id=3, tasks=list(range(4)))
-        assert s.fetch_work(ThreadMode.WRITE_EXCL) is not None  # serves the store job
-        assert s.fetch_work(ThreadMode.WRITE_EXCL) is None  # ignores remaining load
+        assert s.has_work(False)
+        assert s.has_work(True)
 
         # READ thread prefers load over store when both available
+        _submit_load(s, job_id=3, tasks=list(range(4)))
         _submit_store(s, job_id=4, tasks=[0])
         _submit_load(s, job_id=5, tasks=[1])
-        load_work = s.fetch_work(ThreadMode.READ)
+        load_work = s.fetch_work(True)
         assert load_work is not None
-        assert s.fetch_work(ThreadMode.READ) is not None  # steal store
+        assert s.fetch_work(True) is not None  # steal store
 
         # clear: resets all queues and job metadata
         _submit_load(s, 10, list(range(8)))
         _submit_store(s, 11, list(range(4)))
         s.clear()
-        assert not s.has_work(ThreadMode.READ)
-        assert not s.has_work(ThreadMode.WRITE)
-        assert not s.has_work(ThreadMode.WRITE_EXCL)
-        assert s.fetch_work(ThreadMode.READ) is None
+        assert not s.has_work(True)
+        assert not s.has_work(False)
+        assert s.fetch_work(True) is None
         assert len(s._jobs) == 0
 
         # submit after clear works normally
         _submit_load(s, 20, list(range(6)))
-        work = s.fetch_work(ThreadMode.READ)
+        work = s.fetch_work(True)
         assert work is not None
         _, batch_size, _ = work
         assert batch_size == 6
@@ -473,22 +460,14 @@ class TestWorkDispatcher:
         assert batches[0][1] == 1
 
     @pytest.mark.parametrize(
-        "locality,n_read,n_write,n_write_excl",
+        "locality,n_read,n_write",
         [
-            # all thread types, both localities
-            (Locality.LOCAL, 2, 2, 1),
-            (Locality.REMOTE, 2, 2, 1),
-            # no write_excl, both localities
-            (Locality.LOCAL, 2, 2, 0),
-            (Locality.REMOTE, 2, 2, 0),
+            (Locality.LOCAL, 2, 2),
+            (Locality.REMOTE, 2, 2),
             # read-only: steals stores
-            (Locality.REMOTE, 2, 0, 0),
+            (Locality.REMOTE, 2, 0),
             # write-only: steals loads
-            (Locality.REMOTE, 0, 2, 0),
-            # write + write_excl, no read
-            (Locality.REMOTE, 0, 2, 1),
-            # read + write_excl, no regular write
-            (Locality.REMOTE, 2, 0, 1),
+            (Locality.REMOTE, 0, 2),
         ],
     )
     def test_multiple_jobs_all_tasks_covered(
@@ -496,11 +475,8 @@ class TestWorkDispatcher:
         locality: Locality,
         n_read: int,
         n_write: int,
-        n_write_excl: int,
     ):
-        s = _make_dispatcher(
-            locality, n_read=n_read, n_write=n_write, n_write_excl=n_write_excl
-        )
+        s = _make_dispatcher(locality, n_read=n_read, n_write=n_write)
         load_tasks: list[Any] = []
         store_tasks: list[Any] = []
         for jid in range(3):

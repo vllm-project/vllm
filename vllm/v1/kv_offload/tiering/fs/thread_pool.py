@@ -20,7 +20,6 @@ from vllm.v1.kv_offload.tiering.base import JobId
 from vllm.v1.kv_offload.tiering.fs.dispatch import (
     LoadQueue,
     StoreQueue,
-    ThreadMode,
     WorkDispatcher,
     make_batches,
 )
@@ -85,11 +84,10 @@ class JobState:
 
 class DualQueueThreadPool:
     """
-    Thread pool with two task queues (load and store) and three thread groups.
+    Thread pool with two task queues (load and store) and two thread groups.
 
-    - READ threads  (ThreadMode.READ):       load first, steal stores when idle.
-    - WRITE threads (ThreadMode.WRITE):      store first, steal loads when idle.
-    - WRITE_EXCL threads (ThreadMode.WRITE_EXCL): store only, never steal loads.
+    - Load-priority threads: drain the load queue first, steal stores when idle.
+    - Store-priority threads: drain the store queue first, steal loads when idle.
 
     All groups share a single condition variable.
     """
@@ -98,14 +96,10 @@ class DualQueueThreadPool:
         self,
         n_read_threads: int,
         n_write_threads: int,
-        n_write_excl_threads: int,
         block_size: int,
         locality: Locality,
         thread_name_prefix: str = "fs_secondary_tier",
     ) -> None:
-        self._n_read_threads = n_read_threads
-        self._n_write_threads = n_write_threads
-        self._n_write_excl_threads = n_write_excl_threads
         self._condition = threading.Condition(threading.Lock())
         self._idle_condition = threading.Condition(threading.Lock())
         self._stop = False
@@ -123,34 +117,23 @@ class DualQueueThreadPool:
             store_job_q=StoreQueue(block_size),
             n_read_threads=n_read_threads,
             n_write_threads=n_write_threads,
-            n_write_excl_threads=n_write_excl_threads,
         )
 
-        for i in range(self._n_read_threads):
+        for i in range(n_read_threads):
             t = threading.Thread(
                 target=self._worker,
-                args=(ThreadMode.READ,),
+                args=(True,),
                 name=f"{thread_name_prefix}_l{i}",
                 daemon=True,
             )
             t.start()
             self._threads.append(t)
 
-        for i in range(self._n_write_threads):
+        for i in range(n_write_threads):
             t = threading.Thread(
                 target=self._worker,
-                args=(ThreadMode.WRITE,),
+                args=(False,),
                 name=f"{thread_name_prefix}_s{i}",
-                daemon=True,
-            )
-            t.start()
-            self._threads.append(t)
-
-        for i in range(self._n_write_excl_threads):
-            t = threading.Thread(
-                target=self._worker,
-                args=(ThreadMode.WRITE_EXCL,),
-                name=f"{thread_name_prefix}_se{i}",
                 daemon=True,
             )
             t.start()
@@ -177,6 +160,7 @@ class DualQueueThreadPool:
         with self._condition:
             self._inflight_jobs += 1
             n_wake = self._dispatcher.submit(job_id, work_items, n_tasks, is_load)
+            # TODO (varun): Wake threads based on load / store
             self._condition.notify(n_wake)
 
     def enqueue_load(
@@ -240,16 +224,16 @@ class DualQueueThreadPool:
             for t in self._threads:
                 t.join()
 
-    def _worker(self, mode: ThreadMode) -> None:
-        # Wait for tasks, process from primary queue first, fall back to secondary.
+    def _worker(self, load_priority: bool) -> None:
+        # Wait for tasks, drain primary queue first, steal from secondary when idle.
         while True:
             with self._condition:
                 self._condition.wait_for(
-                    lambda: self._stop or self._dispatcher.has_work(mode)
+                    lambda: self._stop or self._dispatcher.has_work(load_priority)
                 )
                 if self._stop:
                     return
-                work = self._dispatcher.fetch_work(mode)
+                work = self._dispatcher.fetch_work(load_priority)
                 if work is None:
                     continue
                 fn, batch_size, state = work

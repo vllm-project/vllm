@@ -461,7 +461,6 @@ def test_wait_idle_blocks_until_tasks_complete():
     pool = DualQueueThreadPool(
         n_read_threads=1,
         n_write_threads=1,
-        n_write_excl_threads=1,
         block_size=1,
         locality=Locality.LOCAL,
     )
