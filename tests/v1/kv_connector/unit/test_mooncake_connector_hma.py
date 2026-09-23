@@ -68,6 +68,46 @@ def test_sw_sizes(swa_enabled, expected_blocks_per_sw):
     assert scheduler.blocks_per_sw == expected_blocks_per_sw
 
 
+@pytest.mark.cpu_test
+def test_transfer_block_size_uses_physical_group_size():
+    """A collapsed logical block size must not shrink the transfer page size."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_both",
+        block_size=128,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=1024,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+        ],
+    )
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    assert scheduler.block_size == 1024
+
+
 # ---------------------------------------------------------------------------
 #  test_is_hma_required: derived from kv_cache_config groups
 # ---------------------------------------------------------------------------
