@@ -642,8 +642,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- merge spec and non-spec outputs ----------
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
-            # direct is False here, so neither input aliases core_attn_out
-            # and the scatter can go straight into it.
             merged = core_attn_out[:, :num_actual_tokens]
             merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
