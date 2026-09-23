@@ -16,7 +16,7 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Any
+from typing import TYPE_CHECKING, IO, Any
 
 import filelock
 import huggingface_hub.constants
@@ -61,6 +61,9 @@ except ImportError:
     SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
 
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -660,18 +663,16 @@ def _normalize_module_prefixes(
     language_model_names: Iterable[str] | None,
 ) -> tuple[str, ...]:
     names = tuple(language_model_names or ())
-    prefixes = tuple(n if n.endswith(".") else f"{n}." for n in names)
-    return prefixes or ("language_model.",)
+    return tuple(n if n.endswith(".") else f"{n}." for n in names)
 
 
-def _mapped_weight_name(weights_mapper: object | None, key: str) -> str | None:
-    """Apply ``WeightsMapper._map_name`` when present; else identity."""
+def _mapped_weight_name(
+    weights_mapper: "WeightsMapper | None", key: str
+) -> str | None:
+    """Apply ``WeightsMapper.map_name`` when present; else identity."""
     if weights_mapper is None:
         return key
-    map_name = getattr(weights_mapper, "_map_name", None)
-    if map_name is None:
-        return key
-    return map_name(key)
+    return weights_mapper.map_name(key)
 
 
 def _hf_prefix_maps_to_lm(
@@ -685,7 +686,7 @@ def _hf_prefix_maps_to_lm(
 
 def _shared_hf_root_module_prefixes(
     lm_module_prefixes: tuple[str, ...],
-    weights_mapper: object | None,
+    weights_mapper: "WeightsMapper | None",
 ) -> tuple[str, ...]:
     """Module prefixes that are also an HF root for non-LM weights.
 
@@ -695,7 +696,7 @@ def _shared_hf_root_module_prefixes(
     """
     if weights_mapper is None:
         return ()
-    mapping = getattr(weights_mapper, "orig_to_new_prefix", None) or {}
+    mapping = weights_mapper.orig_to_new_prefix
     if not mapping:
         return ()
 
@@ -719,20 +720,23 @@ def _shared_hf_root_module_prefixes(
 def resolve_mm_encoder_only_lm_prefixes(
     language_model_names: Iterable[str] | None,
     *,
-    weights_mapper: object | None = None,
+    weights_mapper: "WeightsMapper | None" = None,
 ) -> tuple[str, ...] | None:
     """Resolve vLLM LM *module* prefixes for ``--mm-encoder-only`` shard skip.
 
-    Prefixes come from ``_language_model_names`` (fallback ``language_model.``).
-    Classification of HF index keys is done later via optional
-    ``weights_mapper`` (see ``filter_mm_encoder_only_safetensors_files``), so
-    this helper does **not** hard-code Qwen/HF nest lists.
+    Prefixes come from ``_language_model_names``. Classification of HF index
+    keys is done later via optional ``weights_mapper`` (see
+    ``filter_mm_encoder_only_safetensors_files``), so this helper does **not**
+    hard-code Qwen/HF nest lists.
 
-    Returns ``None`` (leave the safetensors file list unchanged) when a module
-    prefix is a shared HF checkpoint root for both LM and non-LM weights —
-    fail-closed so Molmo / Phi-4-MM / Muse cannot under-load the encoder.
+    Returns ``None`` (leave the safetensors file list unchanged) when
+    ``_language_model_names`` is empty/missing, or when a module prefix is a
+    shared HF checkpoint root for both LM and non-LM weights — fail-closed so
+    Molmo / Phi-4-MM / Muse cannot under-load the encoder.
     """
     prefixes = _normalize_module_prefixes(language_model_names)
+    if not prefixes:
+        return None
     shared = _shared_hf_root_module_prefixes(prefixes, weights_mapper)
     if shared:
         logger.warning_once(
@@ -753,7 +757,7 @@ def filter_mm_encoder_only_safetensors_files(
     index_file: str,
     language_model_prefixes: Iterable[str],
     *,
-    weights_mapper: object | None = None,
+    weights_mapper: "WeightsMapper | None" = None,
 ) -> list[str]:
     """Drop safetensors shards that only contain language-model weights.
 
