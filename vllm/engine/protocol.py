@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -20,6 +21,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
@@ -38,7 +41,7 @@ class StreamingInput:
 
 
 class EngineClient(ABC):
-    """Protocol class for Clients to Engine"""
+    """Protocol class for Clients to Engine."""
 
     vllm_config: VllmConfig
     model_config: ModelConfig
@@ -61,6 +64,28 @@ class EngineClient(ABC):
     @abstractmethod
     def dead_error(self) -> BaseException: ...
 
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        """KV-event publisher config of each engine, keyed by DP rank."""
+        return {}
+
+    def check_admission(  # noqa: B027
+        self, n: int = 1, request_id: str | None = None
+    ) -> None:
+        """Reject the request up front if it would exceed queue limits.
+
+        Called before a response is started so that overload rejections can
+        carry an HTTP status, which is not possible once a streaming response
+        has begun. Engines without admission control accept everything.
+
+        Args:
+            n: Number of sequences the request will occupy.
+            request_id: Request id, used for logging only.
+
+        Raises:
+            GracefulHTTPError: If the request cannot be admitted.
+
+        """
+
     @abstractmethod
     def generate(
         self,
@@ -77,6 +102,8 @@ class EngineClient(ABC):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -105,6 +132,7 @@ class EngineClient(ABC):
         Args:
             request_id: The unique id of the request,
                         or an iterable of such ids.
+
         """
         ...
 
@@ -130,49 +158,54 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def check_health(self) -> None:
-        """Raise if unhealthy"""
+        """Raise if unhealthy."""
         ...
 
     @abstractmethod
     async def start_profile(self) -> None:
-        """Start profiling the engine"""
+        """Start profiling the engine."""
         ...
 
     @abstractmethod
     async def stop_profile(self) -> None:
-        """Stop profiling the engine"""
+        """Stop profiling the engine."""
         ...
 
     @abstractmethod
     async def reset_mm_cache(self) -> None:
-        """Reset the multi-modal cache"""
+        """Reset the multi-modal cache."""
         ...
 
     @abstractmethod
     async def reset_encoder_cache(self) -> None:
-        """Reset the encoder cache"""
+        """Reset the encoder cache."""
         ...
 
     @abstractmethod
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        """Reset the prefix cache and optionally any configured connector cache"""
+        """Reset the prefix cache and optionally any configured connector cache."""
         ...
 
     @abstractmethod
     async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
-        """Sleep the engine"""
+        """Sleep the engine."""
+        ...
+
+    @abstractmethod
+    async def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical GPU memory. Requires a completed pause."""
         ...
 
     @abstractmethod
     async def wake_up(self, tags: list[str] | None = None) -> None:
-        """Wake up the engine"""
+        """Wake up the engine."""
         ...
 
     @abstractmethod
     async def is_sleeping(self) -> bool:
-        """Check whether the engine is sleeping"""
+        """Check whether the engine is sleeping."""
         ...
 
     @abstractmethod
@@ -200,6 +233,7 @@ class EngineClient(ABC):
             wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
+
         """
         ...
 
@@ -221,7 +255,7 @@ class EngineClient(ABC):
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:
-        """Scale the engine"""
+        """Scale the engine."""
         raise NotImplementedError
 
     async def collective_rpc(
@@ -234,8 +268,18 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        """Send fault tolerance instruction to the engine."""
+        raise NotImplementedError
+
+    async def get_status(self):
+        """Get fault tolerance status of all engines."""
+        raise NotImplementedError
+
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        """Get supported tasks"""
+        """Get supported tasks."""
         raise NotImplementedError
 
     async def init_weight_transfer_engine(
@@ -244,14 +288,26 @@ class EngineClient(ABC):
         """Initialize weight transfer for RL training."""
         raise NotImplementedError
 
-    async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+    async def start_weight_update(self) -> None:
         """Start a new weight update."""
+        raise NotImplementedError
+
+    async def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
         raise NotImplementedError
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
         raise NotImplementedError
 
-    async def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
+    async def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
+        raise NotImplementedError
+
+    async def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        raise NotImplementedError
+
+    async def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
         raise NotImplementedError

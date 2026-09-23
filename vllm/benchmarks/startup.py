@@ -26,6 +26,7 @@ from vllm.benchmarks.lib.utils import (
     write_to_json,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 PERCENTAGES = [10, 25, 50, 75, 90, 99]
 
@@ -106,8 +107,7 @@ def _metric_to_json(m: MetricStats) -> dict[str, Any]:
 
 @contextmanager
 def cold_startup():
-    """
-    Context manager to measure cold startup time:
+    """Context manager to measure cold startup time:
     1. Uses a temporary directory for vLLM cache to avoid any pollution
        between cold startup iterations.
     2. Uses inductor's fresh_cache to clear torch.compile caches.
@@ -131,8 +131,7 @@ def cold_startup():
 
 
 def run_startup_in_subprocess(engine_args, result_queue):
-    """
-    Run LLM startup in a subprocess and return timing metrics via a queue.
+    """Run LLM startup in a subprocess and return timing metrics via a queue.
     This ensures complete isolation between iterations.
     """
     try:
@@ -190,7 +189,7 @@ def save_to_pytorch_benchmark_format(
             write_to_json(f"{base_name}.{m.key}.pytorch.json", records)
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--num-iters-cold",
         type=int,
@@ -228,13 +227,11 @@ def main(args: argparse.Namespace):
     engine_args = EngineArgs.from_cli_args(args)
 
     def create_llm_and_measure_startup():
-        """
-        Create LLM instance in a subprocess and measure startup time.
+        """Create LLM instance in a subprocess and measure startup time.
         Returns timing metrics, using subprocess for complete isolation.
         """
-
         # Create a queue for inter-process communication
-        result_queue = multiprocessing.Queue()
+        result_queue: multiprocessing.Queue[Any] = multiprocessing.Queue()
         process = multiprocessing.Process(
             target=run_startup_in_subprocess,
             args=(

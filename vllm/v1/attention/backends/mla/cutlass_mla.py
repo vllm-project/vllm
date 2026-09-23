@@ -50,14 +50,6 @@ class CutlassMLABackend(MLACommonBackend):
         return [128]
 
     @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (1, 0, 2, 3)
-        return (0, 1, 2)
-
-    @staticmethod
     def get_name() -> str:
         return "CUTLASS_MLA"
 
@@ -111,6 +103,7 @@ MAX_HEADS = 128
 
 class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
 
     def __init__(
         self,

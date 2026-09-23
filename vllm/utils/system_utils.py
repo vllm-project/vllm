@@ -60,8 +60,7 @@ def set_env_var(key: str, value: str) -> Iterator[None]:
 
 @contextlib.contextmanager
 def suppress_stdout():
-    """
-    Suppress stdout from C libraries at the file descriptor level.
+    """Suppress stdout from C libraries at the file descriptor level.
 
     Only suppresses stdout, not stderr, to preserve error messages.
     Suppression is disabled when VLLM_LOGGING_LEVEL is set to DEBUG.
@@ -70,6 +69,7 @@ def suppress_stdout():
         with suppress_stdout():
             # C library calls that would normally print to stdout
             torch.distributed.new_group(ranks, backend="gloo")
+
     """
     # Don't suppress if logging level is DEBUG
     if envs.VLLM_LOGGING_LEVEL == "DEBUG":
@@ -114,7 +114,6 @@ def unique_filepath(fn: Callable[[int], Path]) -> Path:
 
 def _sync_visible_devices_env_vars():
     """Sync HIP/CUDA visibility env vars before spawning (ROCm only)."""
-
     if not current_platform.is_rocm():
         return
 
@@ -254,11 +253,11 @@ def decorate_logs(
 
 
 def kill_process_tree(pid: int):
-    """
-    Kills all descendant processes of the given pid by sending SIGKILL.
+    """Kills all descendant processes of the given pid by sending SIGKILL.
 
     Args:
         pid (int): Process ID of the parent process
+
     """
     try:
         parent = psutil.Process(pid)
@@ -284,7 +283,7 @@ def kill_process_tree(pid: int):
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630
 def set_ulimit(target_soft_limit: int = 65535):
     if sys.platform.startswith("win"):
-        logger.info("Windows detected, skipping ulimit adjustment.")
+        logger.debug("Windows detected, skipping ulimit adjustment.")
         return
 
     import resource
@@ -308,26 +307,26 @@ def set_ulimit(target_soft_limit: int = 65535):
 
 def find_loaded_library(lib_name: str) -> str | None:
     """
-    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    According to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
     shared libraries loaded by the process. We can use this file to find the path of the
     loaded library.
     """  # noqa
-    found_line = None
+    # Match the mapped file's name, not the whole line: an unrelated library
+    # whose name merely contains lib_name (e.g. TileLang's libcudart_stub.so
+    # when looking for libcudart) or a directory component containing it must
+    # not win. Legitimate filenames are {lib_name}.so[.*] or a name-mangled
+    # {lib_name}-<hash>.so[.*], and /proc/self/maps is ordered by mapping
+    # address rather than load order, so a substring hit is a
+    # nondeterministic hijack.
     with open("/proc/self/maps") as f:
         for line in f:
-            if lib_name in line:
-                found_line = line
-                break
-    if found_line is None:
-        # the library is not loaded in the current process
-        return None
-    # if lib_name is libcudart, we need to match a line with:
-    # address /path/to/libcudart-hash.so.11.0
-    start = found_line.index("/")
-    path = found_line[start:].strip()
-    filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), (
-        f"Unexpected filename: {filename} for library {lib_name}"
-    )
-    return path
+            start = line.find("/")
+            if start == -1:
+                continue
+            path = line[start:].strip()
+            filename = path.rsplit("/", maxsplit=1)[-1]
+            if filename.startswith((f"{lib_name}.", f"{lib_name}-")):
+                return path
+    # the library is not loaded in the current process
+    return None

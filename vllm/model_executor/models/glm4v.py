@@ -16,7 +16,7 @@ from torch.nn import LayerNorm
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
@@ -61,15 +61,15 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from .utils import WeightsMapper
 
 
 class GLMVImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - c: Number of channels (3)
-        - h: Height of image
-        - w: Width of image
+    """Dimensions:
+    - b: Batch size
+    - c: Number of channels (3)
+    - h: Height of image
+    - w: Width of image
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -89,14 +89,15 @@ class EVA2CLIPPatchEmbedding(nn.Module):
         self.position_embedding = nn.Embedding(config.num_positions, config.hidden_size)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters:
+        """Parameters
         images : torch.Tensor
             Input image tensor with shape (B, C, H, W)
 
-        Returns:
+        Returns
+        -------
         torch.Tensor
             Transformed tensor with shape (B, L, D)
+
         """
         images = images.to(device=self.proj.weight.device, dtype=self.proj.weight.dtype)
         x = self.proj(images)
@@ -245,8 +246,7 @@ class EVA2CLIPGLU(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
-        """
-        The original implementation is the same as:
+        """The original implementation is the same as:
         ```python
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
@@ -348,14 +348,15 @@ class EVA2CLIPModel(nn.Module):
         self.scaling_factor = vision_config.scaling_factor
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters:
+        """Parameters
         images : torch.Tensor
             Input image tensor with shape (B, C, H, W)
 
-        Returns:
+        Returns
+        -------
         torch.Tensor
             Transformed tensor with shape (B, L, D)
+
         """
         x = self.patch_embedding(images)
         x = self.transformer(x)
@@ -376,6 +377,15 @@ class EVA2CLIPModel(nn.Module):
 
 
 class GLM4VModel(ChatGLMModel):
+    hf_to_vllm_mapper = ChatGLMModel.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            # Vision GLU projections
+            "linear_proj.gate_proj": ("linear_proj.merged_proj", 0),
+            "linear_proj.dense_h_to_4h": ("linear_proj.merged_proj", 1),
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -435,36 +445,24 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
 
         target_width = target_height = vision_config["image_size"]
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
 
 class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -507,6 +505,9 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 class GLM4VForCausalLM(
     ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
+    # NOTE: we must bring this to the surface because GLM4VModel.hf_to_vllm_mapper
+    # contains non-stacking related mappings which LoRA/BnB needs to know about
+    hf_to_vllm_mapper = GLM4VModel.hf_to_vllm_mapper
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
@@ -514,9 +515,7 @@ class GLM4VForCausalLM(
     }
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="transformer.encoder",
             connector="transformer.vision.linear_proj",
@@ -578,7 +577,13 @@ class GLM4VForCausalLM(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                feature_data = mm_feature.data
+                assert feature_data is not None
+                grid_item = feature_data.get("image_grid_thw")
+                assert grid_item is not None
+                grid_data = grid_item.data
+                assert isinstance(grid_data, torch.Tensor)
+                t, h, w = grid_data.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, t, h // spatial_merge_size, w // spatial_merge_size
             else:
@@ -621,7 +626,18 @@ class GLM4VForCausalLM(
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return torch.from_numpy(llm_positions), mrope_position_delta
 
-    embed_input_ids = SupportsMultiModal.embed_input_ids
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return SupportsMultiModal.embed_input_ids(
+            self,
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

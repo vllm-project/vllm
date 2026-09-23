@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-GPU-accelerated N-gram proposer using fully async PyTorch tensor operations.
+"""GPU-accelerated N-gram proposer using fully async PyTorch tensor operations.
 
 This version uses a fully vectorized approach with unfold and argmax for
 finding the first match across all sequences in parallel.
@@ -52,8 +51,7 @@ class NgramGPUKernel(nn.Module):
         max_ngram_len: int,
         num_draft_tokens: int,
     ) -> torch.Tensor:
-        """
-        Find suffix n-gram matches and extract following tokens.
+        """Find suffix n-gram matches and extract following tokens.
         Searches for the earliest prior occurrence of the trailing n-gram,
         tries multiple lengths, and picks the longest valid match.
 
@@ -66,6 +64,7 @@ class NgramGPUKernel(nn.Module):
 
         Returns:
             Draft token predictions; -1 means invalid/no match.
+
         """
         batch_size = token_ids.shape[0]
         max_seq_len = token_ids.shape[1]
@@ -91,7 +90,8 @@ class NgramGPUKernel(nn.Module):
             suffix_indices = suffix_starts.unsqueeze(1) + torch.arange(
                 ngram_len, device=device
             )
-            suffix = torch.gather(token_ids, 1, suffix_indices.clamp(min=0))
+            suffix_indices.clamp_(min=0)
+            suffix = torch.gather(token_ids, 1, suffix_indices)
 
             # Window matches for each sequence.
             matches = (search_windows == suffix.unsqueeze(1)).all(dim=-1)
@@ -134,7 +134,7 @@ class NgramGPUKernel(nn.Module):
         draft_indices = draft_start.unsqueeze(1) + torch.arange(
             num_draft_tokens, device=device
         )
-        draft_indices = draft_indices.clamp(min=0, max=max_seq_len - 1)
+        draft_indices.clamp_(min=0, max=max_seq_len - 1)
 
         # Extract draft tokens; gather always runs.
         draft_tokens = torch.gather(token_ids, 1, draft_indices)
@@ -164,8 +164,7 @@ class NgramGPUKernel(nn.Module):
         token_ids_gpu: torch.Tensor,
         combined_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass for N-gram proposal using GPU tensor operations.
+        """Forward pass for N-gram proposal using GPU tensor operations.
 
         Args:
             num_tokens_no_spec: Number of tokens for each sequence [batch_size]
@@ -176,8 +175,8 @@ class NgramGPUKernel(nn.Module):
             draft_tokens: [batch_size, k] on GPU
             num_valid_draft_tokens: [batch_size] int32 on GPU, count of
                 leading valid (non -1) tokens per request.
-        """
 
+        """
         device = token_ids_gpu.device
 
         # Infer batch size to preserve dynamic shape.
@@ -281,8 +280,7 @@ class NgramProposerGPU:
         pattern_len: int,
         device: str = "cuda",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Generate random test data with n-gram repetitions.
+        """Generate random test data with n-gram repetitions.
 
         Args:
             batch_size: Number of sequences in the batch
@@ -295,6 +293,7 @@ class NgramProposerGPU:
             num_tokens: [batch_size] tensor
             sampled_flags: [batch_size] bool tensor
             valid_mask: [batch_size] bool tensor
+
         """
         token_ids = torch.zeros(
             batch_size,
@@ -320,8 +319,7 @@ class NgramProposerGPU:
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
         valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Propose draft tokens using GPU-accelerated n-gram matching.
+        """Propose draft tokens using GPU-accelerated n-gram matching.
 
         Scatter sampled tokens into `token_ids_gpu`, compute temporary
         updated lengths, then run the kernel.
@@ -337,6 +335,7 @@ class NgramProposerGPU:
             draft_tokens: Proposed draft token IDs [batch_size, k]
             num_valid_draft_tokens: Count of leading valid draft tokens
                 per request [batch_size]
+
         """
         assert num_speculative_tokens == self.k
         assert token_ids_gpu.device == self.device
@@ -357,7 +356,8 @@ class NgramProposerGPU:
             valid_write_mask & (valid_sampled_token_ids_gpu != -1) & in_bounds
         )
 
-        write_positions_long = write_positions.clamp(max=max_seq_len - 1).long()
+        write_positions.clamp_(max=max_seq_len - 1)
+        write_positions_long = write_positions.long()
         existing_values = token_ids_gpu.gather(1, write_positions_long)
 
         tokens_cast = valid_sampled_token_ids_gpu.to(token_ids_gpu.dtype)
@@ -396,8 +396,7 @@ class NgramProposerGPU:
         num_tokens_no_spec: torch.Tensor,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Prepare speculative decoding inputs on device:
+        """Prepare speculative decoding inputs on device:
         compute next token ids and valid counts, honoring discarded requests
         and rejected tokens, without CPU-GPU sync.
         """
@@ -427,7 +426,9 @@ class NgramProposerGPU:
         )
 
         # Backup last valid token before speculative tokens.
-        backup_indices = (num_tokens_no_spec[:num_reqs] - 1).clamp(min=0).long()
+        backup_indices = num_tokens_no_spec[:num_reqs] - 1
+        backup_indices.clamp_(min=0)
+        backup_indices = backup_indices.long()
         backup_next_token_ids = torch.gather(
             token_ids_gpu[:num_reqs], dim=1, index=backup_indices.unsqueeze(1)
         ).squeeze(1)
@@ -447,16 +448,17 @@ class NgramProposerGPU:
 
         # Rightmost valid index per row.
         last_valid_indices = valid_sampled_tokens_count - 1
-        last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
+        has_valid_sample = last_valid_indices >= 0
+        last_valid_indices.clamp_(min=0)
 
         # Last valid token from each row; undefined if none.
         selected_tokens = torch.gather(
-            valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)
+            valid_sampled_token_ids_gpu, 1, last_valid_indices.unsqueeze(1)
         ).squeeze(1)
 
         # Use last token if valid; otherwise fallback to backup.
         next_token_ids = torch.where(
-            last_valid_indices != -1,
+            has_valid_sample,
             selected_tokens,
             backup_next_token_ids,
         )
@@ -480,6 +482,7 @@ def update_scheduler_for_invalid_drafts(
         num_valid_draft_tokens_cpu: CPU buffer of valid draft counts.
         scheduler_output: Scheduler metadata to update in-place.
         req_id_to_index: Request-id to batch-index mapping.
+
     """
     req_data = scheduler_output.scheduled_cached_reqs
     num_valid_draft_tokens_event.synchronize()
@@ -647,9 +650,7 @@ def copy_num_valid_draft_tokens(
     num_valid_draft_tokens: torch.Tensor | None,
     batch_size: int,
 ) -> None:
-    """
-    Async D2H copy of per-request valid draft counts.
-    """
+    """Async D2H copy of per-request valid draft counts."""
     if num_valid_draft_tokens is None:
         return
 
