@@ -21,7 +21,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
-    QSAForwardMetadata,
+    QSAIndexerMetadata,
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
@@ -185,15 +185,15 @@ class QSAIndexer(nn.Module):
 
     def _metadata(
         self,
-    ) -> tuple[QSAForwardMetadata, QSAForwardMetadata] | None:
+    ) -> tuple[QSAIndexerMetadata, QSAIndexerMetadata] | None:
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
             metadata = metadata[0]
         if not isinstance(metadata, dict):
             return None
-        raw = cast(QSAForwardMetadata, metadata[self.raw_key_cache.prefix])
+        raw = cast(QSAIndexerMetadata, metadata[self.raw_key_cache.prefix])
         compressed = cast(
-            QSAForwardMetadata, metadata[self.compressed_key_cache.prefix]
+            QSAIndexerMetadata, metadata[self.compressed_key_cache.prefix]
         )
         if raw.num_actual_tokens != compressed.num_actual_tokens:
             raise RuntimeError("QSA side-cache metadata token counts disagree")
@@ -207,8 +207,8 @@ class QSAIndexer(nn.Module):
         self,
         token_k: torch.Tensor,
         positions: torch.Tensor,
-        raw_metadata: QSAForwardMetadata,
-        compressed_metadata: QSAForwardMetadata,
+        raw_metadata: QSAIndexerMetadata,
+        compressed_metadata: QSAIndexerMetadata,
     ) -> None:
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
@@ -256,7 +256,7 @@ class QSAIndexer(nn.Module):
     def _select(
         self,
         q: torch.Tensor,
-        metadata: QSAForwardMetadata,
+        metadata: QSAIndexerMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
         from .ops.qsa import qsa_select_paged_tokens

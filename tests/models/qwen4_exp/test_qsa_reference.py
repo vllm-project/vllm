@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm.models.qwen4_exp.common import qsa_cache
-from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
+from vllm.models.qwen4_exp.common.qsa_cache import QSAIndexerMetadataBuilder
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
@@ -237,7 +237,7 @@ def _qsa_sparse_paged_attention_reference(
 @requires_qsa_kernels
 def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     device = torch.device("cuda")
-    builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
     builder.compress_ratio = 1
     builder.reorder_batch_threshold = 4
     builder.is_circular_buffer = False
@@ -289,7 +289,7 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
 @requires_qsa_kernels
 def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     device = torch.device("cuda")
-    builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = True
@@ -419,7 +419,7 @@ def test_qsa_ring_capacity_covers_one_speculative_step(
 @requires_qsa_kernels
 def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     device = torch.device("cuda")
-    builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = False
