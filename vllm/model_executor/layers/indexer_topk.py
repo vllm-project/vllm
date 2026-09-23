@@ -10,7 +10,6 @@ from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.workspace import current_workspace_manager
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
@@ -201,8 +200,6 @@ class SparseIndexerTopk(torch.nn.Module):
                     f" stride={logits.stride()}, topk={topk_tokens}"
                 )
         elif self._backend == "aiter":
-            # Only hard capability is validated here. The shape-dependent perf
-            # gate is applied in forward(), which falls back to per_row.
             if not self._is_rocm:
                 failures.append("requires a ROCm platform")
             elif not self._aiter_capable:
@@ -233,15 +230,16 @@ class SparseIndexerTopk(torch.nn.Module):
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
-        """The priority chain: aiter -> cooperative -> persistent -> per_row.
-        deep_select/flashinfer/torch are opt-in only.
+        """The priority chain: cooperative -> persistent -> per_row.
+        aiter/deep_select/flashinfer/torch are opt-in only.
 
         cooperative_topk is preferred whenever it is applicable, i.e. within
         its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
         persistent_topk.
+
+        aiter not auto-resolved as it does not outperform the per-row on every shape,
+        hence we delegate to the caller to decide when to use it.
         """
-        if self._aiter_capable and topk_tokens in (512, 1024, 2048, 4096):
-            return "aiter"
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):
@@ -303,14 +301,9 @@ class SparseIndexerTopk(torch.nn.Module):
         topk_indices: torch.Tensor,
         topk_tokens: int,
         max_seq_len: int,
-        *,
-        compress_ratio: int = 1,
     ) -> None:
         """Run the resolved decode top-k implementation, writing into
         topk_indices (int32, -1 fill for rows shorter than topk_tokens).
-
-        max_seq_len is token-granular; compress_ratio is the number of tokens
-        each column of `logits` covers (kpool size / indexer compression).
         """
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
         if backend == "deep_select":
@@ -373,28 +366,15 @@ class SparseIndexerTopk(torch.nn.Module):
         elif backend == "aiter":
             from vllm._aiter_ops import rocm_aiter_ops
 
-            max_valid_seq_len = cdiv(max_seq_len, compress_ratio)
-            if rocm_aiter_ops.is_indexer_top_k_supported(
-                is_prefill=False,
-                compress_ratio=compress_ratio,
-                num_rows=logits.shape[0],
-                max_valid_seq_len=max_valid_seq_len,
-            ) or rocm_aiter_ops.glm5next_indexer_prefers_aiter_top_k(
-                compress_ratio=compress_ratio,
-                max_valid_seq_len=max_valid_seq_len,
-                topk_tokens=topk_tokens,
-            ):
-                # AITER's decode kernel only implements the 1D/next_n == 1
-                # form, which is equivalent once the ragged ends are expanded.
-                rocm_aiter_ops.indexer_top_k_decode(
-                    logits,
-                    1,
-                    self._row_ends(seq_lens, next_n, logits.shape[0]),
-                    topk_indices,
-                    topk_tokens,
-                )
-            else:
-                self._per_row(logits, seq_lens, next_n, topk_indices, topk_tokens)
+            # AITER's decode kernel only implements the 1D/next_n == 1 form,
+            # which is equivalent once the ragged ends are expanded.
+            rocm_aiter_ops.indexer_top_k_decode(
+                logits,
+                1,
+                self._row_ends(seq_lens, next_n, logits.shape[0]),
+                topk_indices,
+                topk_tokens,
+            )
         else:
             assert backend == "per_row", f"unknown topk backend: {backend}"
             self._per_row(logits, seq_lens, next_n, topk_indices, topk_tokens)

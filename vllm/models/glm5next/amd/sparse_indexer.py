@@ -25,6 +25,7 @@ from vllm.models.glm5next.common.sparse_indexer import (
     kv_cache_as_quant_view,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -37,6 +38,9 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+_GFX950_KPOOL_AITER_MAX_POOLS = 256 * 1024  # (1M ctx)
+_GFX950_KPOOL_AITER_MIN_POOLS = 16 * 1024
 
 # kpool write helper: form pools from the current token batch and compress them
 # into the index K cache via the fused Triton kernel.
@@ -86,6 +90,41 @@ def _kpool_compress_insert(
         write_cache=True,
         return_compressed=False,
     )
+
+
+def _kpool_decode_topk_backend(
+    configured: str,
+    *,
+    num_rows: int,
+    max_valid_seq_len: int,
+    select_k: int,
+    index_kpool: int,
+) -> str:
+    """Narrow "auto" to AITER when it beats the in-tree hip decode top-k kernel.
+
+    Heuristic:
+    - <16k pools: in-tree hip kernel
+    - 16-256k pools: use aiter
+    - >256k pools: in-tree because not measured on >1m ctx
+    """
+    if configured != "auto" or not rocm_aiter_ops.is_indexer_top_k_enabled():
+        return configured
+    if rocm_aiter_ops.is_indexer_top_k_supported(
+        is_prefill=False,
+        compress_ratio=index_kpool,
+        num_rows=num_rows,
+        max_valid_seq_len=max_valid_seq_len,
+    ):
+        return "aiter"
+    if (
+        index_kpool > 1
+        and select_k == 512
+        and _GFX950_KPOOL_AITER_MIN_POOLS
+        <= max_valid_seq_len
+        <= _GFX950_KPOOL_AITER_MAX_POOLS
+    ):
+        return "aiter"
+    return configured
 
 
 @eager_break_during_capture
@@ -590,14 +629,20 @@ def sparse_attn_indexer_kpool(
         else:
             topk_max_seq_len = attn_metadata_narrowed.max_seq_len
 
-        get_indexer_topk(topk_backend)(
+        resolved_backend = _kpool_decode_topk_backend(
+            topk_backend,
+            num_rows=num_rows,
+            max_valid_seq_len=cdiv(topk_max_seq_len, index_kpool),
+            select_k=select_k,
+            index_kpool=index_kpool,
+        )
+        get_indexer_topk(resolved_backend)(
             logits,
             seq_lens,
             next_n,
             topk_dst,
             select_k,
             topk_max_seq_len,
-            compress_ratio=index_kpool,
         )
 
         # Resolve to token-level indices in the output buffer.

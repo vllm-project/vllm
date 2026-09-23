@@ -1897,7 +1897,6 @@ def _sync_aiter_situv2_moe_env() -> None:
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
 _GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
-_GFX950_GLM5NEXT_AITER_MAX_COMPRESSED_SEQ_LEN = 256 * 1024
 
 
 class rocm_aiter_ops:
@@ -2527,29 +2526,6 @@ class rocm_aiter_ops:
             topk_tokens == 512
             and 0 < num_rows <= 384
             and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
-        )
-
-    @staticmethod
-    def glm5next_indexer_prefers_aiter_top_k(
-        *,
-        compress_ratio: int,
-        max_valid_seq_len: int,
-        topk_tokens: int,
-    ) -> bool:
-        """AITER's measured advantage window over the in-tree decode kernel.
-        Tuned on GLM-5.3-Flash's kpool logits, so it applies to that indexer
-        only.
-
-        The in-tree kernel rescans the bin holding the threshold once per
-        radix refinement pass, so it degrades 2.5x on the tightly clustered
-        fp8 indexer scores where AITER's cross-block histogram degrades 1.3x.
-        Measured 1.5x-1.7x in AITER's favour at 1-8 rows over 64K-128K pools,
-        flat in rows.
-        """
-        return (
-            compress_ratio > 1
-            and topk_tokens == 512
-            and 0 < max_valid_seq_len <= _GFX950_GLM5NEXT_AITER_MAX_COMPRESSED_SEQ_LEN
         )
 
     @staticmethod
