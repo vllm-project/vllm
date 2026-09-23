@@ -7,47 +7,11 @@
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 # ruff: noqa: E501
 
-from functools import cache
-
 import torch
 
 from vllm.third_party.flash_linear_attention.ops.op import exp, log
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
-
-
-@cache
-def _num_cus(device: int) -> int:
-    from vllm.platforms import current_platform
-
-    return current_platform.get_device_properties(device).multi_processor_count
-
-
-@cache
-def _is_rocm() -> bool:
-    from vllm.platforms import current_platform
-
-    return current_platform.is_rocm()
-
-
-def _decode_launch_config(V: int, num_launch_units: int, device: int) -> tuple[int, int]:
-    """Pick (BV, num_warps) for the gate-fused recurrent kernel.
-
-    The grid is cdiv(V, BV) * N * H, so a decode-shaped launch leaves most of
-    the device idle at BV=32: a single K3 TP8 request is 48 blocks on 256 CUs.
-    A smaller BV buys parallelism, but every tile re-reads the whole q/k/g
-    head, so shrink only until the grid covers the device a few times over.
-
-    Tuned on MI355X (gfx950); other backends keep the original configuration.
-    """
-    if not _is_rocm():
-        return 32, 4
-
-    target = 3 * _num_cus(device)
-    for bv in (16, 8):
-        if cdiv(V, bv) * num_launch_units >= target:
-            return bv, 2
-    return 8, 2
 
 
 @triton.heuristics(
@@ -260,15 +224,9 @@ def fused_recurrent_kda_fwd_kernel(
     p_beta = beta + bos * stride_beta_token + i_h
     for i_t in tl.range(0, sequence_length, num_stages=num_stages):
         tl.assume(i_t >= 0)
-        b_q = tl.load(p_q, mask=m_k, other=0.0, eviction_policy="evict_last").to(
-            tl.float32
-        )
-        b_k = tl.load(p_k, mask=m_k, other=0.0, eviction_policy="evict_last").to(
-            tl.float32
-        )
-        b_v = tl.load(p_v, mask=m_v, other=0.0, eviction_policy="evict_first").to(
-            tl.float32
-        )
+        b_q = tl.load(p_q, mask=m_k, other=0.0).to(tl.float32)
+        b_k = tl.load(p_k, mask=m_k, other=0.0).to(tl.float32)
+        b_v = tl.load(p_v, mask=m_v, other=0.0).to(tl.float32)
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
@@ -278,7 +236,6 @@ def fused_recurrent_kda_fwd_kernel(
             p_g,
             mask=m_k,
             other=0.0,
-            eviction_policy="evict_last",
         ).to(tl.float32)
         if USE_GATE_IN_KERNEL:
             if HAS_DT_BIAS:
@@ -301,7 +258,7 @@ def fused_recurrent_kda_fwd_kernel(
 
         b_state *= exp(b_gate[None, :])
         b_v -= tl.sum(b_state * b_k[None, :], axis=1)
-        b_beta = tl.load(p_beta, eviction_policy="evict_last").to(tl.float32)
+        b_beta = tl.load(p_beta).to(tl.float32)
         if APPLY_BETA_SIGMOID:
             b_beta = tl.sigmoid(b_beta)
         b_v *= b_beta
@@ -311,7 +268,6 @@ def fused_recurrent_kda_fwd_kernel(
             p_out,
             b_out.to(p_out.dtype.element_ty),
             mask=m_v,
-            eviction_policy="evict_first",
         )
 
         final_state_index = tl.load(state_indices + i_n * stride_indices_seq + i_t).to(
@@ -396,10 +352,13 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
+    # Tuned on MI355X (gfx950). A single wave naturally vectorizes the
+    # contiguous K=128 loads as bf16x2/fp32x2, while BV=4 exposes enough
+    # parallelism for decode-shaped launches.
     if use_gate_in_kernel:
-        BV, num_warps = _decode_launch_config(V, N * H, q.device.index)
+        BV, num_warps, num_stages = 4, 1, 3
     else:
-        BV, num_warps = 8, 1
+        BV, num_warps, num_stages = 8, 1, 2
     grid = (cdiv(V, BV) * N * H,)
     fused_recurrent_kda_fwd_kernel[grid](
         q=q,
@@ -434,7 +393,7 @@ def fused_recurrent_kda_fwd(
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         num_warps=num_warps,
-        num_stages=2,
+        num_stages=num_stages,
     )
     return out, initial_state
 
