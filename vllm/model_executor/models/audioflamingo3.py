@@ -197,6 +197,7 @@ class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
         return AudioFlamingo3MultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -237,6 +238,7 @@ def _audioflamingo3_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     if chunk_counts is not None:
         return dict(
             audio_embeds=MultiModalFieldConfig.batched("audio"),
+            audio_num_tokens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
             input_features=MultiModalFieldConfig.flat_from_sizes(
                 "audio", chunk_counts, dim=0
             ),
@@ -247,6 +249,7 @@ def _audioflamingo3_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         )
     return dict(
         audio_embeds=MultiModalFieldConfig.batched("audio"),
+        audio_num_tokens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         input_features=MultiModalFieldConfig.batched("audio"),
         feature_attention_mask=MultiModalFieldConfig.batched("audio"),
         chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
@@ -354,11 +357,15 @@ def _count_audio_tokens_from_mask(
 
 
 class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
+    embedding_fields = {
+        "audio": {"audio_embeds": "values", "audio_num_tokens": "metadata"},
+    }
+
     def _parse_audio_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[Any],
     ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
+        if isinstance(data, dict) and "audio_num_tokens" not in data:
             return DictEmbeddingItems(
                 data,
                 modality="audio",
@@ -442,7 +449,11 @@ class AudioFlamingo3MultiModalProcessor(
         chunk_counts = out_mm_data.get("chunk_counts")
 
         def get_replacement_audioflamingo3(item_idx: int):
-            if feature_attention_mask is not None:
+            if "audio_num_tokens" in out_mm_data:
+                counts = out_mm_data["audio_num_tokens"]
+                assert isinstance(counts, torch.Tensor)
+                num_features = int(counts[item_idx])
+            elif feature_attention_mask is not None:
                 num_features = _count_audio_tokens_from_mask(
                     feature_attention_mask,
                     chunk_counts,
