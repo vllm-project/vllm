@@ -146,20 +146,28 @@ def _check_page_stride(page_stride: int, entries: int, width: int, head_dim: int
 
 @functools.cache
 def _gather_reaches(span: int, block: int, head_dim: int) -> bool:
-    # build_candidate_gather resolves each candidate block to an int32 offset
-    # from the cache base, in 16 B units for values and gather_s_unit B for
-    # scales. The base is the pool's first block, so the span is the pool's.
-    from aiter.ops.triton.attention.pa_mqa_logits_mxfp4_gather import gather_s_unit
+    from aiter.ops.triton.attention import pa_mqa_logits_mxfp4_gather as gather
 
-    unit = min(16, gather_s_unit(block, head_dim // MXFP4_BLOCK_SIZE))
+    # aiter widens the resolved offsets to int64 when the pool outgrows int32.
+    if hasattr(gather, "offset_dtype"):
+        return True
+    # Before that, build_candidate_gather resolved each candidate block to an
+    # int32 offset from the cache base, in 16 B units for values and
+    # gather_s_unit B for scales. The base is the pool's first block, so the
+    # span is the pool's.
+    unit = min(16, gather.gather_s_unit(block, head_dim // MXFP4_BLOCK_SIZE))
     return span <= unit * (2**31 - 1)
 
 
 def reserve_rocm_mxfp4_indexer_workspace(
-    hidden_states: torch.Tensor, logits_width: int, candidate_block_size: int = 0
+    hidden_states: torch.Tensor,
+    logits_width: int,
+    candidate_block_size: int = 0,
+    gather_block_size: int = 0,
 ) -> None:
     """Profiling run: claim the decode logits workspace and the peak prefill
-    logits, block scores included when the layer writes them."""
+    logits, block scores included when the layer writes them, candidate lists
+    when it gathers."""
     rows = _max_decode_logits_rows(hidden_states.shape[0])
     specs = [((rows, logits_width), torch.float32)]
     budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
@@ -167,6 +175,11 @@ def reserve_rocm_mxfp4_indexer_workspace(
         nblocks = triton.cdiv(logits_width, candidate_block_size)
         specs.append(((rows, nblocks), torch.float32))
         budget += budget // candidate_block_size
+    if gather_block_size:
+        # aiter allocates a chunk's candidate lists itself: 24 B per candidate
+        # block (int64 value and scale offsets, int64 position) against the
+        # compact logits' 4 B per pool column.
+        budget += budget * 6 // gather_block_size
     current_workspace_manager().get_simultaneous(*specs)
     torch.empty(budget, dtype=torch.uint8, device=hidden_states.device)
 
@@ -604,7 +617,9 @@ def rocm_mxfp4_sparse_mqa_indexer(
     length gate says it pays, else the dense walk masked to the pool."""
     if not isinstance(get_forward_context().attn_metadata, dict):
         reserve_rocm_mxfp4_indexer_workspace(
-            hidden_states, max(max_model_len, num_candidate_cols)
+            hidden_states,
+            max(max_model_len, num_candidate_cols),
+            gather_block_size=candidate_block_size,
         )
         return topk_indices_buffer
     layer = _layer(
