@@ -149,11 +149,8 @@ def _aiter_mla_native_h24_supported() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _aiter_gather_kv_b_proj():
-    """Load the fused chunked-context gather entry point.
-
-    Requires an AITER build that exports ``gather_kv_b_proj``.  When it is
-    missing we return ``None`` and ``_can_fuse_context_gather`` falls back to
-    the generic ``_compute_prefill_context``.
+    """Load the fused chunked-context gather requires gather_kv_b_proj.
+    falls back to _compute_prefill_context.
     """
     try:
         from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
@@ -1157,9 +1154,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     ) -> list[torch.Tensor] | None:
         """Flatten each context chunk's block table into per-token KV indices.
 
-        ``gather_kv_b_proj`` addresses its KV buffer one token per entry, so it
-        needs flat indices rather than block ids. Built here so the expansion
-        runs once per step instead of once per MLA layer.
+        gather_kv_b_proj addresses its KV buffer one token per entry, so it
+        needs flat indices rather than block ids.
         """
         prefill = attn_metadata.prefill
         if prefill is None or prefill.chunked_context is None:
@@ -1564,6 +1560,34 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
 
+        self._use_fused_mla_kv_concat = (
+            hasattr(torch.ops._C, "fused_kimi_k3_mla_kv_concat")
+            and self.qk_nope_head_dim == 128
+            and self.qk_rope_head_dim == 64
+        )
+
+    def _concat_k_nope_k_pe(
+        self, k_nope: torch.Tensor, k_pe: torch.Tensor
+    ) -> torch.Tensor:
+        """Build [k_nope | k_pe] broadcasting k_pe over the heads.
+        falls back to the generic copies for other shapes."""
+        if not (
+            self._use_fused_mla_kv_concat
+            and k_nope.dim() == 3
+            and k_nope.dtype in (torch.bfloat16, torch.float16)
+            and k_pe.dtype == k_nope.dtype
+        ):
+            return super()._concat_k_nope_k_pe(k_nope, k_pe)
+        k = torch.empty(
+            (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
+            dtype=k_nope.dtype,
+            device=k_nope.device,
+        )
+        torch.ops._C.fused_kimi_k3_mla_kv_concat(
+            k_nope, k_pe.reshape(k_pe.shape[0], k_pe.shape[-1]), k
+        )
+        return k
+
     def _can_fuse_context_gather(
         self,
         q: torch.Tensor,
@@ -1592,13 +1616,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         k_scale: torch.Tensor,
         out_dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather one context chunk and expand it into ``(k, v)`` in one launch.
-
-        Replaces ``gather_and_maybe_dequant_cache`` -> ``kv_b_proj`` ->
-        ``_concat_k_nope_k_pe``: ``k`` comes back already laid out as
-        ``[k_nope | k_pe]``, so there is nothing left to concatenate, and the
-        latent never lands in a full-width workspace.
-        """
+        """Gather one context chunk and expand it into (k, v)."""
         num_blocks, block_size, cache_width = kv_c_and_k_pe_cache.shape
         rope_dim = cache_width - self.kv_lora_rank
         num_rows = chunk.num_context_tokens
