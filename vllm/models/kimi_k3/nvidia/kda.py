@@ -236,7 +236,7 @@ def is_flashinfer_fused_kda_spec_decode_supported(
         and 1 <= num_spec <= 7
         and input_dtype == torch.bfloat16
         and conv_state_dtype == torch.bfloat16
-        and recurrent_state_dtype == torch.float32
+        and recurrent_state_dtype in (torch.float32, torch.bfloat16)
         and lower_bound is not None
         and lower_bound < 0
         and not use_recoverssm
@@ -273,9 +273,9 @@ def resolve_kda_spec_decode_backend(
         raise RuntimeError(
             "FlashInfer packed fused KDA decode requires its "
             "packed_fused_kda_decode API, CUDA SM10x, bfloat16 inputs and "
-            "convolution state, float32 recurrent state, D=128, W=4, a "
-            "bounded gate, 1-7 speculative tokens, a supported head count, "
-            "the SD convolution-state layout, and RecoverSSM disabled."
+            "convolution state, float32 or bfloat16 recurrent state, D=128, "
+            "W=4, a bounded gate, 1-7 speculative tokens, a supported head "
+            "count, the SD convolution-state layout, and RecoverSSM disabled."
         )
     if supported and backend != "native":
         logger.info_once("Using FlashInfer packed fused KDA speculative decode.")

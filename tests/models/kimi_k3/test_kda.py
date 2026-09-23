@@ -104,6 +104,43 @@ def test_resolve_kda_spec_decode_backend(monkeypatch: pytest.MonkeyPatch):
         resolve_kda_spec_decode_backend("flashinfer", *args, False)
 
 
+@pytest.mark.parametrize(
+    ("recurrent_state_dtype", "supported"),
+    [(torch.float32, True), (torch.bfloat16, True), (torch.float16, False)],
+)
+def test_flashinfer_kda_spec_decode_capability_state_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+    recurrent_state_dtype: torch.dtype,
+    supported: bool,
+):
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.kda.has_flashinfer_packed_fused_kda_decode",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.kda.current_platform.is_device_capability_family",
+        lambda family: family == 100,
+    )
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.kda.is_conv_state_dim_first",
+        lambda: False,
+    )
+    assert (
+        is_flashinfer_fused_kda_spec_decode_supported(
+            num_heads=12,
+            head_dim=128,
+            conv_width=4,
+            num_spec=6,
+            input_dtype=torch.bfloat16,
+            conv_state_dtype=torch.bfloat16,
+            recurrent_state_dtype=recurrent_state_dtype,
+            lower_bound=-5.0,
+            use_recoverssm=False,
+        )
+        is supported
+    )
+
+
 def test_flashinfer_kda_spec_decode_capability_rejects_recoverssm():
     assert not is_flashinfer_fused_kda_spec_decode_supported(
         num_heads=12,
@@ -1193,8 +1230,10 @@ def test_fused_kda_decode_correctness(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 def test_flashinfer_fused_kda_spec_decode_integration(
     monkeypatch: pytest.MonkeyPatch,
+    state_dtype: torch.dtype,
 ):
     if not is_flashinfer_fused_kda_spec_decode_supported(
         num_heads=12,
@@ -1203,7 +1242,7 @@ def test_flashinfer_fused_kda_spec_decode_integration(
         num_spec=6,
         input_dtype=torch.bfloat16,
         conv_state_dtype=torch.bfloat16,
-        recurrent_state_dtype=torch.float32,
+        recurrent_state_dtype=state_dtype,
         lower_bound=-5.0,
         use_recoverssm=False,
     ):
@@ -1269,15 +1308,18 @@ def test_flashinfer_fused_kda_spec_decode_integration(
             generator=generator,
         )
     ).transpose(1, 2)
-    state_seed = 0.5 * torch.randn(
-        num_slots,
-        H,
-        D,
-        D,
-        dtype=torch.float32,
-        device=DEVICE,
-        generator=generator,
-    )
+    state_seed = (
+        0.5
+        * torch.randn(
+            num_slots,
+            H,
+            D,
+            D,
+            dtype=torch.float32,
+            device=DEVICE,
+            generator=generator,
+        )
+    ).to(state_dtype)
     metadata = KimiK3KDAMetadata(
         num_prefills=0,
         num_prefill_tokens=0,
