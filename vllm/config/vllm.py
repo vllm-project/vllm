@@ -796,11 +796,12 @@ class VllmConfig:
             or self.compilation_config.pass_config.fuse_gemm_comms
         ):
             return False
-        table = bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS.get(
-            bi._get_tuned_matmul_arch_family(current_platform.get_device_capability())
+        family = bi._get_tuned_matmul_arch_family(
+            current_platform.get_device_capability()
         )
-        if table is None:
+        if family is None or family not in bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
             return False
+        table = bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS[family]
         parallel = self.parallel_config
         tp = parallel.tensor_parallel_size
         hidden = model.get_hidden_size()
