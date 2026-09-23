@@ -1016,3 +1016,78 @@ def test_candidate_exchange_matches_reconstruction_oracle(world: int, k: int):
         assert set(merged_ids[row].tolist()) == set(oracle_ids[row].tolist()), (
             f"row {row}: exchange selected a different set than the oracle"
         )
+
+
+def test_stable_topk_triton_key_encoding_orders_like_reference():
+    """The Triton twin's int64 key layout (dcp_indexer_topk._pack_stable_key)
+    must induce the same total order as the fp64 reference key: score
+    descending, ties to the lowest id, padding last. Mirrors the kernel's
+    bit arithmetic in torch — the kernel itself needs a GPU, the encoding
+    does not. Adversarial inputs: exact ties, NaN, +/-0.0, +/-inf,
+    negatives, large ids, -1 padding."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_topk import (
+        _STABLE_KEY_ID_MASK,
+        _STABLE_KEY_VALID,
+    )
+
+    scores = torch.tensor(
+        [2.5, 2.5, -1.0, 0.0, -0.0, float("inf"), float("-inf"),
+         float("nan"), 7.25, 7.25, 1e-30, -1e-30, 3.0],
+        dtype=torch.float32,
+    )
+    ids = torch.tensor(
+        [7, 12, 3, 40, 41, 5, 6, 2, (1 << 24) - 1, 0, 9, 10, -1],
+        dtype=torch.int64,
+    )
+    valid = ids >= 0
+
+    # The kernel's key, in torch (uint32 semantics via int64 & masks).
+    bits = scores.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    bits = torch.where(bits == 0x80000000, torch.zeros_like(bits), bits)
+    neg = (bits >> 31) != 0
+    ordered = torch.where(neg, bits ^ 0xFFFFFFFF, bits ^ 0x80000000)
+    is_nan = (bits & 0x7FFFFFFF) > 0x7F800000
+    ordered = torch.where(is_nan, torch.zeros_like(ordered), ordered)
+    kernel_key = (
+        _STABLE_KEY_VALID
+        | (ordered << 30)
+        | (_STABLE_KEY_ID_MASK - ids.clamp(min=0))
+    )
+    kernel_key = torch.where(valid, kernel_key, torch.zeros_like(kernel_key))
+
+    # The reference key (same construction _ref_stable_topk... uses).
+    ref_score_bits = scores.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    ref_sign = (ref_score_bits >> 31) & 1
+    ref_score_key = (
+        torch.where(
+            ref_sign.bool(),
+            ref_score_bits ^ 0xFFFFFFFF,
+            ref_score_bits ^ 0x80000000,
+        )
+        & 0xFFFFFFFF
+    )
+    ref_key = (ref_score_key << 32) | ((~ids) & 0xFFFFFFFF)
+    ref_key = torch.where(valid, ref_key, torch.zeros_like(ref_key))
+
+    # Same total order == same descending argsort (all keys distinct because
+    # the id rides in each key). NaN and -0.0 handling intentionally differ
+    # from the raw reference (the kernel demotes NaN and unifies zeros), so
+    # compare on the well-defined subset and check those cases directly.
+    comparable = valid & ~is_nan & (scores != 0.0)
+    kernel_order = kernel_key[comparable].argsort(descending=True)
+    ref_order = ref_key[comparable].argsort(descending=True)
+    assert torch.equal(kernel_order, ref_order)
+
+    # Ties resolve to the lowest id: score 2.5 pair (ids 7, 12) and
+    # score 7.25 pair (ids 2^24-1, 0).
+    tie_a = kernel_key[0] > kernel_key[1]
+    tie_b = kernel_key[9] > kernel_key[8]
+    assert tie_a and tie_b
+
+    # 0.0 and -0.0 collapse to the same score; the id breaks the tie.
+    assert kernel_key[3] > kernel_key[4]
+
+    # NaN sorts below -inf; padding sorts below everything.
+    assert kernel_key[7] < kernel_key[6]
+    assert kernel_key[12] == 0
+    assert (kernel_key[valid] > 0).all()
