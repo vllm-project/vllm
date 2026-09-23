@@ -78,6 +78,7 @@ class DefaultModelLoader(BaseModelLoader):
         self.local_expert_ids: set[int] | None = None
         # Set in load_weights when --mm-encoder-only; used to drop LM-only shards.
         self._encoder_only_lm_prefixes: tuple[str, ...] | None = None
+        self._encoder_only_weights_mapper: object | None = None
 
         extra_config = load_config.model_loader_extra_config
         if not isinstance(extra_config, dict):
@@ -269,6 +270,7 @@ class DefaultModelLoader(BaseModelLoader):
                 hf_folder,
                 index_file,
                 self._encoder_only_lm_prefixes,
+                weights_mapper=self._encoder_only_weights_mapper,
             )
             if not hf_weights_files:
                 raise RuntimeError(
@@ -378,12 +380,29 @@ class DefaultModelLoader(BaseModelLoader):
         mm_config = model_config.multimodal_config
         if mm_config is None or not mm_config.mm_encoder_only:
             self._encoder_only_lm_prefixes = None
+            self._encoder_only_weights_mapper = None
             return
 
-        # Map module attrs → HF index deny prefixes. Coarse denies such as
-        # bare ``model.`` return None (out of scope this PR; full file list).
+        # Optional model-declared module prefixes (vLLM attr names). When set,
+        # still pair with hf_to_vllm_mapper for HF key classification.
+        declared = getattr(model, "mm_encoder_only_lm_prefixes", None)
+        weights_mapper = getattr(model, "hf_to_vllm_mapper", None)
+        if declared is not None:
+            prefixes = tuple(p if p.endswith(".") else f"{p}." for p in declared)
+            self._encoder_only_lm_prefixes = prefixes or None
+            self._encoder_only_weights_mapper = (
+                weights_mapper if self._encoder_only_lm_prefixes else None
+            )
+            return
+
+        # Derive from _language_model_names; fail-closed on shared HF roots
+        # (Molmo/Phi-4-MM/Muse). Qwen nested/flat keys classified via mapper.
         self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
-            getattr(model, "_language_model_names", None)
+            getattr(model, "_language_model_names", None),
+            weights_mapper=weights_mapper,
+        )
+        self._encoder_only_weights_mapper = (
+            weights_mapper if self._encoder_only_lm_prefixes is not None else None
         )
 
     def _init_ep_weight_filter(self, model_config: ModelConfig) -> None:

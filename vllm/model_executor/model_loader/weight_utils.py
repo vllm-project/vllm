@@ -656,60 +656,97 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
     return hf_weights_files
 
 
-# Coarse deny prefixes that also match vision HF keys for some VLMs
-# (e.g. Molmo / Phi-4-MM / Muse mark LM as ``model`` while vision is still
-# under ``model.vision_*``). Out of scope for whole-shard skip in this PR —
-# we skip applying the filter rather than under-loading the encoder. Follow-ups
-# can enable these models with non-overlapping LM/vision HF prefixes or
-# key-level filtering.
-_UNSAFE_MM_ENCODER_ONLY_LM_PREFIXES = frozenset({"model."})
+def _normalize_module_prefixes(
+    language_model_names: Iterable[str] | None,
+) -> tuple[str, ...]:
+    names = tuple(language_model_names or ())
+    prefixes = tuple(n if n.endswith(".") else f"{n}." for n in names)
+    return prefixes or ("language_model.",)
 
-# Extra HF index prefixes when the vLLM module attr is ``language_model``.
-# Covers nested Qwen3/LLaVA (``model.language_model.*``) and flat Qwen2.5
-# (``model.layers.*`` + ``visual.*``). Bare ``model.`` is intentionally not
-# added here (see ``_UNSAFE_MM_ENCODER_ONLY_LM_PREFIXES``).
-_HF_LANGUAGE_MODEL_INDEX_PREFIXES = (
-    "model.language_model.",
-    "model.layers.",
-    "model.embed_tokens.",
-    "model.norm.",
-    "lm_head.",
-)
+
+def _mapped_weight_name(weights_mapper: object | None, key: str) -> str | None:
+    """Apply ``WeightsMapper._map_name`` when present; else identity."""
+    if weights_mapper is None:
+        return key
+    map_name = getattr(weights_mapper, "_map_name", None)
+    if map_name is None:
+        return key
+    return map_name(key)
+
+
+def _hf_prefix_maps_to_lm(
+    new_name: str | None, lm_module_prefixes: tuple[str, ...]
+) -> bool:
+    if not new_name:
+        return False
+    new_p = new_name if new_name.endswith(".") else f"{new_name}."
+    return any(new_p.startswith(p) or p.startswith(new_p) for p in lm_module_prefixes)
+
+
+def _shared_hf_root_module_prefixes(
+    lm_module_prefixes: tuple[str, ...],
+    weights_mapper: object | None,
+) -> tuple[str, ...]:
+    """Module prefixes that are also an HF root for non-LM weights.
+
+    E.g. Molmo/Phi-4-MM/Muse mark LM as ``model`` while vision HF keys stay
+    under ``model.vision_*`` / ``model.embed_tokens_extend.*``. Detected via
+    ``WeightsMapper.orig_to_new_prefix`` (no hard-coded name list).
+    """
+    if weights_mapper is None:
+        return ()
+    mapping = getattr(weights_mapper, "orig_to_new_prefix", None) or {}
+    if not mapping:
+        return ()
+
+    non_lm_origs: list[str] = []
+    for orig, new in mapping.items():
+        orig_p = orig if orig.endswith(".") else f"{orig}."
+        if not _hf_prefix_maps_to_lm(new, lm_module_prefixes):
+            non_lm_origs.append(orig_p)
+
+    if not non_lm_origs:
+        return ()
+
+    shared = [
+        p
+        for p in lm_module_prefixes
+        if any(orig.startswith(p) for orig in non_lm_origs)
+    ]
+    return tuple(shared)
 
 
 def resolve_mm_encoder_only_lm_prefixes(
     language_model_names: Iterable[str] | None,
+    *,
+    weights_mapper: object | None = None,
 ) -> tuple[str, ...] | None:
-    """Map ``_language_model_names`` to HF-index deny prefixes.
+    """Resolve vLLM LM *module* prefixes for ``--mm-encoder-only`` shard skip.
 
-    Returns ``None`` to leave the safetensors file list unchanged when a deny
-    would be too coarse for safe whole-shard skipping (e.g. bare ``model.``).
-    That is out of scope for this change; narrower HF prefixes or key-level
-    filtering can cover those models in a follow-up without changing the
-    ``--mm-encoder-only`` + index-filter approach.
+    Prefixes come from ``_language_model_names`` (fallback ``language_model.``).
+    Classification of HF index keys is done later via optional
+    ``weights_mapper`` (see ``filter_mm_encoder_only_safetensors_files``), so
+    this helper does **not** hard-code Qwen/HF nest lists.
+
+    Returns ``None`` (leave the safetensors file list unchanged) when a module
+    prefix is a shared HF checkpoint root for both LM and non-LM weights —
+    fail-closed so Molmo / Phi-4-MM / Muse cannot under-load the encoder.
+    Models may also declare ``mm_encoder_only_lm_prefixes`` on the module to
+    supply an explicit override (handled by the loader).
     """
-    names = tuple(language_model_names or ())
-    prefixes = tuple(n if n.endswith(".") else f"{n}." for n in names)
-    if not prefixes:
-        prefixes = ("language_model.",)
-
-    unsafe = tuple(p for p in prefixes if p in _UNSAFE_MM_ENCODER_ONLY_LM_PREFIXES)
-    if unsafe:
+    prefixes = _normalize_module_prefixes(language_model_names)
+    shared = _shared_hf_root_module_prefixes(prefixes, weights_mapper)
+    if shared:
         logger.warning_once(
-            "mm-encoder-only whole-shard filter not applied for deny "
-            "prefix(es) %s (too coarse vs vision keys, e.g. Molmo/Phi-4-MM). "
-            "Encoder-only load keeps the full safetensors file list; "
-            "finer HF prefixes can enable skip later.",
-            unsafe,
+            "mm-encoder-only whole-shard filter not applied: LM module "
+            "prefix(es) %s share an HF checkpoint root with non-LM weights "
+            "(via WeightsMapper). Encoder-only load keeps the full "
+            "safetensors file list; declare finer "
+            "``mm_encoder_only_lm_prefixes`` or use key-level filtering later.",
+            shared,
         )
         return None
-
-    expanded = list(prefixes)
-    if "language_model." in prefixes:
-        for extra in _HF_LANGUAGE_MODEL_INDEX_PREFIXES:
-            if extra not in expanded:
-                expanded.append(extra)
-    return tuple(expanded)
+    return prefixes
 
 
 def filter_mm_encoder_only_safetensors_files(
@@ -717,15 +754,21 @@ def filter_mm_encoder_only_safetensors_files(
     hf_folder: str,
     index_file: str,
     language_model_prefixes: Iterable[str],
+    *,
+    weights_mapper: object | None = None,
 ) -> list[str]:
     """Drop safetensors shards that only contain language-model weights.
 
     Used with ``--mm-encoder-only`` so Encoder-only EPD instances avoid reading
-    pure LM shards from disk/DRAM.  A shard is kept if it contains any key that
-    does not start with one of ``language_model_prefixes``.
+    pure LM shards from disk/DRAM.
 
-    Without an index file, returns ``hf_weights_files`` unchanged (cannot safely
-    decide which shards are LM-only).
+    Each HF index key is classified by mapping through ``weights_mapper`` (when
+    provided) and testing the *vLLM* name against ``language_model_prefixes``.
+    Without a mapper, HF names are compared directly (identity checkpoint
+    layout, e.g. Kimi ``language_model.*``).
+
+    A shard is kept if it contains any non-LM key. Without an index file,
+    returns ``hf_weights_files`` unchanged.
     """
     prefixes = tuple(language_model_prefixes)
     if not prefixes:
@@ -746,12 +789,18 @@ def filter_mm_encoder_only_safetensors_files(
     for weight_name, weight_file in weight_map.items():
         keys_by_file[weight_file].append(weight_name)
 
+    def _is_lm_key(key: str) -> bool:
+        mapped = _mapped_weight_name(weights_mapper, key)
+        if mapped is None:
+            return False
+        return any(mapped.startswith(p) for p in prefixes)
+
     def _is_lm_only(weight_file: str) -> bool:
         keys = keys_by_file.get(weight_file)
         if not keys:
             # Not listed in the index (e.g. extra matched glob) — keep.
             return False
-        return all(any(key.startswith(p) for p in prefixes) for key in keys)
+        return all(_is_lm_key(key) for key in keys)
 
     kept: list[str] = []
     skipped = 0

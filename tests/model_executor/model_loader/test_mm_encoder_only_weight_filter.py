@@ -12,11 +12,45 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_mm_encoder_only_safetensors_files,
     resolve_mm_encoder_only_lm_prefixes,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 
 
 def _write_index(folder: str, weight_map: dict[str, str]) -> None:
     with open(os.path.join(folder, SAFE_WEIGHTS_INDEX_NAME), "w") as f:
         json.dump({"weight_map": weight_map}, f)
+
+
+def _qwen25_mapper() -> WeightsMapper:
+    """Qwen2.5-VL dual layout mapper (nested + flat catch-all)."""
+    return WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "language_model.model.",
+            "model.visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+            "model.": "language_model.model.",
+        }
+    )
+
+
+def _qwen3_mapper() -> WeightsMapper:
+    return WeightsMapper(
+        orig_to_new_prefix={
+            "model.visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+        }
+    )
+
+
+def _molmo_mapper() -> WeightsMapper:
+    return WeightsMapper(
+        orig_to_new_prefix={
+            "model.vision_backbone.": "vision_backbone.",
+            "model.transformer.blocks.": "model.layers.",
+            "model.transformer.ln_f.": "model.norm.",
+            "model.transformer.mlp.down_proj.": "lm_head.",
+        }
+    )
 
 
 def test_keeps_vision_shards_drops_language_only():
@@ -82,24 +116,25 @@ def test_no_index_returns_unchanged():
         assert kept == files
 
 
-def test_resolve_expands_qwen_nested_and_flat_prefixes():
+def test_resolve_returns_module_prefixes_without_hf_hardcode():
+    """No global Qwen HF nest list — just vLLM module prefixes."""
     prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
-    assert prefixes is not None
-    assert "language_model." in prefixes
-    assert "model.language_model." in prefixes
-    assert "model.layers." in prefixes
-    assert "model.embed_tokens." in prefixes
-    assert "model.norm." in prefixes
-    assert "lm_head." in prefixes
-    # This PR does not expand to bare model. (would overlap vision for
-    # Molmo / Phi-4-MM / Muse); those stay full-load until finer prefixes.
-    assert "model." not in prefixes
+    assert prefixes == ("language_model.",)
+    # With Qwen mapper, still module prefixes (keys classified via mapper).
+    assert resolve_mm_encoder_only_lm_prefixes(
+        ["language_model"], weights_mapper=_qwen25_mapper()
+    ) == ("language_model.",)
 
 
-def test_resolve_skips_filter_for_bare_model_attr():
-    """Bare model. is out of scope for whole-shard skip; resolve returns None."""
-    assert resolve_mm_encoder_only_lm_prefixes(["model"]) is None
-    assert resolve_mm_encoder_only_lm_prefixes(["model."]) is None
+def test_resolve_skips_filter_for_shared_hf_root():
+    """Shared HF root (Molmo-shaped mapper) → fail-closed, not magic name list."""
+    assert (
+        resolve_mm_encoder_only_lm_prefixes(["model"], weights_mapper=_molmo_mapper())
+        is None
+    )
+    # Without a mapper, identity layout: module prefix is returned as-is.
+    assert resolve_mm_encoder_only_lm_prefixes(["model"]) == ("model.",)
+    assert resolve_mm_encoder_only_lm_prefixes(["model."]) == ("model.",)
 
 
 def test_resolve_keeps_llm_prefix_without_model_broadening():
@@ -125,10 +160,16 @@ def test_qwen3_nested_index_skips_lm_keeps_visual():
                 "model.visual.blocks.0.weight": "model-00002-of-000002.safetensors",
             },
         )
-        prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
+        prefixes = resolve_mm_encoder_only_lm_prefixes(
+            ["language_model"], weights_mapper=_qwen3_mapper()
+        )
         assert prefixes is not None
         kept = filter_mm_encoder_only_safetensors_files(
-            files, folder, SAFE_WEIGHTS_INDEX_NAME, prefixes
+            files,
+            folder,
+            SAFE_WEIGHTS_INDEX_NAME,
+            prefixes,
+            weights_mapper=_qwen3_mapper(),
         )
         assert kept == [files[1]]
 
@@ -153,17 +194,26 @@ def test_qwen25_flat_index_skips_lm_keeps_visual():
                 "visual.blocks.0.weight": "model-00002-of-000002.safetensors",
             },
         )
-        prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
+        prefixes = resolve_mm_encoder_only_lm_prefixes(
+            ["language_model"], weights_mapper=_qwen25_mapper()
+        )
         assert prefixes is not None
         kept = filter_mm_encoder_only_safetensors_files(
-            files, folder, SAFE_WEIGHTS_INDEX_NAME, prefixes
+            files,
+            folder,
+            SAFE_WEIGHTS_INDEX_NAME,
+            prefixes,
+            weights_mapper=_qwen25_mapper(),
         )
         assert kept == [files[1]]
 
 
 def test_molmo_shaped_index_not_filtered_when_deny_disabled():
-    """Bare model. is out of scope this PR; resolve returns None so no filter."""
-    assert resolve_mm_encoder_only_lm_prefixes(["model"]) is None
+    """Shared-root LM attr → resolve None; callers leave the file list alone."""
+    assert (
+        resolve_mm_encoder_only_lm_prefixes(["model"], weights_mapper=_molmo_mapper())
+        is None
+    )
     with tempfile.TemporaryDirectory() as folder:
         files = [
             os.path.join(folder, "vision.safetensors"),
@@ -178,12 +228,9 @@ def test_molmo_shaped_index_not_filtered_when_deny_disabled():
                 "model.transformer.blocks.0.weight": "lm.safetensors",
             },
         )
-        # Document why we do not pass bare model. into the filter today:
-        # whole-shard deny would also drop vision. Follow-ups can use finer
-        # HF LM prefixes instead.
+        # Document why raw HF startswith("model.") is unsafe without fail-closed:
+        # whole-shard deny would also drop vision.
         if_applied_naively = filter_mm_encoder_only_safetensors_files(
             files, folder, SAFE_WEIGHTS_INDEX_NAME, ("model.",)
         )
         assert if_applied_naively == []
-        # Safe path for this PR: resolve → None → callers leave file list as-is.
-        assert files == files
