@@ -16,6 +16,7 @@ from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
@@ -116,19 +117,25 @@ def _build(builder, seq_lens, query_lens):
     return builder.build(common_prefix_len=0, common_attn_metadata=common)
 
 
-def test_builder_emits_compacted_checkpoint_tensors():
-    """Only checkpointing rows appear, and a chunk ends on the checkpoint."""
+def test_builder_emits_one_checkpoint_entry_per_prefill_row():
+    """Declined rows stay in place, masked, and a chunk ends on the checkpoint."""
     builder = _create_mamba2_builder()
     # Row 0 (seq_len 900) checkpoints at 768; row 1 (seq_len 100) is too short
     # for a checkpoint at all.
     meta = _build(builder, seq_lens=[900, 100], query_lens=[900, 100])
 
     assert meta.checkpoint_chunk_idx is not None
-    assert meta.checkpoint_chunk_idx.numel() == 1
-    assert meta.checkpoint_block_idx.numel() == 1
+    assert meta.checkpoint_meta is not None
+    assert meta.checkpoint_chunk_idx.numel() == 2
+    # The exporter masks row 1 off by its zero offset and null block, but
+    # still loads its chunk index first, so the placeholder must be in range.
+    assert meta.checkpoint_meta.checkpoint_offsets.tolist() == [768, 0]
+    assert meta.checkpoint_meta.state_indices[1].item() == NULL_BLOCK_ID
+    assert meta.checkpoint_chunk_idx[1].item() == 0
     # The checkpoint's token offset is the end of its chunk. Asserting it here
     # also proves the chunk split actually landed on the checkpoint.
-    assert meta.cu_chunk_seqlen_p[meta.checkpoint_chunk_idx + 1].item() == 768
+    ckpt_chunk = meta.checkpoint_chunk_idx[0]
+    assert meta.cu_chunk_seqlen_p[ckpt_chunk + 1].item() == 768
 
 
 def test_builder_emits_nothing_outside_align_mode():

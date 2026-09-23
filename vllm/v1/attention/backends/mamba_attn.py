@@ -400,8 +400,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute chunk metadata and return as device tensors.
         Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p,
-        checkpoint_chunk_idx_p). The last is None unless a row checkpoints,
-        and is compacted to the checkpointing rows in prefill-row order.
+        checkpoint_chunk_idx_p). The last is None unless a row checkpoints;
+        it has one entry per prefill row, holding the logical chunk that ends
+        on the checkpoint, and 0 for rows that decline.
         """
         num_prefills = common.num_prefills
 
@@ -429,10 +430,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         last_chunk_indices_p = async_tensor_h2d(
             last_chunk_indices, dtype=torch.int32, device=device
         )
-        ckpt_idxs = [idx for idx in ckpt_idxs if idx >= 0]
         ckpt_idx_p = (
-            async_tensor_h2d(ckpt_idxs, dtype=torch.int64, device=device)
-            if ckpt_idxs
+            async_tensor_h2d(
+                [max(idx, 0) for idx in ckpt_idxs], dtype=torch.int64, device=device
+            )
+            if any(idx >= 0 for idx in ckpt_idxs)
             else None
         )
         return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p, ckpt_idx_p

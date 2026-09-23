@@ -7,8 +7,9 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.mamba.mamba2_checkpoint import (
-    Mamba2PrefillCheckpointBuilder,
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
 )
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -112,10 +113,10 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
 
-    # Internal prefill checkpoints, compacted to the checkpointing rows. The
-    # token offset is cu_chunk_seqlen_p[checkpoint_chunk_idx + 1].
+    # Internal prefill checkpoints, one entry per prefill row. The chunk
+    # index selects the varlen_states row holding the checkpoint state.
     checkpoint_chunk_idx: torch.Tensor | None = None
-    checkpoint_block_idx: torch.Tensor | None = None
+    checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -136,7 +137,7 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
-        self.checkpoint_builder = Mamba2PrefillCheckpointBuilder(
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
 
@@ -158,7 +159,7 @@ class Mamba2AttentionMetadataBuilder(
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
         checkpoint_chunk_idx = None
-        checkpoint_block_idx = None
+        checkpoint_meta = None
         prep_initial_states = False
 
         # Compute seq_idx for prefill only
@@ -181,10 +182,10 @@ class Mamba2AttentionMetadataBuilder(
                     list(range(first, common.num_reqs)),
                 )
                 if checkpoint is not None:
-                    # Offsets place the chunk boundary below; state_indices is
-                    # compacted to the rows that take a checkpoint.
+                    # The host offsets place the chunk boundary below; the
+                    # tensors are handed to the exporter untouched.
                     checkpoint_offsets_p = checkpoint.offsets
-                    checkpoint_block_idx = checkpoint.state_indices
+                    checkpoint_meta = checkpoint
 
             (
                 cu_chunk_seqlen_p,
@@ -206,5 +207,5 @@ class Mamba2AttentionMetadataBuilder(
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
             checkpoint_chunk_idx=checkpoint_chunk_idx,
-            checkpoint_block_idx=checkpoint_block_idx,
+            checkpoint_meta=checkpoint_meta,
         )

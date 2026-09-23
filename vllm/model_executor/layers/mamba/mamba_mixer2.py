@@ -27,6 +27,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -518,6 +521,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+        self.checkpoint_exporter = MambaPrefillCheckpointExporter()
         self.use_replayssm = (
             cache_config.use_replayssm if cache_config is not None else False
         )
@@ -762,7 +766,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             num_decodes = attn_metadata.num_decodes
             num_decode_tokens = attn_metadata.num_decode_tokens
             checkpoint_chunk_idx = attn_metadata.checkpoint_chunk_idx
-            checkpoint_block_idx = attn_metadata.checkpoint_block_idx
+            checkpoint_meta = attn_metadata.checkpoint_meta
 
         if attn_metadata is None:
             # V1 profile run -- warm up SSD kernels so that autotuning
@@ -855,18 +859,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
-
-            if checkpoint_chunk_idx is not None:
-                # Raw pre-conv window ending at the checkpoint, written before
-                # the conv so the running-block write wins on any aliasing.
-                # Full width, not conv_kernel - 1: spec decode widens conv
-                # state by num_spec, and a checkpoint must carry that history.
-                assert cu_chunk_seqlen_p is not None
-                ends = cu_chunk_seqlen_p[checkpoint_chunk_idx + 1]
-                window = torch.arange(-conv_state.shape[-1], 0, device=x.device)
-                conv_state[checkpoint_block_idx] = x[
-                    :, ends.unsqueeze(1) + window
-                ].permute(1, 0, 2)
 
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
@@ -1025,9 +1017,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     else varlen_states
                 )
                 if checkpoint_chunk_idx is not None:
-                    ssm_state[checkpoint_block_idx] = varlen_states[
-                        checkpoint_chunk_idx
-                    ]
+                    assert checkpoint_meta is not None
+                    assert query_start_loc_p is not None
+                    self.checkpoint_exporter.export(
+                        checkpoint_meta,
+                        conv_input=x.transpose(0, 1),
+                        conv_state=conv_state,
+                        recurrent_checkpoint=varlen_states,
+                        recurrent_state=ssm_state,
+                        cu_seqlens=query_start_loc_p,
+                        recurrent_row_ids=checkpoint_chunk_idx,
+                    )
                 ssm_state[state_indices_tensor_p] = final_states
                 if ring_start is not None and self._updates_replayssm_trackers:
                     assert prev_num_accepted is not None
