@@ -396,6 +396,7 @@ def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) ->
     fi_ar_comm.all_reduce.return_value = output
     communicator = CudaCommunicator.__new__(CudaCommunicator)
     communicator.fi_ar_comm = fi_ar_comm
+    communicator.fi_pcie_ipc_ar_comm = None
     communicator.pynccl_comm = Mock(world_size=8)
     communicator.qr_comm = None
     nccl_selector = Mock(return_value=True)
@@ -407,6 +408,21 @@ def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) ->
 
     assert communicator.all_reduce(torch.empty(1)) is output
     nccl_selector.assert_not_called()
+
+
+def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure can use aiter all_gather if available even if pynccl is not available."""
+    output = torch.empty(2)
+    aiter_comm = Mock()
+    aiter_comm.should_custom_ag.return_value = True
+    aiter_comm.custom_all_gather.return_value = output
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = 2
+    communicator.aiter_ar_comm = aiter_comm
+    communicator.pynccl_comm = Mock(disabled=True)
+    monkeypatch.setattr(communicator, "_can_use_aiter_ag_rs", Mock(return_value=True))
+
+    assert communicator.all_gatherv(torch.empty(1)) is output
 
 
 def test_isend_object_posts_size_then_object_and_releases_on_wait(

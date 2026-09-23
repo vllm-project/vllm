@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Warmup deep_gemm kernels.
+"""Warmup deep_gemm kernels.
 DeepGEMM JIT's the kernels. The warmup aims to JIT all the kernels that would
 be used during model execution beforehand.
 """
@@ -22,9 +21,6 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmE
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
-from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-from vllm.model_executor.layers.quantization.online.mxfp8 import Mxfp8OnlineLinearMethod
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
@@ -34,21 +30,21 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
+from vllm.v1.worker.workspace import current_workspace_manager
 
 
 def _generate_optimal_warmup_m_values(
     max_tokens: int, n: int, device: torch.device
 ) -> list[int]:
-    """
-    Generate M values that cover all possible DeepGEMM kernel configurations.
+    """Generate M values that cover all possible DeepGEMM kernel configurations.
     Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
 
     Args:
         max_tokens: Maximum number of tokens to warmup for
         n: The actual N dimension from the weight tensor
         device: The torch device to get properties from.
-    """
 
+    """
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
     block_ns = list(range(16, min(257, n + 1), 16))
@@ -82,34 +78,10 @@ def _generate_optimal_warmup_m_values(
     return sorted(m_values)
 
 
-def _extract_data_from_linear_base_module(
-    m: torch.nn.Module,
-) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
-    """
-    Extract weights, weight scales and quantization block sizes from the given
-    LinearBase module.
-    """
-    assert isinstance(m, LinearBase)
-    assert isinstance(m.quant_method, Fp8LinearMethod)
-    assert m.quant_method.block_quant
-    assert m.quant_method.quant_config is not None
-
-    w = m.weight
-    ws = m.weight_scale_inv if hasattr(m, "weight_scale_inv") else m.weight_scale
-    quant_block_size = m.quant_method.quant_config.weight_block_size
-
-    assert isinstance(w, torch.Tensor)
-    assert isinstance(ws, torch.Tensor)
-    assert quant_block_size is not None
-    return (w, ws, quant_block_size)
-
-
 def _extract_data_from_fused_moe_module(
     m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """
-    Extract weights, weight scales and num_topk from MoERunner module.
-    """
+    """Extract weights, weight scales and num_topk from MoERunner module."""
     assert isinstance(m_, MoERunner)
     m = m_.routed_experts
     w13 = m.w13_weight
@@ -133,45 +105,18 @@ def _extract_data_from_fused_moe_module(
     return w13, w13_s, w2, w2_s, num_topk
 
 
-def _is_deep_gemm_backed_kernel(fp8_linear: object) -> bool:
+def _deep_gemm_linear_data(
+    module: torch.nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Return (weight, weight_scale) for a layer whose kernel stamped itself as
+    ``deep_gemm_warmup_provider`` in ``process_weights_after_loading``, else None.
     """
-    Return True if the selected linear kernel dispatches to DeepGEMM, either
-    directly or as the fallback branch of a dynamic wrapper.
-    """
-    if isinstance(fp8_linear, DeepGemmFp8BlockScaledMMKernel):
-        return True
-    return isinstance(
-        getattr(fp8_linear, "fallback", None), DeepGemmFp8BlockScaledMMKernel
-    )
-
-
-def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
-    """
-    Return True if the input module/layer could be processed with DeepGEMM.
-    """
-
-    if not (
-        isinstance(module, LinearBase)
-        and isinstance(module.quant_method, Fp8LinearMethod)
-        and not isinstance(module.quant_method, Mxfp8OnlineLinearMethod)
-        and getattr(module.quant_method, "block_quant", False)
-        and not getattr(module.quant_method, "use_marlin", True)
-    ):
-        return False
-
-    fp8_linear = getattr(module.quant_method, "fp8_linear", None)
-    if not _is_deep_gemm_backed_kernel(fp8_linear):
-        return False
-
-    block_size = get_mk_alignment_for_contiguous_layout()[0]
-
-    w, _, block_sizes = _extract_data_from_linear_base_module(module)
-    return (
-        block_sizes == get_mk_alignment_for_contiguous_layout()
-        and w.ndim == 2
-        and w.shape[0] % block_size == 0
-        and w.shape[1] % block_size == 0
-    )
+    provider = getattr(module, "deep_gemm_warmup_provider", None)
+    if not isinstance(provider, DeepGemmFp8BlockScaledMMKernel):
+        return None
+    if module.weight_block_size != get_mk_alignment_for_contiguous_layout():
+        return None
+    return provider.get_deep_gemm_warmup_weights(module)
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
@@ -331,15 +276,15 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
     )
     if not warmup_cases:
         return
-    device = w1.device
 
     def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
         _, n, k = w.size()
-        a1q = torch.empty((MAX_M, k), device=device, dtype=torch.float8_e4m3fn)
-        a1q_scales = torch.zeros(
-            (MAX_M, k // block_m), device=device, dtype=torch.float32
+        a1q, a1q_scales, out = current_workspace_manager().get_simultaneous(
+            ((MAX_M, k), torch.float8_e4m3fn),
+            ((MAX_M, k // block_m), torch.float32),
+            ((MAX_M, n), torch.bfloat16),
         )
-        out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
+        a1q_scales.zero_()
 
         for num_tokens, align_used, expert_ids in warmup_cases:
             with mk_alignment_scope(align_used):
@@ -361,11 +306,10 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
 def deepgemm_fp8_gemm_nt_warmup(
     model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
 ):
-    dg_modules = [m for m in model.modules() if _fp8_linear_may_use_deep_gemm(m)]
-
-    for dgm in dg_modules:
-        w, ws, _ = _extract_data_from_linear_base_module(dgm)
-        _deepgemm_fp8_gemm_nt_warmup(w=w, ws=ws, max_tokens=max_tokens, pbar=pbar)
+    for m in model.modules():
+        if (data := _deep_gemm_linear_data(m)) is not None:
+            w, ws = data
+            _deepgemm_fp8_gemm_nt_warmup(w=w, ws=ws, max_tokens=max_tokens, pbar=pbar)
 
 
 def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
@@ -392,8 +336,8 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
 
     total = 0
     for m in model.modules():
-        if _fp8_linear_may_use_deep_gemm(m):
-            w, _, _ = _extract_data_from_linear_base_module(m)
+        if (data := _deep_gemm_linear_data(m)) is not None:
+            w, _ = data
             if w.size() not in seen_fp8_sizes:
                 total += len(_get_fp8_gemm_nt_m_values(w, max_tokens))
                 seen_fp8_sizes.add(w.size())

@@ -78,12 +78,17 @@ def _discover_parsers() -> list[_ParserInfo]:
             # Inkling opts out of token-id terminal matching and has typed
             # structural blocks; its replay coverage lives in test_inkling.py.
             continue
+        if cfg.name == "granite":
+            # Granite has a JSON-array tool body with no TOOL_END terminal, so
+            # it does not fit this token-terminal harness; its replay coverage
+            # lives in test_granite.py.
+            continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
         if not tool_end:
             raise RuntimeError(
                 f"{obj.__name__} config missing 'TOOL_END' in token_id_terminals"
             )
-        all_vals = set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        all_vals = cfg.terminal_literals | set(cfg.token_id_terminals.values())
         found.append(
             _ParserInfo(
                 parser_cls=obj,
@@ -91,12 +96,13 @@ def _discover_parsers() -> list[_ParserInfo]:
                 samples=build_samples(cfg.name),
                 terminals=sorted(v for v in all_vals if len(v) > 1),
                 tool_end=tool_end,
-                think_end=cfg.terminals.get("THINK_END", ""),
+                think_end=cfg.terminal_literal("THINK_END") or "",
                 tool_start=(
-                    cfg.terminals["TOOL_SECTION_START"]
+                    cfg.terminal_literal("TOOL_SECTION_START")
                     if (ParserState.CONTENT, "TOOL_SECTION_START") in cfg.transitions
-                    else cfg.terminals.get("TOOL_START", "")
-                ),
+                    else cfg.terminal_literal("TOOL_START")
+                )
+                or "",
             )
         )
     if missing_builders:

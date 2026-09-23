@@ -321,6 +321,7 @@ class LoopGateProjection(nn.Module):
 
         Returns:
             gate: [num_tokens, num_heads * head_dim] (flattened format matching q shape)
+
         """
         num_heads, num_tokens, head_dim = query.shape
 

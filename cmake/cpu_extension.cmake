@@ -1,4 +1,5 @@
 include(FetchContent)
+include(CheckCXXCompilerFlag)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -134,6 +135,12 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
             CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3))
         message(FATAL_ERROR "X86 backend requires gcc/g++ >= 12.3")
     endif()
+    # Work around a GCC 15 optimizer crash in oneDNN (tree-ssa-pre pass).
+    # Keep this scoped to GCC 15+ so older toolchains are unaffected.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+        list(APPEND CXX_COMPILE_FLAGS "-fno-tree-pre")
+    endif()
     list(APPEND CXX_COMPILE_FLAGS "-mf16c")
     list(APPEND CXX_COMPILE_FLAGS_AVX512 ${CXX_COMPILE_FLAGS})
     list(APPEND CXX_COMPILE_FLAGS_AVX2 ${CXX_COMPILE_FLAGS})
@@ -148,6 +155,24 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         "-mamx-tile"
         "-mavx512bf16"
         "-mavx512vnni")
+    # Some packaged GCC 14 builds still do not accept -mamx-fp8, so gate on
+    # actual flag support rather than compiler version alone.
+    # Option to enable/disable AMX-FP8 support (default: ON)
+    option(ENABLE_AMX_FP8 "Enable AMX-FP8 support" ON)
+
+    if (ENABLE_AMX_FP8)
+        check_cxx_compiler_flag("-mamx-fp8" COMPILER_SUPPORTS_AMX_FP8_FLAG)
+        if (COMPILER_SUPPORTS_AMX_FP8_FLAG)
+            list(APPEND CXX_COMPILE_FLAGS_AVX512_AMX "-mamx-fp8")
+            set(AMX_FP8_SUPPORTED TRUE)
+        else()
+            set(AMX_FP8_SUPPORTED FALSE)
+            message(STATUS "AMX-FP8 disabled: compiler does not support -mamx-fp8 (compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+        endif()
+    else()
+        set(AMX_FP8_SUPPORTED FALSE)
+        message(STATUS "AMX-FP8 disabled by ENABLE_AMX_FP8=OFF")
+    endif()
     list(APPEND CXX_COMPILE_FLAGS_AVX2
         "-mavx2")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
@@ -463,6 +488,7 @@ set(VLLM_EXT_SRC
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
+    "csrc/cpu/cpu_isa.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
@@ -497,6 +523,12 @@ if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
         ${VLLM_EXT_SRC})
 endif()
 
+if (POWER10_FOUND OR POWER11_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_fused_moe_int8.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if(USE_ONEDNN)
     set(VLLM_EXT_SRC
         "csrc/cpu/dnnl_kernels.cpp"
@@ -515,15 +547,24 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_int4.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/moe_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/bmm.cpp"
         "csrc/cpu/sgl-kernels/decode.cpp"
         "csrc/cpu/sgl-kernels/extend.cpp"
-        "csrc/cpu/sgl-kernels/mla_cache.cpp")
+        "csrc/cpu/sgl-kernels/mla_cache.cpp"
+        "csrc/cpu/sgl-kernels/mhc.cpp"
+        "csrc/cpu/sgl-kernels/store_cache.cpp"
+        "csrc/cpu/sgl-kernels/flash_mla.cpp"
+        "csrc/cpu/sgl-kernels/compressor.cpp"
+        "csrc/cpu/sgl-kernels/paged_mqa_logits.cpp"
+        "csrc/cpu/sgl-kernels/topk.cpp"
+        "csrc/cpu/sgl-kernels/indexer.cpp")
 
     set(VLLM_EXT_SRC_AVX512
         "csrc/cpu/sgl-kernels/fla.cpp"
@@ -533,6 +574,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/torch_bindings.cpp"
@@ -549,6 +591,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
@@ -581,6 +624,10 @@ if (ENABLE_X86_ISA)
 
     # For AMX kernels
     target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
+    if (AMX_FP8_SUPPORTED)
+        target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXFP8")
+        message(STATUS "AMX-FP8 (Diamond Rapids) enabled")
+    endif()
 
     # AVX512F 
     define_extension_target(

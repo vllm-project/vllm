@@ -134,25 +134,22 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         assert output
 
 
-def swiglu(x, alpha: float = 1.702, beta: float = 1.0, limit: float | None = None):
-    # Note we add an extra bias of 1 to the linear layer
-    # Uses chunked layout: first half is gate, second half is up
-    x_glu, x_linear = torch.chunk(x, 2, dim=-1)
+def swiglu(
+    x,
+    alpha: float = 1.702,
+    beta: float = 1.0,
+    limit: float | None = None,
+    interleaved: bool = False,
+):
+    if interleaved:
+        x_glu, x_linear = x[..., ::2], x[..., 1::2]
+    else:
+        x_glu, x_linear = torch.chunk(x, 2, dim=-1)
     if limit is not None:
         x_glu = x_glu.clamp(max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
     out_glu = x_glu * torch.sigmoid(alpha * x_glu)
     return out_glu * (x_linear + beta)
-
-
-def swigluoai(x, alpha: float = 1.702, limit: float = 7.0):
-    # OAI swiglu uses interleaved layout: gate/up alternating
-    # See SwigluOAIAndMul in vllm/model_executor/layers/activation.py
-    gate, up = x[..., ::2], x[..., 1::2]
-    gate = gate.clamp(max=limit)
-    up = up.clamp(min=-limit, max=limit)
-    glu = gate * torch.sigmoid(gate * alpha)
-    return (up + 1) * glu
 
 
 fp4_lookup_table = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0, -0.5, -1, -1.5, -2, -3, -4, -6]
@@ -217,8 +214,7 @@ def reference_moe(
     activation: str = "swiglu",
     use_interleaved_layout: bool = False,
 ):
-    """
-    Reference MoE implementation for accuracy testing.
+    """Reference MoE implementation for accuracy testing.
 
     Args:
         activation: One of "swiglu", "silu", "relu2". Controls the activation
@@ -227,6 +223,7 @@ def reference_moe(
             (gate=x[..., ::2], up=x[..., 1::2]) as used by SWIGLUOAI.
             If False, uses chunked layout (gate, up = chunk(x, 2)) as used
             by standard swiglu/silu.
+
     """
     # renormalize routing
     experts = torch.topk(roouting_logits, k=topk, dim=-1, sorted=True)
@@ -242,12 +239,9 @@ def reference_moe(
 
     # Apply activation
     if activation in ("swiglu", "silu"):
-        if use_interleaved_layout:
-            # SWIGLUOAI: interleaved gate/up layout
-            t = swigluoai(t, alpha=alpha, limit=limit)
-        else:
-            # Standard swiglu/silu: chunked layout
-            t = swiglu(t, alpha=alpha, beta=beta, limit=limit)
+        t = swiglu(
+            t, alpha=alpha, beta=beta, limit=limit, interleaved=use_interleaved_layout
+        )
     elif activation == "relu2":
         # RELU2_NO_MUL: relu(x)^2
         t = torch.relu(t)
@@ -1403,6 +1397,14 @@ ROCM_BACKEND_CONFIGS = {
         "requires_aiter": True,
         "requires_gfx950": True,
     },
+    "AITER_TRITON_MXFP4_BF16": {
+        "activation": "SILU",
+        "rtol": 0.3,
+        "percent": 0.95,
+        "requires_aiter": True,
+        "requires_gfx950": False,
+        "interleaved_layout": True,
+    },
     "AITER_MXFP4_FP8": {
         "activation": "SWIGLUOAI",
         "rtol": 0.5,
@@ -1439,8 +1441,7 @@ def test_rocm_mxfp4_moe_oracle(
     intermediate_size: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test ROCm MXFP4 MoE using oracle functions.
+    """Test ROCm MXFP4 MoE using oracle functions.
 
     This test validates that the oracle functions work end-to-end:
     - select_mxfp4_moe_backend() selects a valid backend
@@ -1670,7 +1671,9 @@ def test_rocm_mxfp4_moe_oracle(
     # Determine activation type and layout
     # SWIGLUOAI uses interleaved layout (gate/up alternating)
     # SILU uses chunked layout (first half gate, second half up)
-    use_interleaved = activation == MoEActivation.SWIGLUOAI
+    use_interleaved = bool(
+        config.get("interleaved_layout", activation == MoEActivation.SWIGLUOAI)
+    )
     if activation in [MoEActivation.SWIGLUOAI, MoEActivation.SILU]:
         act_name = "swiglu"
     else:
@@ -1821,8 +1824,7 @@ def test_mxfp4_emulation_rounds_up_to_block_size(
 def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    select_mxfp4_moe_backend() must raise NotImplementedError, with the
+    """select_mxfp4_moe_backend() must raise NotImplementedError, with the
     collected per-backend unsupported reasons in the message, when no
     backend supports the requested deployment configuration.
     """
@@ -1864,6 +1866,61 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
 
     with pytest.raises(NotImplementedError, match="Unsupported reasons"):
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
+
+
+@pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
+@pytest.mark.parametrize("use_ep", [False, True])
+def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
+    monkeypatch: pytest.MonkeyPatch, backend_name: str, use_ep: bool
+):
+    """Global routing cannot index local expert weights, even without all-to-all."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        backend_to_kernel_cls,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticTensorSym,
+        kMxfp4Static,
+    )
+
+    experts_cls = backend_to_kernel_cls(Mxfp4MoeBackend[backend_name])[0]
+    monkeypatch.setattr(experts_cls, "_supports_current_device", lambda: True)
+    config = make_dummy_moe_config(
+        num_experts=256,
+        num_local_experts=64 if use_ep else 256,
+        experts_per_token=6,
+        hidden_dim=4096,
+        intermediate_size=2048,
+        activation=MoEActivation.SWIGLUOAI,
+    )
+    config = replace(
+        config,
+        routing_method=RoutingMethodType.Renormalize,
+        moe_parallel_config=replace(
+            config.moe_parallel_config,
+            tp_size=1 if use_ep else 4,
+            ep_size=4 if use_ep else 1,
+            use_ep=use_ep,
+        ),
+    )
+    assert not config.moe_parallel_config.use_all2all_kernels
+    supported, reason = experts_cls.is_supported_config(
+        experts_cls,
+        config,
+        kMxfp4Static,
+        kFp8StaticTensorSym if backend_name == "AITER_MXFP4_FP8" else None,
+        FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported is not use_ep
+    if use_ep:
+        assert "parallel config" in reason
 
 
 # Every activation-quantizing OCP MX scheme must map to a `quant_dtype` that

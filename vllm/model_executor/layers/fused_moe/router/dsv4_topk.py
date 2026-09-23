@@ -41,11 +41,17 @@ if current_platform.is_cuda():
     def _dsv4_topk_kernel(
         gating_output_ptr,
         correction_bias_ptr,
+        is_padding_ptr,
         topk_weights_ptr,
         topk_ids_ptr,
         routed_scaling_factor,
+        input_ids_ptr,
+        bias_vl_ptr,
+        image_sentinel_lo,
         NUM_EXPERTS: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        HAS_PADDING: tl.constexpr,
+        HAS_VL: tl.constexpr,
         launch_pdl: tl.constexpr,
     ):
         row = tl.program_id(0)
@@ -54,6 +60,19 @@ if current_platform.is_cuda():
         bias = tl.load(
             correction_bias_ptr + expert_offsets, mask=expert_mask, other=0.0
         ).to(tl.float32)
+        if HAS_VL:
+            # Image tokens carry five consecutive in-vocab sentinel ids
+            # starting at image_sentinel_lo and use bias_vl for expert
+            # selection instead of the regular correction bias. Ids above the
+            # sentinel block are regular special tokens and must not match.
+            token_id = tl.load(input_ids_ptr + row).to(tl.int64)
+            bias_vl = tl.load(
+                bias_vl_ptr + expert_offsets, mask=expert_mask, other=0.0
+            ).to(tl.float32)
+            is_image = (token_id >= image_sentinel_lo) & (
+                token_id < image_sentinel_lo + 5
+            )
+            bias = tl.where(is_image, bias_vl, bias)
 
         if launch_pdl:
             tl.extra.cuda.gdc_wait()
@@ -89,6 +108,11 @@ if current_platform.is_cuda():
         output_mask = topk_offsets < 6
         output_offsets = row * 6 + topk_offsets
 
+        if HAS_PADDING:
+            is_padding = tl.load(is_padding_ptr + row)
+            selected_weights = tl.where(is_padding, 0.0, selected_weights)
+            selected_ids = tl.where(is_padding, -1, selected_ids)
+
         if launch_pdl:
             tl.extra.cuda.gdc_launch_dependents()
 
@@ -101,8 +125,26 @@ def dsv4_topk(
     correction_bias: torch.Tensor,
     indices_dtype: torch.dtype,
     routed_scaling_factor: float,
+    is_padding: torch.Tensor | None = None,
+    input_ids: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
+    if is_padding is not None:
+        assert is_padding.dtype == torch.bool
+        assert is_padding.shape == (num_tokens,)
+        assert is_padding.device == gating_output.device
+        assert is_padding.is_contiguous()
+        assert indices_dtype in (torch.int32, torch.int64), (
+            "Padding requires a signed indices dtype for the -1 sentinel."
+        )
+    has_vl = bias_vl is not None and image_sentinel_lo > 0
+    if bias_vl is not None:
+        assert input_ids is not None, "bias_vl routing requires input_ids"
+        assert bias_vl.dtype == torch.float32 and bias_vl.is_contiguous()
+        assert bias_vl.shape == (num_experts,)
+        assert input_ids.is_contiguous()
     shape = (num_tokens, _TOPK)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
@@ -110,11 +152,17 @@ def dsv4_topk(
         _dsv4_topk_kernel[(num_tokens,)](
             gating_output,
             correction_bias,
+            is_padding,
             topk_weights,
             topk_ids,
             routed_scaling_factor,
+            input_ids,
+            bias_vl,
+            image_sentinel_lo,
             NUM_EXPERTS=num_experts,
             BLOCK_N=triton.next_power_of_2(num_experts),
+            HAS_PADDING=is_padding is not None,
+            HAS_VL=has_vl,
             num_warps=1,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )

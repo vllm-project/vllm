@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.manager import (
+    BoundaryStoreStats,
     SimpleCPUOffloadScheduler,
 )
 from vllm.v1.simple_kv_offload.metadata import (
@@ -110,6 +111,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             if disk_path is None:
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_path to be set.'
+                )
+            if disk_capacity_bytes <= 0:
+                raise ValueError(
+                    'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
                 )
         else:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
@@ -291,11 +296,16 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return False, None
 
-    # NOTE: New API only for SimpleCPUOffloadConnector.
-    def has_pending_transfers(self) -> bool:
+    def has_pending_push_work(self) -> bool:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.has_pending_stores()
         return False
+
+    def get_boundary_store_stats(self) -> BoundaryStoreStats | None:
+        """Return cumulative boundary-handoff store diagnostics."""
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.get_boundary_store_stats()
+        return None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self.scheduler_manager is not None:

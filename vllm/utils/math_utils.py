@@ -13,7 +13,7 @@ def cdiv(a: int, b: int) -> int:
 
 
 def next_power_of_2(n: int) -> int:
-    """The next power of 2 (inclusive)"""
+    """The next power of 2 (inclusive)."""
     return 1 if n < 1 else 1 << (n - 1).bit_length()
 
 

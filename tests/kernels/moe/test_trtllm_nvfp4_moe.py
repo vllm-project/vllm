@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for the FlashInfer TRTLLM NvFP4 MoE backend
+"""Tests for the FlashInfer TRTLLM NvFP4 MoE backend
 (`TrtLlmNvFp4ExpertsModular`).
 
 Covers the activations the wrapper claims to support — SiLU, RELU^2 (non-gated),
@@ -44,7 +43,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 if pytest and (
     not has_flashinfer_trtllm_fused_moe()
-    or not current_platform.has_device_capability(100)
+    or not current_platform.is_device_capability_family(100)
 ):
     pytest.skip(
         "Requires flashinfer TRTLLM fused MoE and NvFP4 (SM100)",
