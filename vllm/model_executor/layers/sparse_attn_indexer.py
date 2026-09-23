@@ -1022,7 +1022,32 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor | None,
         weights: torch.Tensor,
     ):
-        assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
+        if self.use_fp4_cache:
+            from vllm.v1.attention.ops.rocm_mxfp4_indexer import (
+                rocm_mxfp4_sparse_attn_indexer,
+            )
+
+            assert isinstance(q_quant, tuple) and self.skip_k_cache_insert, (
+                "the ROCm MXFP4 indexer takes (values, scales) Q and a K cache "
+                "the model already wrote"
+            )
+            q_values, q_scale = q_quant
+            return rocm_mxfp4_sparse_attn_indexer(
+                hidden_states,
+                self.k_cache.prefix,
+                self.k_cache.kv_cache,
+                q_values,
+                q_scale,
+                weights,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_model_len,
+                self.topk_indices_buffer,
+                compress_ratio=self.compress_ratio,
+                candidate_blocks=self.candidate_blocks,
+                candidate_block_size=self.candidate_block_size,
+                candidate_write=self.candidate_write,
+            )
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )

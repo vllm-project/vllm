@@ -51,7 +51,7 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 # The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
-# and mxfp4 is the opt-in Blackwell path.
+# and mxfp4 is the opt-in Blackwell and gfx950 path.
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
 
 
@@ -64,6 +64,14 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
             f"sparse indexer (expected one of {DSA_INDEXER_KV_DTYPES})."
         )
     use_fp4 = kv_dtype == "mxfp4"
+    if use_fp4 and current_platform.is_rocm():
+        from vllm.v1.attention.ops.rocm_mxfp4_indexer import (
+            rocm_mxfp4_indexer_unsupported_reason,
+        )
+
+        if (reason := rocm_mxfp4_indexer_unsupported_reason()) is not None:
+            raise ValueError(f"indexer_kv_dtype='mxfp4' on ROCm: {reason}.")
+        return True
     if use_fp4 and not current_platform.is_device_capability_family(100):
         raise ValueError(
             "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "

@@ -19,6 +19,9 @@ from vllm.utils.import_utils import has_cutedsl
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
 
+# The e2m1 conversion below is PTX; ROCm rounds in plain Triton instead.
+_PORTABLE_FP4 = tl.constexpr(current_platform.is_rocm())
+
 
 @triton.jit
 def _get_cos_sin(
@@ -36,22 +39,43 @@ def _get_cos_sin(
 
 
 @triton.jit
+def _fp32_to_e2m1(x):
+    # Round to nearest even on {0, .5, 1, 1.5, 2, 3, 4, 6} and saturate, as
+    # cvt.rn.satfinite does. The > / >= split is what sends each tie to the
+    # even code.
+    a = tl.abs(x)
+    code = (
+        (a > 0.25).to(tl.int32)
+        + (a >= 0.75).to(tl.int32)
+        + (a > 1.25).to(tl.int32)
+        + (a >= 1.75).to(tl.int32)
+        + (a > 2.5).to(tl.int32)
+        + (a >= 3.5).to(tl.int32)
+        + (a > 5.0).to(tl.int32)
+    )
+    return tl.where(x < 0, code | 8, code)
+
+
+@triton.jit
 def _fp32x2_to_fp4x2(x_lo, x_hi):
-    # NOTE: $1 is high nibble, $2 is low nibble
-    return tl.inline_asm_elementwise(
-        """
-        {
-            .reg .b8 tmp;
-            cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;
-            cvt.u32.u8 $0, tmp;
-        }
-        """,
-        constraints="=r,f,f",
-        args=[x_hi, x_lo],
-        dtype=tl.uint32,
-        is_pure=True,
-        pack=1,
-    ).to(tl.uint8)
+    if _PORTABLE_FP4:
+        return (_fp32_to_e2m1(x_lo) | (_fp32_to_e2m1(x_hi) << 4)).to(tl.uint8)
+    else:
+        # NOTE: $1 is high nibble, $2 is low nibble
+        return tl.inline_asm_elementwise(
+            """
+            {
+                .reg .b8 tmp;
+                cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;
+                cvt.u32.u8 $0, tmp;
+            }
+            """,
+            constraints="=r,f,f",
+            args=[x_hi, x_lo],
+            dtype=tl.uint32,
+            is_pure=True,
+            pack=1,
+        ).to(tl.uint8)
 
 
 @triton.jit
@@ -312,8 +336,11 @@ class FusedIndexerQRopeQuantTritonKernel(
 def _indexer_weights_out_dtypes(vllm_config: Any) -> tuple[torch.dtype, ...]:
     """Weights dtypes the model's indexer layers ask for: fp32 for the dense
     scoring kernels, plus bf16 when the DeepSeek V4.1 sparse-logits indexer
-    (`SparseMQAIndexer`) is enabled."""
-    if vllm_config.attention_config.indexer_sparse_logits:
+    (`SparseMQAIndexer`) is enabled. The ROCm sparse indexer stays fp32."""
+    if (
+        vllm_config.attention_config.indexer_sparse_logits
+        and not current_platform.is_rocm()
+    ):
         return (torch.float32, torch.bfloat16)
     return (torch.float32,)
 
