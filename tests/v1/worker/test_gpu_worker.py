@@ -52,6 +52,36 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         torch.set_num_threads(original_threads)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs the CUDA allocator")
+def test_scoped_max_split_keeps_freed_large_blocks_releasable():
+    """A small allocation made after a large buffer is freed must not pin the
+    buffer's segment: the profiling run (determine_available_memory) grows
+    workspaces this way, and a pinned segment survives empty_cache() and is
+    counted as consumed memory."""
+    large = 512 * 1024 * 1024
+    small = 2 * 1024 * 1024  # large pool, so it is served by splitting cached blocks
+
+    def reserved_while_small_is_live(scope) -> int:
+        torch.cuda.empty_cache()
+        with scope:
+            buf = torch.empty(large, dtype=torch.uint8, device="cuda")
+            del buf
+            tensor = torch.empty(small, dtype=torch.uint8, device="cuda")
+            torch.cuda.empty_cache()
+            reserved = torch.cuda.memory_reserved()
+            del tensor
+        torch.cuda.empty_cache()
+        return reserved
+
+    baseline = torch.cuda.memory_reserved()
+    # Without the limit the small tensor is split off the freed block and pins it.
+    assert reserved_while_small_is_live(nullcontext()) - baseline >= large
+    scoped = gpu_worker.Worker._scoped_allocator_max_split(
+        SimpleNamespace(), max_split_size_mb=20
+    )
+    assert reserved_while_small_is_live(scoped) - baseline < large
+
+
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
