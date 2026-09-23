@@ -1275,8 +1275,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and max_query_len == 1
             and self.pcp_manager is None
         ):
-            # One-token continuations over existing state (e.g. the P/D
-            # last-token replay) can use decode kernels. Fresh one-token
+            # NOTE (NickLucche): 1-token continuations over existing state
+            # (eg the P/D last-token replay on D) can use decode kernels. Fresh 1-token
             # prompts have no prior state and must stay off FULL decode graphs.
             graph_has_prefill = bool(
                 (is_prefilling_np & (num_computed_prefill_tokens_np == 0)).any()
