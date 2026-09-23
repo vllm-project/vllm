@@ -9,9 +9,9 @@ pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     DeepSeekV41ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
     HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
-    MiniCPM5ToolParser, MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser,
-    Phi4MiniJsonToolParser, Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser,
-    ToolParser, ToolParserError,
+    MiMoToolParser, MiniCPM5ToolParser, MinimaxM2ToolParser, MinimaxM3ToolParser,
+    MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser, Qwen3XmlToolParser,
+    SeedOssToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -35,6 +35,7 @@ pub mod names {
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
     pub const MINICPM5: &str = "minicpm5";
+    pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const MISTRAL: &str = "mistral";
@@ -79,6 +80,7 @@ impl ToolParserFactory {
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
             .register_parser::<MiniCPM5ToolParser>(names::MINICPM5)
+            .register_parser::<MiMoToolParser>(names::MIMO)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
             .register_parser::<MinimaxM3ToolParser>(names::MINIMAX_M3)
             .register_parser::<MistralToolParser>(names::MISTRAL)
@@ -90,6 +92,7 @@ impl ToolParserFactory {
         factory
             .register_pattern("mistral-", names::MISTRAL)
             .register_pattern("mixtral-", names::MISTRAL)
+            .register_pattern("mimo-v2", names::MIMO)
             .register_pattern("qwen3-coder", names::QWEN3_CODER)
             .register_pattern("qwen3.5", names::QWEN3_CODER)
             .register_pattern("qwq", names::HERMES)

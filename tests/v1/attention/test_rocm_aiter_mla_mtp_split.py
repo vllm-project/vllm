@@ -278,6 +278,7 @@ def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         num_decode_tokens=2 * qlen,
+        max_query_len=qlen,
         dcp_tot_seq_lens_device=torch.tensor([10, 12], dtype=torch.int32),
     )
 
@@ -514,7 +515,6 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
     Sweeping num_heads asserts metadata is sized for the padded decode shape,
     covering Kimi-K3 TP4's 24 -> 32 head path and native fp8 nhead=32 folding.
     """
-
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
     info_calls = []
 
@@ -634,6 +634,7 @@ def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, 4, 8], dtype=torch.int32),
         num_decode_tokens=8,
+        max_query_len=4,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -684,6 +685,7 @@ def test_min_kv_seq_len_ignores_cudagraph_padding_rows(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * mtp_qlen,
+        max_query_len=mtp_qlen,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -694,7 +696,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
     monkeypatch,
 ):
     """Full-CG zero-qo rows follow rocm_aiter_mla.py:608-657,717-759."""
-
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
         sys.modules,
@@ -735,6 +736,7 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
         query_start_loc_cpu=torch.tensor([0, mtp_qlen, mtp_qlen], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, mtp_qlen, mtp_qlen], dtype=torch.int32),
         num_decode_tokens=seq_lens.numel() * mtp_qlen,
+        max_query_len=mtp_qlen,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -756,7 +758,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
 
 def test_decode_expands_kernel_block_page_indices(monkeypatch):
     """kernel_block_size>1 expands b -> b*K+offset at rocm_aiter_mla.py:696-704."""
-
     expand_kernel = _ExpandPageIndicesKernel()
     monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand_kernel)
     # qlen==1 now takes the persistent-metadata path, which imports
@@ -804,6 +805,7 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, 1, 2], dtype=torch.int32),
         num_decode_tokens=seq_lens.numel(),
+        max_query_len=1,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -895,6 +897,7 @@ def test_persistent_metadata_gate(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * qo_len,
+        max_query_len=qo_len,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -964,6 +967,7 @@ def test_persistent_metadata_gate_without_gluon_build(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * qo_len,
+        max_query_len=qo_len,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -996,6 +1000,7 @@ def _build_non_causal(monkeypatch, *, num_heads, kv_cache_dtype, qlen, mtp_qlen)
         query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         num_decode_tokens=2 * qlen,
+        max_query_len=qlen,
         dcp_tot_seq_lens_device=None,
     )
     return metadata, get_mla_metadata_v1

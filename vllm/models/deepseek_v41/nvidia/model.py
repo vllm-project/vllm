@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
 from collections.abc import Callable, Iterable
+from functools import partial
 from itertools import islice
 
 import regex as re
@@ -16,8 +17,13 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import (
+    get_forward_context,
+    in_piecewise_cudagraph,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_post_tilelang,
@@ -61,9 +67,14 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
+    MegaGateRoutingMetadata,
     make_deepseek_v4_expert_params_mapping,
+    prepare_mega_gate_routing_metadata,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+    DeepseekV4MegaAttnAttention,
+)
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -77,8 +88,14 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import Engram, gather_engram_hashes
-from .ops.mega_mhc import mhc_shifted_post_pre
+from .engram import Engram, can_share_engram_tables, gather_engram_hashes
+from .ops.mhc import (
+    MHC_OVERLAP_MAX_TOKENS,
+    mhc_pre_delayed_overlap,
+    mhc_shifted_post_pre,
+    supports_mhc_all_reduce,
+    supports_mhc_overlap,
+)
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -92,6 +109,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         vllm_config: VllmConfig,
         prefix: str = "",
         use_sequence_parallel: bool = False,
+        reduce_results: bool = True,
     ):
         config = vllm_config.model_config.hf_config
         n_routed_experts = config.n_routed_experts
@@ -110,6 +128,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             n_routed_experts=n_routed_experts,
             n_activated_experts=n_activated_experts,
             num_hash_layers=0,
+            reduce_results=reduce_results,
             image_sentinel_lo=IMAGE_SENTINEL_BASE_ID,
         )
 
@@ -119,8 +138,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     The generic CUDA backend selector does not instantiate DSv4 layers directly,
     so map generic sparse-MLA choices to the DSv4-specialized attention class.
-    Without an explicit backend, SM12 defaults to FlashInfer while the other
-    CUDA arches keep the FlashMLA path.
+    Without an explicit backend: SM12 takes FlashInfer, SM100 takes mega
+    attention where the topology allows it, and everything else keeps the
+    FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
@@ -140,6 +160,8 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
         if device_capability is not None and device_capability.major == 12:
             return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
+    if backend is AttentionBackendEnum.FLASHMLA_MEGA_ATTN_DSV41:
+        return DeepseekV4MegaAttnAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
@@ -149,6 +171,14 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     if device_capability is not None and device_capability.major == 12:
         return DeepseekV4FlashInferSM120Attention
+    # Mega attention is the SM100 default: it fuses Q RoPE, sparse attention,
+    # the output's inverse RoPE and its FP8 cast into one launch, and brings
+    # the 288 B NVFP4 compressed record -- the format the reference
+    # implementation itself stores. It declines topologies it cannot serve
+    # (non-SM100, TP that leaves fewer than WV_GROUP_SIZE heads per wo_a
+    # group, a build without the kernel), which then fall through to FlashMLA.
+    if DeepseekV4MegaAttnAttention.is_available_for(vllm_config):
+        return DeepseekV4MegaAttnAttention
     return DeepseekV4FlashMLAAttention
 
 
@@ -163,6 +193,30 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     )
 
 
+def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
+    """Set up the fused ``wo_b`` GEMM + reduce-scatter when opted in.
+
+    Sequence parallel is the only topology where ``wo_b`` ends in a
+    reduce-scatter, so the kernel is bound to RS mode. The workspace is a
+    process-wide singleton shared with any other model code in this worker
+    (the DSpark drafter reuses it), and its NVLink multicast rendezvous is
+    collective, so every TP rank must take the same decision here.
+    """
+    if not (use_sequence_parallel and envs.VLLM_ENABLE_GEMM_RS):
+        return False
+
+    # The kernel module pulls in cute_dsl, so import it only once opted in.
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+        maybe_init_gemm_rs_ar,
+    )
+
+    hidden_size = vllm_config.model_config.hf_config.hidden_size
+    if not maybe_init_gemm_rs_ar(vllm_config, N=hidden_size, all_reduce=False):
+        return False
+    logger.info_once("To disable DeepSeek-V4.1 GEMM-RS, set VLLM_ENABLE_GEMM_RS=0.")
+    return True
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -172,11 +226,16 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
+        run_gemm_rs: bool = False,
+        mhc_stream: torch.cuda.Stream | None = None,
+        fuse_mhc_all_reduce: bool = False,
     ):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
+        self.mhc_stream = mhc_stream
+        self.fuse_mhc_all_reduce = fuse_mhc_all_reduce
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.engram: Engram | None = None
@@ -200,12 +259,17 @@ class DeepseekV4DecoderLayer(nn.Module):
             aux_stream_list=aux_stream_list,
             candidate_block_buffer=candidate_block_buffer,
         )
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel or fuse_mhc_all_reduce:
             self.attn.wo_b.reduce_results = False
+            if run_gemm_rs:
+                # Binds only when wo_b's kernel and shape qualify; otherwise
+                # forward keeps the separate reduce-scatter below.
+                self.attn.bind_gemm_rs()
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
             use_sequence_parallel=self.use_sequence_parallel,
+            reduce_results=not fuse_mhc_all_reduce,
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -253,19 +317,30 @@ class DeepseekV4DecoderLayer(nn.Module):
                 variants.append(
                     {**hc_stream, "use_pre_mix_in": True, "write_aux": True}
                 )
+            # Shifted mHC splits the epilogue in two: the input collapse on the
+            # caller stream and coefficient generation on a side stream.
+            split_modes = (
+                ("fused", "stats", "input") if mhc_stream is not None else ("fused",)
+            )
             for variant in variants:
-                MHC_PRE_NORM_KERNEL.register_warmup(
-                    max_tokens=max_tokens,
-                    hidden_size=self.hidden_size,
-                    rms_eps=self.rms_norm_eps,
-                    hc_pre_eps=self.hc_eps,
-                    hc_sinkhorn_eps=self.hc_eps,
-                    hc_post_mult_value=self.hc_post_alpha,
-                    sinkhorn_repeat=self.hc_sinkhorn_iters,
-                    norm_eps=self.rms_norm_eps,
-                    hc_mult=self.hc_mult,
-                    **variant,
-                )
+                for split_mode in split_modes:
+                    MHC_PRE_NORM_KERNEL.register_warmup(
+                        split_mode=split_mode,
+                        max_tokens=(
+                            max_tokens
+                            if split_mode == "fused"
+                            else min(max_tokens, MHC_OVERLAP_MAX_TOKENS)
+                        ),
+                        hidden_size=self.hidden_size,
+                        rms_eps=self.rms_norm_eps,
+                        hc_pre_eps=self.hc_eps,
+                        hc_sinkhorn_eps=self.hc_eps,
+                        hc_post_mult_value=self.hc_post_alpha,
+                        sinkhorn_repeat=self.hc_sinkhorn_iters,
+                        norm_eps=self.rms_norm_eps,
+                        hc_mult=self.hc_mult,
+                        **variant,
+                    )
         mix_hc = (2 + self.hc_mult) * self.hc_mult
         hc_dim = self.hc_mult * self.hidden_size
         self.hc_attn_fn = nn.Parameter(
@@ -325,6 +400,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_mask: torch.Tensor | None = None,
         *,
         capture_previous_aux: bool = False,
+        mega_gate_metadata: MegaGateRoutingMetadata | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -334,6 +410,19 @@ class DeepseekV4DecoderLayer(nn.Module):
         torch.Tensor | None,
     ]:
         previous_aux: torch.Tensor | None = None
+        mhc_stream = self.mhc_stream
+        if mhc_stream is not None and (
+            in_piecewise_cudagraph()
+            or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            or not torch.cuda.is_current_stream_capturing()
+        ):
+            # Use overlap only in FULL graphs; eager warmup initializes Mega mHC.
+            mhc_stream = None
+        mhc_pre = (
+            partial(mhc_pre_delayed_overlap, stream=mhc_stream)
+            if mhc_stream is not None
+            else mhc_pre_delayed_tilelang
+        )
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -343,7 +432,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
+                post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
@@ -359,7 +448,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
-                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
+                post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -378,6 +467,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             # and this block's pre, on the full hc stream, so the mix
             # coefficients see the injected stream. The injection also keeps
             # the post out of the pre-norm GEMM's fused prologue.
+            if self.fuse_mhc_all_reduce:
+                x = tensor_model_parallel_all_reduce(x)
             previous_post = mhc_post_tilelang(x, residual, post_mix, res_mix)
             if capture_previous_aux:
                 previous_aux = previous_post.mean(dim=1)
@@ -386,7 +477,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 engram_hashes[:, self.engram.layer_hash_index],
                 engram_mask,
             )
-            post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
+            post_mix, res_mix, x, attn_pre = mhc_pre(
                 residual,
                 self.hc_attn_fn,
                 self.hc_attn_scale,
@@ -420,6 +511,8 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_weight=self.attn_norm.weight,
                 norm_eps=self.attn_norm.variance_epsilon,
                 capture_aux=capture_previous_aux,
+                stream=mhc_stream,
+                reduce_results=self.fuse_mhc_all_reduce,
             )
             if capture_previous_aux:
                 previous_aux = aux
@@ -428,9 +521,13 @@ class DeepseekV4DecoderLayer(nn.Module):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
-        if self.use_sequence_parallel:
+        # With GEMM-RS bound, the attention output is already this rank's
+        # sequence-parallel shard (see DeepseekV4Attention._wo_b_proj).
+        if self.use_sequence_parallel and self.attn.gemm_rs is None:
             x = sp_reduce_scatter(x)
 
+        if mhc_stream is not None:
+            torch.cuda.current_stream().wait_stream(mhc_stream)
         residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
             x,
             residual,
@@ -447,8 +544,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             pre_mix=attn_pre,
             norm_weight=self.ffn_norm.weight,
             norm_eps=self.ffn_norm.variance_epsilon,
+            stream=mhc_stream,
+            reduce_results=self.fuse_mhc_all_reduce,
         )
-        x = self.ffn(x, input_ids)
+        x = self.ffn(x, input_ids, mega_gate_metadata)
+        if mhc_stream is not None:
+            torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
 
 
@@ -480,6 +581,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (compressor kv_score, indexer.weights_proj). fused_wqa_wkv stays on
         # the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+        # Keep mHC independent of the streams used inside attention.
+        mhc_stream = torch.cuda.Stream() if supports_mhc_overlap(vllm_config) else None
+        self.fuse_mhc_all_reduce = mhc_stream is not None and supports_mhc_all_reduce(
+            vllm_config
+        )
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
@@ -514,6 +620,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
 
         self.engram_layout = EngramLayout.from_config(config)
+        engram_config = vllm_config.engram_config
+        if (
+            self.engram_layout is not None
+            and engram_config is not None
+            and engram_config.dp_shared_memory
+        ):
+            engram_config.dp_shared_memory = can_share_engram_tables(self.engram_layout)
+
+        # GEMM-RS uses NCCL symmetric-memory multicast, which requires all TP
+        # ranks to belong to one NVLink domain. Collective: run before layers.
+        self.run_gemm_rs = maybe_init_gemm_rs(vllm_config, self.use_sequence_parallel)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -524,6 +641,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
+                run_gemm_rs=self.run_gemm_rs,
+                mhc_stream=mhc_stream,
+                fuse_mhc_all_reduce=self.fuse_mhc_all_reduce,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -691,6 +811,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
 
+        mega_gate_metadata = None
+        if self.use_mega_moe:
+            mega_gate_metadata = prepare_mega_gate_routing_metadata(
+                input_ids,
+                has_hash_routing=False,
+                image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID
+                if getattr(self.config, "vision_n_layers", 0) > 0
+                else None,
+            )
+
         residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None
         if not get_pp_group().is_first_rank:
@@ -714,6 +844,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 engram_hashes,
                 engram_mask,
                 capture_previous_aux=idx in self.aux_hidden_state_layers,
+                mega_gate_metadata=mega_gate_metadata,
             )
             if previous_aux is not None:
                 # idx is the one-based id of the layer whose post this is.
@@ -722,6 +853,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_hidden_by_layer[idx] = previous_aux
         if layer is not None:
             # The last layer has no successor to fold its post into.
+            if self.fuse_mhc_all_reduce:
+                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
             hidden_states = mhc_post_tilelang(
                 hidden_states, residual, post_mix, res_mix
             )
@@ -935,6 +1068,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def finalize_mega_moe_weights(self) -> None:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
+
+    def finalize_mega_attn_weights(self) -> None:
+        """Permute wq_b / wo_a into FlashMLA's mega-attention layouts.
+
+        A no-op for every other attention layer, and idempotent, so a second
+        post-load pass cannot permute twice.
+        """
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
+            if finalize is not None:
+                finalize()
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
@@ -1190,6 +1334,7 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        self.model.finalize_mega_attn_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

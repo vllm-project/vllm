@@ -99,7 +99,7 @@ steps:
       label: ":amd: (MI300) V1 Core"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
@@ -119,7 +119,7 @@ steps:
       label: ":amd: (MI300) V1 Executor + Worker"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
@@ -138,7 +138,7 @@ steps:
       label: ":amd: (MI300) V1 KV Offload"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
@@ -158,7 +158,7 @@ steps:
       label: ":amd: (MI300) V1 KV Connectors Shard %N"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
@@ -237,6 +237,27 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
+  mirror:
+    amd:
+      label: ":amd: (MI355) Extract Hidden States Integration Single GPU"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 45
+      working_dir: /vllm-workspace
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/extract_hidden_states.py
+      - vllm/model_executor/models/extract_hidden_states.py
+      - vllm/transformers_utils/configs/extract_hidden_states.py
+      - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
+      - tests/v1/kv_connector/extract_hidden_states_integration
+      - vllm/platforms/rocm.py
+      env:
+        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      commands:
+      - pytest -v -s -m 'not distributed' tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":nvidia: (L4) Extract Hidden States Integration"
   key: extract-hidden-states-integration-2-gpus
@@ -258,7 +279,7 @@ steps:
       label: ":amd: (MI355) Extract Hidden States Integration"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 20
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -305,6 +326,15 @@ steps:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
+  mirror:
+    amd:
+      label: ":amd: (MI355) Regression"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
 
 - label: ":nvidia: (H200 MIG 35GB) Examples"
   device: h200_35gb
@@ -407,7 +437,6 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
-      soft_fail: true
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -446,9 +475,15 @@ steps:
       label: ":amd: (MI355) Async Engine, Inputs, Utils, Worker"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 40
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s detokenizer
+      - pytest -v -s -m 'not cpu_test' multimodal
+      # test_cache.py marks every test cpu_test, including this GPU regression.
+      - pytest -v -s multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency
+      - pytest -v -s utils_
 
 - label: ":computer: (CPU) Params, Env, Tokenizers, Parser"
   key: cpu-params-env-tokenizers-parser
@@ -490,6 +525,9 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/reasoning
+  - tools/pre_commit/check_test_tethering.py
+  - tools/pre_commit/test_tethering_allowlist.txt
+  - tests/tools/test_check_test_tethering.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -517,6 +555,7 @@ steps:
   commands:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
+  - pytest -v -s tools/test_check_test_tethering.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
@@ -571,8 +610,9 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Batch Invariance"
+      dind: false
       device: mi250_1
-      timeout_in_minutes: 30
+      timeout_in_minutes: 35
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -623,3 +663,17 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+  mirror:
+    amd:
+      label: ":amd: (MI355) Acceptance Length (Large Models)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/model_executor/models/mlp_speculator.py
+      - tests/v1/spec_decode/test_acceptance_length.py
+      - vllm/platforms/rocm.py

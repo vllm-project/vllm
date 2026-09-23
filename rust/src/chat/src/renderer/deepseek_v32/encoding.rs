@@ -14,6 +14,7 @@ use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
 use crate::error::{Error, Result};
+use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatRole, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 
@@ -42,8 +43,11 @@ struct RenderedToolSchema<'a> {
 }
 
 /// Render one chat request into the final prompt string.
-pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
-    let thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
+pub(super) fn render_request(
+    request: &ChatRequest,
+    reasoning: &ReasoningControl,
+) -> Result<String> {
+    let thinking_mode = match reasoning.is_enabled() {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
     };
