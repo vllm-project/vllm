@@ -217,6 +217,9 @@ class Sampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
             sampling_mask_tensors=sampling_mask_tensors,
+            thinking_loop_breaks=self.thinking_budget_state.take_loop_breaks(
+                idx_mapping, idx_mapping_np
+            ),
         )
         return sampler_output
 
