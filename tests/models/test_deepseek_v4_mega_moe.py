@@ -898,6 +898,11 @@ def v4_dspark_config(dist_init):
         num_hash_layers=0,
         n_shared_experts=1,
         moe_intermediate_size=128,
+        hidden_act="silu",
+        swiglu_limit=10.0,
+        norm_topk_prob=True,
+        topk_method="noaux_tc",
+        routed_scaling_factor=1.5,
         hc_mult=1,
         hc_eps=1e-5,
         rms_norm_eps=1e-5,
@@ -910,20 +915,39 @@ def v4_dspark_config(dist_init):
         n_mtp_layers=2,
         enable_confidence_head=False,
         compress_ratios=[1, 1],
+        q_lora_rank=32,
+        o_lora_rank=32,
+        qk_rope_head_dim=16,
+        o_groups=4,
+        sliding_window=128,
+        hc_sinkhorn_iters=1,
     )
-    model_config = SimpleNamespace(dtype=torch.bfloat16, hf_config=hf_config)
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        hf_config=hf_config,
+        max_model_len=2048,
+    )
     return SimpleNamespace(
         model_config=model_config,
         quant_config=None,
-        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        kernel_config=SimpleNamespace(
+            moe_backend="deep_gemm_mega_moe",
+            enable_jit_warmup=False,
+        ),
         parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
             enable_expert_parallel=True,
             enable_eplb=True,
             eplb_config=SimpleNamespace(num_redundant_experts=4),
         ),
+        attention_config=SimpleNamespace(backend=None),
+        cache_config=SimpleNamespace(block_size=64, cache_dtype="auto"),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
         compilation_config=SimpleNamespace(static_forward_context={}),
         speculative_config=SimpleNamespace(draft_model_config=model_config),
+        use_v2_model_runner=False,
     )
 
 
