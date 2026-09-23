@@ -1,0 +1,1 @@
+<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>look<|end_message|><|message_user|><|content_image|><|end_message|><|message_model|>

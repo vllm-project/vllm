@@ -4,10 +4,11 @@
 import asyncio
 import time
 from contextlib import ExitStack
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
+import vllm.v1.engine.async_llm as async_llm_module
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import VllmConfig
@@ -19,6 +20,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -56,6 +58,72 @@ VISION_PROMPT = {
     "prompt": VISION_PROMPT_TEMPLATE,
     "multi_modal_data": {"image": ImageAsset("stop_sign").pil_image},
 }
+
+
+def _mock_async_llm_dependencies(monkeypatch: pytest.MonkeyPatch):
+    renderer = MagicMock()
+    engine_core = MagicMock()
+    engine_core.profile_async = AsyncMock()
+    monkeypatch.setattr(
+        async_llm_module, "maybe_register_config_serialize_by_value", MagicMock()
+    )
+    monkeypatch.setattr(
+        async_llm_module,
+        "load_stat_logger_plugin_factories",
+        MagicMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        async_llm_module,
+        "renderer_from_config",
+        MagicMock(return_value=renderer),
+    )
+    monkeypatch.setattr(async_llm_module, "InputProcessor", MagicMock())
+    monkeypatch.setattr(async_llm_module, "OutputProcessor", MagicMock())
+    monkeypatch.setattr(
+        async_llm_module.EngineCoreClient,
+        "make_async_mp_client",
+        MagicMock(return_value=engine_core),
+    )
+    return engine_core
+
+
+def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config.profiler_config.profiler = "cuda"
+    vllm_config.profiler_config.ignore_frontend = False
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    async def profile():
+        await engine.start_profile()
+        await engine.stop_profile()
+
+    asyncio.run(profile())
+
+    assert engine.profiler is None
+    engine_core.profile_async.assert_has_awaits([call(True, None), call(False)])
+
+
+def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config.profiler_config.profiler = "torch"
+    vllm_config.profiler_config.ignore_frontend = False
+    vllm_config.profiler_config.torch_profiler_activities = ["CUDA"]
+    _mock_async_llm_dependencies(monkeypatch)
+    profiler = MagicMock()
+    monkeypatch.setattr(async_llm_module, "TorchProfilerWrapper", profiler)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    assert engine.profiler is None
+    profiler.assert_not_called()
 
 
 async def generate(
@@ -412,7 +480,6 @@ async def test_customize_loggers(monkeypatch):
     If a customized logger is provided at the init, it should
     be added to the default loggers.
     """
-
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(
@@ -485,7 +552,7 @@ async def test_dp_rank_argument():
             pass
 
         # Test with out-of-range DP rank.
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             async for _ in engine.generate(
                 request_id="request-35",
                 prompt=TEXT_PROMPT,
@@ -554,8 +621,8 @@ async def test_header_dp_rank_argument():
         # Test 2: Out-of-range DP rank (1)
         mock_raw_request.headers = {"X-data-parallel-rank": "1"}
 
-        # should raise ValueError for out-of-range rank
-        with pytest.raises(ValueError):
+        # should raise VLLMValidationError for out-of-range rank
+        with pytest.raises(VLLMValidationError):
             await serving_chat.create_chat_completion(req, mock_raw_request)
 
 
@@ -597,7 +664,6 @@ async def test_check_health():
 @pytest.mark.asyncio
 async def test_abort_final_output(output_kind: RequestOutputKind):
     """Test that abort() returns a final output with correct information."""
-
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)

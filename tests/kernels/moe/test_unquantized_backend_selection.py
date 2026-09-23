@@ -3,19 +3,125 @@
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
+    backend_to_kernel_cls,
     select_unquantized_moe_backend,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 
 skipif_not_cuda_rocm = pytest.mark.skipif(
     not (current_platform.is_cuda() or current_platform.is_rocm()),
     reason="Only supported on CUDA/ROCm platforms.",
 )
+
+
+@pytest.mark.parametrize(
+    ("amx_supported", "in_dtype", "expect_amx_kernel"),
+    [
+        (True, torch.bfloat16, True),
+        (False, torch.bfloat16, False),
+        (True, torch.float16, False),
+    ],
+)
+def test_x86_cpu_unquantized_kernel_selection(
+    amx_supported: bool,
+    in_dtype: torch.dtype,
+    expect_amx_kernel: bool,
+):
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUUnquantizedExperts,
+        X86CPUUnquantizedExperts,
+    )
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(
+            current_platform,
+            "get_cpu_architecture",
+            return_value=CpuArchEnum.X86,
+        ),
+        patch("torch.cpu._is_amx_tile_supported", return_value=amx_supported),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128,
+            intermediate_size=128,
+            in_dtype=in_dtype,
+        )
+        kernel_cls = next(
+            cls
+            for cls in backend_to_kernel_cls(UnquantizedMoeBackend.CPU)
+            if cls.is_supported_config(
+                cls,
+                moe_config,
+                None,
+                None,
+                CPUUnquantizedExperts.activation_format(),
+            )[0]
+        )
+
+    expected_kernel_cls = (
+        X86CPUUnquantizedExperts if expect_amx_kernel else CPUUnquantizedExperts
+    )
+    assert kernel_cls is expected_kernel_cls
+
+
+@pytest.mark.parametrize(
+    ("platform", "in_dtype", "expect_arm_kernel"),
+    [
+        ("linux", torch.bfloat16, True),
+        ("linux", torch.float16, False),
+        ("darwin", torch.bfloat16, False),
+    ],
+)
+def test_arm_cpu_unquantized_kernel_selection(
+    platform: str,
+    in_dtype: torch.dtype,
+    expect_arm_kernel: bool,
+):
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        ArmCPUUnquantizedExperts,
+        CPUUnquantizedExperts,
+    )
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(
+            current_platform,
+            "get_cpu_architecture",
+            return_value=CpuArchEnum.ARM,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.experts.cpu_moe.sys.platform",
+            platform,
+        ),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128,
+            intermediate_size=128,
+            in_dtype=in_dtype,
+        )
+        kernel_cls = next(
+            cls
+            for cls in backend_to_kernel_cls(UnquantizedMoeBackend.CPU)
+            if cls.is_supported_config(
+                cls,
+                moe_config,
+                None,
+                None,
+                CPUUnquantizedExperts.activation_format(),
+            )[0]
+        )
+
+    expected_kernel_cls = (
+        ArmCPUUnquantizedExperts if expect_arm_kernel else CPUUnquantizedExperts
+    )
+    assert kernel_cls is expected_kernel_cls
 
 
 @pytest.mark.parametrize(
@@ -69,14 +175,20 @@ def test_select_default_backend_by_platform(
         patch.object(current_platform, "is_out_of_tree", return_value=False),
         patch.object(current_platform, platform_method, return_value=True),
     ):
-        moe_config = make_dummy_moe_config()
+        # CPU's grouped-gemm kernels require hidden/intermediate sizes
+        # aligned to 32; the size-1 defaults only work for backends that
+        # don't check shapes at selection time.
+        moe_config = (
+            make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+            if expected_backend == UnquantizedMoeBackend.CPU
+            else make_dummy_moe_config()
+        )
         selected_backend, expert_cls = select_unquantized_moe_backend(
             moe_config=moe_config
         )
 
         assert selected_backend == expected_backend
         if expected_backend in [
-            UnquantizedMoeBackend.CPU,
             UnquantizedMoeBackend.OOT,
             UnquantizedMoeBackend.TPU,
         ]:
@@ -115,6 +227,65 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
 
         assert selected_backend == UnquantizedMoeBackend.AITER
         assert expert_cls is not None
+
+
+@patch(
+    "vllm.utils.flashinfer.has_flashinfer",
+    return_value=False,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops."
+    "is_fused_moe_enabled",
+    return_value=True,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops."
+    "is_rdna_aiter_enabled",
+    return_value=False,
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_select_rocm_aiter_backend_non_gated_activation_falls_back(
+    mock_rdna_disabled, mock_aiter_enabled, mock_has_flashinfer, monkeypatch
+):
+    """Test ROCm backend selection falls back (not raises) for non-gated MoE."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
+    ) as mock_platform:
+        mock_platform.is_cuda.return_value = False
+        mock_platform.is_rocm.return_value = True
+        mock_platform.is_cpu.return_value = False
+        mock_platform.is_xpu.return_value = False
+        mock_platform.is_tpu.return_value = False
+        mock_platform.is_out_of_tree.return_value = False
+
+        moe_config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+        assert moe_config.is_act_and_mul is False
+
+        selected_backend, expert_cls = select_unquantized_moe_backend(
+            moe_config=moe_config,
+        )
+
+        assert selected_backend != UnquantizedMoeBackend.AITER
+        assert expert_cls is not None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_explicit_aiter_backend_non_gated_activation_still_raises():
+    """Explicit `--moe-backend aiter` still raises for non-gated MoE;
+    only the env-var opt-in path falls back."""
+    moe_config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+    moe_config.moe_backend = "aiter"  # explicit pin, not "auto"
+    assert moe_config.is_act_and_mul is False
+
+    with pytest.raises(ValueError):
+        select_unquantized_moe_backend(moe_config=moe_config)
 
 
 @patch(

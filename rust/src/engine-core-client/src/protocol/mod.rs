@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::any::type_name;
 use std::io::Cursor;
 
@@ -21,12 +24,15 @@ fn is_false(v: &bool) -> bool {
 
 pub mod dtype;
 pub mod handshake;
+pub mod kv_hints;
 pub mod logprobs;
 pub mod lora;
 pub mod multimodal;
 pub mod output;
 pub mod request;
 pub mod sampling;
+pub mod sampling_mask;
+mod serde_utils;
 pub mod stats;
 pub mod structured_outputs;
 pub mod tensor;

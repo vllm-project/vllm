@@ -16,9 +16,12 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from itertools import chain
+from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
 
 import torch
 from torch import nn
@@ -30,6 +33,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import is_rope_parameters_nested
 
@@ -44,16 +48,15 @@ logger = init_logger(__name__)
 # Copied from `accelerate`
 @contextmanager
 def init_on_device_without_buffers(device: torch.device):
-    """
-    A context manager under which models are initialized with all
+    """A context manager under which models are initialized with all
     parameters on the specified device. However buffers are not
     initialized on specified device.
 
     Args:
         device (`torch.device`):
             Device to initialize all parameters on.
-    """
 
+    """
     old_register_parameter = nn.Module.register_parameter
 
     def register_empty_parameter(module, name, param):
@@ -66,7 +69,7 @@ def init_on_device_without_buffers(device: torch.device):
                 module._parameters[name].to(device), **kwargs
             )
 
-    tensor_constructors_to_patch = {}
+    tensor_constructors_to_patch: dict[str, Callable] = {}
 
     def patch_tensor_constructor(fn):
         def wrapper(*args, **kwargs):
@@ -109,17 +112,18 @@ def replace_linear_class(
     *,
     prefix: str = "",
 ) -> ColumnParallelLinear | RowParallelLinear | ReplicatedLinear:
-    """
-    Replace nn.Linear with one of vLLM's tensor parallel linear classes.
+    """Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
     Args:
         linear: `nn.Linear` to be replaced.
         style: Tensor parallel style of the new linear, e.g. "colwise".
         quant_config: Quantization config for the new linear.
+        prefix: Module prefix of the new linear, used for quantization lookup.
+
     Returns:
         The new linear.
-    """
 
+    """
     if not isinstance(style, str):
         raise ValueError(f"Unsupported parallel style type {type(style)}, expected str")
 
@@ -142,8 +146,8 @@ def replace_linear_class(
     )
 
 
-TorchConv = nn.Conv2d | nn.Conv3d
-VllmConv = Conv2dLayer | Conv3dLayer
+TorchConv: TypeAlias = nn.Conv2d | nn.Conv3d
+VllmConv: TypeAlias = Conv2dLayer | Conv3dLayer
 
 
 def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
@@ -151,9 +155,11 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
 
     Args:
         conv: `nn.Conv2d` or `nn.Conv3d` to be replaced.
+
     Returns:
         The new `Conv2dLayer` or `Conv3dLayer`. If the conv module is not supported,
         returns the original conv module.
+
     """
     # vLLM does not handle non-zero padding modes
     if conv.padding_mode != "zeros":
@@ -181,6 +187,88 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
     )
 
 
+def attrsetter(attr: str) -> Callable[[object, object], None]:
+    """Set a possibly nested attribute, like the inverse of attrgetter."""
+    parent, _, name = attr.rpartition(".")
+
+    def setter(obj: object, value: object):
+        attr_parent = attrgetter(parent)(obj) if parent else obj
+        setattr(attr_parent, name, value)
+
+    return setter
+
+
+class _UninitializedEmbedding(nn.Embedding):
+    """Make `__init__` inert, so that `VocabParallelEmbedding.__init__`'
+    call to `super().__init__` does not invoke `nn.Embedding.__init__`."""
+
+    def __init__(self):
+        pass
+
+
+class _VocabParallelEmbeddingBase(VocabParallelEmbedding, _UninitializedEmbedding):
+    """Orders `VocabParallelEmbedding` ahead of `nn.Embedding` in the MRO, so that
+    `super().forward(...)` in an `nn.Embedding` subclass reaches vLLM's embedding."""
+
+
+_rebased_embedding_classes: dict[type[nn.Embedding], type[VocabParallelEmbedding]] = {}
+
+
+def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbedding]:
+    """Subclass `cls` so that `VocabParallelEmbedding` supersedes its `nn.Embedding`.
+
+    Args:
+        cls: The `nn.Embedding` subclass to rebase. Cached, so a given `cls` always
+            maps to the same class.
+
+    Returns:
+        The new class, to assign to `__class__` of an instance of `cls`.
+
+    """
+    if cls not in _rebased_embedding_classes:
+        rebased_cls = type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+        _rebased_embedding_classes[cls] = rebased_cls
+    return _rebased_embedding_classes[cls]
+
+
+def replace_embedding_class(
+    embedding: nn.Embedding,
+    quant_config: "QuantizationConfig | None" = None,
+    *,
+    prefix: str = "",
+) -> nn.Module:
+    """Replace `nn.Embedding` with `VocabParallelEmbedding`.
+
+    Args:
+        embedding: The `nn.Embedding` holding a vocab table.
+        quant_config: Quantization config for the new embedding.
+        prefix: Qualname of `embedding`, used to look up its quantization method.
+
+    Returns:
+        The module to install in `embedding`'s place.
+
+    """
+    # Tied tables are reached more than once, so don't rebase an already new embedding
+    if isinstance(embedding, VocabParallelEmbedding):
+        return embedding
+
+    kwargs = dict(
+        num_embeddings=embedding.num_embeddings,
+        embedding_dim=embedding.embedding_dim,
+        params_dtype=embedding.weight.dtype,
+        quant_config=quant_config,
+        prefix=prefix,
+    )
+    # If `embedding` is a bare `nn.Embedding`, simple replace
+    if type(embedding) is nn.Embedding:
+        return VocabParallelEmbedding(**kwargs)
+
+    # Otherwise `embedding` inherits `nn.Embedding`, rebase it in place
+    embedding.__class__ = _rebase_on_vocab_parallel(type(embedding))
+    VocabParallelEmbedding.__init__(embedding, **kwargs)
+    return embedding
+
+
 def recursive_replace_linear(
     model: nn.Module,
     quant_config: "QuantizationConfig | None",
@@ -194,10 +282,9 @@ def recursive_replace_linear(
             qual_name = maybe_prefix(prefix, child_name)
             # Replace modules as needed
             if isinstance(child_module, nn.Linear):
-                style = "replicate"
                 new_module = replace_linear_class(
                     child_module,
-                    style,
+                    "replicate",
                     quant_config,
                     prefix=qual_name,
                 )
@@ -207,6 +294,19 @@ def recursive_replace_linear(
                 setattr(module, child_name, new_module)
 
     _recursive_replace(model, prefix=prefix)
+
+
+T = TypeVar("T")
+
+
+def maybe_per_layer(value: T | list[T], layer_idx: int) -> T:
+    """Pick `layer_idx`'s entry from a config field that may be sized per layer."""
+    return value[layer_idx] if isinstance(value, list) else value
+
+
+def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+    """`module`'s own state (i.e. named parameters and buffers)."""
+    return chain(module.named_parameters(), module.named_buffers())
 
 
 def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
@@ -229,8 +329,7 @@ def get_feature_request_tip(
 
 
 def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
-    """
-    Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
 
     Defaults to `True` but is disabled in the following situations:
 

@@ -10,8 +10,8 @@ from cutlass.cutlass_dsl import dsl_user_op
 
 NVVM_CTA_GROUP_MAP = [
     None,
-    nvvm.Tcgen05GroupKind.CTA_1,
-    nvvm.Tcgen05GroupKind.CTA_2,
+    nvvm.CTAGroupKind.CTA_1,
+    nvvm.CTAGroupKind.CTA_2,
 ]
 LDST_MAP = {
     "32x32b": (nvvm.Tcgen05LdStShape.SHAPE_32X32B, 1),
@@ -78,6 +78,10 @@ def make_sdesc_128B_swizzle(LBO: int):
     return Uint64((LBO >> 4 << 16) | (SBO >> 4 << 32) | (1 << 46) | (2 << 61))
 
 
+def make_mxfp8_idesc(MMA_M: int, MMA_N: int):
+    return Uint32((MMA_N >> 3 << 17) | (1 << 23) | (MMA_M >> 7 << 27))
+
+
 @dsl_user_op
 def mma_f16(
     d_tmem,
@@ -131,12 +135,79 @@ def mma_ts_f16(
 
 
 @dsl_user_op
+def mma_mxfp8(
+    d_tmem,
+    a_desc,
+    b_desc,
+    idesc,
+    sfa_tmem,
+    sfb_tmem,
+    enable_input_d,
+    cta_group: int = 1,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    with cute.arch.elect_one():
+        nvvm.tcgen05_mma_block_scale(
+            nvvm.Tcgen05MMAKind.MXF8F6F4,
+            NVVM_CTA_GROUP_MAP[cta_group],
+            _make_tmem_llvm_ptr(d_tmem, loc=loc, ip=ip),
+            Uint64(a_desc).ir_value(loc=loc, ip=ip),
+            Uint64(b_desc).ir_value(loc=loc, ip=ip),
+            Int32(idesc).ir_value(loc=loc, ip=ip),
+            Boolean(enable_input_d).ir_value(loc=loc, ip=ip),
+            _make_tmem_llvm_ptr(sfa_tmem, loc=loc, ip=ip),
+            _make_tmem_llvm_ptr(sfb_tmem, loc=loc, ip=ip),
+            scale_vec_size=nvvm.Tcgen05MMAScaleVecSize.X1,
+            loc=loc,
+            ip=ip,
+        )
+
+
+@dsl_user_op
+def cp(
+    tmem,
+    sdesc,
+    shape: str,
+    mcast: str,
+    cta_group: int = 1,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    SHAPE_MAP = {
+        "128x256b": nvvm.Tcgen05CpShape.SHAPE_128x256b,
+        "4x256b": nvvm.Tcgen05CpShape.SHAPE_4x256b,
+        "128x128b": nvvm.Tcgen05CpShape.SHAPE_128x128b,
+        "64x128b": nvvm.Tcgen05CpShape.SHAPE_64x128b,
+        "32x128b": nvvm.Tcgen05CpShape.SHAPE_32x128b,
+    }
+    MCAST_MAP = {
+        "none": nvvm.Tcgen05CpMulticast.NONE,
+        "warpx2::02_13": nvvm.Tcgen05CpMulticast.WARPX2_02_13,
+        "warpx2::01_23": nvvm.Tcgen05CpMulticast.WARPX2_01_23,
+        "warpx4": nvvm.Tcgen05CpMulticast.WARPX4,
+    }
+    with cute.arch.elect_one():
+        nvvm.tcgen05_cp(
+            SHAPE_MAP[shape],
+            _make_tmem_llvm_ptr(tmem, loc=loc, ip=ip),
+            Uint64(sdesc).ir_value(loc=loc, ip=ip),
+            group=NVVM_CTA_GROUP_MAP[cta_group],
+            multicast=MCAST_MAP[mcast],
+            loc=loc,
+            ip=ip,
+        )
+
+
+@dsl_user_op
 def commit(mbar, cta_mask=None, cta_group: int = 1, *, loc=None, ip=None):
     mbar_llvm = mbar.to_llvm_ptr(loc=loc, ip=ip)
     group = NVVM_CTA_GROUP_MAP[cta_group]
     if cutlass.const_expr(cta_mask is not None):
         with cute.arch.elect_one():
-            nvvm.tcgen05_commit_arrive(
+            nvvm.tcgen05_commit(
                 mbar_llvm,
                 multicast_mask=cta_mask.ir_value(loc=loc, ip=ip),
                 group=group,
@@ -145,7 +216,7 @@ def commit(mbar, cta_mask=None, cta_group: int = 1, *, loc=None, ip=None):
             )
     else:
         with cute.arch.elect_one():
-            nvvm.tcgen05_commit_arrive(mbar_llvm, group=group, loc=loc, ip=ip)
+            nvvm.tcgen05_commit(mbar_llvm, group=group, loc=loc, ip=ip)
 
 
 @dsl_user_op

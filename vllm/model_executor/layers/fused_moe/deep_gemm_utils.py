@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00ba5c0cef8bff6/lightllm/common/fused_moe/deepep_scatter_gather.py
+"""Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00ba5c0cef8bff6/lightllm/common/fused_moe/deepep_scatter_gather.py
 and updated to fit vllm needs and terminology.
 """
+
+import math
 
 import torch
 
@@ -392,12 +393,13 @@ def _fwd_kernel_ep_gather(
                 source_token_index = tl.load(
                     input_index + cur_token * input_index_stride0 + topk_index
                 )
+                source_token_index_i64 = source_token_index.to(tl.int64)
                 acc_weight = tl.load(
                     recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
                 )
                 tmp = tl.load(
                     input_tensor
-                    + source_token_index * input_tensor_stride0
+                    + source_token_index_i64 * input_tensor_stride0
                     + cur_block * BLOCK_D
                     + off_d
                 )
@@ -424,7 +426,7 @@ def ep_gather(
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
-    BLOCK_D = min(hidden_size, 1024)
+    BLOCK_D = math.gcd(hidden_size, 1024)
     assert hidden_size % BLOCK_D == 0
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
 
@@ -505,7 +507,7 @@ def deepgemm_moe_permute(
             dtype=torch.int32,
         )
     else:
-        aq_scale_out = torch.empty((M_sum, sf_k), device=device, dtype=torch.float32)
+        aq_scale_out = torch.zeros((M_sum, sf_k), device=device, dtype=torch.float32)
 
     # DeepGEMM uses negative values in m_indices (here expert_ids) to mark
     # completely invalid / padded blocks that should be skipped. We always
@@ -523,7 +525,9 @@ def deepgemm_moe_permute(
     expert_num_tokens = None
     if expert_tokens_meta is not None:
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
-    else:
+    if expert_num_tokens is None:
+        # A cudagraph-decode carrier may hold only psum_recv_per_rank and leave
+        # expert_num_tokens None; count locally as in the meta-absent case.
         expert_num_tokens = count_expert_num_tokens(
             topk_ids, local_num_experts, expert_map
         )

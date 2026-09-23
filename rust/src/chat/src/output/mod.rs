@@ -1,23 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Stream;
 use trait_set::trait_set;
 use uuid::Uuid;
-use vllm_llm::TokenUsage;
+use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use crate::FinishReason;
 use crate::error::Result;
-use crate::event::{AssistantBlockKind, ChatEvent};
+use crate::event::{AssistantBlockKind, ChatEvent, ChatTokenUsage};
 
 mod default;
 mod harmony;
+mod structural_tag;
 mod structured;
 
 pub use default::DefaultChatOutputProcessor;
 pub use harmony::HarmonyChatOutputProcessor;
 pub(crate) use harmony::validate_harmony_parser_overrides;
+pub(crate) use structural_tag::apply_output_grammar;
 
 /// Internal assistant event before final assembly.
 ///
@@ -32,6 +37,8 @@ pub(crate) enum AssistantEvent {
     TextDelta {
         kind: AssistantBlockKind,
         delta: String,
+        /// Number of generated tokens attributed to this delta, when available.
+        token_count: Option<usize>,
     },
     /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
     LogprobsDelta {
@@ -44,10 +51,13 @@ pub(crate) enum AssistantEvent {
     /// `ToolCallStart`.
     ToolCallArgumentsDelta { delta: String },
     Done {
-        usage: TokenUsage,
+        usage: ChatTokenUsage,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,
+        /// Connector-specific encoder cache transfer parameters for
+        /// disaggregated serving.
+        ec_transfer_params: Option<serde_json::Value>,
     },
 }
 
@@ -58,7 +68,24 @@ pub type DynChatEventStream = Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Sen
 
 /// Request-scoped output processor from decoded text events into structured
 /// chat events.
+///
+/// A processor is created before the prompt is rendered, so that parser
+/// resolution can adjust the request, and then goes through two more phases
+/// once the final prompt token IDs are known: [`Self::initialize`] and
+/// [`Self::build_output_grammar`], in that order, both before
+/// [`Self::process`].
 pub trait ChatOutputProcessor: Send {
+    /// Initialize request-scoped parser state from the final prompt token IDs.
+    fn initialize(&mut self, _prompt_token_ids: &[u32]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Build the structured output grammar implied by the initialized parser
+    /// state, or `None` when this request needs no parser-owned grammar.
+    fn build_output_grammar(&self) -> Result<Option<BuiltOutputGrammar>> {
+        Ok(None)
+    }
+
     /// Consume decoded text stream and return the structured chat-event stream.
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream>;
 }

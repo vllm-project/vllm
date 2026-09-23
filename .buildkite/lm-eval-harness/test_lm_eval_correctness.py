@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-LM eval harness on model to compare vs HF baseline computed offline.
+"""LM eval harness on model to compare vs HF baseline computed offline.
 Configs are found in configs/$MODEL.yaml
 
 pytest -s -v test_lm_eval_correctness.py \
@@ -71,6 +70,15 @@ def launch_lm_eval(eval_config, tp_size):
     moe_backend = eval_config.get("moe_backend", None)
     if moe_backend is not None:
         model_args += f"moe_backend={moe_backend},"
+
+    if current_platform.is_rocm():
+        rocm_load_strategy = eval_config.get("rocm_safetensors_load_strategy")
+        if rocm_load_strategy is not None:
+            model_args += f"safetensors_load_strategy={rocm_load_strategy},"
+
+    tokenizer_mode = eval_config.get("tokenizer_mode", None)
+    if tokenizer_mode is not None:
+        model_args += f"tokenizer_mode={tokenizer_mode},"
 
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):

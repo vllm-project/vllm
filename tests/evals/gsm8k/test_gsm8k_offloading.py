@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-GSM8K correctness test for CPU KV offloading connectors.
+"""GSM8K correctness test for CPU KV offloading connectors.
 
 Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
@@ -16,11 +15,13 @@ KV drops accuracy below threshold.  The reload itself is not asserted, so
 a silently skipped reload (e.g. offloading disabled) would not be flagged.
 
 Covers both KV offloading connectors (OffloadingConnector and
-SimpleCPUOffloadConnector) across four architecture families:
+SimpleCPUOffloadConnector) across five architecture families:
   - Hybrid Mamba (NemotronH: attention + Mamba)
   - Heterogeneous head dim (Gemma 4)
   - Hybrid GDN (Qwen 3.5: attention + GatedDeltaNet)
   - Compressed attention (DeepSeek-V4-Flash: CSA)
+  - Pure MLA (DeepSeek-V2-Lite: TieringOffloadingSpec, TP=2, replicated
+    single-slot host layout)
 
 Usage:
     pytest -s -v evals/gsm8k/test_gsm8k_offloading.py
@@ -47,14 +48,16 @@ NUM_FEWSHOT = 5
 _OFFLOAD_SYNC_TIMEOUT = 60
 
 
-def _kv_transfer_config(connector: str, cpu_gib: int = 4) -> str:
+def _kv_transfer_config(
+    connector: str, cpu_gib: int = 4, spec_name: str = "CPUOffloadingSpec"
+) -> str:
     if connector == "OffloadingConnector":
         return json.dumps(
             {
                 "kv_connector": "OffloadingConnector",
                 "kv_role": "kv_both",
                 "kv_connector_extra_config": {
-                    "spec_name": "CPUOffloadingSpec",
+                    "spec_name": spec_name,
                     "cpu_bytes_to_use": cpu_gib << 30,
                     "eviction_policy": "lru",
                 },
@@ -115,8 +118,10 @@ class OffloadingModelConfig:
     accuracy_threshold: float
     tolerance: float = 0.05
     extra_server_args: list[str] = field(default_factory=list)
+    env_dict: dict[str, str] = field(default_factory=dict)
     cpu_offload_gib: int = 4
     startup_timeout: int = 600
+    spec_name: str = "CPUOffloadingSpec"
 
 
 MODELS = [
@@ -127,6 +132,7 @@ MODELS = [
         connector="OffloadingConnector",
         # Baseline ~0.49 on 200 questions (measured on GB200).
         accuracy_threshold=0.39,
+        cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
         id="offloading-gemma-4-e4b-it",
@@ -134,6 +140,7 @@ MODELS = [
         connector="OffloadingConnector",
         # Baseline ~0.64 on 200 questions (measured on GB200).
         accuracy_threshold=0.55,
+        cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
         id="offloading-qwen3.5-35b",
@@ -164,6 +171,20 @@ MODELS = [
         ],
         cpu_offload_gib=16,
         startup_timeout=1200,
+    ),
+    OffloadingModelConfig(
+        id="offloading-deepseek-v2-lite-tiering-tp2",
+        model="deepseek-ai/DeepSeek-V2-Lite",
+        connector="OffloadingConnector",
+        # Baseline 0.360/0.345 over two runs (measured on 2xA100).
+        accuracy_threshold=0.35,
+        extra_server_args=[
+            "--tensor-parallel-size",
+            "2",
+        ],
+        cpu_offload_gib=8,
+        startup_timeout=1200,
+        spec_name="TieringOffloadingSpec",
     ),
     # ── SimpleCPUOffloadConnector ────────────────────────────────────
     OffloadingModelConfig(
@@ -229,7 +250,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--enable-prefix-caching",
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
-        _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib),
+        _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib, cfg.spec_name),
         "--trust-remote-code",
         "--disable-uvicorn-access-log",
         *cfg.extra_server_args,
@@ -239,7 +260,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         cfg.model,
         server_args,
         # /reset_prefix_cache requires dev mode.
-        env_dict={"VLLM_SERVER_DEV_MODE": "1"},
+        env_dict={"VLLM_SERVER_DEV_MODE": "1", **cfg.env_dict},
         max_wait_seconds=cfg.startup_timeout,
     ) as server:
         base_url = f"http://{server.host}:{server.port}"

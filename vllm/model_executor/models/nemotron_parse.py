@@ -22,7 +22,7 @@ from transformers import (
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -62,8 +62,7 @@ logger = init_logger(__name__)
 
 
 class BartScaledWordEmbedding(VocabParallelEmbedding):
-    """
-    This module overrides VocabParallelEmbedding's
+    """This module overrides VocabParallelEmbedding's
     forward by multiplying with embeddings scale.
     """
 
@@ -75,24 +74,6 @@ class BartScaledWordEmbedding(VocabParallelEmbedding):
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().forward(input_ids) * self.embed_scale
-
-
-class BartParallelLMHead(ParallelLMHead):
-    """
-    This module overrides ParallelLMHead's
-    forward by dividing by embeddings scale,
-    yielding effectively the inverse of
-    BartScaledWordEmbedding
-    """
-
-    def __init__(
-        self, num_embeddings: int, embedding_dim: int, embed_scale: float = 1.0
-    ):
-        super().__init__(num_embeddings, embedding_dim)
-        self.embed_scale = embed_scale
-
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return super().forward(input_ids) / self.embed_scale
 
 
 class BartDecoderLayer(nn.Module):
@@ -156,12 +137,13 @@ class BartDecoderLayer(nn.Module):
         decoder_hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             decoder_hidden_states: torch.Tensor of *decoder* input embeddings.
             encoder_hidden_states: torch.Tensor of *encoder* input embeddings.
+
         Returns:
             Decoder layer output torch.Tensor
+
         """
         residual = decoder_hidden_states
 
@@ -236,12 +218,13 @@ class MBartDecoderLayer(BartDecoderLayer):
 
 
 class MBartDecoderNoPos(nn.Module):
-    """
-    Transformer decoder consisting of *config.decoder_layers* layers.
+    """Transformer decoder consisting of *config.decoder_layers* layers.
     Each layer is a [`BartDecoderLayer`]
+
     Args:
         config: BartConfig
         embed_tokens (nn.Embedding): output embedding
+
     """
 
     def __init__(
@@ -292,13 +275,13 @@ class MBartDecoderNoPos(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             decoder_input_ids: Indices of *decoder* input sequence tokens in the
                 vocabulary. Padding will be ignored by default should you provide it.
             encoder_hidden_states: Tensor of encoder output embeddings
         Returns:
             Decoder output torch.Tensor
+
         """
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(decoder_input_ids)
@@ -357,12 +340,11 @@ class MBartDecoderNoPos(nn.Module):
 
 
 class NemotronParsePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - b: Batch size
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values"]
@@ -406,7 +388,7 @@ class NemotronParseDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -424,29 +406,10 @@ class NemotronParseMultiModalProcessor(
 ):
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         return [0]
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs, tok_kwargs
-            )
-        else:
-            hf_processor = self.info.get_hf_processor()
-            tokenizer = hf_processor.tokenizer
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=False, return_tensors="pt"
-            )
-        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -667,14 +630,15 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         encoder_outputs: list[torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             input_ids: torch.Tensor of *decoder* input token ids.
             positions: torch.Tensor of *decoder* position indices.
             encoder_outputs: List of encoder output tensors (vision embeddings).
                 During profiling, this may be None or empty.
+
         Returns:
             Output torch.Tensor
+
         """
         inputs_embeds = None
         if encoder_outputs:
