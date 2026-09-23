@@ -370,9 +370,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         """
         BASE_OFFSET = 0.02
         init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
-        # verbose_json is FINAL_ONLY. A silent Whisper chunk often generates
-        # only EOS; that token is kept in token_ids, and stripping it leaves
-        # nothing. tokens_with_start[-2] would then raise IndexError.
         if tokens and tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
         if not tokens:
