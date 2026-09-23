@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
 )
@@ -25,23 +24,10 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 
-logger = init_logger(__name__)
-
-
 def _kv_scale_format_for_model(model_type: str | None) -> str:
     if model_type is not None and model_type.startswith("glm"):
         return "arbitrary_fp32"
     return "pow2_fp32"
-
-
-def _allow_compact_fp8_kv_cache(vllm_config: VllmConfig) -> bool:
-    if vllm_config.cache_config.kv_offloading_size is not None:
-        return False
-    transfer = vllm_config.kv_transfer_config
-    return transfer is None or (
-        transfer.kv_connector in (None, "HiSparseConnector")
-        and transfer.kv_connector_module_path is None
-    )
 
 
 class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
@@ -51,11 +37,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
     supports_dense_mha_prefill = False
 
     def get_fp8_ds_mla_row_bytes(self) -> int:
-        if (
-            self._allow_compact_fp8_kv_cache
-            and self.kv_lora_rank == 512
-            and self.qk_rope_head_dim == 0
-        ):
+        if self.kv_lora_rank == 512 and self.qk_rope_head_dim == 0:
             return 528
         return super().get_fp8_ds_mla_row_bytes()
 
@@ -90,17 +72,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                 f"KV cache layout; got kv_cache_dtype={kv_cache_dtype!r}."
             )
 
-        vllm_config = get_current_vllm_config()
-        self._allow_compact_fp8_kv_cache = _allow_compact_fp8_kv_cache(vllm_config)
-        if (
-            not self._allow_compact_fp8_kv_cache
-            and mla_args["kv_lora_rank"] == 512
-            and mla_args["qk_rope_head_dim"] == 0
-        ):
-            logger.info_once(
-                "Using the 656-byte fp8_ds_mla KV cache layout for compatibility "
-                "with KV transfer/offloading without compact-layout negotiation."
-            )
         topk_indices_buffer = mla_args.pop("topk_indices_buffer", None)
         super().__init__(
             num_heads,
@@ -117,6 +88,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             topk_indices_buffer=topk_indices_buffer,
             **mla_args,
         )
+        vllm_config = get_current_vllm_config()
         model_type = None
         if vllm_config.model_config is not None:
             model_type = getattr(
