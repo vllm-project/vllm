@@ -58,6 +58,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     accumulate_mla_context_chunk,
     init_mla_context_partial,
     neutralize_empty_context_partials,
+    split_kv_b_proj,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -72,9 +73,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     resolve_quant_method,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_and_maybe_dequant_weights,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.utils import replace_parameter
@@ -165,9 +163,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             rope_parameters = dict(config.rope_parameters)
             if rope_parameters["rope_type"] != "default":
                 rope_parameters["rope_type"] = (
-                    "deepseek_yarn"
-                    if rope_parameters.get("apply_yarn_scaling", True)
-                    else "deepseek_llama_scaling"
+                    "deepseek_llama_scaling"
+                    if rope_parameters.get("attention_factor") == 1.0
+                    else "deepseek_yarn"
                 )
             self.rotary_emb = get_rope(
                 qk_rope_head_dim,
@@ -301,7 +299,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         )
         self.gemm_rs_ar = None
         if run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
@@ -441,20 +439,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         projected into latent space by ``W_UK_T`` and the attention output is
         projected back to ``v`` by ``W_UV`` -- avoiding materializing full K/V.
         """
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
-        ).T
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        ), f"{kv_b_proj_weight.shape=}"
-        kv_b_proj_weight = kv_b_proj_weight.view(
+        W_UK, W_UV = split_kv_b_proj(
+            self.kv_b_proj,
+            act_dtype,
             self.kv_lora_rank,
             self.num_local_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            self.qk_nope_head_dim,
+            self.v_head_dim,
         )
         # (L, N, V) -> (N, L, V)
         replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
@@ -631,7 +622,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             attn_out = _gate_sigmoid_mul(attn_out, gate)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(attn_out):
-            return self.gemm_rs_ar(attn_out, self.o_proj.weight)
+            return self.gemm_rs_ar.apply(attn_out, self.o_proj)
 
         return self.o_proj(attn_out)[0]
 

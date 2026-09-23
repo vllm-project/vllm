@@ -3,6 +3,7 @@
 
 import sys
 from contextlib import contextmanager
+from inspect import signature
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, call, patch
@@ -41,7 +42,9 @@ def _make_runner(modules, *, max_tokens: int = 8192, linear_backend: str = "auto
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
-            kernel_config=SimpleNamespace(linear_backend=linear_backend)
+            kernel_config=SimpleNamespace(linear_backend=linear_backend),
+            attention_config=SimpleNamespace(hisparse_config=None),
+            parallel_config=SimpleNamespace(enable_elastic_ep=False),
         ),
         get_model=Mock(
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
@@ -81,8 +84,16 @@ def test_flashinfer_autotune_token_counts_are_bounded_and_deduplicated():
     assert token_counts == (32,)
 
 
-def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run():
+@pytest.mark.parametrize("skip_attn", [False, True])
+def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2Runner
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner as V1Runner
+
     runner = _make_runner([])
+    dummy_run_signature = signature((V2Runner if skip_attn else V1Runner)._dummy_run)
+    runner._dummy_run.side_effect = lambda **kwargs: dummy_run_signature.bind(
+        None, **kwargs
+    )
     max_buckets = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 8192)
     deferred_buckets = (1, 2, 4, 8, 16, 32, 64, 128)
 
@@ -98,7 +109,7 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run():
         ) as get_buckets,
         patch("vllm.utils.flashinfer.autotune") as autotune,
     ):
-        _run_flashinfer_autotune_dummy_runs(runner)
+        _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
 
     assert get_buckets.call_args_list == [call(8192), call(128)]
     assert autotune.call_args_list == [
@@ -111,24 +122,42 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run():
             skip_eplb=True,
             is_profile=True,
             randomize_inputs=True,
+            **({"skip_attn": True} if skip_attn else {}),
         ),
         call(
             num_tokens=128,
             skip_eplb=True,
             is_profile=True,
             randomize_inputs=True,
+            **({"skip_attn": True} if skip_attn else {}),
         ),
     ]
 
 
-@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+@pytest.mark.parametrize(
+    "has_v2,elastic_ep",
+    [(False, False), (True, False), (True, True)],
+    ids=["v1", "v2", "elastic-v1"],
+)
+@pytest.mark.parametrize("hisparse", [False, True])
 @pytest.mark.parametrize("world_size,rank", [(1, 0), (2, 0), (2, 1)])
 @pytest.mark.parametrize("skip_ops", [[], ["fp4_gemm", "bmm_fp8"]])
-@pytest.mark.parametrize("failure", [None, "dummy", "replayssm", "kimi"])
+@pytest.mark.parametrize("failure", [None, "dummy", "replayssm", "kimi", "bf16"])
 def test_flashinfer_autotune_lifecycle(
-    monkeypatch, tmp_path, use_v2, world_size, rank, skip_ops, failure
+    monkeypatch,
+    tmp_path,
+    has_v2,
+    elastic_ep,
+    hisparse,
+    world_size,
+    rank,
+    skip_ops,
+    failure,
 ):
+    use_v2 = has_v2 and not elastic_ep
     runner = _make_runner([])
+    runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
+    runner.vllm_config.attention_config.hisparse_config = object() if hisparse else None
     model = runner.get_model()
     cache_path = tmp_path / "autotune.json"
     cache_path.write_bytes(b"cached")
@@ -142,18 +171,30 @@ def test_flashinfer_autotune_lifecycle(
         barrier=events.barrier,
     )
 
+    in_autotune = False
+
     @contextmanager
     def autotune_context(**kwargs):
+        nonlocal in_autotune
         assert torch.is_inference_mode_enabled()
+        in_autotune = True
         events.enter()
         try:
             yield
         finally:
+            in_autotune = False
             events.exit()
+
+    def bf16_warmup(*args, **kwargs):
+        assert torch.is_inference_mode_enabled()
+        assert not in_autotune
+        if failure == "bf16":
+            raise RuntimeError("warmup failed")
 
     events.autotune.side_effect = autotune_context
     if failure is not None:
         getattr(events, failure).side_effect = RuntimeError("warmup failed")
+    events.bf16.side_effect = bf16_warmup
     monkeypatch.setitem(
         sys.modules,
         "flashinfer.autotuner",
@@ -170,7 +211,7 @@ def test_flashinfer_autotune_lifecycle(
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_world_group", lambda: world
     )
-    monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: use_v2)
+    monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: has_v2)
     monkeypatch.setattr(fi_utils, "autotune", events.autotune)
     monkeypatch.setattr(warmup.envs, "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS", skip_ops)
     resolve_file = Mock(return_value=cache_path)
@@ -181,6 +222,10 @@ def test_flashinfer_autotune_lifecycle(
     monkeypatch.setattr(warmup, "_run_flashinfer_autotune_dummy_runs", events.dummy)
     monkeypatch.setattr(warmup, "replayssm_autotune_warmup", events.replayssm)
     monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", events.kimi)
+    monkeypatch.setattr(warmup, "_run_flashinfer_bf16_autotune_dummy_run", events.bf16)
+    monkeypatch.setattr(
+        warmup, "autotune_hisparse_flashinfer_attention", events.hisparse
+    )
 
     if failure is None:
         warmup.flashinfer_autotune(runner)
@@ -209,11 +254,22 @@ def test_flashinfer_autotune_lifecycle(
     expected.extend(
         [call.set_group(world.cpu_group if world_size > 1 else None), call.enter()]
     )
-    for name, arg in [("dummy", runner), ("replayssm", runner), ("kimi", model)]:
-        expected.append(getattr(call, name)(arg))
+    if hisparse:
+        expected.append(call.hisparse(runner))
+    for name, arg, kwargs in [
+        ("dummy", runner, {"skip_attn": hisparse}),
+        ("replayssm", runner, {}),
+        ("kimi", model, {}),
+    ]:
+        expected.append(getattr(call, name)(arg, **kwargs))
         if failure == name:
             break
-    expected.extend([call.exit(), call.set_group(None)])
+    expected.append(call.exit())
+    if failure in (None, "bf16"):
+        expected.append(
+            call.bf16(runner, skip_ops=set(skip_ops) or None, skip_attn=hisparse)
+        )
+    expected.append(call.set_group(None))
     if failure is None:
         if world_size > 1:
             expected.append(call.barrier())

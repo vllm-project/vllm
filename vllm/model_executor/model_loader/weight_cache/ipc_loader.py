@@ -12,6 +12,11 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
+from vllm.distributed import (
+    get_dp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -21,13 +26,13 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfigMismatchError,
-    TensorEntry,
     UnsupportedQuantForIPCError,
     WeightCacheKey,
+    WeightCacheState,
     WeightCacheUnavailableError,
     check_ipc_platform_support,
     check_ipc_quant_support,
-    get_physical_device_id,
+    get_current_device_uuid,
     get_socket_path,
     recv_msg,
     send_msg,
@@ -56,7 +61,7 @@ class IpcModelLoader(BaseModelLoader):
     Extra config keys (via --model-loader-extra-config):
 
     - socket_path: explicit daemon socket path. Defaults to a per-GPU path
-      derived from the physical GPU id.
+      derived from the physical GPU uuid and the cache role (target/draft).
     - socket_dir: directory containing the daemon sockets.
     - mode: "zero_copy" (default) or "copy".
     - fallback: fall back to disk loading when the daemon is unavailable or
@@ -74,6 +79,15 @@ class IpcModelLoader(BaseModelLoader):
         extra_config = copy(load_config.model_loader_extra_config or {})
         self.socket_path: str | None = extra_config.pop("socket_path", None)
         self.socket_dir: str | None = extra_config.pop("socket_dir", None)
+        # Internal: set by the engine when routing a speculative draft to the
+        # daemon's draft group.
+        self.is_draft = bool(extra_config.pop("is_draft", False))
+        if self.is_draft and self.socket_path is not None:
+            raise ValueError(
+                "socket_path cannot be combined with the draft weight cache role; "
+                "use socket_dir so the target and draft sockets are derived "
+                "independently"
+            )
         self.mode: str = extra_config.pop("mode", "zero_copy")
         self.fallback: bool = extra_config.pop("fallback", True)
         self.connect_timeout_s: float = float(
@@ -104,7 +118,7 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.accelerator.current_device_index()
-        entries, _ = self._fetch_entries(model_config)
+        entries = self._fetch_entries(model_config).entries
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -119,22 +133,38 @@ class IpcModelLoader(BaseModelLoader):
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
-        # Unsupported quantization is a permanent misconfiguration rather than a
-        # transient daemon outage, so it is raised even when fallback is on.
-        self._check_supported(vllm_config, model_config)
+        # An unsupported platform is a permanent misconfiguration rather than
+        # a transient daemon outage, so it is raised even when fallback is on.
+        check_ipc_platform_support()
         state_fetched = False
         try:
-            entries, aliases = self._fetch_entries(model_config)
+            # Cross-check the routing flag against the identity of the model
+            # being loaded: a draft load that lost its flag (or a target load
+            # that got one) would hit the wrong daemon group and
+            # fingerprint-mismatch.
+            spec = vllm_config.speculative_config
+            inferred = spec is not None and model_config is spec.draft_model_config
+            if inferred != self.is_draft:
+                raise CacheConfigMismatchError(
+                    f"Weight cache role mismatch: loading "
+                    f"{'draft' if inferred else 'target'} model but the loader "
+                    f"was configured for the "
+                    f"{'draft' if self.is_draft else 'target'} group"
+                )
+            state = self._fetch_entries(model_config)
             state_fetched = True
-            return self._build_model(
-                vllm_config, model_config, prefix, entries, aliases
-            )
+            return self._build_model(vllm_config, model_config, prefix, state)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
             logger.warning(
                 "Weight cache unusable (%s); falling back to disk loading", e
             )
+        except UnsupportedQuantForIPCError:
+            # Unsupported quantization is a permanent misconfiguration rather
+            # than a transient daemon outage, so it is raised even when
+            # fallback is on.
+            raise
         except Exception:
             if not self.fallback:
                 raise
@@ -154,8 +184,7 @@ class IpcModelLoader(BaseModelLoader):
         vllm_config: VllmConfig,
         model_config: ModelConfig,
         prefix: str,
-        entries: dict[str, TensorEntry],
-        aliases: dict[str, str],
+        state: WeightCacheState,
     ) -> nn.Module:
         device_config = vllm_config.device_config
         load_device = (
@@ -176,7 +205,12 @@ class IpcModelLoader(BaseModelLoader):
                     model_config=model_config,
                     prefix=prefix,
                 )
-            self._apply_entries(model, entries, aliases, device_index)
+            check_ipc_quant_support(model)
+            self._apply_entries(model, state, device_index)
+            # Flags that load_weights would have set (e.g. EAGLE ownership of
+            # embed_tokens / lm_head); the daemon ran it, this process did not.
+            for name, value in state.attrs.items():
+                setattr(model, name, value)
             # The daemon exports tensors that already went through
             # process_weights_after_loading; re-run it in pre-processed mode
             # so quant methods only rebuild Python-side state (e.g. the MoE
@@ -192,32 +226,15 @@ class IpcModelLoader(BaseModelLoader):
             self._send_release()
         logger.info(
             "Mapped %d tensors from the weight cache daemon (%s mode)",
-            len(entries),
+            len(state.entries),
             self.mode,
         )
         return model.eval()
 
-    @staticmethod
-    def _check_supported(vllm_config: VllmConfig, model_config: ModelConfig) -> None:
-        check_ipc_platform_support(where="engine")
-        check_ipc_quant_support(model_config, where="engine")
-        cache_dtype = vllm_config.cache_config.cache_dtype
-        if cache_dtype != "auto" and not str(cache_dtype).startswith("fp8"):
-            # BaseKVCacheMethod.process_weights_after_loading turns the loaded
-            # k/v scale parameters into plain float attributes. For fp8 cache
-            # dtypes those are rebuilt from the exported scale buffers when
-            # process_weights_after_loading runs in pre-processed mode; other
-            # quantized cache dtypes are not verified.
-            raise UnsupportedQuantForIPCError(
-                f"[weight_cache:engine] kv cache dtype {cache_dtype!r} is not "
-                "supported by the weight cache; use --kv-cache-dtype auto."
-            )
-
     def _apply_entries(
         self,
         model: nn.Module,
-        entries: dict[str, TensorEntry],
-        aliases: dict[str, str],
+        state: WeightCacheState,
         device_index: int,
     ) -> None:
         # remove_duplicate=False keeps tied module aliases reachable by name:
@@ -248,7 +265,7 @@ class IpcModelLoader(BaseModelLoader):
                 module.register_buffer(leaf, obj)
             registered[name] = obj
 
-        for name, entry in entries.items():
+        for name, entry in state.entries.items():
             tensor = entry.rebuild(device_index)
             if self.mode == "copy":
                 tensor = tensor.clone()
@@ -257,7 +274,7 @@ class IpcModelLoader(BaseModelLoader):
         # Re-establish tied-weight aliases by registering the *same* object the
         # canonical name resolved to, so parameter identity (and the tie) is
         # preserved instead of allocating uninitialized memory.
-        for alias_name, canonical_name in aliases.items():
+        for alias_name, canonical_name in state.aliases.items():
             obj = registered.get(canonical_name)
             if obj is None:
                 logger.warning(
@@ -268,24 +285,19 @@ class IpcModelLoader(BaseModelLoader):
                 continue
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
-    def _fetch_entries(
-        self, model_config: ModelConfig
-    ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
-        from vllm.distributed import (
-            get_tensor_model_parallel_rank,
-            get_tensor_model_parallel_world_size,
-        )
-
+    def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
+        dp_group = get_dp_group()
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
+            dp_size=dp_group.world_size,
+            dp_rank=dp_group.rank_in_group,
+            is_draft=self.is_draft,
         )
         return self._request_state(cache_config)
 
-    def _request_state(
-        self, cache_config: WeightCacheKey
-    ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
+    def _request_state(self, cache_config: WeightCacheKey) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:
             send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
             response = recv_msg(conn)
@@ -299,7 +311,11 @@ class IpcModelLoader(BaseModelLoader):
                 f"Weight cache daemon error: {response.get('message')}"
             )
         self._check_gpu_uuid(response.get("gpu_uuid"))
-        return response["entries"], response.get("aliases", {})
+        return WeightCacheState(
+            entries=response["entries"],
+            aliases=response.get("aliases", {}),
+            attrs=response.get("attrs", {}),
+        )
 
     def _connect(self, timeout: float) -> socket.socket:
         socket_path = self._resolve_socket_path()
@@ -327,22 +343,16 @@ class IpcModelLoader(BaseModelLoader):
     def _resolve_socket_path(self) -> str:
         if self.socket_path is not None:
             return self.socket_path
-        device_index = torch.accelerator.current_device_index()
-        gpu_id = get_physical_device_id(device_index)
-        if gpu_id is None:
-            raise WeightCacheUnavailableError(
-                "Cannot infer the physical GPU id from CUDA_VISIBLE_DEVICES; "
-                "pass socket_path via --model-loader-extra-config"
-            )
-        return get_socket_path(gpu_id, self.socket_dir)
+        return get_socket_path(
+            get_current_device_uuid(),
+            self.socket_dir,
+            is_draft=self.is_draft,
+        )
 
     def _check_gpu_uuid(self, daemon_uuid: str | None) -> None:
         if daemon_uuid is None:
             return
-        props = torch.cuda.get_device_properties(
-            torch.accelerator.current_device_index()
-        )
-        local_uuid = str(props.uuid)
+        local_uuid = get_current_device_uuid()
         if daemon_uuid != local_uuid:
             raise CacheConfigMismatchError(
                 f"Daemon GPU {daemon_uuid} != engine GPU {local_uuid}; "
@@ -361,7 +371,9 @@ class IpcModelLoader(BaseModelLoader):
         # DefaultModelLoader must not see load_format="ipc_cache" or the ipc
         # extra config keys.
         return dataclasses.replace(
-            self.load_config, load_format="auto", model_loader_extra_config={}
+            self.load_config,
+            load_format="auto",
+            model_loader_extra_config={},
         )
 
     def _fallback_load(

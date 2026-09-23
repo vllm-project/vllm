@@ -10,11 +10,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     resolve_flashinfer_autotune_v2_root,
+    use_flashinfer_autotune_v2,
     write_flashinfer_autotune_cache,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import autotune as flashinfer_autotune
-from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_autotune_v2
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 if TYPE_CHECKING:
@@ -46,6 +47,35 @@ _FLASHINFER_SM120_SPARSE_MLA_DECODE_LABELS = {
 }
 
 _SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
+
+
+def autotune_hisparse_flashinfer_attention(runner: "GPUModelRunner") -> None:
+    """Autotune each HiSparse FlashInfer sparse-MLA configuration."""
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseImpl,
+    )
+
+    tuned: set[tuple[object, ...]] = set()
+    for layer in runner.vllm_config.compilation_config.static_forward_context.values():
+        impl = getattr(layer, "impl", None)
+        if not isinstance(impl, FlashInferMLASparseImpl):
+            continue
+        if getattr(layer, "hisparse_cache", None) is None:
+            continue
+        if impl.topk_indices_buffer is None:
+            continue
+        key = (
+            impl.kv_cache_dtype,
+            impl.num_heads,
+            impl.qk_nope_head_dim,
+            impl.qk_rope_head_dim,
+            impl.kv_lora_rank,
+            impl.topk_indices_buffer.shape[1],
+        )
+        if key in tuned:
+            continue
+        impl.autotune_hisparse_decode(layer)
+        tuned.add(key)
 
 
 def _attention_backend_name(backend: object) -> str | None:
@@ -125,7 +155,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         create_mixed_batch=True,
     )
 
-    if has_flashinfer_autotune_v2():
+    if use_flashinfer_autotune_v2(runner):
         return _run_sparse_mla_decode_autotune_v2(
             worker, num_tokens, log_label, dummy_run_kwargs
         )

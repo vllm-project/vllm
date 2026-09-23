@@ -153,12 +153,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 layer.logical_widths,
                 getattr(layer, "input_scale", None),
             )
-            weight = weight.t()
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight, weight_scale, input_scale = process_fp8_weight_channel_strategy(
                 layer.weight, layer.weight_scale, getattr(layer, "input_scale", None)
             )
-            weight = weight.t()
 
         elif self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False
@@ -177,8 +175,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # required by torch.compile to be torch.nn.Parameter
         layer.weight = Parameter(weight.data, requires_grad=False)
-        # Preserve the dim tags dropped by the transpose so layout-aware
-        # kernels (humming) see (K, N) instead of assuming (N, K).
+        # The helpers return (K, N); retag so layout-aware kernels see it.
         layer.weight.input_dim = 0
         layer.weight.output_dim = 1
         layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
