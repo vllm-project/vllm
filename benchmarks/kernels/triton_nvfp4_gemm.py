@@ -51,6 +51,8 @@ def _triton_nvfp4_gemm_kernel(
     VEC_SIZE: tl.constexpr,
     # True when K is a multiple of BLOCK_K, so no K step needs a mask
     EVEN_K: tl.constexpr,
+    # Rows of output tiles per band in the launch order (see below)
+    GROUP_SIZE_M: tl.constexpr,
 ):
     """Triton kernel for NVFP4 GEMM: C = alpha * (A @ B^T).
 
@@ -63,10 +65,21 @@ def _triton_nvfp4_gemm_kernel(
     Computes C = alpha * dot_scaled(A, B^T) where dot_scaled handles
     block-scale dequantization internally via tensor core instructions.
     """
+    # Map the program id to an output tile in bands of GROUP_SIZE_M tile rows:
+    # go down the rows of one band, step one column right, repeat across all
+    # columns, then move to the next band. The programs running at the same
+    # time then share a few row strips of A and a few column strips of B, so
+    # both stay in L2 instead of A being re-read once per tile column.
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
-    pid_m = pid % num_pid_m
-    pid_n = pid // num_pid_m
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    # The last band can have fewer than GROUP_SIZE_M tile rows.
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
     # Row and column indices used for loads. Indices past M or N wrap back
     # into range, so every load reads a real row of A or B. The rows they
@@ -158,6 +171,99 @@ def _triton_nvfp4_gemm_kernel(
     tl.store(c_ptrs, c, mask=mask)
 
 
+def _nvfp4_config(bm: int, bn: int, bk: int, warps: int, stages: int) -> triton.Config:
+    return triton.Config(
+        {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk, "GROUP_SIZE_M": 8},
+        num_warps=warps,
+        num_stages=stages,
+    )
+
+
+# Candidate tile configs for autotuning. PROVISIONAL: to be replaced by the
+# short list that a wide sweep on SM120 (RTX 5090) and SM100 (B200) selects.
+# Small BLOCK_M entries cover decode-sized M; configs that do not fit a GPU's
+# shared memory are pruned per device by _prune_configs.
+NVFP4_GEMM_CONFIGS = [
+    _nvfp4_config(128, 128, 128, 4, 3),
+    _nvfp4_config(128, 256, 128, 8, 3),
+    _nvfp4_config(128, 128, 256, 8, 2),
+    _nvfp4_config(64, 128, 128, 4, 4),
+    _nvfp4_config(32, 128, 128, 4, 4),
+    _nvfp4_config(16, 128, 128, 4, 4),
+]
+
+
+def nvfp4_gemm_smem_bytes(bm: int, bn: int, bk: int, stages: int) -> int:
+    """Estimate the shared memory one config needs for its pipelined loads.
+
+    Args:
+        bm: BLOCK_M.
+        bn: BLOCK_N.
+        bk: BLOCK_K, in unpacked FP4 elements.
+        stages: num_stages, the number of K steps loaded ahead.
+
+    Returns:
+        Bytes of shared memory: packed A and B tiles (two FP4 values per
+        byte) plus one e4m3 scale per 16 values, times the number of stages.
+
+    """
+    per_stage = bm * bk // 2 + bn * bk // 2 + (bm + bn) * (bk // 16)
+    return stages * per_stage
+
+
+def _prune_configs(configs, named_args, **kwargs):
+    """Drop configs that cannot fit this GPU or that are far larger than M/N.
+
+    Keeping BLOCK_M no larger than the smallest power of two >= M (at least
+    16) avoids tuning 128-row tiles for M=1, and likewise for N. If nothing is
+    left, the smallest config is kept so a launch always has a candidate.
+    """
+    m, n = named_args["M"], named_args["N"]
+    # Shared memory of the GPU the output tensor lives on.
+    props = triton.runtime.driver.active.utils.get_device_properties(
+        named_args["c_ptr"].device.index
+    )
+    max_smem = props["max_shared_mem"]
+    m_cap = max(16, triton.next_power_of_2(m))
+    n_cap = max(16, triton.next_power_of_2(n))
+    kept = []
+    for cfg in configs:
+        kw = cfg.kwargs
+        fits = (
+            nvfp4_gemm_smem_bytes(
+                kw["BLOCK_M"], kw["BLOCK_N"], kw["BLOCK_K"], cfg.num_stages
+            )
+            <= max_smem
+        )
+        if fits and kw["BLOCK_M"] <= m_cap and kw["BLOCK_N"] <= n_cap:
+            kept.append(cfg)
+    if kept:
+        return kept
+    return [
+        min(
+            configs,
+            key=lambda c: nvfp4_gemm_smem_bytes(
+                c.kwargs["BLOCK_M"],
+                c.kwargs["BLOCK_N"],
+                c.kwargs["BLOCK_K"],
+                c.num_stages,
+            ),
+        )
+    ]
+
+
+# EVEN_K depends on the chosen BLOCK_K, so it is derived per config.
+_nvfp4_gemm_kernel = triton.heuristics(
+    {"EVEN_K": lambda args: args["K"] % args["BLOCK_K"] == 0}
+)(_triton_nvfp4_gemm_kernel)
+
+_nvfp4_gemm_kernel_autotuned = triton.autotune(
+    configs=NVFP4_GEMM_CONFIGS,
+    key=["M", "N", "K"],
+    prune_configs_by={"early_config_prune": _prune_configs},
+)(_nvfp4_gemm_kernel)
+
+
 def triton_scaled_fp4_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -165,6 +271,7 @@ def triton_scaled_fp4_mm(
     b_scale: torch.Tensor,
     alpha: float | torch.Tensor,
     out_dtype: torch.dtype,
+    config: dict | None = None,
 ) -> torch.Tensor:
     """Triton-based NVFP4 GEMM: C = alpha * dequant(A) @ dequant(B)^T.
 
@@ -175,6 +282,10 @@ def triton_scaled_fp4_mm(
         b_scale: Block scales for B    [N, K//16] float8_e4m3fn (linear layout)
         alpha:   Global scale = 1 / (global_scale_a * global_scale_b)
         out_dtype: Output dtype (torch.bfloat16 or torch.float16)
+        config:  Optional fixed tile config with keys BLOCK_M, BLOCK_N,
+            BLOCK_K, GROUP_SIZE_M, num_warps and num_stages. When None
+            (the default), the config is autotuned over NVFP4_GEMM_CONFIGS
+            for each (M, N, K). A fixed config is for sweeps and tests.
 
     Returns:
         C: [M, N] tensor in out_dtype
@@ -219,19 +330,9 @@ def triton_scaled_fp4_mm(
     # Allocate output
     c = torch.empty((M, N), device=a.device, dtype=out_dtype)
 
-    # Tile sizes — tuned for SM100+ tensor cores
-    BLOCK_M = 128
-    BLOCK_N = 128
-    BLOCK_K = 128  # Must be multiple of VEC_SIZE (16)
-
-    # Adjust block sizes for small matrices
-    if M < BLOCK_M:
-        BLOCK_M = max(16, triton.next_power_of_2(M))
-    if N < BLOCK_N:
-        BLOCK_N = max(16, triton.next_power_of_2(N))
-
-    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
-    EVEN_K = K % BLOCK_K == 0
+    # One program per output tile; the tile size comes from the config.
+    def grid(meta):
+        return (triton.cdiv(M, meta["BLOCK_M"]) * triton.cdiv(N, meta["BLOCK_N"]),)
 
     # Strides for A [M, K//2] — row-major
     stride_am = a.stride(0)
@@ -246,7 +347,7 @@ def triton_scaled_fp4_mm(
     stride_a_scale_m = a_scale.stride(0)
     stride_b_scale_n = b_scale.stride(0)
 
-    _triton_nvfp4_gemm_kernel[grid](
+    args = (
         a,
         b,
         c,
@@ -264,11 +365,13 @@ def triton_scaled_fp4_mm(
         c.stride(1),
         stride_a_scale_m,
         stride_b_scale_n,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        BLOCK_K=BLOCK_K,
-        VEC_SIZE=VEC_SIZE,
-        EVEN_K=EVEN_K,
     )
+    if config is None:
+        _nvfp4_gemm_kernel_autotuned[grid](*args, VEC_SIZE=VEC_SIZE)
+    else:
+        assert config["BLOCK_K"] % (2 * VEC_SIZE) == 0, (
+            f"BLOCK_K={config['BLOCK_K']} must be a multiple of {2 * VEC_SIZE}"
+        )
+        _nvfp4_gemm_kernel[grid](*args, VEC_SIZE=VEC_SIZE, **config)
 
     return c

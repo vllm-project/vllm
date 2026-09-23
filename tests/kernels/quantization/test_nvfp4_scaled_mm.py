@@ -3,6 +3,7 @@
 import importlib.util
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import NamedTuple
 
 import pytest
@@ -159,8 +160,8 @@ class NvFp4Operand(NamedTuple):
 
 
 @pytest.fixture(scope="module")
-def triton_fp4_mm() -> Callable[..., torch.Tensor]:
-    """triton_scaled_fp4_mm, loaded by path so no sys.path entry is needed."""
+def triton_nvfp4_module() -> ModuleType:
+    """benchmarks/kernels/triton_nvfp4_gemm.py, loaded by path (no sys.path)."""
     if not HAS_TRITON:
         pytest.skip("Triton is not available.")
     spec = importlib.util.spec_from_file_location(
@@ -169,7 +170,13 @@ def triton_fp4_mm() -> Callable[..., torch.Tensor]:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.triton_scaled_fp4_mm
+    return module
+
+
+@pytest.fixture(scope="module")
+def triton_fp4_mm(triton_nvfp4_module: ModuleType) -> Callable[..., torch.Tensor]:
+    """triton_scaled_fp4_mm with its default (autotuned) tile config."""
+    return triton_nvfp4_module.triton_scaled_fp4_mm
 
 
 def linear_nvfp4(rows: int, k: int, dtype: torch.dtype) -> NvFp4Operand:
@@ -459,3 +466,63 @@ def test_triton_nvfp4_gemm_host_alpha(
         captured = triton_fp4_mm(a.fp4, b.fp4, a.sf, b.sf, host_alpha, dtype)
     graph.replay()
     torch.testing.assert_close(captured, expected, atol=0, rtol=0)
+
+
+# Shapes with partial tiles on every axis, for checking each tile config.
+TRITON_CONFIG_SHAPES = [(17, 130, 320), (150, 100, 2880)]
+
+
+@pytest.mark.parametrize("shape", TRITON_CONFIG_SHAPES)
+@torch.inference_mode()
+def test_triton_nvfp4_gemm_every_config(
+    triton_nvfp4_module: ModuleType, shape: tuple[int, int, int]
+) -> None:
+    """Every autotune candidate is correct, not only the one that wins timing.
+
+    The autotuner picks per shape and per GPU, so a config that is wrong on
+    partial tiles could be chosen on some other device or shape. Each config
+    is run directly on shapes with M, N and K tails. Configs that do not fit
+    this GPU's shared memory are skipped, as the autotuner prunes them.
+    """
+    set_random_seed(SEEDS[0])
+    m, n, k = shape
+    dtype = torch.bfloat16
+    a, b = linear_nvfp4(m, k, dtype), linear_nvfp4(n, k, dtype)
+    alpha = 1.0 / (a.global_scale * b.global_scale)
+    expected = linear_ref(a, b).to(dtype)
+    driver = triton_nvfp4_module.triton.runtime.driver.active
+    device_index = torch.accelerator.current_device_index()
+    max_smem = driver.utils.get_device_properties(device_index)["max_shared_mem"]
+    ran = 0
+    for cfg in triton_nvfp4_module.NVFP4_GEMM_CONFIGS:
+        kw = cfg.kwargs
+        smem = triton_nvfp4_module.nvfp4_gemm_smem_bytes(
+            kw["BLOCK_M"], kw["BLOCK_N"], kw["BLOCK_K"], cfg.num_stages
+        )
+        if smem > max_smem:
+            continue
+        config = {**kw, "num_warps": cfg.num_warps, "num_stages": cfg.num_stages}
+        out = triton_nvfp4_module.triton_scaled_fp4_mm(
+            a.fp4, b.fp4, a.sf, b.sf, alpha, dtype, config=config
+        )
+        torch.testing.assert_close(
+            out,
+            expected,
+            atol=TRITON_ATOL,
+            rtol=TRITON_RTOL,
+            msg=lambda msg, config=config: f"config {config}: {msg}",
+        )
+        ran += 1
+    assert ran > 0, "no tile config fits this GPU's shared memory"
+
+
+@pytest.mark.parametrize("m,n", [(1, 16), (1, 4096), (16384, 4096)])
+def test_triton_nvfp4_gemm_prune_keeps_a_config(
+    triton_nvfp4_module: ModuleType, m: int, n: int
+) -> None:
+    """Config pruning always leaves at least one candidate to launch."""
+    c = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+    kept = triton_nvfp4_module._prune_configs(
+        triton_nvfp4_module.NVFP4_GEMM_CONFIGS, {"M": m, "N": n, "c_ptr": c}
+    )
+    assert len(kept) >= 1
