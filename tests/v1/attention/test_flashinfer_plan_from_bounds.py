@@ -213,17 +213,8 @@ def test_build_copies_seq_lens_only_when_the_bounds_do_not_suffice(
     lower = [n - NUM_SPEC for n in upper[:-1]] + upper[-1:]
     if case == "not_fa2_exact_bounds":
         upper = lower = exact
-    cam = create_common_attn_metadata(
-        BatchSpec(seq_lens=upper, query_lens=QUERY_LENS),
-        BLOCK_SIZE,
-        torch.device("cuda"),
-        max_block_idx=vllm_config.cache_config.num_gpu_blocks,
-    )
-    cam = cam.replace(
-        seq_lens=torch.tensor(exact, dtype=torch.int32, device="cuda"),
-        seq_lens_cpu_lower_bound=(
-            None if case == "no_lower_bound" else torch.tensor(lower, dtype=torch.int32)
-        ),
+    cam = _mixed_metadata(
+        exact, upper, None if case == "no_lower_bound" else lower, vllm_config
     )
 
     def build():
@@ -265,6 +256,53 @@ def test_build_copies_seq_lens_only_when_the_bounds_do_not_suffice(
     if case == "fa2":
         indptr = builder.paged_kv_indptr.gpu[: len(exact) + 1]
         assert torch.any(indptr[1:] - indptr[:-1] > cdiv(exact_gpu, BLOCK_SIZE))
+
+
+def _mixed_metadata(
+    exact: list[int], upper: list[int], lower: list[int] | None, vllm_config
+) -> CommonAttentionMetadata:
+    """Decodes, verifications and a prefill (QUERY_LENS) with exact seq_lens on
+    the device and the CPU bounds."""
+    cam = create_common_attn_metadata(
+        BatchSpec(seq_lens=upper, query_lens=QUERY_LENS),
+        BLOCK_SIZE,
+        torch.device("cuda"),
+        max_block_idx=vllm_config.cache_config.num_gpu_blocks,
+    )
+    return cam.replace(
+        seq_lens=torch.tensor(exact, dtype=torch.int32, device="cuda"),
+        seq_lens_cpu_lower_bound=(
+            None if lower is None else torch.tensor(lower, dtype=torch.int32)
+        ),
+    )
+
+
+def test_seq_lens_bounds_check_does_not_synchronize() -> None:
+    """With VLLM_DEBUG_SEQ_LENS_BOUNDS the builder asserts on the device that
+    the exact seq_lens lie within the bounds it planned from, without reading
+    anything back."""
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B", block_size=BLOCK_SIZE, max_model_len=4096
+    )
+    builder = _make_builder(vllm_config)
+    builder._check_seq_lens_bounds = True
+    lower = [n - NUM_SPEC for n in UPPER[:-1]] + UPPER[-1:]
+    cam = _mixed_metadata(list(EXACT), list(UPPER), lower, vllm_config)
+
+    def build():
+        with set_current_vllm_config(vllm_config):
+            return builder.build(common_prefix_len=0, common_attn_metadata=cam)
+
+    for _ in range(6):
+        build()
+    torch.accelerator.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        build()
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    # The bounds hold: the device-side assertion stays quiet.
+    torch.accelerator.synchronize()
 
 
 def _decode_metadata(

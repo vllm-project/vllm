@@ -71,6 +71,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    check_seq_lens_bounds,
     get_dcp_local_seq_lens,
     get_flashinfer_layout_string,
     get_num_attention_heads_from_layers,
@@ -991,6 +992,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             max_num_reqs, dtype=torch.int32, device=self.device
         )
         self._plan_workspaces = _PinnedPlanWorkspaces()
+        self._check_seq_lens_bounds = envs.VLLM_DEBUG_SEQ_LENS_BOUNDS
 
     @property
     def kv_cache_layout(self) -> KVCacheLayout:
@@ -1584,6 +1586,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
             if from_bounds is not None:
                 seq_lens_cpu, seq_lens_exact = from_bounds
+                if self._check_seq_lens_bounds:
+                    assert common_attn_metadata.seq_lens_cpu_lower_bound is not None
+                    check_seq_lens_bounds(
+                        seq_lens[:num_reqs],
+                        common_attn_metadata.seq_lens_cpu_lower_bound,
+                        seq_lens_cpu,
+                    )
             else:
                 with gpu_sync_allowed():
                     seq_lens_cpu = common_attn_metadata.seq_lens.cpu()

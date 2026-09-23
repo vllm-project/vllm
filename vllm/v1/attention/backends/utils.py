@@ -1085,6 +1085,36 @@ def compute_causal_conv1d_metadata(
     return nums_dict, batch_ptr, token_chunk_offset_ptr
 
 
+def check_seq_lens_bounds(
+    seq_lens: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor
+) -> None:
+    """Assert lower <= seq_lens <= upper element-wise without synchronizing.
+
+    ``seq_lens`` are the exact lengths, on any device. ``lower`` and ``upper``
+    may be longer and may live on the CPU; they are copied to the device of
+    ``seq_lens`` asynchronously. On the CPU a violation raises at once. On
+    CUDA it surfaces as a device-side assertion at the next synchronization,
+    which leaves the CUDA context unusable: a debug aid, not a recoverable
+    check. Enabled with VLLM_DEBUG_SEQ_LENS_BOUNDS, which the FlashInfer
+    builder reads once at construction.
+    """
+    num_reqs = seq_lens.shape[0]
+
+    def on_device(bound: torch.Tensor) -> torch.Tensor:
+        bound = bound[:num_reqs]
+        if bound.device == seq_lens.device:
+            return bound
+        if PIN_MEMORY and not bound.is_pinned():
+            bound = bound.pin_memory()
+        return bound.to(seq_lens.device, non_blocking=True)
+
+    lower, upper = on_device(lower), on_device(upper)
+    torch._assert_async(
+        ((seq_lens >= lower) & (seq_lens <= upper)).all(),
+        "seq_lens outside the CPU bounds FlashInfer was planned from",
+    )
+
+
 def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int = 1,

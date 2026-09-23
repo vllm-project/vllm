@@ -295,6 +295,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
+    VLLM_DEBUG_SEQ_LENS_BOUNDS: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
@@ -2033,6 +2034,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
+    # Check on the device that the exact seq_lens lie within the CPU bounds
+    # FlashInfer plans from. Does not synchronize. Debug aid only: on CUDA a
+    # violation is a device-side assertion that leaves the CUDA context
+    # unusable. The FlashInfer builder reads this once at construction.
+    "VLLM_DEBUG_SEQ_LENS_BOUNDS": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_SEQ_LENS_BOUNDS", "0"))
+    ),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
