@@ -12,6 +12,7 @@ steps:
   working_dir: "."
   env:
     SNAPSHOT_E2E_RUN_LIMIT_S: "1200"
+    NVIDIA_VISIBLE_DEVICES: "0"
   source_file_dependencies:
   - .buildkite/scripts/initialized-snapshot-e2e.sh
   - .buildkite/test_areas/entrypoints.yaml
