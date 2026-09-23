@@ -414,6 +414,12 @@ def _warmup_kernels(
 
             worker_execute_model(decode_output)
             worker_sample_tokens(None)
+            if num_spec_steps > 0:
+                # Speculative-decoding warmup can queue draft-model TP
+                # collectives that outlive the Python sample_tokens() call.
+                # Drain them before the next warmup transition so all ranks
+                # stay in lockstep.
+                torch.accelerator.synchronize()
 
             for i, use_spec in zip(indices, spec_flags):
                 req_computed[i] += decode_query_len if use_spec else 1
