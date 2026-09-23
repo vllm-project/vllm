@@ -28,6 +28,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -35,7 +36,11 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    MoERunner,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -305,11 +310,11 @@ class SarvamMLAMoE(nn.Module):
         else:
             self.router_dtype = torch.bfloat16
 
-        self.gate = nn.Linear(
+        self.gate = GateLinear(
             self.hidden_size,
             self.num_experts,
-            bias=False,
-            dtype=self.router_dtype,
+            out_dtype=self.router_dtype,
+            prefix=f"{prefix}.gate",
         )
 
         if getattr(config, "moe_router_enable_expert_bias", True):
@@ -324,6 +329,7 @@ class SarvamMLAMoE(nn.Module):
 
         self.score_function = getattr(config, "score_function", "sigmoid")
         self.num_shared_experts = getattr(config, "num_shared_experts", 1)
+        self.shared_experts: SarvamMLAMLP | None
         if self.num_shared_experts > 0:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
                 shared_int = config.moe_shared_expert_intermediate_size
@@ -363,12 +369,7 @@ class SarvamMLAMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        router_logits = self.gate(
-            hidden_states.to(self.router_dtype)
-            if self.router_dtype is not None
-            else hidden_states
-        )
-        router_logits = router_logits.to(hidden_states.dtype)
+        router_logits, _ = self.gate(hidden_states)
         final_hidden = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -448,6 +449,16 @@ class SarvamMLABlock(nn.Module):
         return hidden_states, residual
 
 
+# PEP 563 stringifies annotations in this module, so the decorator cannot infer
+# these; they are the set DeepSeek-V2 infers for the same forward signature.
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class SarvamMLAModel(nn.Module, EagleModelMixin):
     """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
 
@@ -526,6 +537,7 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
         Returns:
             Intermediate tensors on non-final stages. On the final stage,
             normalized hidden states, paired with auxiliary states if captured.
+
         """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -579,6 +591,9 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
 
 
 class SarvamMixtureOfExperts(MixtureOfExperts):
+    moe_layers: list[MoERunner]
+    moe_mlp_layers: list[SarvamMLAMoE]
+
     def extract_moe_parameters(self, example_moe: SarvamMLAMoE | None) -> None:
         if example_moe is None:
             raise RuntimeError("No SarvamMLAMoE layer found in model.layers.")
@@ -615,12 +630,6 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
             if hasattr(fused, "update_expert_map"):
                 fused.update_expert_map()
 
-    def set_eplb_state(self, eplb_state) -> None:
-        self.eplb_state = eplb_state
-        for moe in self.moe_layers:
-            if hasattr(moe, "set_eplb_state"):
-                moe.set_eplb_state(eplb_state)
-
 
 class SarvamMLAForCausalLM(
     nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, SarvamMixtureOfExperts
@@ -634,9 +643,21 @@ class SarvamMLAForCausalLM(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    @staticmethod
+    def _remap_config(config) -> None:
+        """Default the routing keys the released checkpoints omit."""
+        defaults = {
+            "n_group": 1,
+            "topk_group": 1,
+        }
+        for attr, default in defaults.items():
+            if getattr(config, attr, None) is None:
+                setattr(config, attr, default)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self._remap_config(config)
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config

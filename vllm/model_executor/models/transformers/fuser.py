@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fuser detection for the Transformers modeling backend.
-
-`get_fusers` traces a module class once (see `fx_utils`) and matches it against each
-concrete fuser in `fusers`; `Fusers` caches the result per class for a whole model.
-At most one match may give the module a different forward, and any number of fusers that
-leave the forward alone apply alongside. `base.recursive_replace` then applies them per
-instance. RMSNorm-shaped modules the tracer cannot match are warned about.
-"""
+"""Fuser detection for the Transformers modeling backend."""
 
 from collections import UserDict
 from typing import TYPE_CHECKING, TypeVar
@@ -20,6 +13,7 @@ from vllm.model_executor.models.transformers.fusers import (
     AttentionFuser,
     BaseFuser,
     GLUFuser,
+    MergedColumnParallelFuser,
     MLAFuser,
     PackedQKVFuser,
     QKVFuser,
@@ -42,23 +36,23 @@ def key(module: nn.Module) -> tuple:
 
 
 FUSERS: tuple[type[BaseFuser], ...] = (
+    # Order these by priority, e.g. QKV would be preferred over MergedColumnParallel
     MLAFuser,
     GLUFuser,
     QKVFuser,
     PackedQKVFuser,
+    MergedColumnParallelFuser,
     RMSNormFuser,
+    # Put fusers that don't redefine forward after this comment
     AttentionFuser,
 )
-"""Every fuser, in match order: those that redefine the forward first, then those
+"""Every fuser, in priority order: those that redefine the forward first, then those
 that leave it alone. A new fuser is added here."""
 
 
 @cached(cache={}, key=key)
 def get_fusers(module: nn.Module) -> list[BaseFuser]:
-    """Every fuser that applies to `module`'s class and shape (cached).
-
-    The one that redefines the forward comes first, so applying them in order
-    fuses before the rest read or adjust the result."""
+    """Every fuser that could apply to `module`'s class (cached), in `FUSERS` order."""
     # Projection fusions need >=2 sibling linears; the RMSNorm fusion needs a
     # leaf module (raw tensor math, no submodules). Nothing else can match, and
     # tracing is skipped for it.
@@ -66,13 +60,13 @@ def get_fusers(module: nn.Module) -> list[BaseFuser]:
     is_leaf = next(module.children(), None) is None
     graph = trace(module) if n_linear >= 2 or is_leaf else None
 
+    # Every redefining candidate that matches is cached, not just the first:
+    # instances of this class can be shaped heterogeneously, so which one is
+    # usable is decided per instance in Fusers.__getitem__, not here. A forward
+    # can only be rewritten from a trace of it, so each starts fresh regardless.
     fusers: list[BaseFuser] = []
     for fuser_cls in FUSERS:
-        if fuser_cls.redefines_forward and (
-            # A forward can only be rewritten from a trace of it, and only once,
-            # because every rewrite starts from the original source.
-            graph is None or any(fuser.redefines_forward for fuser in fusers)
-        ):
+        if fuser_cls.redefines_forward and graph is None:
             continue
         if (fuser := fuser_cls.match(graph, module)) is None:
             continue
@@ -118,5 +112,15 @@ class Fusers(UserDict):
 
     def __getitem__(self, m: nn.Module) -> list[BaseFuser]:
         """The fusers this instance can take, in the order to apply them."""
-        fusers = self.data.get(key(m), ())
-        return [fuser for fuser in fusers if fuser.validate(m, self.vllm_config)]
+        chosen: list[BaseFuser] = []
+        redefined = False
+        for fuser in self.data.get(key(m), ()):
+            # Only one candidate may rewrite m's forward; take the first
+            # (highest-priority) one that validates for this instance.
+            if fuser.redefines_forward and redefined:
+                continue
+            if not fuser.validate(m, self.vllm_config):
+                continue
+            redefined = redefined or fuser.redefines_forward
+            chosen.append(fuser)
+        return chosen
