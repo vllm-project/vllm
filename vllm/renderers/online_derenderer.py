@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from typing import Any
 
@@ -81,6 +84,8 @@ class OnlineDerenderer:
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
         tool_strict_level: str | None = None,
+        parser_cache_size: int = 0,
+        parser_cache_ttl: float = 300.0,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -121,6 +126,22 @@ class OnlineDerenderer:
             default_chat_template_kwargs or {}
         )
         self.trust_request_chat_template = trust_request_chat_template
+
+        self.parser_cache_size = parser_cache_size
+        self.parser_cache_ttl = parser_cache_ttl
+        self._parser_cache: OrderedDict[
+            tuple[str, int],
+            tuple[
+                ChatStreamProcessor,
+                DerenderStreamState,
+                int,
+                tuple[int, ...],
+                tuple[int, ...] | None,
+                Any,
+                float,
+            ],
+        ] = OrderedDict()
+        self._parser_cache_lock = threading.Lock()
 
         self.log_error_stack = log_error_stack
         self.supports_browsing = False
@@ -727,19 +748,21 @@ class OnlineDerenderer:
         """Parser path for streaming chat derender: replay + `parse_delta`.
 
         Parser internal state (buffered markup, reasoning/tool phase, etc.)
-        cannot be serialized into `DerenderStreamState`, so each call
-        builds a fresh parser and replays every prior output token through
-        `parse_delta` (discarding the result) before processing this
-        chunk's tokens for real.
+        cannot be serialized into `DerenderStreamState`. When parser caching
+        is enabled (`parser_cache_size > 0`), the active parser and detokenizer
+        state are cached across chunks for the same stream, bypassing replay.
+        On cache miss or when disabled, each call builds a fresh parser and
+        replays prior output tokens through `parse_delta` before processing
+        this chunk's tokens for real.
 
         Every chunk, replayed or live, goes through one `parse_delta` call
         with the tokens it arrived with (more than one under e.g.
         speculative decoding). Replay recovers those boundaries from
         `state.output_chunk_lens`, so the rebuilt parser state matches
         standard serving, which calls `parse_delta` once per engine step.
-        Text comes from a fresh incremental detokenizer with special tokens
+        Text comes from an incremental detokenizer with special tokens
         preserved (``skip_special_tokens=False``), seeded from the prompt
-        tail on every call since replay starts from scratch.
+        tail on every call since replay starts from scratch (unless cached).
 
         Logprobs need no replay: a generate chunk's ``logprobs`` cover exactly
         that chunk's tokens, so they are resolved once and attached to
@@ -751,51 +774,113 @@ class OnlineDerenderer:
         tokenizer = self.renderer.get_tokenizer()
         top_limit = _chat_top_logprobs_limit(chat_request)
 
-        processor = ChatStreamProcessor(
-            chat_request,
-            parser_cls(
-                tokenizer,
-                chat_request.tools,
-                chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
-                model_config=self.model_config,
-            ),
-        )
-
-        # Ephemeral incremental detok window, local to this call. Threaded
-        # across both the replay and current chunk phases (via `nonlocal`)
-        # so multi-byte characters split across that boundary still decode
-        # correctly. Discarded once the call returns.
         skip_special, spaces_between = _decode_params(
             tokenizer, chat_request, preserve_special=True
         )
-        detok_state = _seed_stream_state(
-            tokenizer, prompt_token_ids, skip_special_tokens=skip_special
-        )
 
-        def _replay(token_ids: list[int], chunk_lens: list[int]) -> None:
-            """Replay prior chunks through `parse_delta` to rebuild parser
-            state, discarding the result. Never `finished` since that only
-            applies to the current chunk.
-            """
-            nonlocal detok_state
-            start = 0
-            for chunk_len in chunk_lens:
-                chunk = token_ids[start : start + chunk_len]
-                start += chunk_len
-                text, detok_state = self._detokenize_delta(
-                    tokenizer,
-                    chunk,
-                    detok_state,
-                    skip_special_tokens=skip_special,
-                    spaces_between_special_tokens=spaces_between,
+        if not generate_chunk.choices:
+            usage_info: UsageInfo | None = None
+            if generate_chunk.usage is not None:
+                u = generate_chunk.usage
+                pt = (
+                    prompt_tokens
+                    if prompt_tokens is not None
+                    else (u.prompt_tokens or 0)
                 )
-                processor.step(text, chunk, None, prompt_token_ids)
+                ct = u.completion_tokens or 0
+                usage_info = UsageInfo(
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                    total_tokens=pt + ct,
+                )
+            chunk = ChatCompletionStreamResponse(
+                id=generate_chunk.request_id,
+                model=model,
+                choices=[],
+                usage=usage_info,
+                metrics=generate_chunk.metrics,
+            )
+            return chunk, state
 
-        # Replay history to reconstruct parser state. The result is thrown
-        # away and only the current chunk's emission goes to the client.
-        _replay(state.output_token_ids, state.output_chunk_lens)
-        # Replay rebuilds the same flag. The carried one stays authoritative.
-        processor.tools_streamed = state.tools_streamed
+        choice = generate_chunk.choices[0]
+        cache_key = (generate_chunk.request_id, choice.index)
+
+        cached_entry: tuple[ChatStreamProcessor, DerenderStreamState] | None = None
+        if self.parser_cache_size > 0:
+            now = time.monotonic()
+            with self._parser_cache_lock:
+                entry = self._parser_cache.pop(cache_key, None)
+                if entry is not None:
+                    (
+                        c_processor,
+                        c_detok,
+                        c_count,
+                        c_out_tids,
+                        c_prompt_tids,
+                        c_tools,
+                        c_time,
+                    ) = entry
+                    prompt_tids_tuple = (
+                        tuple(prompt_token_ids)
+                        if prompt_token_ids is not None
+                        else None
+                    )
+                    if (
+                        now - c_time <= self.parser_cache_ttl
+                        and c_count == len(state.output_chunk_lens)
+                        and c_out_tids == tuple(state.output_token_ids)
+                        and c_prompt_tids == prompt_tids_tuple
+                        and c_tools == chat_request.tools
+                    ):
+                        cached_entry = (c_processor, c_detok)
+
+        if cached_entry is not None:
+            processor, detok_state = cached_entry
+        else:
+            processor = ChatStreamProcessor(
+                chat_request,
+                parser_cls(
+                    tokenizer,
+                    chat_request.tools,
+                    chat_template_kwargs=self._resolve_chat_template_kwargs(
+                        chat_request
+                    ),
+                    model_config=self.model_config,
+                ),
+            )
+
+            # Ephemeral incremental detok window, local to this call. Threaded
+            # across both the replay and current chunk phases (via `nonlocal`)
+            # so multi-byte characters split across that boundary still decode
+            # correctly. Discarded once the call returns (unless cached).
+            detok_state = _seed_stream_state(
+                tokenizer, prompt_token_ids, skip_special_tokens=skip_special
+            )
+
+            def _replay(token_ids: list[int], chunk_lens: list[int]) -> None:
+                """Replay prior chunks through `parse_delta` to rebuild parser
+                state, discarding the result. Never `finished` since that only
+                applies to the current chunk.
+                """
+                nonlocal detok_state
+                start = 0
+                for chunk_len in chunk_lens:
+                    chunk = token_ids[start : start + chunk_len]
+                    start += chunk_len
+                    text, detok_state = self._detokenize_delta(
+                        tokenizer,
+                        chunk,
+                        detok_state,
+                        skip_special_tokens=skip_special,
+                        spaces_between_special_tokens=spaces_between,
+                    )
+                    processor.step(text, chunk, None, prompt_token_ids)
+
+            # Replay history to reconstruct parser state. The result is thrown
+            # away and only the current chunk's emission goes to the client.
+            _replay(state.output_token_ids, state.output_chunk_lens)
+            # Replay rebuilds the same flag. The carried one stays authoritative.
+            processor.tools_streamed = state.tools_streamed
 
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         output_token_ids = list(state.output_token_ids)
@@ -885,6 +970,40 @@ class OnlineDerenderer:
                     token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
+
+            if self.parser_cache_size > 0:
+                is_finished = choice.finish_reason is not None
+                if not is_finished and finish_reason is None:
+                    now = time.monotonic()
+                    with self._parser_cache_lock:
+                        expired_keys = [
+                            k
+                            for k, v in self._parser_cache.items()
+                            if now - v[6] > self.parser_cache_ttl
+                        ]
+                        for k in expired_keys:
+                            self._parser_cache.pop(k, None)
+
+                        prompt_tids_tuple = (
+                            tuple(prompt_token_ids)
+                            if prompt_token_ids is not None
+                            else None
+                        )
+                        self._parser_cache[cache_key] = (
+                            processor,
+                            detok_state,
+                            len(output_chunk_lens),
+                            tuple(output_token_ids),
+                            prompt_tids_tuple,
+                            chat_request.tools,
+                            now,
+                        )
+                        self._parser_cache.move_to_end(cache_key)
+                        while len(self._parser_cache) > self.parser_cache_size:
+                            self._parser_cache.popitem(last=False)
+                else:
+                    with self._parser_cache_lock:
+                        self._parser_cache.pop(cache_key, None)
 
         updated_state = state.model_copy(
             update={
