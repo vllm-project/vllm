@@ -103,7 +103,7 @@ logger = logging.get_logger(__name__)
 # tokens (and to exclude control tokens such as ``<mask>``).
 _LANG_CODE_RE = re.compile(r"^[a-z]{3}_[A-Z][a-z]{3}$")
 
-# Friendly aliases -> NLLB-200 language tag (PR 4.2). Lets callers pass a common
+# Friendly aliases -> NLLB-200 language tag. Lets callers pass a common
 # ISO-639-1 code ("de") or an English language name ("German") instead of the
 # full NLLB tag ("deu_Latn"). Only consulted for NLLB-200-style checkpoints (see
 # ``_normalize_lang_code``); a candidate is accepted only if the checkpoint
@@ -203,7 +203,7 @@ _NAME_TO_NLLB: dict[str, str] = {
     "swahili": "swh_Latn",
 }
 
-# M2M100 (PR 6). Unlike NLLB, M2M100 names its languages with bare ISO-639-1
+# M2M100. Unlike NLLB, M2M100 names its languages with bare ISO-639-1
 # codes ("de", "fr", "zh") exposed through the tokenizer's ``lang_code_to_id``,
 # each mapped to a ``__de__``-style token id. To normalize the SAME friendly
 # inputs we accept for NLLB (English names, and NLLB-style tags a caller might
@@ -1017,7 +1017,7 @@ class M2M100ProcessingInfo(BaseProcessingInfo):
         case a caller reuses one) is mapped to it. A mapped candidate is accepted
         only if the checkpoint actually declares it, so this never invents an
         unsupported language -- an unmapped/unknown code is returned unchanged
-        and rejected downstream (PR 4.2 for NLLB, PR 6 for M2M100).
+        and rejected downstream.
 
         A non-string target raises a clean ``ValueError`` rather than an
         ``AttributeError`` from ``.strip()`` (the runtime path already guards
@@ -1106,8 +1106,7 @@ class M2M100ProcessingInfo(BaseProcessingInfo):
         # the runtime prepends only decoder_start_token_id (=eos=2). The ENCODER
         # source is tokenized separately in _apply_hf_processor_main /
         # _get_prompt_updates with add_special_tokens=True (the NLLB tokenizer
-        # then prepends the src-lang code and appends </s>). Target-language
-        # forced-BOS conditioning lands in PR 2.2.
+        # then prepends the src-lang code and appends </s>).
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
 
@@ -1211,21 +1210,15 @@ class M2M100MultiModalProcessor(EncDecMultiModalProcessor[M2M100ProcessingInfo])
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ):
-        """NLLB / M2M100 has no HF Processor, only a tokenizer.
+        """Tokenize the source text directly (these models have only a
+        tokenizer, no HF Processor). The decoder prompt is built separately by
+        ``create_decoder_prompt``, so this emits only ``encoder_input_ids``.
 
-        NOTE (0.26.x checklist #3): vLLM >=0.26 renamed the encoder-side
-        override to ``_apply_hf_processor_main(mm_items, hf_processor_mm_kwargs)``
-        and the base path now requires a real ``ProcessorMixin`` (these models
-        only have a tokenizer, so the base path raises ``TypeError``). We
-        tokenize the source text directly. The decoder prompt is built separately
-        by ``EncDecMultiModalProcessor`` via ``create_decoder_prompt``, so this
-        emits only ``encoder_input_ids``.
-
-        Tokenized with ``add_special_tokens=True`` so the NLLB tokenizer prepends
-        the source-language code and appends </s>, matching HuggingFace. Stays
-        consistent with ``_get_prompt_updates``.
+        Uses ``add_special_tokens=True`` so the NLLB tokenizer prepends the
+        source-language code and appends </s>, matching HuggingFace and
+        ``_get_prompt_updates``.
         """
         from transformers.feature_extraction_utils import BatchFeature
 
@@ -1295,13 +1288,13 @@ class M2M100ForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModa
     The source sentence is fed as a "text" modality through
     ``M2M100MultiModalProcessor`` (registered above). ``load_weights`` consumes a
     real ``facebook/nllb-200-*`` or M2M100 checkpoint with zero missing or
-    unexpected keys. Target-language forced-BOS conditioning and end-to-end
-    generation land in PRs 2.2 / 2.3.
+    unexpected keys. The decoder's first token is the target-language
+    ``forced_bos_token_id`` resolved by ``create_decoder_prompt``.
     """
 
     # HF M2M100 checkpoint keys already carry the ``model.`` prefix and use
     # standard ``.weight``/``.bias``/``*_layer_norm`` names, so the mapper is an
-    # identity map (BART needed one to *add* ``model.`` and rename beta/gamma).
+    # identity map.
     hf_to_vllm_mapper = WeightsMapper()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
