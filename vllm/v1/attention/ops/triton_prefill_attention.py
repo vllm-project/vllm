@@ -32,6 +32,16 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
 
 
+def _prefer_narrow_kv_tile() -> bool:
+    """RDNA3/RDNA4 prefer a narrower KV tile than the shared default."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1x
+
+    # RDNA3/RDNA4 only: on_gfx1x() excludes gfx10xx and gfx1250.
+    return on_gfx1x()
+
+
 @triton.jit
 def _fwd_kernel(
     Q,
@@ -249,6 +259,10 @@ def context_attention_fwd(
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
     num_warps = 4 if Lk <= 64 else 8
 
+    # BLOCK_M, num_warps and num_stages stay at the shared defaults; min()
+    # leaves dtypes whose default tile is already 32, such as float32, alone.
+    BLOCK_N = min(BLOCK, 32) if _prefer_narrow_kv_tile() else BLOCK
+
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
 
@@ -272,7 +286,7 @@ def context_attention_fwd(
         kv_group_num=kv_group_num,
         BLOCK_M=BLOCK,
         BLOCK_DMODEL=triton.next_power_of_2(Lk),
-        BLOCK_N=BLOCK,
+        BLOCK_N=BLOCK_N,
         IS_CAUSAL=is_causal,
         SLIDING_WINDOW_Q=sliding_window_q,
         SLIDING_WINDOW_K=sliding_window_k,

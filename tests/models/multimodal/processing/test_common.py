@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Set as AbstractSet
 from functools import partial
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
+from tests.models.utils import build_model_context
 from vllm.config import ModelConfig
 from vllm.config.multimodal import (
     AudioDummyOptions,
@@ -16,10 +19,15 @@ from vllm.config.multimodal import (
     MultiModalDummyOptions,
     VideoDummyOptions,
 )
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
+from vllm.entrypoints.chat_utils import _get_embeds_data
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import batched_tensors_equal
+from vllm.multimodal.inputs import MultiModalFeatureSpec, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.platforms import current_platform
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
@@ -191,6 +199,79 @@ def get_token_prompt(
         raise TypeError(type(inputs.prompt))
 
     return inputs.prompt
+
+
+@pytest.mark.parametrize(
+    "model_id,durations",
+    [
+        ("Qwen/Qwen2-Audio-7B-Instruct", [1.0, 2.3]),
+        ("nvidia/audio-flamingo-3-hf", [31.0]),
+        ("fixie-ai/ultravox-v0_5-llama-3_2-1b", [1.0, 31.0]),
+        ("Qwen/Qwen2.5-Omni-3B", [1.0, 2.3]),
+        ("Qwen/Qwen3-Omni-30B-A3B-Instruct", [1.0, 2.3]),
+    ],
+)
+def test_audio_metadata_only_roundtrip(model_id, durations, monkeypatch):
+    """EC metadata preserves the raw-audio prompt without running the HF processor."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"audio": len(durations)})
+    mm_config = ctx.model_config.multimodal_config
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    sample_rate = processor.info.get_feature_extractor().sampling_rate
+    audios = [
+        np.zeros(int(duration * sample_rate), dtype=np.float32)
+        for duration in durations
+    ]
+    prompt = processor.dummy_inputs.get_dummy_text({"audio": len(audios)})
+    raw = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs={},
+    )
+    features = [
+        MultiModalFeatureSpec(
+            data=item,
+            modality="audio",
+            identifier=str(index),
+            mm_position=position,
+        )
+        for index, (item, position) in enumerate(
+            zip(raw["mm_kwargs"]["audio"], raw["mm_placeholders"]["audio"])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    metadata = json.loads(
+        json.dumps([entry["metadata"] for entry in published.values()])
+    )
+    assert len(metadata) == len(audios)
+    assert all(metadata)
+    audio_data = _get_embeds_data("audio", metadata, processor)
+
+    def unexpected_preprocessing(*args, **kwargs):
+        pytest.fail("The EC consumer must not preprocess audio")
+
+    monkeypatch.setattr(processor, "_call_hf_processor", unexpected_preprocessing)
+    remote = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": audio_data}),
+        hf_processor_mm_kwargs={},
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
+    # Omni also consumes these lengths when constructing M-RoPE positions.
+    if "audio_feature_lengths" in audio_data:
+        assert torch.equal(
+            remote["mm_kwargs"].get_data()["audio_feature_lengths"],
+            raw["mm_kwargs"].get_data()["audio_feature_lengths"],
+        )
+
+    mm_config.allow_missing_mm_embeddings = False
+    ordinary_processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    with pytest.raises(ValueError, match="should contain the fields"):
+        ordinary_processor.info.parse_mm_data({"audio": audio_data})
 
 
 def random_vision_chunk(

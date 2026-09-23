@@ -61,6 +61,19 @@ and compares the disaggregated outputs against it. Set `MODEL` to use another mo
 or `MOONCAKE_EC_PROTOCOL=rdma` to use RDMA on supported hardware. See the script for
 additional configuration options.
 
+### Audio inputs
+
+The Python EPD proxy also rewrites audio in `/v1/chat/completions` into
+metadata-only references for Qwen2-Audio, AudioFlamingo3, Ultravox,
+Qwen2.5-Omni, and Qwen3-Omni. The encoder publishes `audio_num_tokens`
+(the placeholder token count of each audio) together with any feature
+lengths the model needs; the consumer uses them to reconstruct the audio
+placeholders and receives the embeddings through its EC connector without
+repeating audio preprocessing.
+
+This covers pure audio inputs, not video with an embedded audio track. It does
+not add `/v1/audio/transcriptions` or realtime routes to the example proxy.
+
 ---
 
 ## 3  Test Script

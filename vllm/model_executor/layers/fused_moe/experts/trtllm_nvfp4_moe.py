@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 from vllm.model_executor.utils import is_weights_pre_processed
@@ -222,10 +223,10 @@ class TrtLlmNvFp4ExpertsBase:
         activation_key: QuantKey | None,
     ) -> bool:
         """Supports Nvfp4 quantization."""
-        SUPPORTED_W_A = [
-            (kNvfp4Static, kNvfp4Dynamic),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        return weight_key == kNvfp4Static and activation_key in (
+            kNvfp4Dynamic,
+            kNvfp4DynamicToken,
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -316,22 +317,12 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        if self.per_token_activation:
-            # Deferred input quant leaves K unpacked here, breaking the
-            # workspace assumptions below. Per-token NVFP4 is only supported on
-            # the monolithic (non-EP) path for now.
-            raise NotImplementedError(
-                "NVFP4 per-token activation is only supported on the monolithic "
-                "(non-EP) FlashInfer TRTLLM MoE path."
-            )
-
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
 
-        # Hidden states are Nvfp4, packed into int8 dtype, so we
-        # need to multiply K by 2 to get the output shape right.
-        assert self.hidden_dim == K * 2
+        # Per-token inputs are unpacked; otherwise each byte holds two FP4 values.
+        assert self.hidden_dim == (K if self.expects_unquantized_inputs else K * 2)
         output = (M, self.hidden_dim)
 
         return (workspace1, workspace2, output)
@@ -349,7 +340,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
-        a1q_scale: torch.Tensor,
+        a1q_scale: torch.Tensor | None,
     ):
         import flashinfer
 

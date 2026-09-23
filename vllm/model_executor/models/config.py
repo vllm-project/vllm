@@ -280,11 +280,14 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 "FLASH_ATTN or TRITON_ATTN instead."
             )
         if attention_config.backend is None and not attention_config.use_non_causal:
+            # Only the sm_100 default backend order reads this flag (it puts
+            # FlashInfer first for causal models). Elsewhere Gemma4Config above
+            # keeps FlashInfer out: FA4 on every layer, else TRITON_ATTN.
             attention_config.use_non_causal = True
             logger.info(
-                "DiffusionGemma uses mixed causal/bidirectional attention "
-                "within a batch; setting use_non_causal=True to exclude "
-                "FlashInfer from auto-selection."
+                "DiffusionGemma mixes causal and bidirectional attention in "
+                "one batch; setting use_non_causal=True so the default backend "
+                "order prefers FlashAttention over FlashInfer."
             )
 
         # Auto-create DiffusionConfig from HF config if not provided.

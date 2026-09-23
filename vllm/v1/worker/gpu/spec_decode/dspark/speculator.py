@@ -149,10 +149,7 @@ class DSparkSpeculator(DFlashSpeculator):
         )
         if self.draft_watermarker is not None:
             sampled = self.draft_watermarker.sample(
-                logits,
-                sampled,
-                idx_map,
-                self.temperature,
+                logits, sampled, idx_map, self.temperature
             )
         return sampled
 

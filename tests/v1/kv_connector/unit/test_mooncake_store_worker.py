@@ -2222,15 +2222,40 @@ def test_worker_init_excludes_nonprefix_cache_groups(monkeypatch):
     assert [db.block_size for db in store_worker.token_dbs] == [800, 800]
 
 
+def _make_two_full_attention_groups_kv_cache_config():
+    """Two full-attention groups with different block sizes: no hybrid
+    layers, but block-level failure reporting is still unsupported."""
+    return KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full0"],
+                FullAttentionSpec(
+                    block_size=800, num_kv_heads=8, head_size=64, dtype=None
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["full1"],
+                FullAttentionSpec(
+                    block_size=1600, num_kv_heads=8, head_size=64, dtype=None
+                ),
+            ),
+        ],
+    )
+
+
 @pytest.mark.parametrize(
-    ("disable_hybrid_kv_cache_manager", "expected_is_hma_required"),
+    ("make_config", "expected_is_hma_required"),
     [
-        (True, False),
-        (False, True),
+        (lambda: _make_qsa_hybrid_kv_cache_config(), True),
+        (lambda: _make_two_full_attention_groups_kv_cache_config(), True),
+        (lambda: _make_kv_cache_config(block_size=800), False),
     ],
+    ids=["hybrid", "two-full-attention-groups", "single-group"],
 )
 def test_worker_is_hma_required_from_kv_cache_groups(
-    monkeypatch, disable_hybrid_kv_cache_manager, expected_is_hma_required
+    monkeypatch, make_config, expected_is_hma_required
 ):
     store = MagicMock()
     store.setup.return_value = 0
@@ -2241,16 +2266,12 @@ def test_worker_is_hma_required_from_kv_cache_groups(
         "load_from_config",
         staticmethod(lambda: _make_config()),
     )
-    vllm_config = _make_vllm_config(
-        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager
-    )
+    vllm_config = _make_vllm_config()
     vllm_config.cache_config.block_size = 800
     vllm_config.cache_config.enable_prefix_caching = True
     vllm_config.cache_config.prefix_match_unit = None
 
-    store_worker = worker.MooncakeStoreWorker(
-        vllm_config, _make_qsa_hybrid_kv_cache_config()
-    )
+    store_worker = worker.MooncakeStoreWorker(vllm_config, make_config())
 
     assert store_worker._is_hma_required is expected_is_hma_required
 

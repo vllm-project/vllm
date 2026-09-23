@@ -2129,7 +2129,7 @@ class KFp8StaticChannel(QuantKeyScheme):
         weight, weight_scale, _ = process_fp8_weight_channel_strategy(
             layer.weight, layer.weight_scale.data
         )
-        layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight = Parameter(weight, requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
 

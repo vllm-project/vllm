@@ -1830,6 +1830,7 @@ steps:
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
+  - vllm/third_party/flash_linear_attention/
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/mamba
@@ -1886,7 +1887,7 @@ steps:
   - vllm/config/
   - tests/kernels/quantization/test_rocm_skinny_gemms.py
   commands:
-  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) DeepEP FP8 MoE Kernels" # TBD
   timeout_in_minutes: 55
@@ -3452,6 +3453,29 @@ steps:
   commands:
   - pytest -v -s compile/h100/test_startup.py
 
+- label: ":amd: (MI355) Fusion and Compile FP8"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers/
+  - vllm/v1/attention/
+  - vllm/distributed/
+  - vllm/_aiter_ops.py
+  - tests/compile/passes/
+  - tests/compile/correctness_e2e/test_attn_quant.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/models/llama.py
+  commands:
+  - amd-smi
+  - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+  - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
+
 #--------------------------------------------------------  mi355 · distributed  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Sharded RDT Weight Transfer"
@@ -3869,6 +3893,84 @@ steps:
   - uv pip install --system 'evalscope==1.10.0'
   - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-rocm.txt
 
+- label: ":amd: (MI355) LM Eval TurboQuant k8v4"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/ops/triton_unified_attention.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  - vllm/v1/attention/ops/flydsl_turboquant_decode.py
+  - vllm/v1/attention/ops/flydsl_kernels/
+  - vllm/v1/attention/ops/turboquant_soa/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k8v4-rocm.txt
+
+- label: ":amd: (MI355) LM Eval TurboQuant t4nc"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/ops/triton_unified_attention.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  - vllm/v1/attention/ops/flydsl_turboquant_decode.py
+  - vllm/v1/attention/ops/flydsl_kernels/
+  - vllm/v1/attention/ops/turboquant_soa/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t4nc-rocm.txt
+
+- label: ":amd: (MI355) LM Eval TurboQuant k3v4nc"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/ops/triton_unified_attention.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  - vllm/v1/attention/ops/flydsl_turboquant_decode.py
+  - vllm/v1/attention/ops/flydsl_kernels/
+  - vllm/v1/attention/ops/turboquant_soa/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v4nc-rocm.txt
+
 - label: ":amd: (MI355) LM Eval Small Models Distributed"
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -4229,6 +4331,35 @@ steps:
   commands:
   - pytest -v -s kernels/moe/test_moe_layer.py
 
+- label: ":amd: (MI355) MoRI EP Numerics"
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/kernels/moe/test_mori_moe.py
+  - tests/kernels/moe/utils.py
+  - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
+  - tests/kernels/utils.py
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/utils/torch_utils.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/
+  - vllm/config/
+  - vllm/forward_context.py
+  - vllm/v1/worker/workspace.py
+  - vllm/platforms/
+  - vllm/_aiter_ops.py
+  - requirements/rocm-test.txt
+  optional: true
+  commands:
+  - amd-smi
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 pytest -v -s kernels/moe/test_mori_moe.py
+
 - label: ":amd: (MI355) Quantization Kernels Shard %N"
   timeout_in_minutes: 120
   parallelism: 6
@@ -4254,7 +4385,30 @@ steps:
   - tests/kernels/quantization/test_rocm_skinny_gemms.py
   optional: true
   commands:
-  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) NVFP4 Dense Emulation Shard %N"
+  timeout_in_minutes: 10
+  parallelism: 3
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/kernels/quantization/test_nvfp4_emulation.py
+  - tests/kernels/quantization/nvfp4_utils.py
+  - tests/conftest.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py
+  - vllm/config/kernel.py
+  - vllm/platforms/
+  - vllm/envs.py
+  - vllm/utils/torch_utils.py
+  - requirements/rocm-test.txt
+  optional: true
+  commands:
+  - amd-smi
+  - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) FP8 MoE Kernels" # TBD
   timeout_in_minutes: 40
@@ -5069,3 +5223,57 @@ steps:
   commands:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
+
+- label: ':amd: (MI355) Fusion E2E TP2 AsyncTP BF16 Config Sweep'
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/utils.py
+  - vllm/distributed/
+  - vllm/v1/attention/backends/triton_attn.py
+  - tests/compile/fusions_e2e/
+  - tests/compile/passes/distributed/test_async_tp.py
+  - tests/compile/rocm/test_async_tp.py
+  - tests/compile/correctness_e2e/test_async_tp.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/models/qwen3.py
+  commands:
+  - rocm-smi
+  - pytest -v -s tests/compile/rocm/test_async_tp.py
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_rocm_async_tp.py
+  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py::test_rocm_async_tp_bf16_output_correctness
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  mirror_hardwares:
+  - amdexperimental
+  - amdproduction
+  - amdgfx950nightly
+  - amdmi355
+  optional: true
+
+- label: ":amd: (MI355) MRV2 Sampler JIT Warmup"
+  timeout_in_minutes: 10
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - tests/jit_monitor/
+  - tests/models/utils.py
+  - tests/models/registry.py
+  - tests/utils.py
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/model_executor/warmup/
+  - vllm/v1/sample/ops/topk_topp_sampler.py
+  - vllm/utils/jit_monitor.py
+  - vllm/config/observability.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  commands:
+  - pytest -v -s tests/jit_monitor/test_no_runtime_jit_rocm.py --timeout=300

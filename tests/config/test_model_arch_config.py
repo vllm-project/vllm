@@ -15,8 +15,10 @@ from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.config.model_arch import ModelArchitectureConfig
+from vllm.transformers_utils.configs.diffusion_gemma import DiffusionGemmaConfig
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.transformers_utils.model_arch_config_convertor import (
+    MODEL_ARCH_CONFIG_CONVERTORS,
     Gemma4ModelArchConfigConvertor,
     ModelArchConfigConvertorBase,
 )
@@ -496,3 +498,26 @@ def test_deepseek_v4_convertor_splits_vision_architecture():
         conv = DeepseekV4ModelArchConfigConvertor(draft_cfg, draft_cfg)
         assert conv.get_architectures() == [draft_arch]
         assert draft_cfg.architectures == [draft_arch]
+
+
+def test_diffusion_gemma_head_dims_vary_by_layer_type():
+    """Checkpoints carry model_type `diffusion_gemma` at the top level. Under
+    the base convertor every layer reports the sliding head dim, Gemma4Config
+    skips its head-dim handling, and the full-attention KV-cache group falls to
+    FlashInfer, which cannot take a per-request causal tensor."""
+    text_config = dict(
+        num_hidden_layers=6,
+        hidden_size=64,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+        head_dim=16,
+        global_head_dim=32,
+        layer_types=["sliding_attention"] * 5 + ["full_attention"],
+    )
+    hf_config = DiffusionGemmaConfig(text_config=text_config)
+
+    convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS[hf_config.model_type]
+    assert convertor_cls is Gemma4ModelArchConfigConvertor
+    arch = convertor_cls(hf_config, hf_config.text_config).convert()
+
+    assert [arch[i].head_size for i in range(6)] == [16] * 5 + [32]

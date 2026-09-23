@@ -188,10 +188,7 @@ class EncoderOnlyModelState(DefaultModelState):
         return attn_metadata
 
     def _build_encoder_attn_metadata(
-        self,
-        input_batch: InputBatch,
-        cudagraph_mode: CUDAGraphMode,
-        for_capture: bool,
+        self, input_batch: InputBatch, cudagraph_mode: CUDAGraphMode, for_capture: bool
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding

@@ -420,6 +420,10 @@ def _run_fused_moe_lora_one_shot(
         npid = min(npid_occ, max_npid_by_budget)
     npid = max(1, min(npid, max(1, N_per_slice // 128)))
 
+    # see issue: https://github.com/intel/intel-xpu-backend-for-triton/issues/8121
+    if current_platform.is_xpu():
+        npid = 1
+
     # Robust defaults across the prefill regime (H100/H200/B200, bf16/fp16).
     # NPID > 1 is the small-M / under-saturated path -- more warps help
     # amortise the inner-N expand loop. ns=3 instead of 4: GB200 ncu showed

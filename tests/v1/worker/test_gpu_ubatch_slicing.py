@@ -756,7 +756,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
         [1, 1, 10, 1, 1], [64, 96, 512, 32, 48]
     )
     # execute_model has populated the merged batch's DCP metadata already.
-    input_batch.dcp_local_seq_lens = gpu_cp_utils.maybe_prepare_dcp_local_seq_lens(
+    input_batch.dcp_local_seq_lens = gpu_cp_utils.prepare_dcp_local_seq_lens(
         buffers.dcp_local_seq_lens,
         input_batch.seq_lens,
         input_batch.num_reqs,

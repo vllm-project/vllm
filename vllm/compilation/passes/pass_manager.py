@@ -41,6 +41,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
+    from .fusion.collective_fusion import AsyncTPPass
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
     from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
     from .fusion.qk_norm_rope_kvcache_fusion import QkNormRopeKvCacheFusionPass
@@ -50,7 +51,6 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
-    from .fusion.collective_fusion import AsyncTPPass
 
 if current_platform.is_xpu():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass

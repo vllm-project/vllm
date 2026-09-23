@@ -21,7 +21,7 @@ from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
-    state.max_model_len = 8192
+    state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
     state.recoverssm = None
 
@@ -34,6 +34,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         query_start_loc_np=torch.tensor([0, 1], dtype=torch.int32).numpy(),
         query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
         num_scheduled_tokens=torch.tensor([1], dtype=torch.int32),
+        max_query_len=None,
         seq_lens_cpu_upper_bound=torch.tensor([1537], dtype=torch.int32),
         seq_lens=torch.tensor([1537], dtype=torch.int32),
         is_prefilling_np=torch.tensor([False]).numpy(),
