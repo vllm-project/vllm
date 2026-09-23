@@ -14,12 +14,23 @@ vllm serve /path/to/target --dtype bfloat16 \
     --speculative-config '{"method":"dflash","model":"/path/to/lilicorr","num_speculative_tokens":15,"draft_sample_method":"probabilistic"}'
 ```
 
-Set `num_speculative_tokens` to the checkpoint's trained `block_size - 1`.
-The block contains one anchor position and the remaining candidate positions.
-The current implementation builds the learned slot embeddings and attention
-buffers for that fixed geometry and scores the complete candidate lattice.
-Using fewer draft positions would require a separate implementation and quality
-validation; it is not supported by changing this setting alone.
+We strongly recommend explicitly setting `num_speculative_tokens` to the
+checkpoint's trained `block_size - 1` (for example, `15` for `block_size=16`).
+The trained block includes one anchor position. Other supported lengths are
+available, but may degrade acceptance length unpredictably; benchmark them with
+your checkpoint and workload before using them.
+
+Shorter drafts, down to one token, use the corresponding prefix of the learned
+slot embeddings and attention bias without changing checkpoint parameter shapes.
+Lengths above `block_size - 1` are unsupported because the checkpoint has no
+learned slot embeddings for those positions.
+
+Fixed-length drafting with shorter verification is a separate option provided by
+adaptive verification (`enable_adaptive_verification`). LiLiCorr shares the
+candidate-sampling and acceptance-estimation path, but this combination has not
+been validated end-to-end. Adaptive verification also requires compatible target
+attention backends and variable-length CUDA graph support; do not assume it works
+with Mamba2 targets.
 
 ## Proposal sampling
 

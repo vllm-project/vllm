@@ -18,7 +18,7 @@ from vllm.config import (
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers import logits_processor
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.models.lilicorr import LiLiCorrConfig, LiLiCorrHead
+from vllm.model_executor.models.lilicorr import LiLiCorrHead
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
@@ -44,7 +44,7 @@ def _config(**overrides):
         logit_scale=3.0,
     )
     config.update(overrides)
-    return LiLiCorrConfig(**config)
+    return {f"lilicorr_{key}": value for key, value in config.items()}
 
 
 def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
@@ -63,8 +63,9 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
         -1,
     )
     x = head.token_proj(embeddings) + head.pass_hidden_proj(hidden).unsqueeze(-2)
-    x = x + head.feature_mlp(features.to(x.dtype))
-    x = x + head.slot_embedding[:, 0] + head.rank_embedding[:, 0]
+    features = head.feature_mlp[0](features.to(x.dtype))
+    x = x + head.feature_mlp[3](F.silu(head.feature_mlp[1](features)))
+    x = x + head.slot_embedding[:, 0, :slots] + head.rank_embedding[:, 0]
     x = x.flatten(1, 2)
     positions = torch.arange(slots, device=x.device).repeat_interleave(top_k)
     relative = positions[:, None] - positions[None, :]
@@ -87,7 +88,7 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
                 normalized, normalized, normalized, attn_mask=bias, need_weights=False
             )[0]
         )
-        x = x + layer.mlp(layer.mlp_norm(x))
+        x = x + layer.mlp[2](F.silu(layer.mlp[0](layer.mlp_norm(x))))
     x = head.output_norm(x).view(batch, slots, top_k, -1)
     a = head.anchor_norm(head.context_proj(anchor) * valid[:, None])
     expanded = a[:, None, None].expand_as(x)
@@ -107,8 +108,8 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
     "head_width,slots,dtype",
     [
         pytest.param(8, 3, torch.float32, id="projected-multi-slot"),
-        pytest.param(16, 1, torch.float32, id="identity-single-slot"),
-        pytest.param(8, 3, torch.bfloat16, id="bf16-projected-multi-slot"),
+        pytest.param(16, 1, torch.float32, id="identity-shortened-single-slot"),
+        pytest.param(8, 2, torch.bfloat16, id="bf16-shortened-multi-slot"),
     ],
 )
 def test_lilicorr_matches_exported_head(head_width, slots, dtype):
@@ -121,7 +122,7 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
     ):
         head = LiLiCorrHead(
             model_hidden_size=16,
-            block_size=slots + 1,
+            block_size=4,
             rms_norm_eps=1e-6,
             config=_config(hidden_size=head_width),
         ).to(dtype)
@@ -152,6 +153,47 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
         expected = _reference_scores(head, *inputs)
     tolerance = 0.04 if dtype == torch.bfloat16 else 2e-6
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+
+
+def test_runtime_length_keeps_trained_checkpoint_geometry(monkeypatch):
+    from vllm.model_executor.models.lilicorr import LiLiCorr
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+
+    def init_backbone(self, **kwargs):
+        nn.Module.__init__(self)
+        self.quant_config = None
+
+    monkeypatch.setattr(DFlashQwen3Model, "__init__", init_backbone)
+    spec = SimpleNamespace(
+        num_speculative_tokens=1,
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                hidden_size=16,
+                rms_norm_eps=1e-6,
+                dflash_config=_config() | {"block_size": 4},
+            )
+        ),
+    )
+    with set_current_vllm_config(
+        VllmConfig(
+            device_config=DeviceConfig("cpu"),
+            compilation_config=CompilationConfig(mode=0),
+        )
+    ):
+        for slots in (1, 3):
+            spec.num_speculative_tokens = slots
+            head = LiLiCorr(
+                vllm_config=SimpleNamespace(speculative_config=spec)
+            ).lilicorr
+            assert head.slot_embedding.shape == (1, 1, 3, 1, 8)
+            assert head.relative_slot_bias.shape == (2, 7)
+        spec.draft_model_config.hf_config.dflash_config["lilicorr_enabled"] = False
+        with pytest.raises(ValueError, match="lilicorr_enabled"):
+            LiLiCorr(vllm_config=SimpleNamespace(speculative_config=spec))
+        spec.draft_model_config.hf_config.dflash_config["lilicorr_enabled"] = True
+        spec.num_speculative_tokens = 4
+        with pytest.raises(ValueError, match="trained block_size"):
+            LiLiCorr(vllm_config=SimpleNamespace(speculative_config=spec))
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
@@ -329,27 +371,12 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     torch.testing.assert_close(adaptive_inputs[2], spec.sample_col)
 
 
-@pytest.mark.parametrize(
-    "key,value",
-    [
-        ("candidate_topk", 3),
-        ("vector_eps", 0),
-        ("logit_scale", float("nan")),
-        ("hidden_size", -1),
-    ],
-)
-def test_invalid_head_geometry_is_rejected(key, value):
-    values = {f"lilicorr_{k}": v for k, v in vars(_config()).items()}
-    values[f"lilicorr_{key}"] = value
-    with pytest.raises(ValueError):
-        LiLiCorrConfig.from_dict(values)
-
-
-def test_lilicorr_architecture_survives_dflash_config_wrapping():
+def test_lilicorr_config_preserves_architecture():
     from transformers import Qwen3Config
 
     config = Qwen3Config(architectures=["LiLiCorrDraftModel"])
-    assert EAGLEConfig(config, method="dflash").architectures == ["LiLiCorrDraftModel"]
+    wrapped = EAGLEConfig(config, method="dflash")
+    assert wrapped.architectures == ["LiLiCorrDraftModel"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

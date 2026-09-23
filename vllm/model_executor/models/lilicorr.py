@@ -3,10 +3,8 @@
 # LiLiCorr head adapted from sgl-project/sglang PR #37462 (Apache-2.0).
 """DFlash backbone with the LiLiCorr candidate-lattice correlator."""
 
-import math
 from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +13,8 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.linear import (
     LinearBase,
     ReplicatedLinear,
@@ -31,46 +31,6 @@ from .qwen3_dflash2 import DFlash2Qwen3DecoderLayer
 from .utils import maybe_prefix
 
 
-@dataclass(frozen=True)
-class LiLiCorrConfig:
-    candidate_topk: int
-    hidden_size: int
-    num_layers: int
-    num_heads: int
-    mlp_ratio: float
-    factor_dim: int
-    vector_eps: float
-    logit_scale: float
-
-    def resolve_hidden_size(self, *, model_hidden_size: int) -> int:
-        return self.hidden_size or model_hidden_size
-
-    @classmethod
-    def from_dict(cls, config: dict) -> "LiLiCorrConfig":
-        if not config.get("lilicorr_enabled", True):
-            raise ValueError("LiLiCorrDraftModel requires lilicorr_enabled.")
-        values: dict[str, Any] = {}
-        for name in cls.__dataclass_fields__:
-            key = f"lilicorr_{name}"
-            if key not in config:
-                raise ValueError(f"Missing dflash_config.{key}.")
-            cast = float if name in ("mlp_ratio", "vector_eps", "logit_scale") else int
-            value = cast(config[key])
-            if (
-                not math.isfinite(value)
-                or value < 0
-                or (value == 0 and name != "hidden_size")
-            ):
-                raise ValueError(f"Invalid dflash_config.{key}={value}.")
-            values[name] = value
-        result = cls(**values)
-        if result.candidate_topk > 16 or result.candidate_topk & (
-            result.candidate_topk - 1
-        ):
-            raise ValueError("LiLiCorr candidate_topk must be a power of two <= 16.")
-        return result
-
-
 class LiLiCorrLatticeAttention(nn.Module):
     def __init__(
         self,
@@ -80,13 +40,13 @@ class LiLiCorrLatticeAttention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        if hidden_size % num_heads != 0:
+        if num_heads <= 0 or hidden_size % num_heads != 0:
             raise ValueError(
                 f"LiLiCorr hidden_size={hidden_size} must be divisible "
                 f"by num_heads={num_heads}."
             )
-        self.hidden_size = int(hidden_size)
-        self.num_heads = int(num_heads)
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
         self.head_dim = self.hidden_size // self.num_heads
         # Exported lattice QKV parameters stay in the model's floating dtype.
         self.in_proj_weight = nn.Parameter(
@@ -113,15 +73,62 @@ class LiLiCorrLatticeAttention(nn.Module):
         q = q.view(shape).transpose(1, 2)
         k = k.view(shape).transpose(1, 2)
         v = v.view(shape).transpose(1, 2)
+        # Attention and MMEncoderAttention cannot accept this learned per-head
+        # additive bias. The full candidate lattice has no KV-cache state.
         out = F.scaled_dot_product_attention(
             q,
             k,
             v,
-            attn_mask=attention_bias.reshape(bsz, self.num_heads, seq_len, seq_len),
+            attn_mask=attention_bias,
         )
         return self.out_proj(
             out.transpose(1, 2).reshape(bsz, seq_len, self.hidden_size)
         )
+
+
+class LiLiCorrMLP(nn.Sequential):
+    """Biased SiLU MLP retaining the checkpoint's numeric module names."""
+
+    def __init__(
+        self,
+        input_size: int,
+        intermediate_size: int,
+        output_size: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+        normalize_input: bool = False,
+    ) -> None:
+        modules: list[nn.Module] = [nn.LayerNorm(input_size)] if normalize_input else []
+        input_index = len(modules)
+        modules.extend(
+            [
+                ReplicatedLinear(
+                    input_size,
+                    intermediate_size,
+                    return_bias=False,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, str(input_index)),
+                ),
+                get_act_fn("silu"),
+                ReplicatedLinear(
+                    intermediate_size,
+                    output_size,
+                    return_bias=False,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, str(input_index + 2)),
+                ),
+            ]
+        )
+        super().__init__(*modules)
+        self._input_index = input_index
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._input_index:
+            x = self[0](x)
+        x = self[self._input_index](x)
+        down_proj = cast(ReplicatedLinear, self[-1])
+        x = maybe_fused_act_quant(self[self._input_index + 1], x, down_proj)
+        return down_proj(x)
 
 
 class LiLiCorrLayer(nn.Module):
@@ -141,22 +148,13 @@ class LiLiCorrLayer(nn.Module):
         )
         self.mlp_norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
         mlp_hidden_size = int(hidden_size * mlp_ratio)
-        self.mlp = nn.Sequential(
-            ReplicatedLinear(
-                hidden_size,
-                mlp_hidden_size,
-                return_bias=False,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "mlp.0"),
-            ),
-            nn.SiLU(),
-            ReplicatedLinear(
-                mlp_hidden_size,
-                hidden_size,
-                return_bias=False,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "mlp.2"),
-            ),
+        # The checkpoint uses a biased, nongated MLP, unlike Qwen's SwiGLU.
+        self.mlp = LiLiCorrMLP(
+            hidden_size,
+            mlp_hidden_size,
+            hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "mlp"),
         )
 
     def forward(
@@ -178,21 +176,29 @@ class LiLiCorrHead(nn.Module):
         model_hidden_size: int,
         block_size: int,
         rms_norm_eps: float,
-        config: LiLiCorrConfig,
+        config: dict[str, Any],
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        hidden_size = config.resolve_hidden_size(model_hidden_size=model_hidden_size)
-        self.block_size = int(block_size)
-        self.num_candidate_slots = self.block_size - 1
-        self.candidate_topk = int(config.candidate_topk)
+        hidden_size = config["lilicorr_hidden_size"] or model_hidden_size
+        self.block_size = block_size
+        self.num_candidate_slots = block_size - 1
+        self.candidate_topk = config["lilicorr_candidate_topk"]
+        if (
+            self.candidate_topk <= 0
+            or self.candidate_topk > 16
+            or self.candidate_topk & (self.candidate_topk - 1)
+        ):
+            raise ValueError("LiLiCorr candidate_topk must be a power of two <= 16.")
         self.hidden_size = hidden_size
-        self.num_heads = int(config.num_heads)
-        self.mlp_ratio = float(config.mlp_ratio)
-        self.factor_dim = int(config.factor_dim)
-        self.vector_eps = float(config.vector_eps)
-        self.logit_scale = float(config.logit_scale)
+        self.num_heads = config["lilicorr_num_heads"]
+        self.mlp_ratio = config["lilicorr_mlp_ratio"]
+        self.factor_dim = config["lilicorr_factor_dim"]
+        self.vector_eps = config["lilicorr_vector_eps"]
+        self.logit_scale = config["lilicorr_logit_scale"]
+        # Candidate IDs and embeddings are replicated across TP ranks, so each
+        # rank scores the same lattice without further head collectives.
         self.token_proj = (
             nn.Identity()
             if model_hidden_size == hidden_size
@@ -211,23 +217,13 @@ class LiLiCorrHead(nn.Module):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "pass_hidden_proj"),
         )
-        self.feature_mlp = nn.Sequential(
-            nn.LayerNorm(self.num_candidate_features),
-            ReplicatedLinear(
-                self.num_candidate_features,
-                hidden_size,
-                return_bias=False,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "feature_mlp.1"),
-            ),
-            nn.SiLU(),
-            ReplicatedLinear(
-                hidden_size,
-                hidden_size,
-                return_bias=False,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "feature_mlp.3"),
-            ),
+        self.feature_mlp = LiLiCorrMLP(
+            self.num_candidate_features,
+            hidden_size,
+            hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "feature_mlp"),
+            normalize_input=True,
         )
         self.slot_embedding = nn.Parameter(
             torch.zeros(1, 1, self.num_candidate_slots, 1, hidden_size)
@@ -256,7 +252,7 @@ class LiLiCorrHead(nn.Module):
                     quant_config=quant_config,
                     prefix=maybe_prefix(prefix, f"layers.{i}"),
                 )
-                for i in range(int(config.num_layers))
+                for i in range(config["lilicorr_num_layers"])
             ]
         )
         self.output_norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
@@ -268,6 +264,9 @@ class LiLiCorrHead(nn.Module):
             quant_config=None,
             prefix=maybe_prefix(prefix, "factor_input_proj"),
         )
+        # These are latent edge factors, not vocabulary projections. A candidate's
+        # outgoing vector scores its compatibility with each next-slot candidate's
+        # incoming vector; the anchor supplies the outgoing vector for slot zero.
         self.out_head = ReplicatedLinear(
             hidden_size,
             self.factor_dim,
@@ -300,8 +299,13 @@ class LiLiCorrHead(nn.Module):
     def materialize_inference_buffers(
         self, device: torch.device, dtype: torch.dtype
     ) -> None:
+        """Build inference-only views/copies after checkpoint weights are loaded."""
         topk = self.candidate_topk
         self._attn_bias = self._build_attention_bias(device=device, dtype=dtype)
+        # Both edge heads consume the same factor_hidden. Stacking their output
+        # rows computes both projections in one linear call; score() splits and
+        # normalizes each vector separately. Do this once after loading, keeping
+        # the original parameter names for checkpoint compatibility.
         self._fused_edge_weight = (
             torch.cat([self.out_head.weight, self.in_head.weight], dim=0)
             .to(device=device, dtype=dtype)
@@ -312,6 +316,10 @@ class LiLiCorrHead(nn.Module):
             .to(device=device, dtype=dtype)
             .contiguous()
         )
+        # The trained factor input is [x, anchor, x*anchor] for every candidate x.
+        # Splitting W along its input dimension lets score() project the anchor
+        # once per request and broadcast it, without materializing the concatenated
+        # input. The three contributions are summed with the original bias once.
         weight = self.factor_input_proj.weight
         hdim = self.hidden_size
         self._factor_input_splits = (
@@ -337,20 +345,19 @@ class LiLiCorrHead(nn.Module):
         slot_ids = torch.arange(
             self.num_candidate_slots, device=device, dtype=torch.long
         ).repeat_interleave(topk)
+        # Flattened lattice index = slot * topk + candidate rank. All candidates
+        # in a slot therefore share a position, including distinct candidate pairs
+        # within that slot. Each head learns a relative-slot bias plus an extra
+        # same-slot term; this is an additive score bias, not a causal mask.
+        # Center the lookup at the trained block_size-1 even for shorter drafts;
+        # score() selects the matching prefix of the resulting matrix.
         rel = slot_ids.view(-1, 1) - slot_ids.view(1, -1)
-        rel = rel.clamp(min=-(self.block_size - 1), max=self.block_size - 1)
         bias = self.relative_slot_bias[:, rel + self.block_size - 1]
         same_slot = slot_ids.view(-1, 1) == slot_ids.view(1, -1)
         bias = bias + same_slot.unsqueeze(0).to(
             dtype=bias.dtype
         ) * self.same_slot_bias.view(-1, 1, 1)
         return bias.to(device=device, dtype=dtype).contiguous()
-
-    def _project_anchor(
-        self, anchor_hidden: torch.Tensor, anchor_valid: torch.Tensor
-    ) -> torch.Tensor:
-        anchor = self.context_proj(anchor_hidden)
-        return anchor * anchor_valid.unsqueeze(-1).to(anchor.dtype)
 
     def score(
         self,
@@ -366,6 +373,11 @@ class LiLiCorrHead(nn.Module):
                 "Call materialize_inference_buffers() after loading the LiLiCorr head."
             )
         bsz, n_slots, topk = candidate_log_probs.shape
+        if not 1 <= n_slots <= self.num_candidate_slots:
+            raise ValueError(
+                f"LiLiCorr supports 1..{self.num_candidate_slots} candidate slots, "
+                f"got {n_slots}."
+            )
         if topk != self.candidate_topk:
             raise ValueError(
                 f"LiLiCorr expects candidate_topk={self.candidate_topk}, got {topk}."
@@ -392,16 +404,14 @@ class LiLiCorrHead(nn.Module):
         hidden_states = hidden_states + self.feature_mlp(
             features.to(dtype=token_states.dtype)
         )
-        hidden_states = hidden_states + self.slot_embedding[:, 0]
+        hidden_states = hidden_states + self.slot_embedding[:, 0, :n_slots]
         hidden_states = hidden_states + self.rank_embedding[:, 0]
         hidden_states = hidden_states.reshape(bsz, n_slots * topk, self.hidden_size)
-        anchor_state = self._project_anchor(anchor_hidden, anchor_valid)
-        lattice = self._attn_bias.shape[-1]
-        attention_bias = (
-            self._attn_bias.unsqueeze(0)
-            .expand(bsz, -1, -1, -1)
-            .reshape(bsz * self.num_heads, lattice, lattice)
-        )
+        anchor_state = self.context_proj(anchor_hidden)
+        anchor_state = anchor_state * anchor_valid[:, None].to(anchor_state.dtype)
+        # Shorter drafts use the learned prefix; keep checkpoint parameter shapes.
+        lattice = n_slots * topk
+        attention_bias = self._attn_bias[None, :, :lattice, :lattice]
         for layer in self.layers:
             hidden_states = layer(hidden_states, attention_bias)
         hidden_states = self.output_norm(hidden_states).reshape(
@@ -421,6 +431,10 @@ class LiLiCorrHead(nn.Module):
         anchor_out = F.normalize(
             self.anchor_out_head(anchor_state), dim=-1, eps=self.vector_eps
         )
+        # start_scores[b, j] scores anchor -> candidate j in slot zero.
+        # pair_scores[b, s, i, j] scores candidate i in slot s -> candidate j
+        # in slot s+1. Normalized factor dot products encode learned compatibility;
+        # forward() scales them into logits for the candidate-path selector.
         start_scores = (anchor_out[:, None, :] * in_vec[:, 0, :, :]).sum(dim=-1)
         pair_scores = torch.matmul(out_vec[:, :-1], in_vec[:, 1:].transpose(-1, -2))
         return (start_scores, pair_scores)
@@ -455,16 +469,15 @@ class LiLiCorr(DFlashQwen3Model):
         assert spec is not None
         config = spec.draft_model_config.hf_config
         draft_config = config.dflash_config
-        head_config = LiLiCorrConfig.from_dict(draft_config)
-        block_size = int(
-            draft_config.get("block_size", getattr(config, "block_size", 0))
-        )
-        if block_size != 1 + spec.num_speculative_tokens:
+        if not draft_config.get("lilicorr_enabled", True):
+            raise ValueError("LiLiCorr requires lilicorr_enabled=True.")
+        block_size = draft_config.get("block_size", getattr(config, "block_size", 0))
+        if not 1 <= spec.num_speculative_tokens < block_size:
             raise ValueError(
-                "LiLiCorr requires num_speculative_tokens = trained block_size - 1."
+                "LiLiCorr requires 1 <= num_speculative_tokens < trained block_size."
             )
-        taps = int(draft_config.get("conv_kernel_size", 0))
-        groups = int(draft_config.get("conv_group_size", 0))
+        taps = draft_config.get("conv_kernel_size", 0)
+        groups = draft_config.get("conv_group_size", 0)
         if taps < 0 or groups < 0 or bool(taps) != bool(groups):
             raise ValueError(
                 "LiLiCorr convolution geometry must enable both taps and group size."
@@ -479,7 +492,7 @@ class LiLiCorr(DFlashQwen3Model):
                 model_hidden_size=config.hidden_size,
                 block_size=block_size,
                 rms_norm_eps=config.rms_norm_eps,
-                config=head_config,
+                config=draft_config,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "lilicorr"),
             )
