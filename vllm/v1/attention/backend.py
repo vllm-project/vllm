@@ -539,6 +539,7 @@ class CommonAttentionMetadata:
             max_seq_len=self.max_seq_len,
             block_table_tensor=self.block_table_tensor[:num_actual_reqs],
             slot_mapping=self.slot_mapping[:num_actual_tokens],
+            is_dummy_batch=self.is_dummy_batch,
             causal=self.causal[:num_actual_reqs]
             if isinstance(self.causal, torch.Tensor)
             else self.causal,
