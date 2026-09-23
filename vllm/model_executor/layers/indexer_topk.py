@@ -164,10 +164,12 @@ class SparseIndexerTopk(torch.nn.Module):
             and not current_platform.is_device_capability_family(120)
         )
         self._is_rocm = current_platform.is_rocm()
+        self._aiter_enabled = False
         self._aiter_capable = False
         if self._is_rocm:
             from vllm._aiter_ops import rocm_aiter_ops
 
+            self._aiter_enabled = bool(rocm_aiter_ops.is_enabled())
             self._aiter_capable = bool(rocm_aiter_ops.is_indexer_top_k_enabled())
 
     def resolve_backend(
@@ -202,8 +204,12 @@ class SparseIndexerTopk(torch.nn.Module):
         elif self._backend == "aiter":
             if not self._is_rocm:
                 failures.append("requires a ROCm platform")
+            elif not self._aiter_enabled:
+                failures.append("requires AITER (VLLM_ROCM_USE_AITER=1)")
             elif not self._aiter_capable:
-                failures.append("requires AITER enabled on gfx950")
+                failures.append(
+                    "AITER has no tuned indexer top-k kernels for this GPU arch"
+                )
             if topk_tokens not in (512, 1024, 2048, 4096):
                 failures.append(
                     f"topk_tokens must be in (512, 1024, 2048, 4096), got {topk_tokens}"
