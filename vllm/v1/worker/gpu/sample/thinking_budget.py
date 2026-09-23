@@ -125,6 +125,13 @@ class ThinkingBudgetState:
         self.lb_check_interval = max(
             1, getattr(reasoning_config, "loop_break_check_interval", 16)
         )
+        self.lb_release = getattr(reasoning_config, "loop_break_release", "force")
+        self.lb_ramp_increment = getattr(
+            reasoning_config, "loop_break_ramp_increment", 2.0
+        )
+        self.lb_ramp_max_tokens = getattr(
+            reasoning_config, "loop_break_ramp_max_tokens", 32
+        )
 
         self.use_loop_break = np.zeros(self.max_num_reqs, dtype=bool)
         # -1 off, 0 armed, 1 fired. Written per request on the host and flipped
@@ -142,23 +149,33 @@ class ThinkingBudgetState:
         self.loop_break_report = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        # Tokens the request's release ramps before forcing; 0 forces at once.
+        self.loop_break_ramp_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
         self._lb_reset_reqs: list[int] = []
         self._lb_reset_vals: list[int] = []
+        self._lb_ramp_tokens: list[int] = []
 
-    def _loop_break_active_for(self, sampling_params: SamplingParams) -> bool:
-        """Server-configured loop breaking, minus a per-request opt-out.
+    def _loop_break_ramp_tokens_for(
+        self, sampling_params: SamplingParams
+    ) -> int | None:
+        """Tokens a request's release ramps before forcing: 0 for ``"force"``,
+        None when loop breaking is off for the request.
 
-        ``thinking_loop_break=False`` opts a request out; ``None`` (the default)
-        follows the server configuration. ``True`` cannot enable the feature on
-        a server that has not configured it, because the detection parameters
-        live in ``ReasoningConfig``.
+        ``thinking_loop_break=False`` opts a request out; ``None`` or ``True``
+        follows the server configuration, and ``"force"`` or ``"ramp"`` picks
+        the release. No value enables the feature on a server that has not
+        configured it, because the detection parameters live in
+        ``ReasoningConfig``.
         """
         if not self.loop_break_enabled:
-            return False
+            return None
         override = sampling_params.thinking_loop_break
-        if override is None:
-            return True
-        return bool(override)
+        if override is False:
+            return None
+        release = override if isinstance(override, str) else self.lb_release
+        return self.lb_ramp_max_tokens if release == "ramp" else 0
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         if not self.enabled:
@@ -166,7 +183,8 @@ class ThinkingBudgetState:
         budget = sampling_params.thinking_token_budget
         use_thinking_budget = budget is not None
         self.use_thinking_budget[req_idx] = use_thinking_budget
-        loop_break = self._loop_break_active_for(sampling_params)
+        ramp_tokens = self._loop_break_ramp_tokens_for(sampling_params)
+        loop_break = ramp_tokens is not None
         if budget is None:
             budget = _LOOP_BREAK_ONLY_BUDGET if loop_break else -1
         else:
@@ -181,6 +199,7 @@ class ThinkingBudgetState:
             self._lb_reset_vals.append(
                 _LOOP_BREAK_ARMED if loop_break else _LOOP_BREAK_OFF
             )
+            self._lb_ramp_tokens.append(ramp_tokens or 0)
         if self.thinking_token_budget.np[req_idx] != budget:
             self.thinking_token_budget.np[req_idx] = budget
             self._budget_dirty = True
@@ -204,11 +223,16 @@ class ThinkingBudgetState:
             vals = async_tensor_h2d(
                 self._lb_reset_vals, dtype=torch.int32, device=self.device
             )
+            ramp_tokens = async_tensor_h2d(
+                self._lb_ramp_tokens, dtype=torch.int32, device=self.device
+            )
             self.loop_break_fired.index_copy_(0, idx, vals)
+            self.loop_break_ramp_tokens.index_copy_(0, idx, ramp_tokens)
             self.loop_break_last_check.index_fill_(0, idx, 0)
             self.loop_break_report.index_fill_(0, idx, 0)
             self._lb_reset_reqs.clear()
             self._lb_reset_vals.clear()
+            self._lb_ramp_tokens.clear()
         if self._budget_dirty:
             self.thinking_token_budget.copy_to_uva()
             self._budget_dirty = False
@@ -247,6 +271,12 @@ class ThinkingBudgetState:
             ),
             loop_break_report=(
                 self.loop_break_report if self.loop_break_enabled else None
+            ),
+            loop_break_ramp_tokens=(
+                self.loop_break_ramp_tokens if self.loop_break_enabled else None
+            ),
+            loop_break_ramp_increment=(
+                self.lb_ramp_increment if self.loop_break_enabled else 0.0
             ),
             loop_break_min_pattern_size=(
                 self.lb_min_pattern_size if self.loop_break_enabled else 0
@@ -496,9 +526,11 @@ def _loop_break_detect_kernel(
         tl.store(loop_break_last_check_ptr + req_state_idx, 0)
         return
     if fired > 0:
-        # Already forcing. Under speculative decoding a forced end token can be
-        # rejected, so the flag stays set and _thinking_budget_kernel
+        # Already releasing. Under speculative decoding a forced end token can
+        # be rejected, so the flag stays set and _thinking_budget_kernel
         # re-asserts the end sequence every step until the section closes.
+        # Returning before the checkpoint below also freezes it at the fire,
+        # which is where the ramp release counts from.
         return
 
     total_len = tl.load(total_len_ptr + req_state_idx)
@@ -568,6 +600,9 @@ def _thinking_budget_kernel(
     cached_last_start_ptr,
     cached_last_end_ptr,
     loop_break_fired_ptr,
+    loop_break_last_check_ptr,
+    loop_break_ramp_tokens_ptr,
+    ramp_increment,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
     reasoning_end_token_ids_ptr,
@@ -675,6 +710,50 @@ def _thinking_budget_kernel(
             fired = tl.load(loop_break_fired_ptr + req_state_idx)
         if fired <= 0:
             return
+        if HAS_LOOP_BREAK:
+            ramp_tokens = tl.load(loop_break_ramp_tokens_ptr + req_state_idx)
+            if ramp_tokens > 0:
+                # The detection kernel stops advancing the checkpoint once a
+                # loop fires, so it holds the section length at the fire.
+                since_fire = num_reasoning_tokens - tl.load(
+                    loop_break_last_check_ptr + req_state_idx
+                )
+                since_fire = tl.maximum(since_fire, 0)
+                # Once the model starts a multi-token natural marker, finish it,
+                # even past the end of the ramp.
+                started = 0
+                for prefix_len in tl.static_range(1, NATURAL_END_LEN):
+                    if prefix_len <= since_fire:
+                        prefix_match = True
+                        for j in tl.static_range(0, NATURAL_END_LEN):
+                            if j < prefix_len:
+                                expected = tl.load(
+                                    natural_reasoning_end_token_ids_ptr + j
+                                )
+                                actual = _load_effective_token(
+                                    all_token_ids_ptr,
+                                    all_token_ids_stride,
+                                    input_ids_ptr,
+                                    cur_req_first_pos,
+                                    req_state_idx,
+                                    total_len,
+                                    effective_len - prefix_len + j,
+                                )
+                                prefix_match = prefix_match & (actual == expected)
+                        if prefix_match:
+                            started = prefix_len
+                ramp_token_id = tl.load(natural_reasoning_end_token_ids_ptr + started)
+                ramp_logit_ptr = logits_ptr + token_idx * logits_stride + ramp_token_id
+                if started > 0:
+                    tl.store(ramp_logit_ptr, 1.0e9)
+                    return
+                if since_fire < ramp_tokens:
+                    # Bias, rather than force, the model's own end marker, so
+                    # it picks where to close.
+                    bias = ramp_increment * (since_fire + 1).to(tl.float32)
+                    tl.store(ramp_logit_ptr, tl.load(ramp_logit_ptr) + bias)
+                    return
+                # The ramp has run out: fall through to the forced sequence.
 
     # If the tail already ends with a prefix of the forced end sequence
     # (even from a resumed prompt), continue from the next marker token.
@@ -726,6 +805,8 @@ def apply_thinking_budget(
     loop_break_fired: torch.Tensor | None = None,
     loop_break_last_check: torch.Tensor | None = None,
     loop_break_report: torch.Tensor | None = None,
+    loop_break_ramp_tokens: torch.Tensor | None = None,
+    loop_break_ramp_increment: float = 0.0,
     loop_break_min_pattern_size: int = 0,
     loop_break_max_pattern_size: int = 0,
     loop_break_min_count: int = 0,
@@ -792,6 +873,9 @@ def apply_thinking_budget(
         cached_last_start,
         cached_last_end,
         loop_break_fired,
+        loop_break_last_check,
+        loop_break_ramp_tokens,
+        loop_break_ramp_increment,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
         reasoning_end_token_ids,
