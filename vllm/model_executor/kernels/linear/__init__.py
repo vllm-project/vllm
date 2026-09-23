@@ -26,9 +26,6 @@ from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
 )
-from vllm.model_executor.kernels.linear.mixed_precision.allspark import (
-    AllSparkLinearKernel,
-)
 from vllm.model_executor.kernels.linear.mixed_precision.conch import (
     ConchLinearKernel,
 )
@@ -101,6 +98,7 @@ from vllm.model_executor.kernels.linear.mxfp6 import (
 from vllm.model_executor.kernels.linear.mxfp6.emulation import (
     EmulationMxfp6LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp6.humming import HummingMxFp6LinearKernel
 from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
@@ -177,7 +175,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledFp8BlockScaledMMKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
@@ -187,6 +184,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
     CPUFp8PerTensorScaledMMLinearKernel,
+    CPUFp8W8A8BlockScaledMMKernel,
+    CPUFP8W8A8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
@@ -294,6 +293,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         HummingLinearKernel,
         HummingMxfp8LinearKernel,
         HummingMxFp4LinearKernel,
+        HummingMxFp6LinearKernel,
         HummingNvFp4LinearKernel,
     },
     "marlin": {
@@ -322,7 +322,6 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
         AiterFp8BlockScaledMMKernel,
-        AiterPreshuffledFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
@@ -438,6 +437,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.CPU: [
+        CPUFP8W8A8ScaledMMLinearKernel,
         CPUFp8PerTensorScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
@@ -466,11 +466,11 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
-        AiterPreshuffledFp8BlockScaledMMKernel,
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
     PlatformEnum.CPU: [
+        CPUFp8W8A8BlockScaledMMKernel,  # W8A8 preferred; falls back to W8A16 below
         CPUFp8BlockScaledMMKernel,
     ],
     PlatformEnum.XPU: [
@@ -501,7 +501,6 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CUDA: [
         CutlassW4A8LinearKernel,
         MacheteLinearKernel,
-        AllSparkLinearKernel,
         MarlinLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
@@ -573,6 +572,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
 
 _POSSIBLE_MXFP6_KERNELS: dict[PlatformEnum, list[type[MxFp6LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        HummingMxFp6LinearKernel,
         EmulationMxfp6LinearKernel,
     ],
     PlatformEnum.ROCM: [
@@ -867,6 +867,7 @@ def choose_mp_linear_kernel(
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
+            logger.info_once("Using %s for mixed-precision linear", kernel.__name__)
             return kernel
         else:
             failure_reasons.append(
@@ -1250,7 +1251,6 @@ __all__ = [
     "ScaledMMLinearLayerConfig",
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
-    "AiterPreshuffledFp8BlockScaledMMKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",
@@ -1268,7 +1268,6 @@ __all__ = [
     "ZentorchWNA16LinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
-    "AllSparkLinearKernel",
     "ConchLinearKernel",
     "CPUWNA16LinearKernel",
     "CutlassW4A8LinearKernel",
@@ -1293,6 +1292,7 @@ __all__ = [
     "MxFp6LinearLayerConfig",
     "init_mxfp6_linear_kernel",
     "EmulationMxfp6LinearKernel",
+    "HummingMxFp6LinearKernel",
     "AiterMxfp4LinearKernel",
     "EmulationMxfp4LinearKernel",
     "FlashInferMxFp4LinearKernel",
