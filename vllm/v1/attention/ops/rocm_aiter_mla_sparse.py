@@ -899,8 +899,11 @@ def rocm_fp8_paged_mqa_logits(
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            (out_logits,) = current_workspace_manager().get_simultaneous(
-                ((batch_size * next_n, max_model_len), torch.float32),
+            out_logits = current_workspace_manager().get_persistent(
+                key=("rocm_paged_mqa_out_logits",
+                     batch_size * next_n, max_model_len),
+                shape=(batch_size * next_n, max_model_len),
+                dtype=torch.float32,
             )
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
@@ -920,8 +923,11 @@ def rocm_fp8_paged_mqa_logits(
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
         batch_size, next_n, heads, _ = q_fp8.shape
-        (out_qk,) = current_workspace_manager().get_simultaneous(
-            ((heads, batch_size * next_n, max_model_len), torch.float32),
+        out_qk = current_workspace_manager().get_persistent(
+            key=("rocm_paged_mqa_out_qk_stage1",
+                 heads, batch_size * next_n, max_model_len),
+            shape=(heads, batch_size * next_n, max_model_len),
+            dtype=torch.float32,
         )
         out_qk.fill_(float("-inf"))
         deepgemm_fp8_paged_mqa_logits_stage1(
