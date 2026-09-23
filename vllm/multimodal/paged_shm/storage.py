@@ -21,6 +21,11 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.multimodal.paged_shm import memcpy_utils
+from vllm.multimodal.paged_shm.memcpy_utils import (
+    copy_blocks_to_contig,
+    copy_contig_to_blocks,
+)
 from vllm.utils.torch_utils import PIN_MEMORY, DeviceLikeType
 
 
@@ -65,6 +70,14 @@ class PagedShmStorage:
         self._shm_np = np.ndarray(self.size, dtype=self.dtype, buffer=self._shm.buf)
         self._shm_np.resize(self.n_block, self.block_size)
         self._shm_tensor = torch.from_numpy(self._shm_np)
+        # Flat 1-D view for the numba memcpy primitives. Zero-copy: the
+        # array is C-contiguous, so reshape returns a view of the shm buffer.
+        self._shm_flat = self._shm_np.reshape(-1)
+
+        # Compile (or mmap the cached artifact for) the numba kernel now, so
+        # the first real copy doesn't pay JIT cost. Cheap after the first
+        # call in a process.
+        memcpy_utils.warmup()
 
         self.is_pinned = False
         if pin and PIN_MEMORY:
@@ -195,8 +208,9 @@ class PagedShmStorage:
         """Write CPU data (as contiguous uint8 numpy array) into blocks."""
         size = data_np.shape[0]
         self._validate_blocks(size, blocks)
-        for array, offset, start in self._iterate_blocks(size, blocks, as_numpy=True):
-            array[:offset] = data_np[start : start + offset]
+        copy_contig_to_blocks(
+            data_np, self._shm_flat, blocks, self.block_size
+        )
 
     def _write_gpu(self, data: torch.Tensor, blocks: list[int]) -> None:
         """Write GPU tensor data into blocks via batched GPU->CPU transfer."""
@@ -241,8 +255,9 @@ class PagedShmStorage:
         """Read data from blocks and return as a contiguous numpy array (CPU)."""
         self._validate_blocks(size, blocks)
         out = np.empty(size, dtype=np.uint8)
-        for array, offset, start in self._iterate_blocks(size, blocks, as_numpy=True):
-            out[start : start + offset] = array[:offset]
+        copy_blocks_to_contig(
+            self._shm_flat, out, blocks, self.block_size
+        )
         return out
 
     def read_to_tensor(
@@ -270,8 +285,16 @@ class PagedShmStorage:
                 )
             if out.device.type != "cpu":
                 raise ValueError("Output tensor must be on CPU for CPU read")
-        for tensor, offset, start in self._iterate_blocks(size, blocks, as_numpy=False):
-            out[start : start + offset] = tensor[:offset]
+            if out.dtype != torch.uint8:
+                raise ValueError("Output tensor must be uint8 for CPU read")
+            if not out.is_contiguous():
+                raise ValueError("Output tensor must be contiguous for CPU read")
+
+        # ``out.numpy()`` shares memory with the tensor, so the numba kernel
+        # writes directly into the destination tensor's storage.
+        copy_blocks_to_contig(
+            self._shm_flat, out.numpy(), blocks, self.block_size
+        )
         return out
 
     def read_to_device(
