@@ -31,6 +31,7 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.utils import from_layer
 from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
@@ -58,6 +59,56 @@ TOLERANCES = {
     torch.float32: (5e-3, 5e-3),
     torch.bfloat16: (3e-2, 2e-2),
 }
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA LoRA projection")
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("head_dimension", [False, True])
+@torch.inference_mode()
+def test_mla_prefill_projection_uses_explicit_adapter_slots(
+    default_vllm_config, dist_init, use_graph, head_dimension
+):
+    config = LoRAConfig(max_loras=2, max_lora_rank=8, lora_dtype=torch.bfloat16)
+    with torch.device("cuda"):
+        base = ColumnParallelLinear(64, 32, bias=False, params_dtype=torch.bfloat16)
+        base.weight.fill_(0.015625)
+        layer = from_layer(base, 2, config, [])
+        x = torch.ones(6, 64, dtype=torch.bfloat16)
+        mapping = torch.tensor([0, 1, -1, 1, 0, -1])
+        baseline = base(x)[0]
+        output = baseline.clone()
+
+        def project():
+            output.copy_(baseline)
+            layer.apply_mla_kv_b_lora_linear(
+                x.unsqueeze(1) if head_dimension else x, output, mapping
+            )
+
+        project()
+        graph = None
+        if use_graph:
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                project()
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                project()
+        for value in (0.125, 0.25):
+            expected = baseline.clone()
+            for slot in range(2):
+                a = torch.full((8, 64), 0.125, dtype=torch.bfloat16)
+                b = torch.full((32, 8), value * (slot + 1), dtype=torch.bfloat16)
+                layer.set_lora(slot, a, b)
+                expected[mapping == slot] += (
+                    x[mapping == slot].float() @ a.float().T @ b.float().T
+                ).to(expected.dtype)
+            if graph is None:
+                project()
+            else:
+                graph.replay()
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 def test_lora_linear_requires_unquantized_input() -> None:
