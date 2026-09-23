@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used by the
@@ -323,6 +330,90 @@ def _gumbel_sample_kernel(
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
 
+_SAMPLE_BLOCK_SIZE = 1024
+
+
+def _gumbel_sample_warmup_inputs(
+    *,
+    vllm_config: Any,
+    is_drafting: bool,
+    apply_temperature: bool,
+    per_token_col: bool,
+    use_fp64: bool,
+) -> dict[str, Any]:
+    vocab_size = vllm_config.model_config.get_vocab_size()
+    local_max_dtype = torch.float64 if use_fp64 else torch.float32
+    num_blocks = triton.cdiv(vocab_size, _SAMPLE_BLOCK_SIZE)
+    return dict(
+        local_argmax=TritonWarmupTensor(torch.int64, shape=(1, num_blocks)),
+        local_max=TritonWarmupTensor(local_max_dtype, shape=(1, num_blocks)),
+        logits_cache=None,
+        logits_cache_col=None,
+        logits=TritonWarmupTensor(
+            vllm_config.model_config.dtype, shape=(1, vocab_size)
+        ),
+        expanded_idx_mapping=TritonWarmupTensor(torch.int32),
+        seeds=TritonWarmupTensor(torch.int64),
+        pos=TritonWarmupTensor(torch.int64),
+        temp=TritonWarmupTensor(torch.float32),
+        vocab_size=vocab_size,
+        block_size=_SAMPLE_BLOCK_SIZE,
+        is_drafting=is_drafting,
+        apply_temperature=apply_temperature,
+        use_fp64=use_fp64,
+        per_token_col=per_token_col,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_gumbel_sample_kernel,
+    warmup_inputs=_gumbel_sample_warmup_inputs,
+)
+def _gumbel_sample_dispatch(
+    local_argmax: torch.Tensor,
+    local_max: torch.Tensor,
+    logits_cache: torch.Tensor | None,
+    logits_cache_col: torch.Tensor | None,
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    seeds: torch.Tensor,
+    pos: torch.Tensor,
+    temp: torch.Tensor,
+    vocab_size: int,
+    block_size: int,
+    is_drafting: bool,
+    apply_temperature: bool,
+    use_fp64: bool,
+    per_token_col: bool,
+) -> DispatchSpec:
+    num_tokens = local_argmax.shape[0]
+    num_blocks = triton.cdiv(vocab_size, block_size)
+    return (num_tokens, num_blocks), dict(
+        logits_cache_stride_0=(
+            logits_cache.stride(0) if logits_cache is not None else 0
+        ),
+        logits_cache_stride_1=(
+            logits_cache.stride(1) if logits_cache is not None else 0
+        ),
+    )
+
+
+def register_gumbel_sample_warmup(*, vllm_config: Any, use_fp64: bool) -> None:
+    """Register the base (non-drafting, non-cached) gumbel_sample warmup.
+
+    Speculative-decode drafting call sites (is_drafting=True) are not covered.
+    """
+    # register_warmup() only auto-injects vllm_config when called with no
+    # args/kwargs, so it must be passed explicitly here.
+    _gumbel_sample_dispatch.register_warmup(
+        vllm_config=vllm_config,
+        is_drafting=False,
+        apply_temperature=False,
+        per_token_col=False,
+        use_fp64=use_fp64,
+    )
+
+
 def gumbel_sample(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
@@ -347,33 +438,27 @@ def gumbel_sample(
             f"than the sampled logits ({vocab_size}). Cached logits would be "
             "truncated."
         )
-    BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    num_blocks = triton.cdiv(vocab_size, _SAMPLE_BLOCK_SIZE)
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
     local_max_dtype = torch.float64 if use_fp64 else torch.float32
     local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
     per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
-    _gumbel_sample_kernel[(num_tokens, num_blocks)](
+    _gumbel_sample_dispatch(
         local_argmax,
-        local_argmax.stride(0),
         local_max,
-        local_max.stride(0),
         logits_cache,
-        logits_cache.stride(0) if logits_cache is not None else 0,
-        logits_cache.stride(1) if logits_cache is not None else 0,
         logits_cache_col,
         logits,
-        logits.stride(0),
         expanded_idx_mapping,
         seed,
         pos,
         temperature,
         vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        IS_DRAFTING=is_drafting,
-        APPLY_TEMPERATURE=apply_temperature,
-        USE_FP64=use_fp64,
-        PER_TOKEN_COL=per_token_col,
+        _SAMPLE_BLOCK_SIZE,
+        is_drafting,
+        apply_temperature,
+        use_fp64,
+        per_token_col,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)

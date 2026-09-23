@@ -442,11 +442,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             from vllm.v1.sample.ops.topk_topp_sampler import (
                 register_top_k_top_p_warmups,
             )
+            from vllm.v1.worker.gpu.sample.gumbel import register_gumbel_sample_warmup
 
             # V2 bypasses TopKTopPSampler, which registers native warmups.
             # CUDA also needs these for its FlashInfer fallback paths.
             with self.jit_warmup_registry.activate():
                 register_top_k_top_p_warmups()
+                # gumbel_sample also needs its own warmup registration.
+                register_gumbel_sample_warmup(
+                    vllm_config=self.vllm_config,
+                    use_fp64=self.model_config.use_fp64_gumbel,
+                )
 
             sampler_kwargs: dict[str, Any] = {
                 "vllm_config": self.vllm_config,
