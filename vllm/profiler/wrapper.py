@@ -17,8 +17,12 @@ from typing_extensions import override
 
 import vllm.version
 from vllm.config import ProfilerConfig
-from vllm.config.profiler import ProfilerKind, TorchProfilerActivity, _is_uri_path
-from vllm.exceptions import ProfilerAlreadyActiveError
+from vllm.config.profiler import (
+    ProfilerKind,
+    TorchProfilerActivity,
+    _is_uri_path,
+    validate_profile_iteration_bounds,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -99,11 +103,12 @@ class WorkerProfiler(ABC):
     ) -> None:
         """Attempt to start the profiler, accounting for delayed starts."""
         if self._active:
-            raise ProfilerAlreadyActiveError()
-        if delay_iterations is not None and delay_iterations < 0:
-            raise ValueError("delay_iterations must be greater than or equal to 0")
-        if max_iterations is not None and max_iterations < 0:
-            raise ValueError("max_iterations must be greater than or equal to 0")
+            logger.debug(
+                "start_profile received when profiler is already active. "
+                "Ignoring request."
+            )
+            return
+        validate_profile_iteration_bounds(delay_iterations, max_iterations)
         self._delay_iters = (
             self._default_delay_iters if delay_iterations is None else delay_iterations
         )
