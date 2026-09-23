@@ -16,7 +16,7 @@ via Gemma4MultimodalEmbedder.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -404,6 +404,39 @@ def _concat_logprob_stashes(
         selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
         cu_num_generated_tokens=cu_num_generated_tokens,
     )
+
+
+_MASKED_LOGIT = -1e20
+
+
+def _mask_rows_to_allowed(
+    logits: torch.Tensor,
+    row_starts: Sequence[int] | np.ndarray,
+    row_lens: Sequence[int] | np.ndarray,
+    allowed_per_row: Sequence[torch.Tensor | None],
+) -> torch.Tensor:
+    """Mask every column outside a request's allowed ids on that request's
+    rows. Request i owns rows [row_starts[i], +row_lens[i]); None leaves its
+    rows alone. Returns a copy when any row is masked, so the caller's tensor
+    (possibly the runner's) is never written.
+
+    Softmax over a masked row equals the K-space distribution the shared
+    fast path computes, so both paths give the same reads. The mask value is
+    a large finite negative rather than -inf: the entropy is probs times
+    log-probs, and 0 * -inf is NaN, while 0 * -1e20 is 0. It stays finite
+    after the greedy temperature clamp (1e-10) scales it by 1e10.
+    """
+    out: torch.Tensor | None = None
+    keep = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
+    for start, n, allowed in zip(row_starts, row_lens, allowed_per_row):
+        if allowed is None:
+            continue
+        if out is None:
+            out = logits.clone()
+        keep.zero_()
+        keep[allowed] = True
+        out[int(start) : int(start) + int(n)].masked_fill_(~keep, _MASKED_LOGIT)
+    return logits if out is None else out
 
 
 # Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
@@ -797,20 +830,29 @@ class DiffusionGemmaRequestStates:
             slot_idx, async_tensor_h2d(positions, dtype=torch.int64, device=self.device)
         ] = True
 
+    def allowed_tensor(self, ids: tuple[int, ...]) -> torch.Tensor:
+        """``ids`` as an int64 tensor on the device, built once per tuple."""
+        t = self._allowed_cache.get(ids)
+        if t is None:
+            t = torch.tensor(ids, dtype=torch.int64, device=self.device)
+            if len(self._allowed_cache) > 64:
+                self._allowed_cache.clear()
+            self._allowed_cache[ids] = t
+        return t
+
     def batch_allowed(self, slots: list[int]) -> torch.Tensor | None:
-        """The allowed ids shared by every one of ``slots``, or None."""
+        """The allowed ids shared by every one of ``slots``, or None.
+
+        None means the step runs over the full vocabulary. The sampler then
+        masks each constrained slot's logit rows to its own set, so a
+        constrained request reads the same way whoever shares its batch.
+        """
         if not slots or not self.constrained:
             return None
         first = self.constrained.get(slots[0])
         if first is None or any(self.constrained.get(s) != first for s in slots[1:]):
             return None
-        t = self._allowed_cache.get(first)
-        if t is None:
-            t = torch.tensor(first, dtype=torch.int64, device=self.device)
-            if len(self._allowed_cache) > 64:
-                self._allowed_cache.clear()
-            self._allowed_cache[first] = t
-        return t
+        return self.allowed_tensor(first)
 
     def set_read_only(self, slot_idx: int) -> None:
         self.read_only[slot_idx].fill_(True)
@@ -1432,6 +1474,19 @@ class DiffusionSampler:
             assert logits.shape[-1] == allowed.numel()
             embed_weight = self.embed_weight[allowed]
             sc_vocab_start, sc_vocab_end = 0, allowed.numel()
+        elif states.constrained and num_decode > 0:
+            # The decode slots do not share one set, so this step runs over
+            # the full vocabulary. Mask each constrained request's rows to
+            # its own set so it reads the same as on the shared path. The
+            # helper copies rather than write the runner's tensor: the slow
+            # path, one full-vocab copy like top_k/top_p above.
+            per_row = [
+                None if ids is None else states.allowed_tensor(ids)
+                for ids in (states.constrained.get(s) for s in decode_slots_np.tolist())
+            ]
+            logits = _mask_rows_to_allowed(
+                logits, row_starts_np, valid_canvas_len_np, per_row
+            )
 
         slots_np = input_batch.idx_mapping_np[:num_reqs]
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
