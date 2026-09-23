@@ -220,7 +220,7 @@ def _decode_metadata(case, rows, ratio, query_lens):
         decode_block_ends=(lens + CAND_BLOCK - 1) // CAND_BLOCK,
         decode_native=native,
         decode_schedule=ops.build_rocm_mxfp4_decode_schedule(
-            lens, HEADS, HEAD_DIM, entries, schedule, native
+            lens, HEADS, HEAD_DIM, entries, schedule, MAX_LEN // ratio, native
         ),
     )
 

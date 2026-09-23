@@ -11,6 +11,7 @@ the whole context: the pool is resolved once per step and shared by all four.
 
 import functools
 import importlib
+import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -59,9 +60,16 @@ def rocm_mxfp4_indexer_unsupported_reason() -> str | None:
     if not on_gfx950():
         return "the ROCm MXFP4 indexer kernels are gfx950 only"
     try:
-        _aiter()
+        pa = _aiter()
     except ImportError as e:
         return f"aiter's paged MXFP4 MQA-logits kernel is unavailable ({e})"
+    params = inspect.signature(pa.paged_mxfp4_mqa_logits).parameters
+    if "row_ends" not in params or "query_start_loc" not in params:
+        return (
+            "aiter's paged MXFP4 MQA-logits kernel predates its row_ends / "
+            "query_start_loc API; vLLM needs ROCm/aiter "
+            "cagri/gluon_paged_mxfp4_mqa_logits at b2a2fa441 or later"
+        )
     return None
 
 
@@ -79,8 +87,9 @@ def check_rocm_mxfp4_cache_geometry(
 def rocm_mxfp4_decode_schedule_words(
     num_heads: int, head_dim: int, page_entries: int, next_n: int = 1
 ) -> int:
-    """int32 words of a decode step's work schedule, flattened or not."""
-    words = 0
+    """int32 words of the largest schedule a decode step can build, flattened or
+    not. The slice cap can take it past target_wgs, up to SCHED_SLOT_CAP."""
+    words = 4 * _aiter().SCHED_SLOT_CAP
     for rows in {1, next_n}:
         config = _aiter().select_config(num_heads, head_dim, rows, page_entries)
         words = max(words, 4 * config["target_wgs"])
@@ -93,14 +102,22 @@ def build_rocm_mxfp4_decode_schedule(
     head_dim: int,
     page_entries: int,
     out: torch.Tensor,
+    logits_width: int,
     native: "RocmMxfp4NativeDecode | None" = None,
 ) -> torch.Tensor | None:
     """Work descriptors that even out a decode step, or None where the static
-    grid already fills the machine. Depends only on the rows' lengths and the
-    cache geometry, so one serves every layer of a group."""
+    grid already fills the machine. Depends only on the rows' lengths, the
+    cache geometry and the logits width, so one serves every layer of a group.
+    The width sizes the slices, capped the way the static grid caps them."""
     if native is None:
         return _aiter().build_schedule(
-            row_lens, 1, num_heads, head_dim, page_entries, out=out
+            row_lens,
+            1,
+            num_heads,
+            head_dim,
+            page_entries,
+            out=out,
+            max_model_len=logits_width,
         )
     return _aiter().build_schedule(
         native.context_lens,
@@ -109,7 +126,8 @@ def build_rocm_mxfp4_decode_schedule(
         head_dim,
         page_entries,
         out=out,
-        cu_ends=row_lens,
+        row_ends=row_lens,
+        max_model_len=logits_width,
     )
 
 
@@ -122,41 +140,6 @@ def _kv_view(kv_cache: torch.Tensor, head_dim: int) -> torch.Tensor:
     return torch.as_strided(
         kv_cache, (num_pages, entries, 1, width), (kv_cache.stride(0), width, width, 1)
     )
-
-
-@functools.cache
-def _check_page_stride(page_stride: int, entries: int, width: int, head_dim: int):
-    from aiter.ops.triton.attention.pa_mqa_logits_mxfp4_gather import cache_strides
-
-    probe = torch.empty_strided(
-        (2, entries, 1, width),
-        (page_stride, width, width, 1),
-        dtype=torch.uint8,
-        device="meta",
-    )
-    used = cache_strides(probe, head_dim)[1]
-    if used != page_stride:
-        raise RuntimeError(
-            f"aiter's paged MXFP4 MQA-logits kernel would step {used} B between "
-            f"pages, but the indexer cache pages are {page_stride} B apart: they "
-            "sit inside vLLM's block-major KV pool. aiter has to take the page "
-            "stride from kv_cache.stride(0)."
-        )
-
-
-@functools.cache
-def _gather_reaches(span: int, block: int, head_dim: int) -> bool:
-    from aiter.ops.triton.attention import pa_mqa_logits_mxfp4_gather as gather
-
-    # aiter widens the resolved offsets to int64 when the pool outgrows int32.
-    if hasattr(gather, "offset_dtype"):
-        return True
-    # Before that, build_candidate_gather resolved each candidate block to an
-    # int32 offset from the cache base, in 16 B units for values and
-    # gather_s_unit B for scales. The base is the pool's first block, so the
-    # span is the pool's.
-    unit = min(16, gather.gather_s_unit(block, head_dim // MXFP4_BLOCK_SIZE))
-    return span <= unit * (2**31 - 1)
 
 
 def reserve_rocm_mxfp4_indexer_workspace(
@@ -327,7 +310,6 @@ def _layer(
         "the ROCm MXFP4 indexer needs DeepseekV41RocmMxfp4IndexerBackend metadata"
     )
     kv = _kv_view(kv_cache, head_dim)
-    _check_page_stride(kv.stride(0), kv.shape[1], kv.shape[3], head_dim)
     num_heads = q_values.shape[1]
     return _Layer(
         metadata=metadata,
@@ -381,7 +363,7 @@ def _dense_prefill(
             plan.width,
             out_logits=logits[lo:hi],
             clean_logits=False,
-            cu_ends=plan.row_ends[lo:hi],
+            row_ends=plan.row_ends[lo:hi],
             **_block_scores(layer, None if scores is None else scores[lo:hi]),
         )
     candidates = None if layer.candidates is None else layer.candidates[t0:t1]
@@ -414,14 +396,14 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         # A request's next_n rows go in as one sequence, so a workgroup walks
         # each KV tile once for all of them.
         q, q_scale, weights = layer.rows(0, rows, native.context_lens.shape[0])
-        context_lens, block_table, cu_ends = (
+        context_lens, block_table, row_ends = (
             native.context_lens,
             native.block_table,
             lengths,
         )
     else:
         q, q_scale, weights = layer.decode_rows(rows)
-        context_lens, block_table, cu_ends = lengths, metadata.decode.block_table, None
+        context_lens, block_table, row_ends = lengths, metadata.decode.block_table, None
         assert block_table.shape[0] == rows, "one block-table row per query row"
     _aiter().paged_mxfp4_mqa_logits(
         q,
@@ -433,7 +415,7 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         logits_width,
         out_logits=logits,
         clean_logits=False,
-        cu_ends=cu_ends,
+        row_ends=row_ends,
         schedule=metadata.decode_schedule,
         **_block_scores(layer, scores[0] if scores else None),
     )
@@ -494,7 +476,7 @@ def _gather_prefill(
             num_cols,
             out_logits=compact[lo:hi],
             clean_logits=False,
-            cu_ends=slot_ends,
+            row_ends=slot_ends,
             use_gather=True,
             candidates=gather,
         )
@@ -536,7 +518,7 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
         num_cols,
         out_logits=compact,
         clean_logits=False,
-        cu_ends=slot_ends,
+        row_ends=slot_ends,
         use_gather=True,
         candidates=gather,
     )
@@ -636,20 +618,17 @@ def rocm_mxfp4_sparse_mqa_indexer(
         candidate_block_size,
     )
     metadata = layer.metadata
-    kv = layer.kv
-    span = (kv.shape[0] - 1) * kv.stride(0) + kv.shape[1] * kv.shape[3]
-    reachable = _gather_reaches(span, candidate_block_size, head_dim)
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
-            if reachable and plan.use_gather:
+            if plan.use_gather:
                 _gather_prefill(layer, chunk, plan, num_candidate_cols)
             else:
                 _dense_prefill(layer, chunk, plan, candidate_write=False)
     if metadata.decode is not None:
         # A FULL graph cannot follow the per-step gate; the gather is the side
         # that stays flat in the context length.
-        if reachable and (metadata.decode_use_gather or layer.full_graph):
+        if metadata.decode_use_gather or layer.full_graph:
             _gather_decode(layer, num_candidate_cols)
         else:
             _dense_decode(layer, max_model_len, candidate_write=False)

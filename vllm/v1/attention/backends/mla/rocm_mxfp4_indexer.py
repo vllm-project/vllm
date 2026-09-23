@@ -282,6 +282,9 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
         # across requests, so a step's shape does not fix its query lengths.
         adaptive = spec_config is not None and spec_config.enable_adaptive_verification
         self.native_next_n = 1 if adaptive else self.num_speculative_tokens + 1
+        # The indexer's logits width, which the decode schedule sizes slices by.
+        max_model_len = vllm_config.model_config.max_model_len
+        self.logits_width = max_model_len // self.compress_ratio
         # Every dense layer of this group reads the same rows through the same
         # page geometry, so the step builds their schedule once; the scheduler
         # launch costs about half a decode launch.
@@ -338,6 +341,7 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                 self.head_dim,
                 self.page_entries,
                 self.decode_schedule_buffer,
+                self.logits_width,
                 metadata.decode_native,
             )
             metadata.decode_use_gather = self._gather_pays(
