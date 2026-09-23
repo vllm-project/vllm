@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the DoubleQuant fan-out variants registered by
+"""Unit tests for the DoubleQuant fan-out variants registered by
 ``RocmAiterRMSNormQuantFusionPass``.
 
 Both variants target a 1-to-2 fan-out where one ``rms_norm`` output feeds
@@ -90,8 +89,7 @@ def test_double_aiter_rms_fp8_group_quant_fusion(
     model_cls: type[torch.nn.Module],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    Both fan-out shapes (with and without an intermediate view) must fuse
+    """Both fan-out shapes (with and without an intermediate view) must fuse
     into ``rocm_aiter_rmsnorm_fp8_group_quant``: the no-view shape via
     ``DoubleAiterRMSFp8GroupQuantPattern`` and the viewed shape via the
     new ``DoubleAiterRMSFp8GroupQuantViewPattern`` sibling.
