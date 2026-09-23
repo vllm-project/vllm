@@ -12,7 +12,7 @@ use crate::tool::{Result, ToolParserError};
 pub(crate) mod marker;
 pub(crate) mod recursion;
 
-pub use marker::{Attributed, AttributionMode, Marker, MarkerRef, MarkerStream, attributed};
+pub use marker::{Attributed, Marker, MarkerLike, MarkerStream, attributed};
 
 /// Return the byte length of the longest proper prefix of `token` that is also
 /// a suffix of `buffer`.
@@ -71,7 +71,7 @@ enum Scan {
 /// on a cloned cursor, so the scanner and the consuming `alt` branch can never
 /// disagree; a rejected candidate (an ordinary lookalike) is skipped and the
 /// scan continues.
-fn scan_markers<'i, 'm, I: MarkerStream<'i>, M: Copy + Into<MarkerRef<'m>>>(
+fn scan_markers<'i, I: MarkerStream<'i>, M: MarkerLike>(
     input: &I,
     markers: &[M],
     from: usize,
@@ -79,10 +79,10 @@ fn scan_markers<'i, 'm, I: MarkerStream<'i>, M: Copy + Into<MarkerRef<'m>>>(
     let start = input.offset();
     let mut from = from.max(start);
     while let Some(at) = input.next_candidate(markers, from) {
-        for &marker in markers {
+        for marker in markers {
             let mut probe = input.clone();
             probe.next_slice(at - start);
-            match marker.into().parse_next(&mut probe) {
+            match marker.as_marker().parse_next(&mut probe) {
                 Ok(_) => return Ok(Scan::Found(at)),
                 Err(ErrMode::Backtrack(_)) => {}
                 Err(ErrMode::Incomplete(_)) => return Ok(Scan::Pending(at)),
@@ -98,7 +98,7 @@ fn scan_markers<'i, 'm, I: MarkerStream<'i>, M: Copy + Into<MarkerRef<'m>>>(
 /// This is the single-marker variant of [`safe_text_len_mul`].
 ///
 /// Returns the text length in bytes, and advances the input.
-pub fn safe_text_len<'i, 'm, I: MarkerStream<'i>, M: Copy + Into<MarkerRef<'m>>>(
+pub fn safe_text_len<'i, I: MarkerStream<'i>, M: MarkerLike>(
     input: &mut I,
     marker: M,
 ) -> ModalResult<usize> {
@@ -113,7 +113,7 @@ pub fn safe_text_len<'i, 'm, I: MarkerStream<'i>, M: Copy + Into<MarkerRef<'m>>>
 /// incomplete marker for guarded ones.
 ///
 /// Returns the text length in bytes, and advances the input.
-pub fn safe_text_len_mul<'i, 'm, I: MarkerStream<'i>, M: Copy + Into<MarkerRef<'m>>>(
+pub fn safe_text_len_mul<'i, I: MarkerStream<'i>, M: MarkerLike>(
     input: &mut I,
     markers: &[M],
 ) -> ModalResult<usize> {
@@ -160,26 +160,30 @@ impl MarkerScanState {
 /// chunks while waiting for a closing marker. Plain `take_until` is still a
 /// better fit for one-shot parsers over a complete body, and for `1..` cases
 /// where an empty slice before the marker should be rejected.
-pub fn take_until_marker<'i, 'm, 'a, I: MarkerStream<'i>, M: Copy + Into<MarkerRef<'m>> + 'a>(
+pub fn take_until_marker<'i, 'a, I: MarkerStream<'i>, M: MarkerLike + 'a>(
     marker: M,
     state: &'a mut MarkerScanState,
 ) -> impl Parser<I, &'i str, ErrMode<ContextError>> + 'a {
-    move |input: &mut I| take_until_marker_(input, marker, state)
+    move |input: &mut I| take_until_marker_(input, &marker, state)
 }
 
-fn take_until_marker_<'i, 'm, I: MarkerStream<'i>, M: Copy + Into<MarkerRef<'m>>>(
+fn take_until_marker_<'i, I: MarkerStream<'i>, M: MarkerLike>(
     input: &mut I,
-    marker: M,
+    marker: &M,
     state: &mut MarkerScanState,
 ) -> ModalResult<&'i str> {
-    debug_assert!(!marker.into().as_str().is_empty());
+    debug_assert!(!marker.as_marker().as_str().is_empty());
 
     if input.eof_offset() == 0 {
         return incomplete();
     }
 
     let start = input.offset();
-    match scan_markers(input, &[marker], start + state.scan_start)? {
+    match scan_markers(
+        input,
+        std::slice::from_ref(marker),
+        start + state.scan_start,
+    )? {
         Scan::Found(at) => {
             state.reset();
             Ok(input.next_slice(at - start))

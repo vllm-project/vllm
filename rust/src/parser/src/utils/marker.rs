@@ -25,6 +25,7 @@
 
 use std::ops::Range;
 
+use auto_impl::auto_impl;
 use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
 use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult};
@@ -34,25 +35,6 @@ use winnow::stream::{
 use winnow::token::literal;
 
 use super::partial_prefix_len;
-
-/// Whether parser input carries generated-token attribution.
-///
-/// This is a property of the caller's pipeline, known before the first delta,
-/// so it is chosen once when the parser is constructed and never inferred from
-/// the data. A parser applies it when building its markers: under
-/// [`AttributionMode::TextOnly`] they carry no guards.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AttributionMode {
-    /// Every delta carries one [`TokenAttribution`] per generated token, as
-    /// produced by the incremental detokenizer. Structural markers must be
-    /// spelled by their dedicated special tokens; equal text from ordinary
-    /// tokens stays content.
-    #[default]
-    Tokens,
-    /// Deltas carry text only. Markers are matched by spelling alone, which
-    /// cannot tell model-written marker text from structure.
-    TextOnly,
-}
 
 /// Streaming winnow input over one [`DecodedText`] buffer.
 ///
@@ -100,14 +82,10 @@ pub trait MarkerStream<'i>:
     /// token, so text-only input never yields one. Any other marker begins at a
     /// complete occurrence of its spelling, or at a proper prefix of it that
     /// ends the input.
-    fn next_candidate<'m, M: Copy + Into<MarkerRef<'m>>>(
-        &self,
-        markers: &[M],
-        from: usize,
-    ) -> Option<usize> {
+    fn next_candidate<M: MarkerLike>(&self, markers: &[M], from: usize) -> Option<usize> {
         let start = self.offset();
         let from = from.max(start);
-        let markers = || markers.iter().map(|&marker| marker.into());
+        let markers = || markers.iter().map(MarkerLike::as_marker);
 
         let anchored = markers().any(|marker| marker.first_token_id().is_some()).then(|| {
             visible_in(self.anchors(), from..usize::MAX).find_map(|(at, token_id)| {
@@ -302,8 +280,8 @@ impl Marker {
         self
     }
 
-    /// Drop the token-identity guards, so the marker matches by spelling alone
-    /// ([`AttributionMode::TextOnly`]).
+    /// Drop the token-identity guards, so the marker matches by spelling alone,
+    /// for callers whose input carries no token attribution.
     #[must_use]
     pub fn without_guards(mut self) -> Self {
         self.guards.clear();
@@ -316,35 +294,48 @@ impl Marker {
     }
 }
 
+/// Anything the scanning helpers accept as a marker, viewed through
+/// [`MarkerRef`].
+///
+/// A plain `str` is a marker without guards, so text-only parsers keep passing
+/// `&[&str]` (or `&String`); token-aware parsers pass `&Marker`.
+#[auto_impl(&)]
+pub trait MarkerLike {
+    /// Borrow the marker's spelling and guards.
+    fn as_marker(&self) -> MarkerRef<'_>;
+}
+
+impl MarkerLike for str {
+    fn as_marker(&self) -> MarkerRef<'_> {
+        MarkerRef {
+            text: self,
+            guards: &[],
+        }
+    }
+}
+
+impl MarkerLike for String {
+    fn as_marker(&self) -> MarkerRef<'_> {
+        self.as_str().as_marker()
+    }
+}
+
+impl MarkerLike for Marker {
+    fn as_marker(&self) -> MarkerRef<'_> {
+        MarkerRef {
+            text: &self.text,
+            guards: &self.guards,
+        }
+    }
+}
+
 /// Borrowed view of a marker: its spelling and guarded segments.
 ///
-/// A plain `&str` is a marker without guards, so text-only parsers keep passing
-/// `&[&str]` to the scanning helpers.
+/// A plain `&str` is a marker without guards; see [`MarkerLike`].
 #[derive(Clone, Copy, Debug)]
 pub struct MarkerRef<'m> {
     text: &'m str,
     guards: &'m [Guard],
-}
-
-impl<'m> From<&'m str> for MarkerRef<'m> {
-    fn from(text: &'m str) -> Self {
-        Self { text, guards: &[] }
-    }
-}
-
-impl<'m> From<&'m String> for MarkerRef<'m> {
-    fn from(text: &'m String) -> Self {
-        text.as_str().into()
-    }
-}
-
-impl<'m> From<&'m Marker> for MarkerRef<'m> {
-    fn from(marker: &'m Marker) -> Self {
-        Self {
-            text: &marker.text,
-            guards: &marker.guards,
-        }
-    }
 }
 
 impl<'m> MarkerRef<'m> {
@@ -385,7 +376,7 @@ impl<'m> MarkerRef<'m> {
 
 impl<'i, I: MarkerStream<'i>> Parser<I, &'i str, ErrMode<ContextError>> for &Marker {
     fn parse_next(&mut self, input: &mut I) -> ModalResult<&'i str> {
-        MarkerRef::from(*self).parse_next(input)
+        self.as_marker().parse_next(input)
     }
 }
 
@@ -396,7 +387,7 @@ mod tests {
     use winnow::error::ErrMode;
     use winnow::stream::{Partial, Stream};
 
-    use super::{Marker, MarkerRef, MarkerStream, attributed};
+    use super::{Marker, MarkerLike, MarkerStream, attributed};
     use crate::utils::safe_text_len_mul;
 
     const CLOSE_ID: u32 = 256;
@@ -539,19 +530,13 @@ mod tests {
 
     #[test]
     fn marker_first_token_id_requires_leading_special() {
+        assert_eq!(think_close().as_marker().first_token_id(), Some(CLOSE_ID));
+        assert_eq!(Marker::text("</think>").as_marker().first_token_id(), None);
         assert_eq!(
-            MarkerRef::from(&think_close()).first_token_id(),
-            Some(CLOSE_ID)
-        );
-        assert_eq!(
-            MarkerRef::from(&Marker::text("</think>")).first_token_id(),
+            Marker::text("x").then_special("<|sep|>", SEP_ID).as_marker().first_token_id(),
             None
         );
-        assert_eq!(
-            MarkerRef::from(&Marker::text("x").then_special("<|sep|>", SEP_ID)).first_token_id(),
-            None
-        );
-        assert_eq!(MarkerRef::from("</think>").first_token_id(), None);
+        assert_eq!("</think>".as_marker().first_token_id(), None);
     }
 
     #[test]
