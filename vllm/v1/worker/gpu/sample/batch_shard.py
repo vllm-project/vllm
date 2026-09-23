@@ -10,6 +10,7 @@ import torch.distributed
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -45,14 +46,14 @@ class BatchShardMetadata:
     # tensor. Derived from the global cu_num_logits, so each rank agrees
     # ont he gather shapes, including empty shards.
     max_num_logits_per_req: int
+    adaptive_verification_enabled: bool
 
 
-@triton.jit(
-    do_not_specialize=["num_reqs", "local_logits_start", "max_num_reqs_per_rank"]
-)
+@triton.jit(do_not_specialize=["num_reqs", "max_num_reqs_per_rank"])
 def _build_shard_plan_kernel(
     idx_mapping_ptr,
     cu_num_logits_ptr,
+    scheduled_cu_num_logits_ptr,
     query_start_loc_ptr,
     seq_lens_ptr,
     sorted_logits_indices_ptr,
@@ -64,7 +65,6 @@ def _build_shard_plan_kernel(
     local_expanded_local_pos_ptr,
     local_seq_lens_ptr,
     num_reqs,
-    local_logits_start,
     max_num_reqs_per_rank,
     TP_SIZE: tl.constexpr,
     TP_RANK: tl.constexpr,
@@ -81,19 +81,26 @@ def _build_shard_plan_kernel(
     req_block = tl.arange(0, PADDED_NUM_REQS)
     req_mask = req_block < num_reqs
     owners = tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0) % TP_SIZE
+    # Get the number of admitted and scheduled logits per request. These only differ
+    # during adaptive verification.
     num_logits_per_req = tl.load(
         cu_num_logits_ptr + req_block + 1, mask=req_mask, other=0
     ) - tl.load(cu_num_logits_ptr + req_block, mask=req_mask, other=0)
+    num_scheduled_logits_per_req = tl.load(
+        scheduled_cu_num_logits_ptr + req_block + 1, mask=req_mask, other=0
+    ) - tl.load(scheduled_cu_num_logits_ptr + req_block, mask=req_mask, other=0)
 
     # Owner-sorted layout is rank 0's requests in batch order, then rank 1's,
     # etc, so a request's starting offset can be derived from counting.
     lower = (owners < owner) & req_mask
     earlier = (owners == owner) & (req_block < req_idx) & req_mask
 
-    # Compute the logits row offset for the current request in the sorted
-    # batch.
-    req_logits_start = tl.sum(tl.where(lower, num_logits_per_req, 0)) + tl.sum(
-        tl.where(earlier, num_logits_per_req, 0)
+    # Offset of this request's logits within its owner's segment.
+    local_start = tl.sum(tl.where(earlier, num_logits_per_req, 0))
+    # Offset in the owner-sorted send buffer. Segment base offsets follow the
+    # scheduled counts because the all-to-all split sizes are computed from them.
+    req_logits_start = (
+        tl.sum(tl.where(lower, num_scheduled_logits_per_req, 0)) + local_start
     )
 
     # Copy the current request logit indices into the sorted batch.
@@ -121,7 +128,6 @@ def _build_shard_plan_kernel(
         tl.store(local_cu_num_logits_ptr, 0)
 
     if owner == TP_RANK:
-        local_start = req_logits_start - local_logits_start
         tl.store(local_idx_mapping_ptr + local_req_idx, req_state_idx)
         tl.store(local_cu_num_logits_ptr + local_req_idx + 1, local_start + num_logits)
         tl.store(
@@ -150,11 +156,13 @@ class BatchSharder:
         max_num_reqs: int,
         max_num_logits_per_req: int,
         device: torch.device,
+        adaptive_verification_enabled: bool,
     ):
         tp_group = get_tp_group()
         self.tp_rank = tp_group.rank_in_group
         self.tp_size = tp_group.world_size
         self.device = device
+        self.adaptive_verification_enabled = adaptive_verification_enabled
         self._padded_num_reqs = triton.next_power_of_2(max_num_reqs)
         self._padded_num_logits_per_req = triton.next_power_of_2(max_num_logits_per_req)
         self._num_warps = max(1, min(8, self._padded_num_reqs // 128))
@@ -194,7 +202,6 @@ class BatchSharder:
             req_owner_np, weights=num_logits_per_req_np, minlength=tp_size
         ).astype(np.int64)
         num_local_logits = int(num_logits_per_rank_np[tp_rank])
-        local_logits_start = int(num_logits_per_rank_np[:tp_rank].sum())
         local_cu_num_logits_np = np.zeros(num_local_reqs + 1, dtype=np.int32)
         np.cumsum(
             num_logits_per_req_np[local_req_indices_np], out=local_cu_num_logits_np[1:]
@@ -204,14 +211,31 @@ class BatchSharder:
             torch.from_numpy(local_req_indices_np)
         ]
 
+        # Under adaptive verification the device cu_num_logits holds the admitted
+        # draft counts while cu_num_logits_np still holds the scheduled ones. The
+        # all-to-all split sizes and buffer lengths come from the host array, so
+        # the kernel should place each owner's segment using the scheduled layout,
+        # and pack the admitted rows at the front of it.
+        scheduled_cu_num_logits = (
+            async_tensor_h2d(input_batch.cu_num_logits_np, device=self.device)
+            if self.adaptive_verification_enabled
+            else input_batch.cu_num_logits
+        )
+        # Under adaptive verification each owner segment ends in scheduled - admitted
+        # rows that the kernel never writes. These rows must point to valid logit and
+        # request slots.
+        indices_alloc = (
+            torch.zeros if self.adaptive_verification_enabled else torch.empty
+        )
+
         # Shard the input batch GPU tensors.
-        sorted_logits_indices = torch.empty(
+        sorted_logits_indices = indices_alloc(
             num_logits, dtype=torch.int64, device=self.device
         )
         gathered_src_indices = torch.empty(
             num_reqs, dtype=torch.int64, device=self.device
         )
-        local_logits_indices = torch.empty(
+        local_logits_indices = indices_alloc(
             num_local_logits, dtype=torch.int64, device=self.device
         )
         local_idx_mapping = torch.empty(
@@ -220,10 +244,10 @@ class BatchSharder:
         local_cu_num_logits = torch.empty(
             num_local_reqs + 1, dtype=torch.int32, device=self.device
         )
-        local_expanded_idx_mapping = torch.empty(
+        local_expanded_idx_mapping = indices_alloc(
             num_local_logits, dtype=torch.int32, device=self.device
         )
-        local_expanded_local_pos = torch.empty(
+        local_expanded_local_pos = indices_alloc(
             num_local_logits, dtype=torch.int32, device=self.device
         )
         local_seq_lens = torch.empty(
@@ -233,6 +257,7 @@ class BatchSharder:
             _build_shard_plan_kernel[(num_reqs,)](
                 input_batch.idx_mapping,
                 input_batch.cu_num_logits,
+                scheduled_cu_num_logits,
                 input_batch.query_start_loc,
                 input_batch.seq_lens,
                 sorted_logits_indices,
@@ -244,7 +269,6 @@ class BatchSharder:
                 local_expanded_local_pos,
                 local_seq_lens,
                 num_reqs,
-                local_logits_start,
                 max_num_reqs_per_rank,
                 TP_SIZE=tp_size,
                 TP_RANK=tp_rank,
@@ -292,6 +316,7 @@ class BatchSharder:
             max_num_reqs_per_rank=max_num_reqs_per_rank,
             gathered_src_indices=gathered_src_indices,
             max_num_logits_per_req=max_num_logits_per_req,
+            adaptive_verification_enabled=self.adaptive_verification_enabled,
         )
         return local_batch, sorted_logits_indices, local_grammar_output, metadata
 
@@ -590,7 +615,14 @@ def _gather_logprobs_tensors(
         logprobs=logprobs,
         selected_token_ranks=selected_token_ranks,
         cu_num_generated_tokens=(
-            global_batch.cu_num_logits_np.tolist() if num_logits != num_reqs else None
+            None
+            if metadata.adaptive_verification_enabled or num_logits == num_reqs
+            else global_batch.cu_num_logits_np.tolist()
+        ),
+        cu_num_generated_tokens_tensor=(
+            global_batch.cu_num_logits.clone()
+            if metadata.adaptive_verification_enabled
+            else None
         ),
     )
 
