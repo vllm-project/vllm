@@ -43,12 +43,15 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import FatreluAndMul, SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    fused_experts,
+    fused_topk,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -109,12 +112,10 @@ class MiniCPMMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             self.hidden_size,
             self.num_total_experts,
-            bias=False,
             params_dtype=self.params_dtype,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
