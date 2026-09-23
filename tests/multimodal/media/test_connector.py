@@ -18,9 +18,12 @@ import torch
 from PIL import Image, ImageChops
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
+
+from ..utils import create_long_gop_video
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -34,6 +37,17 @@ TEST_VIDEO_URLS = [
     f"{VLLM_S3_BUCKET_URL}/multimodal_asset/slow_traffic_small.mp4",
     f"{VLLM_S3_BUCKET_URL}/multimodal_asset/vtest.avi",
 ]
+
+
+@pytest.mark.asyncio
+async def test_qwen2vl_single_frame_video_is_client_error():
+    connector = MediaConnector(media_io_kwargs={"video": {"backend": "opencv"}})
+    data = create_long_gop_video(num_frames=1, width=32, height=32)
+    url = "data:video/mp4;base64," + base64.b64encode(data).decode("ascii")
+    with pytest.raises(VLLMValidationError, match="no frames after temporal alignment"):
+        connector.fetch_video(url, video_processor="Qwen2VLVideoProcessor")
+    with pytest.raises(VLLMValidationError, match="no frames after temporal alignment"):
+        await connector.fetch_video_async(url, video_processor="Qwen2VLVideoProcessor")
 
 
 @pytest.fixture(scope="module")
