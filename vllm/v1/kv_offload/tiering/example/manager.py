@@ -9,7 +9,7 @@ TieringOffloadingManager without requiring actual storage or network backends.
 """
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -17,7 +17,6 @@ from typing_extensions import override
 
 from vllm.v1.kv_offload.base import (
     ConfigInfo,
-    ConfigInfoMapping,
     LookupResult,
     Medium,
     OffloadKey,
@@ -41,8 +40,8 @@ if TYPE_CHECKING:
 class ExampleTierInfo(ConfigInfo):
     """Config facts of one ExampleSecondaryTierManager.
 
-    A field name is the label name. A secondary tier needs no name of its own
-    for the tier, because the tier label tells the series of the tiers apart.
+    A secondary tier keeps the empty key_prefix of ConfigInfo, because
+    TieringOffloadingSpec adds the tier index and the tier type to each name.
     """
 
     example_info: int
@@ -103,7 +102,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         return ExampleTierInfo.config_info_keys()
 
     @override
-    def config_info(self) -> ConfigInfoMapping:
+    def config_info(self) -> Mapping[str, str | int | float | bool]:
         return self._config_info.as_config_info()
 
     @override

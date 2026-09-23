@@ -21,7 +21,6 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
 
 def make_req_context(
