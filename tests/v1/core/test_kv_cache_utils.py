@@ -137,22 +137,44 @@ def test_hybrid_draft_full_attention_shapes(
     )
 
 
-@pytest.mark.parametrize("difference", ["bytes", "block_size", "dtype", "non_causal"])
-def test_heterogeneous_full_attention_rejects_incompatible_specs(difference):
+@pytest.mark.parametrize(
+    "difference, shareable",
+    [
+        ("heads", True),
+        ("dtype", True),
+        ("non_causal", True),
+        ("bytes", False),
+        ("block_size", False),
+        ("sliding_window", False),
+        ("mamba", False),
+    ],
+)
+def test_shared_block_table_spec(difference, shareable):
     full = FullAttentionSpec(
         block_size=16, num_kv_heads=4, head_size=256, dtype=torch.bfloat16
     )
-    draft = replace(full, num_kv_heads=8, head_size=128, head_size_v=128)
-    if difference == "bytes":
-        draft = replace(draft, num_kv_heads=4)
+    other = replace(full, num_kv_heads=8, head_size=128, head_size_v=128)
+    if difference == "dtype":
+        other = replace(other, dtype=torch.float16)
+    elif difference == "non_causal":
+        other = replace(other, non_causal=True)
+    elif difference == "bytes":
+        other = replace(other, num_kv_heads=4)
     elif difference == "block_size":
-        draft = replace(draft, block_size=32, num_kv_heads=4)
-    elif difference == "dtype":
-        draft = replace(draft, dtype=torch.float16)
-    else:
-        draft = replace(draft, non_causal=True)
-    with pytest.raises((AssertionError, ValueError)):
-        kv_cache_utils._get_uniform_page_group_spec({"target": full, "draft": draft})
+        other = replace(other, block_size=32, num_kv_heads=4)
+    elif difference == "sliding_window":
+        other = SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+            sliding_window=4096,
+        )
+    elif difference == "mamba":
+        full = MambaSpec(block_size=16, shapes=((1024,),), dtypes=(torch.bfloat16,))
+        other = replace(full, shapes=((512, 2),))
+    spec = kv_cache_utils._get_shared_block_table_spec({"a": full, "b": other})
+    assert (spec is not None) == shareable
 
 
 @pytest.mark.parametrize("gpu_block_size", [32, 64])

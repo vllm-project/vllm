@@ -1523,13 +1523,9 @@ def _get_kv_cache_groups_uniform_page_size(
     spec_buckets: list[list[KVCacheSpec]] = []
     for layer_spec, layer_names in same_type_layers.items():
         for names, specs in zip(layer_buckets, spec_buckets):
-            candidate_specs = [*specs, layer_spec]
-            try:
-                type(specs[0]).merge(candidate_specs)
-            except (AssertionError, ValueError):
-                # Different full-attention shapes can still share a block table.
-                if not _can_share_full_attention_block_table(candidate_specs):
-                    continue
+            candidate = {str(i): spec for i, spec in enumerate([*specs, layer_spec])}
+            if _get_shared_block_table_spec(candidate) is None:
+                continue
             names.extend(layer_names)
             specs.append(layer_spec)
             break
@@ -1595,57 +1591,37 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
-    logger.info(
-        "Uniform-page KV cache: %d groups, up to %d layers per group",
-        len(grouped_layers),
-        group_size,
-    )
     groups = []
     for layers in grouped_layers:
-        layer_specs = {name: kv_cache_spec[name] for name in layers}
-        group_spec = _get_uniform_page_group_spec(layer_specs)
+        group_spec = _get_shared_block_table_spec(
+            {name: kv_cache_spec[name] for name in layers}
+        )
+        assert group_spec is not None
         groups.append(KVCacheGroupSpec(layers, group_spec))
     return groups
 
 
-def _get_uniform_page_group_spec(
+def _get_shared_block_table_spec(
     specs: dict[str, KVCacheSpec],
-) -> KVCacheSpec:
-    """Preserve distinct full-attention shapes sharing one block table."""
+) -> KVCacheSpec | None:
+    """The spec of a KV cache group holding these layers, or None if they
+    cannot share a block table.
+
+    Attention layers whose specs differ in shape (e.g. a drafter's head
+    layout) can still share one when their block size, token-slot semantics
+    and page size match; each keeps its own spec. The layout resolver picks a
+    block-compact layout whenever shapes differ.
+    """
     values = list(specs.values())
-    first = values[0]
     try:
-        return type(first).merge(values)
+        return type(values[0]).merge(values)
     except (AssertionError, ValueError):
-        if not _can_share_full_attention_block_table(values):
-            raise
-
-    # Keep each layer's original shape for tensor allocation and attention kernels.
-    per_layer_specs = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert per_layer_specs is not None
-    return per_layer_specs
-
-
-def _can_share_full_attention_block_table(specs: Sequence[KVCacheSpec]) -> bool:
-    """Allow different head shapes only when page bytes and all other fields match."""
-    if not all(type(spec) is FullAttentionSpec for spec in specs):
-        return False
-    full_attention_specs = cast(Sequence[FullAttentionSpec], specs)
-    first = full_attention_specs[0]
-    for spec in full_attention_specs:
-        if spec.page_size_bytes != first.page_size_bytes:
-            return False
-        # Ignore the three shape fields when comparing block size, dtype,
-        # quantization, attention semantics, and any future spec fields.
-        same_shape = replace(
-            spec,
-            num_kv_heads=first.num_kv_heads,
-            head_size=first.head_size,
-            head_size_v=first.head_size_v,
-        )
-        if same_shape != first:
-            return False
-    return True
+        pass
+    if not all(isinstance(spec, AttentionSpec) for spec in values):
+        return None
+    if len({spec.page_size_bytes for spec in values}) > 1:
+        return None
+    return UniformTypeKVCacheSpecs.from_specs(specs)
 
 
 def _get_per_layer_spec(
