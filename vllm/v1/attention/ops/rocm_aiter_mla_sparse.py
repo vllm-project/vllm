@@ -33,6 +33,29 @@ else:
 logger = init_logger(__name__)
 
 
+def _validate_paged_mqa_length_semantics(
+    *,
+    compressed_max_model_len: int,
+    semantic_uncompressed_max_model_len: int,
+    semantic_compress_ratio: int,
+) -> None:
+    """Static check that compression semantics are consistent.
+
+    Only uses Python integers; no GPU tensor .item() calls.
+    """
+    if semantic_uncompressed_max_model_len <= 0 or semantic_compress_ratio <= 1:
+        return
+    expected = semantic_uncompressed_max_model_len // semantic_compress_ratio
+    if compressed_max_model_len != expected:
+        raise RuntimeError(
+            "paged-MQA max_model_len semantic mismatch: "
+            f"observed compressed={compressed_max_model_len}, "
+            f"expected compressed={expected}, "
+            f"uncompressed={semantic_uncompressed_max_model_len}, "
+            f"compress_ratio={semantic_compress_ratio}"
+        )
+
+
 def _get_persistent_paged_mqa_inputs(
     *,
     context_lens: torch.Tensor,
@@ -1346,6 +1369,8 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    semantic_uncompressed_max_model_len: int = 0,
+    semantic_compress_ratio: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1370,9 +1395,17 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    semantic_uncompressed_max_model_len: int = 0,
+    semantic_compress_ratio: int = 1,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
 
+    # Static semantic validation (pure Python, no GPU sync).
+    _validate_paged_mqa_length_semantics(
+        compressed_max_model_len=int(max_model_len),
+        semantic_uncompressed_max_model_len=semantic_uncompressed_max_model_len,
+        semantic_compress_ratio=semantic_compress_ratio,
+    )
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
