@@ -6,15 +6,17 @@ import textwrap
 import traceback
 from itertools import product
 from typing import Any
+from unittest import mock
 
 import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
+from vllm.utils.import_utils import has_aiter, has_deep_ep, has_deep_gemm
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -385,6 +387,135 @@ def test_modular_kernel_combinations_singlegpu(
         )
     verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
+
+
+# AITER sorting-backend dispatch env-var matrix (issue #54966 step 3) -------
+#
+# AITER_USE_CK_MOE_SORTING / AITER_USE_FLYDSL_MOE_SORTING are aiter globals
+# read once at import time, so each combo needs a fresh child process (see
+# parallel_launch_with_config) rather than in-process monkeypatching.
+#
+# AITER_MOE_SORT_BACKEND is not covered: it only matters when output_aux=True,
+# which vLLM only sets on the MXFP4 path -- not yet wired into AiterExperts.
+
+require_aiter_moe = pytest.mark.skipif(
+    not (
+        current_platform.is_rocm()
+        and has_aiter()
+        and rocm_aiter_ops.is_fused_moe_enabled()
+    ),
+    reason=(
+        "AITER MoE sorting-backend dispatch needs ROCm + AITER, with "
+        "VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1 set before "
+        "the test process starts."
+    ),
+)
+
+# (AITER_USE_CK_MOE_SORTING, AITER_USE_FLYDSL_MOE_SORTING, expected_backend)
+AITER_SORTING_BACKEND_ENV_CASES = [
+    (1, 0, "ck"),
+    (1, 1, "ck"),  # CK wins over FlyDSL even when both are requested.
+    (0, 1, "flydsl"),
+    (0, 0, "opus"),  # default when neither flag is set.
+]
+
+
+def _aiter_sorting_backend_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    config: Config,
+    weights: WeightTensors,
+    verbose: bool,
+    expected_backend: str,
+):
+    # Imported lazily (inside the spawned child, after env vars have been
+    # applied) so aiter's import-time globals pick up this case's env.
+    import aiter.fused_moe as aiter_fused_moe
+
+    with (
+        mock.patch.object(
+            aiter_fused_moe,
+            "_moe_sorting_impl",
+            wraps=aiter_fused_moe._moe_sorting_impl,
+        ) as sorting_impl_mock,
+        mock.patch.object(
+            aiter_fused_moe,
+            "_flydsl_moe_sorting",
+            wraps=aiter_fused_moe._flydsl_moe_sorting,
+        ) as flydsl_mock,
+    ):
+        # Reuses the real correctness/accuracy checking rank_worker already
+        # does for every other AiterExperts combo, instead of duplicating it.
+        rank_worker(pgi, vllm_config, cpu_group, config, weights, verbose)
+
+        if expected_backend == "flydsl":
+            assert flydsl_mock.call_count > 0, "Expected FlyDSL sorting to fire."
+            assert sorting_impl_mock.call_count == 0, (
+                "FlyDSL was requested and eligible, but the opus/CK sorting "
+                "path fired instead -- a silent fallback."
+            )
+        else:
+            assert flydsl_mock.call_count == 0, (
+                f"Expected the '{expected_backend}' sorting path, but FlyDSL "
+                "fired instead."
+            )
+            assert sorting_impl_mock.call_count > 0, (
+                f"Expected the '{expected_backend}' sorting path to fire."
+            )
+            use_opus = sorting_impl_mock.call_args.kwargs["use_opus"]
+            assert use_opus == (expected_backend == "opus"), (
+                f"Expected use_opus={expected_backend == 'opus'} for the "
+                f"'{expected_backend}' sorting path, got use_opus={use_opus}."
+            )
+
+
+@require_aiter_moe
+@pytest.mark.parametrize("ck,flydsl,expected_backend", AITER_SORTING_BACKEND_ENV_CASES)
+def test_aiter_moe_sorting_backend_dispatch_env_matrix(
+    ck: int, flydsl: int, expected_backend: str
+):
+    """See https://github.com/vllm-project/vllm/issues/54966 ("Test AITER
+    backend and dispatch settings")."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    config = Config(
+        Ms=[32],
+        K=2048,
+        N=1024,
+        E=32,
+        topks=[4],
+        dtype=torch.bfloat16,
+        quant_config=None,
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=AiterExperts,
+        world_size=1,
+    )
+    assert config.is_valid()[0]
+
+    weights = WeightTensors.make(config)
+    vllm_config, env_dict = config.make_env_data()
+    env_dict = {
+        **env_dict,
+        "AITER_USE_CK_MOE_SORTING": str(ck),
+        "AITER_USE_FLYDSL_MOE_SORTING": str(flydsl),
+    }
+
+    parallel_launch_with_config(
+        config.world_size,
+        _aiter_sorting_backend_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        expected_backend,
+    )
 
 
 if __name__ == "__main__":
