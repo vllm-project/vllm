@@ -242,7 +242,7 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
-    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER."""
+    """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_enabled():
@@ -943,6 +943,7 @@ class VllmConfig:
 
         model_config.hf_config = hf_config
         model_config.model_arch_config = model_config.get_model_arch_config()
+        model_config.is_submodel_config = True
 
         return replace(self, model_config=model_config)
 
@@ -1331,7 +1332,26 @@ class VllmConfig:
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 
+        if self.model_config is not None and self.model_config.is_submodel_config:
+            # with_hf_config() view: the parent config was already validated,
+            # and this view's empty architecture list makes the model-dependent checks
+            # below unsafe (e.g. use_mla resolves the architecture registry).
+            return
+
         self._resolve_mm_encoder_only()
+
+        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
+            # Such an instance publishes encoder embeddings and runs no language
+            # model, so it holds no KV cache for prefix caching to reuse and its
+            # coordinator would have no group to manage. Disable before
+            # `try_verify_and_update_config` so model config hooks (e.g. the
+            # hybrid mamba hook setting `mamba_block_size`) already see prefix
+            # caching as disabled.
+            logger.info(
+                "Disabling prefix caching: this instance runs the "
+                "multi-modal encoder only."
+            )
+            self.cache_config.enable_prefix_caching = False
 
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
@@ -1598,11 +1618,14 @@ class VllmConfig:
 
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.warning_once(
-                "Enforce eager set, disabling torch.compile and CUDAGraphs. "
-                "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
+                "Enforce eager set, disabling torch.compile, CUDAGraphs, and JIT "
+                "kernel warmup. This is equivalent to setting -cc.mode=none "
+                "-cc.cudagraph_mode=none and "
+                "--kernel_config.enable_jit_warmup=False"
             )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            self.kernel_config.enable_jit_warmup = False
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
@@ -1894,6 +1917,16 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        # After the platform hook, which has the last word on async scheduling.
+        if (
+            self.diffusion_config is not None
+            and self.scheduler_config.async_scheduling
+            and self.scheduler_config.scheduler_cls is None
+        ):
+            self.scheduler_config.scheduler_cls = (
+                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
+            )
+
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
@@ -2068,16 +2101,6 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
-
-        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
-            # Such an instance publishes encoder embeddings and runs no language
-            # model, so it holds no KV cache for prefix caching to reuse and its
-            # coordinator would have no group to manage.
-            logger.info(
-                "Disabling prefix caching: this instance runs the "
-                "multi-modal encoder only."
-            )
-            self.cache_config.enable_prefix_caching = False
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
