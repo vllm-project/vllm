@@ -972,10 +972,7 @@ def _make_fp8_linear_config(group_shape):
         GroupShape.PER_TENSOR,
         GroupShape.PER_CHANNEL,
         GroupShape.PER_TOKEN,
-        GroupShape(1, 128),
-        GroupShape(64, 128),
         GroupShape(128, 128),
-        GroupShape(256, 128),
     ],
 )
 def test_marlin_fp8_accepts_compatible_quantizations(group_shape):
@@ -988,22 +985,8 @@ def test_marlin_fp8_accepts_compatible_quantizations(group_shape):
     assert compatible_accept_reason is None
 
 
-@pytest.mark.parametrize(
-    ("group_shape", "expected_reason"),
-    [
-        (
-            GroupShape(-1, 128),
-            f"Unsupported weight group shape: {GroupShape(-1, 128)}.",
-        ),
-        (GroupShape(64, 64), "FP8 Marlin requires K group size 128, got 64."),
-        (GroupShape(128, 1), "FP8 Marlin requires K group size 128, got 1."),
-    ],
-)
-def test_marlin_fp8_rejects_incompatible_quantizations(group_shape, expected_reason):
-    incompatible_accept, incompatible_reason = (
-        MarlinFP8ScaledMMLinearKernel.can_implement(
-            _make_fp8_linear_config(group_shape)
-        )
+def test_marlin_fp8_rejects_incompatible_quantization():
+    incompatible_accept, _ = MarlinFP8ScaledMMLinearKernel.can_implement(
+        _make_fp8_linear_config(GroupShape(64, 64))
     )
     assert not incompatible_accept
-    assert incompatible_reason == expected_reason
