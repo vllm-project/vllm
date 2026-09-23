@@ -49,8 +49,7 @@ def _can_render_directly(response: CompletionResponse) -> bool:
         models.extend((choice, choice.logprobs))
         if choice.prompt_logprobs is not None:
             return False
-        if choice.logprobs is not None:
-            logprobs = choice.logprobs
+        if (logprobs := choice.logprobs) is not None:
             if not all(map(isfinite, filter(None, logprobs.token_logprobs))):
                 return False
             values = chain.from_iterable(
