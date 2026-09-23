@@ -506,13 +506,16 @@ class _RecordingEvent:
     """Stand-in for torch.Event that records the order it was waited on."""
 
     def __init__(self, name: str, log: list[str]):
+        """Log this event's waits and records to ``log`` as ``name``."""
         self.name = name
         self.log = log
 
     def synchronize(self):
+        """Log a host wait on this event."""
         self.log.append(f"wait:{self.name}")
 
     def record(self):
+        """Log a record of this event."""
         self.log.append(f"record:{self.name}")
 
 
@@ -541,6 +544,7 @@ def test_synchronize_input_prep_waits_for_spec_decode_postprocess():
 
 
 def test_synchronize_input_prep_without_spec_decode_is_unchanged():
+    """Without spec decode only prepare_inputs_event is waited on and recorded."""
     log: list[str] = []
     runner = SimpleNamespace(
         prepare_inputs_event=_RecordingEvent("prepare_inputs", log),
@@ -574,6 +578,7 @@ def test_synchronize_input_prep_waits_for_postprocess_without_async_scheduling()
 
 
 def test_synchronize_input_prep_is_a_noop_without_spec_decode_or_overlap():
+    """With neither event there is nothing to wait on or record."""
     runner = SimpleNamespace(prepare_inputs_event=None, num_accepted_tokens_event=None)
 
     with GPUModelRunner.synchronize_input_prep(runner):

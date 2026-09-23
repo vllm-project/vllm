@@ -3803,6 +3803,7 @@ class GPUModelRunner(
 
     @contextmanager
     def synchronize_input_prep(self):
+        """Wait until the previous step is done with the buffers input prep reuses."""
         # prepare_inputs_event is recorded when input prep ends, so it says
         # nothing about the spec-decode postprocess that runs after the model.
         # That postprocess reads the persistent block tables and staged index
