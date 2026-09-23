@@ -560,6 +560,12 @@ class OnlineRenderer:
                     param="suffix",
                 )
 
+            if request.truncate_prompt_tokens is not None:
+                return self.create_error_response(
+                    "suffix is not supported with truncate_prompt_tokens",
+                    param="suffix",
+                )
+
             if isinstance(request.prompt, str):
                 rendered_prompt = self.renderer.render_completion_suffix(
                     request.prompt, request.suffix
