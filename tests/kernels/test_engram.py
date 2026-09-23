@@ -599,7 +599,9 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
         ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeypatch):
@@ -701,7 +703,9 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
     assert cache_sizes == [1] * len(cache_sizes)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 7, 256])

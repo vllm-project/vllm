@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import pytest
 import torch
 
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
+    async_tensor_h2d,
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
@@ -192,3 +194,26 @@ def test_runtime_threads_override_vllm_set_omp_num_threads(
     torch.set_num_threads(3)
     set_torch_threads_for_runtime()
     assert torch.get_num_threads() == 1
+
+
+@pytest.mark.parametrize(
+    "device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]
+)
+def test_async_tensor_h2d_staging(device):
+    """Staging must preserve values while normalizing dtype and layout."""
+    # Non-contiguous source with a dtype conversion: would previously sync.
+    src = torch.arange(12, dtype=torch.int64).reshape(3, 4).T
+    result = async_tensor_h2d(src, device=device, dtype=torch.int32)
+    assert result.dtype == torch.int32
+    assert result.is_contiguous()
+    assert torch.equal(result.cpu(), src.to(torch.int32))
+
+    # numpy and list sources still work.
+    assert torch.equal(
+        async_tensor_h2d(np.arange(4, dtype=np.int64), device=device),
+        torch.arange(4, device=device),
+    )
+    assert torch.equal(
+        async_tensor_h2d([1, 2, 3], device=device, dtype=torch.int32),
+        torch.tensor([1, 2, 3], dtype=torch.int32, device=device),
+    )

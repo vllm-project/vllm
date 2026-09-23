@@ -66,9 +66,10 @@ def _store_candidates_kernel(
     cols = tl.program_id(1) * TILE + tl.arange(0, TILE)
     value = tl.load(values + row * k + cols, cols < k, other=-float("inf"))
     index = tl.load(indices + row * k + cols, cols < k, other=-1)
+    # NaN scores can occur during warmup; only -inf denotes padding.
     tl.store(
         output + row * out_stride_row + cols * out_stride_col,
-        tl.where(value > -float("inf"), index, -1),
+        tl.where(value != -float("inf"), index, -1),
         cols < OUT_K,
     )
 

@@ -27,6 +27,10 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
 )
@@ -402,6 +406,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)
+        expose_input_quant_key(layer, self.fp8_linear)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -412,8 +417,10 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # if batch invariant mode is enabled dequant
-        if envs.VLLM_BATCH_INVARIANT and not isinstance(
-            self.fp8_linear, CutlassFP8ScaledMMLinearKernel
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and not isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel)
+            and not isinstance(x, QuantizedActivation)
         ):
             weight_dequant = (
                 layer.weight.to(x.dtype) * layer.weight_scale.to(x.dtype).t()
@@ -730,11 +737,13 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         )
         # Reject backends whose make_fp8_moe_quant_config branch silently
         # drops per_act_token_quant / per_out_ch_quant or collapses scales:
-        # MARLIN / CPU route through fp8_w8a16_moe_quant_config; FLASHINFER_*
-        # fold scales into a per-tensor alpha (oracle/fp8.py).
+        # MARLIN / CPU route through fp8_w8a16_moe_quant_config, CPU_W8A8
+        # ignores both flags, and FLASHINFER_* fold scales into a per-tensor
+        # alpha (oracle/fp8.py).
         if self.fp8_backend in (
             Fp8MoeBackend.MARLIN,
             Fp8MoeBackend.CPU,
+            Fp8MoeBackend.CPU_W8A8,
             Fp8MoeBackend.FLASHINFER_CUTLASS,
             Fp8MoeBackend.FLASHINFER_TRTLLM,
         ):

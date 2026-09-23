@@ -61,8 +61,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-from ..common.engram import Engram, EngramLayout, NgramHashState
+from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
+
+# Engram host offload and its prefetch stream are neither ROCm- nor
+# NVIDIA-specific, so they are imported rather than duplicated.
+from ..nvidia.engram import Engram
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -274,7 +278,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
                     self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
@@ -288,7 +292,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
-                post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -301,18 +305,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     pre_mix=pre_mix,
                 )
         else:
-            residual = self.mhc_post(x, residual, post_mix, res_mix)
-            if self.engram is not None and engram_hashes is not None:
-                # Engram injection happens between the previous sublayer's
-                # post and this block's pre, on the full hc stream, so the
-                # mix coefficients see the injected stream.
-                residual = self.engram(
-                    residual,
-                    engram_hashes[:, self.engram.layer_hash_index],
-                    engram_mask,
-                )
-            post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
-                residual,
+            pre_args = (
                 self.hc_attn_fn,
                 self.hc_attn_scale,
                 self.hc_attn_base,
@@ -321,8 +314,37 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_eps,
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
-                pre_mix=pre_mix,
             )
+            if self.engram is not None and engram_hashes is not None:
+                # Engram injection happens between the previous sublayer's
+                # post and this block's pre, on the full hc stream, so the
+                # mix coefficients see the injected stream. That read of the
+                # residual is what stops the post from fusing into the pre
+                # here, unlike the attention seam below.
+                residual = self.mhc_post(x, residual, post_mix, res_mix)
+                residual = self.engram(
+                    residual,
+                    engram_hashes[:, self.engram.layer_hash_index],
+                    engram_mask,
+                )
+                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                    residual, *pre_args, pre_mix=pre_mix
+                )
+            else:
+                (
+                    residual,
+                    post_mix,
+                    res_mix,
+                    x,
+                    attn_pre,
+                ) = self.mhc_pre_delayed(
+                    residual,
+                    *pre_args,
+                    pre_mix=pre_mix,
+                    sublayer_out=x,
+                    post_layer_mix=post_mix,
+                    comb_res_mix=res_mix,
+                )
         x = self.attn_norm(x)
 
         if self.use_sequence_parallel:
@@ -332,8 +354,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual = self.mhc_post(x, residual, post_mix, res_mix)
-        post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
+        residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -344,6 +365,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
             pre_mix=attn_pre,
+            sublayer_out=x,
+            post_layer_mix=post_mix,
+            comb_res_mix=res_mix,
         )
         x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)

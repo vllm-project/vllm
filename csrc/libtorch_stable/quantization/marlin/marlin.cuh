@@ -67,14 +67,6 @@ __device__ inline void cp_async2_ca_pred(void* smem_ptr, const void* glob_ptr,
   }
 }
 
-__device__ inline void cp_async4_ca_pred(void* smem_ptr, const void* glob_ptr,
-                                         bool pred = true) {
-  if (pred) {
-    reinterpret_cast<int4*>(smem_ptr)[0] =
-        reinterpret_cast<const int4*>(glob_ptr)[0];
-  }
-}
-
 __device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr,
                                       bool pred = true) {
   if (pred) {
@@ -111,19 +103,6 @@ __device__ inline void cp_async1_ca_pred(void* smem_ptr, const void* glob_ptr,
 __device__ inline void cp_async2_ca_pred(void* smem_ptr, const void* glob_ptr,
                                          bool pred = true) {
   const int BYTES = 8;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-      "{\n"
-      "   .reg .pred p;\n"
-      "   setp.ne.b32 p, %0, 0;\n"
-      "   @p cp.async.ca.shared.global [%1], [%2], %3;\n"
-      "}\n" ::"r"((int)pred),
-      "r"(smem), "l"(glob_ptr), "n"(BYTES));
-}
-
-__device__ inline void cp_async4_ca_pred(void* smem_ptr, const void* glob_ptr,
-                                         bool pred = true) {
-  const int BYTES = 16;
   uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile(
       "{\n"

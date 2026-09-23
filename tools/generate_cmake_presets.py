@@ -28,7 +28,6 @@ def get_cpu_cores():
 
 def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False):
     """Generates the CMakeUserPresets.json file."""
-
     print("Attempting to detect your system configuration...")
 
     # Detect NVCC

@@ -163,6 +163,7 @@ def repeated_context_mask(
         include_prompt: Search the prompt as well as the generated tokens.
         skip_partial_context: Mark contexts containing start padding so they use
             ordinary sampling.
+
     """
     if max_history is not None and max_history < 1:
         raise ValueError("max_history must be positive or None")

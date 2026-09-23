@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
+"""TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
 
 This spec creates a TieringOffloadingManager with a CPU primary tier
 and configurable secondary tiers (e.g., Storage, Network).
@@ -82,8 +81,7 @@ logger = init_logger(__name__)
 
 
 class TieringOffloadingSpec(CPUOffloadingSpec):
-    """
-    Spec for multi-tier KV cache offloading.
+    """Spec for multi-tier KV cache offloading.
 
     Creates a TieringOffloadingManager with:
     - Primary tier: CPU (LRU or ARC eviction policy)
@@ -249,6 +247,34 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             assert isinstance(tier_config, dict)
             tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
             metrics.update(tier_cls.build_metric_definitions(tier_config))
+
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Exponential moving average of store latency "
+                    "for back-pressure detection, in s/MiB."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of store operations dropped due to "
+                    "back-pressure on a secondary tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of blocks dropped due to back-pressure on a secondary tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+
         return metrics
 
     def __init__(self, config: OffloadingConfig):
@@ -260,6 +286,32 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
+
+        # Backpressure config is merged field-by-field in priority order
+        # (highest first):
+        #   1. Per-tier ``backpressure`` dict in the tier config
+        #   2. Top-level ``backpressure`` in kv_connector_extra_config
+        # Merging per field (rather than per whole dict) means a partial
+        # tier override still inherits missing fields from the top-level
+        # default, so the resolved dict reaching the factory is complete.
+        # Within each tier's resolved dict, tier-type-aware water marks
+        # are filled in last so a bare ``"backpressure": {}`` picks up
+        # sensible thresholds for the storage medium.
+        bp_defaults = self.extra_config.get("backpressure")
+
+        for tier_cfg in self.secondary_tier_configs:
+            tier_override = tier_cfg.get("backpressure")
+            # Overlay from lowest to highest precedence so higher-precedence
+            # fields win while lower-precedence ones fill in the gaps.
+            merged: dict[str, Any] = {}
+            for source in (bp_defaults, tier_override):
+                if source:
+                    merged.update(source)
+            # Only set a resolved dict when at least one source contributed
+            # (or an explicit ``backpressure`` key was present, e.g. ``{}``),
+            # so tiers without any backpressure config stay unconfigured.
+            if merged or "backpressure" in tier_cfg:
+                tier_cfg["backpressure"] = merged
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
@@ -276,8 +328,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def get_manager(self) -> OffloadingManager:
-        """
-        Get the TieringOffloadingManager.
+        """Get the TieringOffloadingManager.
 
         Creates a TieringOffloadingManager with:
         - Primary tier: CPU (LRU or ARC)
@@ -285,6 +336,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         Returns:
             TieringOffloadingManager instance
+
         """
         if not self._manager:
             if int(self.extra_config.get("store_threshold", 0)) >= 2:

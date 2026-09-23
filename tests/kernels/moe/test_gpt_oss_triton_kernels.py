@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import get_triton_kernels_version, has_triton_kernels
 
 if not has_triton_kernels():
     pytest.skip(
@@ -15,9 +15,15 @@ if not has_triton_kernels():
         allow_module_level=True,
     )
 
-import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
 import triton_kernels.swiglu
-from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+
+if get_triton_kernels_version() == "3.8":
+    # 3.8: matmul_ogs -> matmul, matmul_ogs_details -> matmul_details
+    import triton_kernels.matmul_details.opt_flags as opt_flags
+    from triton_kernels.matmul import FlexCtx, PrecisionConfig
+else:
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
+    from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
 from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_mxfp
 from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
@@ -28,9 +34,10 @@ from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_co
 from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
     triton_kernel_moe_forward,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mx_scale_kwargs
 from vllm.utils.math_utils import round_up
 
-from .utils import shuffle_weight
+from .utils import mxfp4_w_layouts, shuffle_weight
 
 
 def deshuffle(w: torch.Tensor):
@@ -133,12 +140,12 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
 
         x_tri = F.pad(x_tri, (0, x_pad, 0, 0), mode="constant", value=0)
 
-        w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
-        w_scale_layout, w_scale_layout_opts = (
-            layout.make_default_matmul_mxfp4_w_scale_layout(
-                mx_axis=1, num_warps=num_warps
-            )
-        )
+        (
+            w_layout,
+            w_layout_opts,
+            w_scale_layout,
+            w_scale_layout_opts,
+        ) = mxfp4_w_layouts(mx_axis=1, num_warps=num_warps)
 
         w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
         w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
@@ -165,10 +172,10 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
         )
 
         pc1 = PrecisionConfig(
-            weight_scale=w1_scale_tri, flex_ctx=FlexCtx(rhs_data=InFlexData())
+            **mx_scale_kwargs(w1_scale_tri), flex_ctx=FlexCtx(rhs_data=InFlexData())
         )
         pc2 = PrecisionConfig(
-            weight_scale=w2_scale_tri, flex_ctx=FlexCtx(rhs_data=InFlexData())
+            **mx_scale_kwargs(w2_scale_tri), flex_ctx=FlexCtx(rhs_data=InFlexData())
         )
 
         # tucuate so the rest can run properly
@@ -281,8 +288,6 @@ class Case:
 @pytest.mark.parametrize("num_token", [2])
 @pytest.mark.parametrize("tp", [1, 2, 4, 8])
 def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
-    from triton_kernels.tensor_details import layout
-
     if not hasattr(layout, "make_default_matmul_mxfp4_w_layout"):
         pytest.skip("make_default_matmul_mxfp4_w_layout not available")
 
@@ -384,10 +389,14 @@ def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
 
     make_routing_data = gptoss_moe.make_routing_data
     routing_data_from_sparse_topk = gptoss_moe.routing_data_from_sparse_topk
-    use_legacy_triton_kernels = gptoss_moe.use_legacy_triton_kernels
 
-    if use_legacy_triton_kernels:
+    if gptoss_moe.triton_kernels_version == "3.5.1":
         pytest.skip("SparseMatrix path requires triton_kernels v3.6.0+")
+    if gptoss_moe.triton_kernels_version == "3.8":
+        pytest.skip(
+            "3.8 rebuilds routing from raw ids, so routing_data_from_sparse_topk "
+            "just forwards to make_routing_data and the comparison is vacuous"
+        )
 
     from triton_kernels.topk import topk as topk_fn
 

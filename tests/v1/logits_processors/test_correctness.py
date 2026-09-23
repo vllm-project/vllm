@@ -98,7 +98,7 @@ class LogitsProcsRequestParams:
         self.params = _sampling_params_from_logitproc(logitproc_type)
 
     def __str__(self):
-        """For debugging"""
+        """For debugging."""
         summ = ", ".join(f"{k}={v}" for k, v in vars(self).items())
         return f"MyClass({summ})"
 
@@ -117,7 +117,7 @@ def _generate_fake_sampling_metadata(
     vocab_size: int,
     device: torch.device,
 ) -> SamplingMetadata:
-    """Generate fake sampling metadata with fake logitsprocs"""
+    """Generate fake sampling metadata with fake logitsprocs."""
     output_token_ids: list[list[int]] = []
     prompt_token_ids: list[list[int]] = []
     for _ in range(batch_size):
@@ -176,7 +176,7 @@ def _generate_fake_sampling_metadata(
 
 
 def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
-    """Generate fake logits and sampling metadata"""
+    """Generate fake logits and sampling metadata."""
     fake_logits = create_fake_logits(batch_size, VOCAB_SIZE)
     # Create one dominant token per batch, to support min-p test
     for i in range(batch_size):
@@ -192,7 +192,7 @@ def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
 
 
 def _sampling_params_from_logitproc(logitproc_type: LogitprocType) -> SamplingParams:
-    """Customize request SamplingParams for a specified logitproc"""
+    """Customize request SamplingParams for a specified logitproc."""
     # SamplingParams for req with no logitproc
     kwargs = {"min_p": 0.0, "logit_bias": None, "min_tokens": 0}
     if fxn := logitsprocs_test_mapping[logitproc_type].gen_request_fxn:
@@ -220,6 +220,7 @@ def _generate_mixed_logitsprocs_batch_params(
     Returns:
       List of per-request params which configure the engine for that request's
       enabled logitproc
+
     """
     batch_size = len(logitsprocs_types) * reqs_per_logitproc
     # Generate multiple repeats of key params for each logitproc;
@@ -251,7 +252,7 @@ def _raise_error_invalid(
 
 
 def _logit_bias_params(kwargs: dict) -> None:
-    """Logit bias config"""
+    """Logit bias config."""
     kwargs["logit_bias"] = {
         random.randint(0, VOCAB_SIZE - 1): random.choice([-0.1, 0.2])
     }
@@ -265,7 +266,7 @@ def _logit_bias_validate(
     request_params: LogitsProcsRequestParams,
     step_idx: int,
 ) -> None:
-    """Validate logit bias logitproc applied correctly"""
+    """Validate logit bias logitproc applied correctly."""
     logit_bias = request_params.params.logit_bias
     logits_old = test_fakes.logits[persistent_batch[batch_index].workload_index].cpu()
     logits_new = logits_new[batch_index].cpu()
@@ -301,7 +302,7 @@ def _logit_bias_validate(
 
 
 def _min_p_params(kwargs: dict) -> None:
-    """Min-p logitproc config"""
+    """Min-p logitproc config."""
     kwargs["min_p"] = 0.1
 
 
@@ -313,7 +314,7 @@ def _min_p_validate(
     request_params: LogitsProcsRequestParams,
     step_idx: int,
 ) -> None:
-    """Validate min-p logitproc applied correctly"""
+    """Validate min-p logitproc applied correctly."""
     for token_id in range(VOCAB_SIZE):
         logits_for_token = logits_new[batch_index][token_id]
         if token_id == 0:
@@ -347,7 +348,7 @@ def _min_p_validate(
 
 
 def _min_tokens_params(kwargs: dict) -> None:
-    """Min-tokens logitproc config"""
+    """Min-tokens logitproc config."""
     kwargs["min_tokens"] = MIN_TOKENS_LEN_THRESHOLD
     kwargs["stop_token_ids"] = [
         np.random.randint(0, VOCAB_SIZE - 1)
@@ -363,7 +364,7 @@ def _min_tokens_validate(
     request_params: LogitsProcsRequestParams,
     step_idx: int,
 ) -> None:
-    """Validate min-tokens logitsproc applied correctly"""
+    """Validate min-tokens logitsproc applied correctly."""
     ref_num_out_tokens = len(request_params.out_tokens)
     min_reached = ref_num_out_tokens >= MIN_TOKENS_LEN_THRESHOLD
     ref_all_stop_token_ids = request_params.params.all_stop_token_ids
@@ -560,7 +561,7 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode
 
 
 def _thinking_budget_params(kwargs: dict) -> None:
-    """Set SamplingParams kwargs for thinking token budget tests"""
+    """Set SamplingParams kwargs for thinking token budget tests."""
     kwargs["thinking_token_budget"] = THINKING_TOKEN_BUDGET
 
 
@@ -661,7 +662,7 @@ def _none_validate(
     request_params: LogitsProcsRequestParams,
     step_idx: int,
 ) -> None:
-    """Validate that no logits processors are applied"""
+    """Validate that no logits processors are applied."""
     logits = test_fakes.logits[persistent_batch[batch_index].workload_index].cpu()
     ref_logits = logits_new[batch_index]
     if not torch.all(ref_logits == logits):
@@ -706,7 +707,7 @@ logitsprocs_test_mapping = {
 
 
 def _get_test_cases() -> list[list[str]]:
-    """Each test case is a set of logitsprocs"""
+    """Each test case is a set of logitsprocs."""
     logitsprocs_types = list(logitsprocs_test_mapping.keys())
 
     # Isolate thinking-budget handling from other processors to avoid cross-talk.

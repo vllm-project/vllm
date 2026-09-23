@@ -406,19 +406,24 @@ def chunk_kda_scaled_dot_kkt_fwd(
     chunk_size: int = FLA_CHUNK_SIZE,
     output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    r"""
-    Compute beta * K * K^T.
+    r"""Compute beta * K * K^T.
 
     Args:
+        q (torch.Tensor):
+            The query tensor of shape `[B, T, H, K]`.
         k (torch.Tensor):
             The key tensor of shape `[B, T, H, K]`.
         beta (torch.Tensor):
             The beta tensor of shape `[B, T, H]`.
         gk (torch.Tensor):
             The cumulative sum of the gate tensor of shape `[B, T, H, K]` applied to the key tensor. Default: `None`.
+        scale (float):
+            Scale applied to the query-key products. Default: `None`.
         cu_seqlens (torch.Tensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
+        chunk_indices (torch.Tensor):
+            Precomputed chunk indices for `cu_seqlens`. Default: `None`.
         chunk_size (int):
             The chunk size. Default: 64.
         output_dtype (torch.dtype):
@@ -426,6 +431,7 @@ def chunk_kda_scaled_dot_kkt_fwd(
 
     Returns:
         beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
+
     """
     B, T, H, K = k.shape
     assert K <= 256
@@ -1318,16 +1324,15 @@ def fused_kda_gate(
     safe_gate: bool = False,
     lower_bound: float | None = -5.0,
 ) -> torch.Tensor:
-    """
-    Forward pass for KDA gate:
-      input g: [..., H*D]
-      param A: [H] or [1, 1, H, 1]
-      beta: softplus beta parameter (softplus branch only)
-      threshold: softplus threshold parameter (softplus branch only)
-      safe_gate: when False (default) compute y = -exp(A)*softplus(g+g_bias);
-        when True compute the bounded y = lower_bound*sigmoid(exp(A)*(g+g_bias))
-      lower_bound: floor for the safe_gate branch (default -5.0)
-      return  : [..., H, D]
+    """Forward pass for KDA gate:
+    input g: [..., H*D]
+    param A: [H] or [1, 1, H, 1]
+    beta: softplus beta parameter (softplus branch only)
+    threshold: softplus threshold parameter (softplus branch only)
+    safe_gate: when False (default) compute y = -exp(A)*softplus(g+g_bias);
+      when True compute the bounded y = lower_bound*sigmoid(exp(A)*(g+g_bias))
+    lower_bound: floor for the safe_gate branch (default -5.0)
+    return  : [..., H, D]
     """
     orig_shape = g.shape[:-1]
 

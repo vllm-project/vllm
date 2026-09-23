@@ -65,9 +65,9 @@ def create_fused_moe_router(
     # Deepseek V4 vision routing bias parameters
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
+    skip_padding: bool = False,
 ) -> FusedMoERouter:
-    """
-    Factory function to create the appropriate FusedMoERouter subclass based on
+    """Factory function to create the appropriate FusedMoERouter subclass based on
     the provided parameters.
 
     The selection logic follows this priority order:
@@ -92,6 +92,7 @@ def create_fused_moe_router(
         topk_group: Top-k within each group (for grouped routing)
         scoring_func: Scoring function to use ("softmax" or "sigmoid")
         num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
+        skip_padding: Whether to invalidate routes for padding rows
 
     Grouped topk and fused topk bias arguments:
         routed_scaling_factor: Scaling factor for routed weights
@@ -114,8 +115,8 @@ def create_fused_moe_router(
 
     Returns:
         An instance of the appropriate FusedMoERouter subclass
-    """
 
+    """
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
         return RoutingSimulatorRouter(
@@ -210,6 +211,7 @@ def create_fused_moe_router(
                 routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias,
                 num_fused_shared_experts=num_fused_shared_experts,
+                skip_padding=skip_padding,
             )
         # Otherwise fall through to the non-grouped chain below.
 

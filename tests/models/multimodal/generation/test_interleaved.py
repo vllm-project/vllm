@@ -23,11 +23,9 @@ NONINTERLEAVED_PROMPT = base_prompt("<image><image><video>\n")
 @pytest.mark.parametrize("dtype", ["float16"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
-    """
-    This is a simple test to check if interleaved and non-interleaved prompts
+    """This is a simple test to check if interleaved and non-interleaved prompts
     give the same result.
     """
-
     image_cherry = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
     image_stop = convert_image_mode(ImageAsset("stop_sign").pil_image, "RGB")
     images = [image_cherry, image_stop]

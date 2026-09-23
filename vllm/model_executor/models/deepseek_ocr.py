@@ -11,7 +11,7 @@ import torch.nn as nn
 from transformers import BatchFeature, CLIPVisionConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -46,10 +46,10 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -79,13 +79,12 @@ _IMAGE_TOKEN = "<image>"
 
 
 class DeepseekOCRImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - n: Number of images
-        - p: Number of patches
-        - base_size: Base size of the processor
-        - image_size: Image size of the processor
+    """Dimensions:
+    - b: Batch size
+    - n: Number of images
+    - p: Number of patches
+    - base_size: Base size of the processor
+    - image_size: Image size of the processor
     """
 
     type: Literal["pixel_values"]
@@ -269,17 +268,15 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         max_image_size = self.info.get_image_size_with_most_features()
 
         return {
             "image": self._get_dummy_images(
                 width=max_image_size.width,
                 height=max_image_size.height,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
             )
         }
 
@@ -287,34 +284,19 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
 class DeepseekOCRMultiModalProcessor(
     BaseMultiModalProcessor[DeepseekOCRProcessingInfo]
 ):
-    def _apply_hf_processor_main(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        if "text" in hf_inputs.hf_data:
+            hf_inputs.hf_data["prompt"] = hf_inputs.hf_data.pop("text")
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        if mm_data:
-            processed_data = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_processor_mm_kwargs),
-                dict(prompt=prompt_text, **mm_data),
-                hf_processor_mm_kwargs,
-            )
-
-        else:
-            tokenizer = self.info.get_tokenizer()
-            assert isinstance(tokenizer, HfTokenizer)
-            processed_data = tokenizer(
-                prompt_text, add_special_tokens=True, return_tensors="pt"
-            )
-
-        processed_data.update(passthrough_data)
-        return processed_data
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,
@@ -639,9 +621,7 @@ class DeepseekOCRForCausalLM(
         return autoloaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="projector",
@@ -676,8 +656,7 @@ class DeepseekOCRForCausalLM(
         self,
         image_spatial_crop: torch.Tensor | None = None,
     ) -> tuple[int, int, int, int]:
-        """
-        Return (num_input_tokens, num_output_tokens, global_output_token,
+        """Return (num_input_tokens, num_output_tokens, global_output_token,
         local_output_token) for a single image described by
         ``image_spatial_crop``.
         """
@@ -854,8 +833,7 @@ class DeepseekOCRForCausalLM(
         self,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Encode batched global images with newline tokens inserted.
+        """Encode batched global images with newline tokens inserted.
         Output shape: ``[B * 272, n_embed]``.
         """
         bsz = pixel_values.shape[0]
@@ -880,8 +858,7 @@ class DeepseekOCRForCausalLM(
         self,
         images_crop: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Encode local patches without newline insertion (newlines are added later
+        """Encode local patches without newline insertion (newlines are added later
         in ``postprocess_encoder_output`` via ``_assemble_patch_grid``).
         Output shape: ``[P * 100, n_embed]``.
         """
@@ -951,8 +928,7 @@ class DeepseekOCRForCausalLM(
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """
-        Assemble per-image embeddings from global and local encoder outputs.
+        """Assemble per-image embeddings from global and local encoder outputs.
 
         ``output['global']`` contains global-image features with newlines already
         inserted (from CUDA graph replay or eager fallback):

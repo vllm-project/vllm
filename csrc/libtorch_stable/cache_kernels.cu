@@ -19,7 +19,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cfloat>
 #include <cstdlib>
 
 #ifdef USE_ROCM
@@ -84,7 +83,9 @@ void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
 namespace {
 // ROCm hipMemcpyBatchAsync faults for count > 8192 (MI350X/gfx950), so chunk
 // at that ceiling.
+#if defined(USE_ROCM)
 constexpr int64_t kRocmDefaultMaxBatchDescriptors = 8192;
+#endif
 
 constexpr const char* kMaxBatchDescriptorsEnv =
     "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS";
@@ -587,8 +588,9 @@ __global__ void concat_and_cache_ds_mla_kernel(
     max_abs = fmaxf(max_abs, VLLM_SHFL_XOR_SYNC_WIDTH(max_abs, offset, 16));
   }
 
-  // Compute the scale for the tile
-  float tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, FLT_MIN);
+  // Both SM90 and SM100 readers preserve power-of-two fp32 scales exactly.
+  float tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, 1e-4f);
+  tile_scale = exp2f(ceilf(log2f(tile_scale)));
 
   // The first lane of each half-warp writes the scale to kv_cache
   if ((lane_idx == 0) || (lane_idx == 16)) {

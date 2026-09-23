@@ -22,6 +22,46 @@ BLOCK_SIZES = [32, 128]
 set_random_seed(0)
 
 
+@pytest.mark.parametrize("num_experts,num_tokens", [(32, 8), (256, 8), (256, 1024)])
+@pytest.mark.parametrize("use_expert_map", [False, True])
+def test_moe_align_scatter_masks_invalid_routes(
+    num_experts, num_tokens, use_expert_map
+):
+    topk_ids = torch.arange(num_tokens * 4, device="cuda").reshape(-1, 4)
+    topk_ids %= num_experts
+    topk_ids[0] = torch.tensor([-1, num_experts, 0, 1], device="cuda")
+    expert_map = None
+    valid = (topk_ids >= 0) & (topk_ids < num_experts)
+    if use_expert_map:
+        expert_map = torch.full((num_experts,), -1, dtype=torch.int32, device="cuda")
+        expert_map[::2] = torch.arange(
+            num_experts // 2, device="cuda", dtype=torch.int32
+        )
+        valid &= topk_ids % 2 == 0
+
+    sorted_ids, expert_ids, num_padded, scatter_idx = moe_align_block_size(
+        topk_ids,
+        32,
+        num_experts,
+        expert_map,
+        ignore_invalid_experts=True,
+        return_scatter_idx=True,
+    )
+    expected = torch.arange(topk_ids.numel(), device="cuda", dtype=torch.int32)
+    expected[~valid.flatten()] = -1
+    torch.testing.assert_close(scatter_idx, expected[:, None])
+    active_sorted = sorted_ids[: num_padded.item()]
+    active_sorted = active_sorted[active_sorted < topk_ids.numel()]
+    torch.testing.assert_close(active_sorted.sort().values, expected[expected >= 0])
+
+    baseline = moe_align_block_size(
+        topk_ids, 32, num_experts, expert_map, ignore_invalid_experts=True
+    )
+    assert len(baseline) == 3
+    torch.testing.assert_close(num_padded, baseline[2])
+    torch.testing.assert_close(expert_ids, baseline[1])
+
+
 def _group_tokens_by_expert(
     sorted_ids: torch.Tensor,
     expert_ids: torch.Tensor,
@@ -54,8 +94,7 @@ def _verify_expert_level_sorting(
     valid_length: int,
     total_tokens: int,
 ):
-    """
-    Verify that actual_sorted_ids follows the correct expert-level sorting.
+    """Verify that actual_sorted_ids follows the correct expert-level sorting.
     The kerne limplementation may or may not preserve original token order
     in topk_ids in the final sorted_ids however this does not impact quality.
     """
@@ -96,8 +135,7 @@ def torch_moe_align_block_size(
     expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Golden torch implementation of moe_align_block_size.
+    """Golden torch implementation of moe_align_block_size.
 
     This function aligns the token distribution across experts to be compatible
     with block size for matrix multiplication by sorting tokens by expert and
@@ -189,7 +227,7 @@ def torch_moe_align_block_size(
 def test_moe_align_block_size(
     m: int, topk: int, num_experts: int, block_size: int, pad_sorted_ids: bool
 ):
-    """Test moe_align_block_size without expert mapping"""
+    """Test moe_align_block_size without expert mapping."""
     topk_ids = torch.zeros((m, topk), device="cuda", dtype=torch.int32)
     for i in range(m):
         experts = torch.randperm(num_experts, device="cuda")[:topk]
@@ -254,7 +292,7 @@ def test_moe_align_block_size_with_expert_map(
     block_size: int,
     mask_inactive_experts: bool,
 ):
-    """Test moe_align_block_size with expert mapping (EP scenario)"""
+    """Test moe_align_block_size with expert mapping (EP scenario)."""
     expert_map = torch.full((num_experts,), -1, device="cuda", dtype=torch.int32)
     local_experts = list(range(0, num_experts, 2))
     for i, expert_id in enumerate(local_experts):

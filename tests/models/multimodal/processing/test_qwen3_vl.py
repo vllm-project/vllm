@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ...registry import HF_EXAMPLE_MODELS
@@ -339,7 +340,9 @@ def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> Non
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
     capped = MULTIMODAL_REGISTRY.create_processor(capped_ctx.model_config)
-    capped_dummy = capped.dummy_inputs.get_dummy_mm_data(1024, {"video": 1}, {})
+    capped_dummy = capped.dummy_inputs.get_dummy_mm_data(
+        1024, {"video": 1}, MultiModalDummyOptions()
+    )
     capped_frames = capped_dummy["video"][0][0].shape[0]
     assert capped_frames == 16, (
         f"Expected the dummy to spread the budget over 16 frames, got {capped_frames}"
@@ -351,7 +354,9 @@ def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> Non
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
     uncapped = MULTIMODAL_REGISTRY.create_processor(uncapped_ctx.model_config)
-    uncapped_dummy = uncapped.dummy_inputs.get_dummy_mm_data(1024, {"video": 1}, {})
+    uncapped_dummy = uncapped.dummy_inputs.get_dummy_mm_data(
+        1024, {"video": 1}, MultiModalDummyOptions()
+    )
     uncapped_frames = uncapped_dummy["video"][0][0].shape[0]
     assert uncapped_frames == 2, (
         f"Expected the uncapped dummy to keep 2 frames, got {uncapped_frames}"

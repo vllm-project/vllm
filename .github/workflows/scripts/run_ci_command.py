@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import http.client
 import json
 import os
 import random
@@ -22,6 +23,7 @@ COMMAND_RUN_AMD_CI_ALL = "/amd-ci run all"
 COMMAND_RUN_AMD_CI_NIGHTLY = "/amd-ci run nightly"
 COMMAND_RETRY_AMD_FAILED = "/amd-ci retry"
 COMMAND_CANCEL_AMD_CI = "/amd-ci cancel"
+ALLOW_STALE_SUFFIX = " --allow-stale"
 RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_CI: {},
     COMMAND_RUN_CI_ALL: {"RUN_ALL": "1"},
@@ -30,20 +32,25 @@ RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_AMD_CI_ALL: {"RUN_ALL": "1"},
     COMMAND_RUN_AMD_CI_NIGHTLY: {"RUN_ALL": "1", "NIGHTLY": "1"},
 }
+ALLOW_STALE_COMMANDS = frozenset(
+    f"{command}{ALLOW_STALE_SUFFIX}" for command in RUN_CI_COMMAND_ENV
+)
+RUN_CI_COMMAND_ENV.update(
+    {
+        command: RUN_CI_COMMAND_ENV[command.removesuffix(ALLOW_STALE_SUFFIX)]
+        for command in ALLOW_STALE_COMMANDS
+    }
+)
 UPSTREAM_CI_COMMANDS = frozenset(
     {
-        COMMAND_RUN_CI,
-        COMMAND_RUN_CI_ALL,
-        COMMAND_RUN_CI_NIGHTLY,
+        *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/ci ")),
         COMMAND_RETRY_FAILED,
         COMMAND_CANCEL_CI,
     }
 )
 AMD_CI_COMMANDS = frozenset(
     {
-        COMMAND_RUN_AMD_CI,
-        COMMAND_RUN_AMD_CI_ALL,
-        COMMAND_RUN_AMD_CI_NIGHTLY,
+        *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/amd-ci ")),
         COMMAND_RETRY_AMD_FAILED,
         COMMAND_CANCEL_AMD_CI,
     }
@@ -77,6 +84,10 @@ class ApiError(RuntimeError):
     def __init__(self, status: int | None, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+class CiPreparationError(RuntimeError):
+    pass
 
 
 def rate_limit_jitter() -> float:
@@ -137,6 +148,8 @@ class HttpTransport:
                     None,
                     f"API request failed: {error.reason}",
                 ) from error
+            except (OSError, http.client.HTTPException) as error:
+                raise ApiError(None, f"API request failed: {error}") from error
 
         if not response_body:
             return None
@@ -233,6 +246,17 @@ class GitHubClient:
 
     def get_pr(self, number: int) -> dict[str, Any]:
         return self._request(self._repo_path(f"/pulls/{number}"))
+
+    def get_commits_behind_base(self, base_ref: str, head_sha: str) -> int:
+        base_ref = urllib.parse.quote(f"refs/heads/{base_ref}", safe="")
+        head_sha = urllib.parse.quote(head_sha, safe="")
+        response = self._request(
+            self._repo_path(f"/compare/{base_ref}...{head_sha}?per_page=1")
+        )
+        behind = response.get("behind_by") if isinstance(response, dict) else None
+        if type(behind) is not int or behind < 0:
+            raise ApiError(None, "GitHub returned an invalid commits-behind count.")
+        return behind
 
     def list_pulls_for_commit(self, commit: str) -> list[dict[str, Any]]:
         commit = urllib.parse.quote(commit, safe="")
@@ -747,6 +771,10 @@ def notify_authorized(
         (
             f"✅ @{author}, CI is now available for this PR.\n\n"
             "- `/ci run` starts upstream CI; `/amd-ci run` starts AMD CI only.\n"
+            "- Your branch must contain every commit currently on its upstream "
+            "target branch. Merge or rebase onto the latest target branch, then "
+            "rerun the command. Append `--allow-stale` to a run command to test "
+            "an outdated branch at your own risk.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
@@ -794,6 +822,56 @@ def resolve_workflow_run_pr(
     return find_matching_pr(github.list_pulls_for_commit(head_sha))
 
 
+def prepare_pr_for_ci(
+    github: GitHubClient,
+    pr: Mapping[str, Any],
+    command: str,
+) -> tuple[dict[str, Any], str]:
+    base_ref = pr["base"]["ref"]
+    no_action = "No new CI build was started."
+    try:
+        behind = github.get_commits_behind_base(base_ref, pr["head"]["sha"])
+        current_pr = github.get_pr(pr["number"])
+    except ApiError as error:
+        raise CiPreparationError(
+            f"Could not check the PR against upstream `{base_ref}`. "
+            f"{no_action} Comment `{command}` again. {error}"
+        ) from error
+    if (
+        current_pr["state"] != "open"
+        or current_pr["head"]["sha"] != pr["head"]["sha"]
+        or current_pr["base"]["ref"] != pr["base"]["ref"]
+    ):
+        raise CiPreparationError(
+            f"The PR changed while checking its branch. {no_action} "
+            f"Comment `{command}` again."
+        )
+    commits = "commit" if behind == 1 else "commits"
+    lag = f"This PR is {behind} {commits} behind upstream `{base_ref}`."
+    if command in ALLOW_STALE_COMMANDS:
+        warning = ""
+        if behind:
+            run_command = command.removesuffix(ALLOW_STALE_SUFFIX)
+            warning = (
+                f"⚠️ {lag} Running CI at your own risk because "
+                "`--allow-stale` was requested; outdated CI configuration may "
+                "cause failures. Before merging, merge or rebase onto the latest "
+                f"`{base_ref}`, then rerun `{run_command}` on the latest PR commit."
+            )
+            print(warning)
+        return current_pr, warning
+
+    if behind:
+        raise CiPreparationError(
+            f"{lag} Your branch must contain every commit currently on upstream "
+            f"`{base_ref}`. {no_action} "
+            f"Merge or rebase onto the latest `{base_ref}`, then rerun `{command}`."
+            " To test this branch at your own risk, "
+            f"use `{command}{ALLOW_STALE_SUFFIX}`."
+        )
+    return current_pr, ""
+
+
 def handle_run_ci(
     *,
     actor: str,
@@ -828,12 +906,7 @@ def handle_run_ci(
             f"{ci_name} is already running for this commit: {active_build['web_url']}"
         )
 
-    current_pr = github.get_pr(pr["number"])
-    if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
-        return (
-            "The PR head changed while processing the command. "
-            f"Comment `{command}` again."
-        )
+    current_pr, warning = prepare_pr_for_ci(github, pr, command)
 
     build = buildkite.create_build(
         create_build_payload(
@@ -846,6 +919,7 @@ def handle_run_ci(
     return (
         f"Triggered [Buildkite {ci_name} #{build['number']}]({build['web_url']}) "
         f"for commit `{current_pr['head']['sha'][:12]}`."
+        + (f"\n\n{warning}" if warning else "")
     )
 
 
@@ -1099,6 +1173,12 @@ def run(
             raise ValueError(f"Unsupported CI command: {command}")
         add_reaction_safely(github, comment_id, "rocket")
         github.add_comment(issue_number, f"✅ {message}")
+    except CiPreparationError as error:
+        add_reaction_safely(github, comment_id, "-1")
+        github.add_comment(
+            issue_number,
+            f"❌ {error}\n\n{command_comment_marker(comment_id)}",
+        )
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise

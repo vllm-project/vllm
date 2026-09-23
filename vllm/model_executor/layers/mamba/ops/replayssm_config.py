@@ -8,7 +8,6 @@ auto-detected (Blackwell vs not) so call sites need not thread it through.
 """
 
 import functools
-from contextlib import contextmanager
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -24,20 +23,6 @@ def _is_blackwell() -> bool:
 
 # Per-kernel overrides keyed by the kernel name passed to get_replayssm_config.
 _overrides: dict[str, tuple] = {}
-
-
-@contextmanager
-def override_replayssm_config(kernel: str, config: tuple):
-    """Pin ``kernel``'s launch config for the duration of the context."""
-    prev = _overrides.get(kernel)
-    _overrides[kernel] = config
-    try:
-        yield
-    finally:
-        if prev is None:
-            _overrides.pop(kernel, None)
-        else:
-            _overrides[kernel] = prev
 
 
 def _dstate_tile(dstate: int, tile: int) -> int:

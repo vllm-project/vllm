@@ -23,7 +23,6 @@ from vllm.v1.worker.gpu.states import RequestState
 @pytest.fixture
 def mock_model_runner_with_req_states():
     """Create a mock MRv2 GPUModelRunner with a real RequestState."""
-
     runner = Mock(spec=GPUModelRunner)
     runner.req_states = RequestState(
         max_num_reqs=10,

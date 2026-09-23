@@ -33,6 +33,7 @@ async def read_upload_with_limit(
 
     Raises:
         VLLMValidationError: If the file exceeds the configured size limit.
+
     """
     if max_size_mb is None:
         max_size_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB

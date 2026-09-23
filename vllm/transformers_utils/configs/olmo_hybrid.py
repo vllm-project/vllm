@@ -6,8 +6,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class OlmoHybridConfig(PretrainedConfig):
-    r"""
-        Configuration class for [`OlmoHybridModel`]. It is used to
+    r"""Configuration class for [`OlmoHybridModel`]. It is used to
         instantiate an OLMo Hybrid model according to the specified
         arguments, defining the model architecture. Instantiating a
         configuration with the defaults will yield a similar
@@ -19,7 +18,7 @@ class OlmoHybridConfig(PretrainedConfig):
         can be used to control the model outputs. Read the
         documentation from [`PreTrainedConfig`] for more information.
 
-        Args:
+    Args:
             vocab_size (`int`, *optional*, defaults to 100352):
                 Vocabulary size of the OlmoHybrid model. Defines
                 the number of different tokens that can be
@@ -159,6 +158,7 @@ class OlmoHybridConfig(PretrainedConfig):
         >>> model = OlmoHybridModel(configuration)
         >>> configuration = model.config
     ```
+
     """
 
     model_type = "olmo_hybrid"

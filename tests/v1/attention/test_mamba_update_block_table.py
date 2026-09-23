@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Regression test for https://github.com/vllm-project/vllm/issues/34865
+"""Regression test for https://github.com/vllm-project/vllm/issues/34865.
 
 When multiple KV cache groups share the same MambaSpec (as in Nemotron
 hybrid models), the metadata caching optimization reuses metadata from
@@ -76,7 +75,6 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
     """update_block_table() must write block_idx tensors to the current
     builder's persistent buffers, not leave them pointing to a different
     builder's buffers."""
-
     block_size = 16
     max_model_len = 256
     num_reqs = 4
@@ -181,7 +179,6 @@ def test_state_indices_tensor_d_includes_num_speculative_blocks():
     the cudagraph buffer for state_indices_tensor_d must allocate the same
     per-request column count as the runtime block table, which includes
     num_speculative_blocks trailing scratch columns."""
-
     block_size = 16
     max_model_len = 256
     max_num_seqs = 4
@@ -215,7 +212,6 @@ def test_block_idx_cudagraph_capture_padded_by_num_reqs():
     _cudagraph_capture must slice block_idx_last_{scheduled,computed}_token
     by the request count (padded_bs == num_reqs), not by num_decode_tokens.
     Past num_decodes, the slice must be zero-filled."""
-
     block_size = 16
     max_model_len = 256
     max_num_seqs = 8

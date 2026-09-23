@@ -13,9 +13,7 @@ logger = init_logger(__name__)
 
 
 class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Prepare/Finalize using MoRI kernels.
-    """
+    """Prepare/Finalize using MoRI kernels."""
 
     def __init__(
         self,
@@ -60,8 +58,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
-        """
-        Returns a tuple of:
+        """Returns a tuple of:
         - quantized + dispatched a.
         - Optional quantized + dispatched a1_scales.
         - Optional ExpertTokensMetadata containing gpu/cpu tensors
@@ -85,6 +82,15 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             elif quant_config.is_per_act_token:
                 quant_func = get_hip_quant(QuantType.per_Token)
                 a1, scale = quant_func(a1, quant_dtype=current_platform.fp8_dtype())
+            elif quant_config.is_per_tensor:
+                quant_func = get_hip_quant(QuantType.per_Tensor)
+                a1, scale = quant_func(
+                    a1,
+                    scale=quant_config.a1_scale,
+                    quant_dtype=current_platform.fp8_dtype(),
+                )
+                # mori expects one scale slot per token; broadcast.
+                scale = scale.expand(a1.shape[0], 1).contiguous()
 
         (
             dispatch_a1,

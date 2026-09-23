@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for AWQ INT4 W4A8 GEMM pipeline (SGLang kernel migration).
+"""Unit tests for AWQ INT4 W4A8 GEMM pipeline (SGLang kernel migration).
 
 Part 1: Weight packing tests
   - convert_weight_packed_scale_zp correctness
@@ -44,6 +43,7 @@ def make_awq_checkpoint_data(K, N, group_size, seed=42):
         float_ref:      [K, N] float32, reference dequantized weights
         weight_int4_orig: [K, N] int32, original int4 values (0-15)
         zeros_int4_orig:  [num_groups, N] int32, original zero points (0-15)
+
     """
     rng = np.random.RandomState(seed)
     num_groups = K // group_size

@@ -17,14 +17,19 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
-if has_triton_kernels():
+_triton_kernels_version = get_triton_kernels_version()
+
+if _triton_kernels_version is not None:
     try:
-        from triton_kernels.matmul_ogs import PrecisionConfig
+        if _triton_kernels_version == "3.8":
+            from triton_kernels.matmul import PrecisionConfig
+        else:
+            from triton_kernels.matmul_ogs import PrecisionConfig
     except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -41,8 +46,7 @@ def _get_config_dtype_str(
     use_int4_w4a16: bool = False,
     ocp_mx_scheme: str | None = None,
 ) -> str | None:
-    """
-    Return a string used to construct the filename that contains the
+    """Return a string used to construct the filename that contains the
     tuning info for a particular quantization scheme.  See
     try_get_optimal_moe_config in fused_moe.py.
     """
@@ -72,9 +76,7 @@ def _quant_flags_to_group_shape(
     per_out_ch_quant: bool,
     block_shape: list[int] | None,
 ) -> tuple[GroupShape | None, GroupShape | None]:
-    """
-    Convert MoE quantization flags into more generic GroupShapes.
-    """
+    """Convert MoE quantization flags into more generic GroupShapes."""
     a_shape: GroupShape | None
     w_shape: GroupShape | None
     if block_shape is not None:
@@ -173,8 +175,7 @@ def get_routing_method_type(
 
 @dataclass
 class FusedMoEQuantDesc:
-    """
-    A quantization descriptor for fused MoE ops. This class can describe
+    """A quantization descriptor for fused MoE ops. This class can describe
     either activations or weights.
     """
 
@@ -212,8 +213,7 @@ class FusedMoEQuantDesc:
 # e.g. for specific arguments bias, precision, etc.
 @dataclass
 class FusedMoEQuantConfig:
-    """
-    The FusedMoEQuantConfig contains all the quantization parameters for
+    """The FusedMoEQuantConfig contains all the quantization parameters for
     a single FusedMoEMethodBase operation.  It consists of four
     FusedMoEQuantDescs, one for each activation and set of weights.
 
@@ -435,8 +435,7 @@ class FusedMoEQuantConfig:
         return self._a1.dtype == "fp8" and self._w1.dtype == "mxfp4"
 
     def config_name(self, dtype: torch.dtype) -> str | None:
-        """
-        Return a string used to construct the filename that contains the
+        """Return a string used to construct the filename that contains the
         tuning info for a particular quantization scheme.  See
         try_get_optimal_moe_config in fused_moe.py.
         """
@@ -454,8 +453,7 @@ class FusedMoEQuantConfig:
         max_tokens: int,
         hidden_dim: int,
     ) -> tuple[int, int] | None:
-        """
-        Construct the proper activation scale shape for this
+        """Construct the proper activation scale shape for this
         config.
         """
         if self.is_quantized:
@@ -477,8 +475,7 @@ class FusedMoEQuantConfig:
         max_tokens: int,
         hidden_dim: int,
     ) -> tuple[int, int, int] | None:
-        """
-        Construct the proper activation batched scale shape for this
+        """Construct the proper activation batched scale shape for this
         config, e.g. (num experts, *scale_shape).
         """
         if self.is_quantized:
@@ -512,8 +509,7 @@ class FusedMoEQuantConfig:
         gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
     ) -> "FusedMoEQuantConfig":
-        """
-        General builder function for a FusedMoEQuantConfig.
+        """General builder function for a FusedMoEQuantConfig.
         - quant_dtype: Optional quantization type. None if activations are
           unquantized or quantized prior to calling.  Note: "nvfp4", "mxfp4",
           "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
@@ -607,9 +603,7 @@ def fp8_w8a8_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for fp8 activations and fp8 weights.
-    """
+    """Construct a quant config for fp8 activations and fp8 weights."""
     return FusedMoEQuantConfig.make(
         current_platform.fp8_dtype(),
         w1_scale=w1_scale,
@@ -640,9 +634,7 @@ def int8_w8a8_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for int8 activations and int8 weights.
-    """
+    """Construct a quant config for int8 activations and int8 weights."""
     return FusedMoEQuantConfig.make(
         torch.int8,
         w1_scale=w1_scale,
@@ -667,9 +659,7 @@ def gptq_marlin_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
 ):
-    """
-    Construct a quant config for gptq marlin quantization.
-    """
+    """Construct a quant config for gptq marlin quantization."""
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
@@ -702,9 +692,7 @@ def mxfp4_w4a16_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for unquantized activations and mxfp4 weights.
-    """
+    """Construct a quant config for unquantized activations and mxfp4 weights."""
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
@@ -730,9 +718,7 @@ def mxfp4_mxfp8_moe_quant_config(
     mx_alignment: int = 0,
     is_scale_swizzled: bool = True,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for mxfp4 activations and mxfp4 weights.
-    """
+    """Construct a quant config for mxfp4 activations and mxfp4 weights."""
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc("mxfp8"),
         _a2=FusedMoEQuantDesc("mxfp8"),
@@ -756,9 +742,7 @@ def mxfp4_w4a8_moe_quant_config(
     block_shape: list[int] | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for fp8 activations and mxfp4 weights.
-    """
+    """Construct a quant config for fp8 activations and mxfp4 weights."""
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc("fp8", None, a1_scale, None, None, None),
         _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
@@ -782,9 +766,7 @@ def ocp_mx_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for mxfp4 activations and mxfp4 weights.
-    """
+    """Construct a quant config for mxfp4 activations and mxfp4 weights."""
     assert quant_dtype in OCP_MX_DTYPES
     return FusedMoEQuantConfig.make(
         quant_dtype=quant_dtype,
@@ -818,9 +800,7 @@ def nvfp4_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for mxfp4 activations and nvp4 weights.
-    """
+    """Construct a quant config for mxfp4 activations and nvp4 weights."""
     return FusedMoEQuantConfig.make(
         "nvfp4",
         w1_scale=w1_scale,
@@ -845,8 +825,7 @@ def mxfp4_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for MXFP4 x MXFP4 MoE.
+    """Construct a quant config for MXFP4 x MXFP4 MoE.
     MXFP4 uses block scaling only (E8M0 scales, 32-element groups), with no
     separate alphas / global activation scales in this config.
     """
@@ -869,9 +848,7 @@ def nvfp4_w4a16_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for 16-but activations and nvp4 weights.
-    """
+    """Construct a quant config for 16-but activations and nvp4 weights."""
     return FusedMoEQuantConfig.make(
         quant_dtype=None,
         w1_scale=w1_scale,
@@ -899,9 +876,7 @@ def int4_w4a16_moe_quant_config(
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for 16-bit float activations and int4 weights.
-    """
+    """Construct a quant config for 16-bit float activations and int4 weights."""
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
@@ -924,9 +899,7 @@ def fp8_w8a16_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for 16-bit float activations and fp8 weights.
-    """
+    """Construct a quant config for 16-bit float activations and fp8 weights."""
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     fp8_dtype = current_platform.fp8_dtype()
     return FusedMoEQuantConfig(
@@ -968,9 +941,7 @@ def int8_w8a16_moe_quant_config(
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for 16-bit float activations and int8 weights.
-    """
+    """Construct a quant config for 16-bit float activations and int8 weights."""
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
@@ -992,9 +963,7 @@ def int4_w4afp8_moe_quant_config(
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for fp8 activations and int4 weights.
-    """
+    """Construct a quant config for fp8 activations and int4 weights."""
     return FusedMoEQuantConfig.make(
         torch.float8_e4m3fn,  # quant dtype for activations
         w1_scale=w1_scale,
@@ -1015,8 +984,7 @@ def biased_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for unquantized activations with biases.
+    """Construct a quant config for unquantized activations with biases.
 
     gemm1_alpha/gemm1_beta/gemm1_clamp_limit carry the SwiGLU gate params
     through to the fused activation kernel (e.g. swigluoai_uninterleave).
@@ -1117,6 +1085,10 @@ class FusedMoEParallelConfig:
     def use_deepep_v2_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_v2"
 
+    @property
+    def use_moonep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "moonep"
+
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
@@ -1136,8 +1108,7 @@ class FusedMoEParallelConfig:
         sp_size_: int,
         vllm_parallel_config: ParallelConfig,
     ) -> "FusedMoEParallelConfig":
-        """
-        Determine MoE parallel configuration. Based on the input `tp_size_`,
+        """Determine MoE parallel configuration. Based on the input `tp_size_`,
         `dp_size_` and vllm's parallel config, determine what
         level's of parallelism to use in the fused moe layer.
 
@@ -1145,6 +1116,7 @@ class FusedMoEParallelConfig:
             tp_size_ (int): `tp_size` passed into the FusedMoEFactory constructor.
             pcp_size_ (int): `pcp_size` passed into the FusedMoEFactory constructor.
             dp_size_ (int): `dp_size` passed into the FusedMoEFactory constructor.
+            sp_size_ (int): `sp_size` passed into the FusedMoEFactory constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 
@@ -1208,6 +1180,7 @@ class FusedMoEParallelConfig:
             - device 3: TP = {1, 0} DP = {2, 1} EP = {4, 3}
             - Comment: There are 2 engine instances and the experts are split
                 between the 4 devices.
+
         """
         use_ep = (
             dp_size_ * pcp_size_ * tp_size_ > 1
@@ -1309,6 +1282,7 @@ class FusedMoEConfig:
     elastic_ep_max_dp_size: int | None = None
     has_bias: bool = False
     is_lora_enabled: bool = False
+    has_hash_routing: bool = False
 
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is
@@ -1340,6 +1314,8 @@ class FusedMoEConfig:
 
     # Set by __post_init__
     intermediate_size_per_partition: int = -1
+    # Use the allocated width as the checkpoint TP stride, including for scales.
+    tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
 
@@ -1501,6 +1477,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_v2_kernels(self):
         return self.moe_parallel_config.use_deepep_v2_kernels
+
+    @property
+    def use_moonep_kernels(self):
+        return self.moe_parallel_config.use_moonep_kernels
 
     @property
     def needs_round_robin_routing_tables(self):

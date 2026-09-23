@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark comparing old vs new default fused MoE configs.
+"""Benchmark comparing old vs new default fused MoE configs.
 
 Runs the triton fused_moe kernel with three configurations for each scenario:
   1. Tuned config (from JSON file, if available) — the target to match

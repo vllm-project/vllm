@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: str | None = None
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
+    FORCE_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
@@ -130,6 +131,7 @@ if TYPE_CHECKING:
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
+    VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
@@ -137,11 +139,12 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
-    VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
+    VLLM_ROCM_USE_AITER_MOE_SITUV2: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
@@ -154,7 +157,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
-    VLLM_PLE_CPU_OFFLOAD: bool = True
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
@@ -211,7 +213,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
-    VLLM_KIMI_K3_GEMM_RS: bool = False
+    VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -392,8 +394,7 @@ def env_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], str | None]:
-    """
-    Create a lambda that validates environment variable against allowed choices
+    """Create a lambda that validates environment variable against allowed choices.
 
     Args:
         env_name: Name of the environment variable
@@ -403,6 +404,7 @@ def env_with_choices(
 
     Returns:
         Lambda function for environment_variables dict
+
     """
 
     def _get_validated_env() -> str | None:
@@ -437,8 +439,7 @@ def env_list_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], list[str]]:
-    """
-    Create a lambda that validates environment variable
+    """Create a lambda that validates environment variable
     containing comma-separated values against allowed choices
 
     Args:
@@ -450,6 +451,7 @@ def env_list_with_choices(
     Returns:
         Lambda function for environment_variables
         dict that returns list of strings
+
     """
 
     def _get_validated_env_list() -> list[str]:
@@ -492,8 +494,7 @@ def env_set_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], set[str]]:
-    """
-    Creates a lambda which that validates environment variable
+    """Creates a lambda which that validates environment variable
     containing comma-separated values against allowed choices which
     returns choices as a set.
     """
@@ -512,6 +513,7 @@ def get_vllm_port() -> int | None:
 
     Raises:
         ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
+
     """
     if "VLLM_PORT" not in os.environ:
         return None
@@ -533,12 +535,19 @@ def get_vllm_port() -> int | None:
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
+def _generate_shm_name() -> str:
+    import pybase64
+
+    # Fit macOS's 30-character limit without truncating the UUID.
+    encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
+    return "vllm_mm_" + encoded_uuid.rstrip("=")
+
+
 def get_env_or_set_default(
     env_name: str,
     default_factory: Callable[[], str],
 ) -> Callable[[], str]:
-    """
-    Create a lambda that returns an environment variable value if set,
+    """Create a lambda that returns an environment variable value if set,
     or generates and sets a default value using the provided factory function.
     """
 
@@ -841,6 +850,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
     # Standard unix flag for disabling ANSI color codes
     "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
+    # De-facto standard flag for forcing ANSI color codes (e.g. non-tty case)
+    "FORCE_COLOR": lambda: os.getenv("FORCE_COLOR", "0") != "0",
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: (
@@ -1219,6 +1230,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
+    # Set to 1 to dequantize MXFP4 weights to BF16 once at load time and run as
+    # a BF16 checkpoint (no per-step weight dequant). This improves emulation
+    # latency at the cost of additional device memory. Default off.
+    "VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD": lambda: (
+        os.getenv("VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD", "False").lower()
+        in ("true", "1")
+    ),
     # On hardware without a native MXFP8 kernel (e.g. ROCm gfx942 / MI300), the
     # MXFP8 emulation path dequantizes weights MXFP8->BF16 once at load time and
     # runs as a BF16 checkpoint (no per-step dequant). Set to 0 to fall back to
@@ -1251,12 +1269,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
-    # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
-    # interleaved flydsl kernels instead of the default a16w4 separated path.
-    # This is the only flag users need: vLLM picks the kernels by passing
-    # gate_mode to AITER and sets the AITER-side workaround env at init.
-    "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
+    # Route K3 SiTU MXFP4 MoE through the FlyDSL SiTUv2 path (a4w4 fp4
+    # activations, separated gate/up layout) instead of default a16w4. vLLM
+    # sets AITER_SITUV2_A4W4 at init when this flag is on and clears any
+    # legacy AITER_SITUV2_A8W4 override (AITER checks A8W4 first).
+    # VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 is a deprecated alias for existing
+    # recipes; it does not select a8w4 kernels.
+    # Needs AITER >= v0.1.20 (ROCm/aiter#4463) for the a4w4 dispatch flag
+    # and tuned kimik3_a4w4_*_fmoe.csv rows; otherwise FlyDSL uses heuristics.
+    "VLLM_ROCM_USE_AITER_MOE_SITUV2": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "0").lower() in ("true", "1")
+        or os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower()
+        in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
@@ -1296,6 +1320,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+    ),
+    # Whether to use aiter fp4 gemm asm.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
@@ -1502,7 +1531,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
         os.environ.get("VLLM_HUMMING_ONLINE_QUANT_CONFIG", None)
     ),
-    # The activation dtype config for humming kernel
+    # The activation dtype config for humming kernel. Explicit schemas disable
+    # fallback unless the config includes "allow_fallback": true.
     "VLLM_HUMMING_INPUT_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
         os.environ.get("VLLM_HUMMING_INPUT_QUANT_CONFIG", None)
     ),
@@ -1599,9 +1629,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
-    # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
-    # row-parallel projections. All TP ranks must belong to one NVLink domain.
-    "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
+    # Fuse eligible sequence-parallel row-parallel projections with their TP
+    # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
+    # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP
+    # ranks must belong to one NVLink domain.
+    "VLLM_ENABLE_GEMM_RS": lambda: bool(int(os.getenv("VLLM_ENABLE_GEMM_RS", "0"))),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -1929,7 +1961,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if not explicitly set.
     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": get_env_or_set_default(
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-        lambda: f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}",
+        _generate_shm_name,
     ),
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
@@ -2043,8 +2075,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
-    # Store n-gram embedding tables in pinned CPU memory for UVA lookup.
-    "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "1"))),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
@@ -2170,6 +2200,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each op additionally checks its own shape / dtype constraints and falls
     # back to the eager path when they do not hold.
     "VLLM_ENABLE_HPC_OPS": lambda: bool(int(os.getenv("VLLM_ENABLE_HPC_OPS", "0"))),
+    # Whether to skip version suffix when building package
+    "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
+        int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
+    ),
 }
 
 
@@ -2177,8 +2211,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
 
 def __getattr__(name: str):
-    """
-    Gets environment variables lazily.
+    """Gets environment variables lazily.
 
     NOTE: After enable_envs_cache() invocation (which triggered after service
     initialization), all environment variables will be cached.
@@ -2189,14 +2222,13 @@ def __getattr__(name: str):
 
 
 def _is_envs_cache_enabled() -> bool:
-    """Checked if __getattr__ is wrapped with functools.cache"""
+    """Checked if __getattr__ is wrapped with functools.cache."""
     global __getattr__
     return hasattr(__getattr__, "cache_clear")
 
 
 def enable_envs_cache() -> None:
-    """
-    Enables caching of environment variables. This is useful for performance
+    """Enables caching of environment variables. This is useful for performance
     reasons, as it avoids the need to re-evaluate environment variables on
     every call.
 
@@ -2217,8 +2249,7 @@ def enable_envs_cache() -> None:
 
 
 def disable_envs_cache() -> None:
-    """
-    Resets the environment variables cache. It could be used to isolate environments
+    """Resets the environment variables cache. It could be used to isolate environments
     between unit tests.
     """
     global __getattr__
@@ -2239,21 +2270,11 @@ def is_set(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def validate_environ(hard_fail: bool) -> None:
-    for env in os.environ:
-        if env.startswith("VLLM_") and env not in environment_variables:
-            if hard_fail:
-                raise ValueError(f"Unknown vLLM environment variable detected: {env}")
-            else:
-                logger.warning("Unknown vLLM environment variable detected: %s", env)
-
-
 def compile_factors() -> dict[str, object]:
     """Return env vars used for torch.compile cache keys.
 
     Start with every known vLLM env var; drop entries in `ignored_factors`;
     hash everything else. This keeps the cache key aligned across workers."""
-
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_RPC_BASE_PATH",
@@ -2338,6 +2359,8 @@ def compile_factors() -> dict[str, object]:
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
+        "VLLM_SKIP_VERSION_SUFFIX",
+        "FORCE_COLOR",
     }
 
     from vllm.config.utils import normalize_value

@@ -12,7 +12,6 @@ import os
 import tempfile
 import threading
 import time
-from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,7 +22,7 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from safetensors.torch import load, load_file, safe_open, save_file
+from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -72,7 +71,7 @@ temp_dir = tempfile.gettempdir()
 
 
 def enable_xet_high_performance():
-    """automatically activates xet high performance mode"""
+    """Automatically activates xet high performance mode"""
     if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
         huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
 
@@ -103,8 +102,7 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
 def atomic_writer(
     filepath: str | Path, mode: str = "w", encoding: str | None = None
 ) -> Generator[IO]:
-    """
-    Context manager that provides an atomic file writing routine.
+    """Context manager that provides an atomic file writing routine.
 
     The context manager writes to a temporary file and, if successful,
     atomically replaces the original file.
@@ -116,6 +114,7 @@ def atomic_writer(
 
     Yields:
         file object: A handle to the temporary file.
+
     """
     # Create a temporary file in the same directory as the target file
     # to ensure it's on the same filesystem for an atomic replace.
@@ -184,56 +183,6 @@ def maybe_download_from_modelscope(
                 model_path = model
         return model_path
     return None
-
-
-def _shared_pointers(tensors):
-    ptrs = defaultdict(list)
-    for k, v in tensors.items():
-        ptrs[v.data_ptr()].append(k)
-    failing = []
-    for _, names in ptrs.items():
-        if len(names) > 1:
-            failing.append(names)
-    return failing
-
-
-def convert_bin_to_safetensor_file(
-    pt_filename: str,
-    sf_filename: str,
-) -> None:
-    loaded = torch.load(pt_filename, map_location="cpu", weights_only=True)
-    if "state_dict" in loaded:
-        loaded = loaded["state_dict"]
-    shared = _shared_pointers(loaded)
-    for shared_weights in shared:
-        for name in shared_weights[1:]:
-            loaded.pop(name)
-
-    # For tensors to be contiguous
-    loaded = {k: v.contiguous() for k, v in loaded.items()}
-
-    dirname = os.path.dirname(sf_filename)
-    os.makedirs(dirname, exist_ok=True)
-    save_file(loaded, sf_filename, metadata={"format": "pt"})
-
-    # check file size
-    sf_size = os.stat(sf_filename).st_size
-    pt_size = os.stat(pt_filename).st_size
-    if (sf_size - pt_size) / pt_size > 0.01:
-        raise RuntimeError(
-            f"""The file size different is more than 1%:
-         - {sf_filename}: {sf_size}
-         - {pt_filename}: {pt_size}
-         """
-        )
-
-    # check if the tensors are the same
-    reloaded = load_file(sf_filename)
-    for k in loaded:
-        pt_tensor = loaded[k]
-        sf_tensor = reloaded[k]
-        if not torch.equal(pt_tensor, sf_tensor):
-            raise RuntimeError(f"The output tensors do not match for key {k}")
 
 
 # TODO(woosuk): Move this to other place.
@@ -482,6 +431,7 @@ def download_weights_from_hf(
 
     Returns:
         str: The path to the downloaded model weights.
+
     """
     assert len(allow_patterns) > 0
     local_only = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -580,6 +530,7 @@ def download_safetensors_index_file_from_hf(
         subfolder (Optional[str]): The subfolder within the model repository
             to download weights from.
         revision (Optional[str]): The revision of the model.
+
     """
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
@@ -637,8 +588,7 @@ def filter_duplicate_safetensors_files(
 
 
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:
-    """
-    Exclude files that are not needed for inference.
+    """Exclude files that are not needed for inference.
 
     See https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
     """
@@ -727,11 +677,15 @@ def _get_available_ram_bytes() -> int:
 
     host_available = psutil.virtual_memory().available
 
-    from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
+    from vllm.utils.cpu_resource_utils import (
+        get_cgroup_memory_limit,
+        get_cgroup_memory_usage,
+    )
 
-    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    cgroup_limit = get_cgroup_memory_limit()
     if cgroup_limit is None:
         return host_available
+    cgroup_usage = get_cgroup_memory_usage()
     cgroup_available = (
         cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
     )
@@ -1308,29 +1262,6 @@ def composed_weight_loader(
     return composed_loader
 
 
-def initialize_dummy_weights(
-    model: torch.nn.Module,
-    model_config: ModelConfig,
-    low: float = -1e-3,
-    high: float = 1e-3,
-    seed: int = 1234,
-) -> None:
-    """Initialize model weights with random values.
-
-    The model weights must be randomly initialized for accurate performance
-    measurements. Additionally, the model weights should not cause NaNs in the
-    forward pass. We empirically found that initializing the weights with
-    values between -1e-3 and 1e-3 works well for most models.
-
-    We use per-parameter random seed, so that dummy weights are consistent,
-    even if the model is partitioned across multiple devices. When the seed
-    is fixed, the random values generated by this function only depends on
-    the parameter's number of elements and its data type.
-    """
-    for param in model.state_dict().values():
-        initialize_single_dummy_weight(param, low, high, seed)
-
-
 @torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
@@ -1403,6 +1334,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         str: The remapped parameter name if successful, or the original name
              if no remapping is needed.
         None: If the remapped name is not found in params_dict.
+
     """
     # Already in vLLM's expected form (e.g. weights pre-renamed by a
     # `WeightsMapper` from the quant config). Skip the regex remap, which
@@ -1502,8 +1434,7 @@ def maybe_remap_moe_expert_param_name(
     name: str,
     params_dict: dict[str, torch.nn.Parameter],
 ) -> str:
-    """
-    Remap MoE expert parameter names to account for routed_experts hierarchy.
+    """Remap MoE expert parameter names to account for routed_experts hierarchy.
 
     This handles the transition from the old FusedMoE structure where weights
     were directly in the experts module, to the new MoERunner → RoutedExperts
@@ -1525,6 +1456,7 @@ def maybe_remap_moe_expert_param_name(
     Returns:
         Remapped parameter name if routed_experts hierarchy exists,
         otherwise the original name
+
     """
     # Only remap if this looks like an expert parameter
     if ".experts." not in name:
@@ -1578,8 +1510,7 @@ def remap_moe_expert_weights(
     weights: Iterable[tuple[str, torch.Tensor]],
     params_dict: dict[str, torch.nn.Parameter],
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """
-    Wrapper generator that remaps MoE expert parameter names for backward compatibility.
+    """Remap MoE expert parameter names for backward compatibility.
 
     This allows models with custom weight loading to automatically handle both old
     and new checkpoint formats without needing model-specific remapping code.
@@ -1597,6 +1528,7 @@ def remap_moe_expert_weights(
 
     Yields:
         (remapped_name, tensor) tuples
+
     """
     for name, weight in weights:
         remapped_name = maybe_remap_moe_expert_param_name(name, params_dict)

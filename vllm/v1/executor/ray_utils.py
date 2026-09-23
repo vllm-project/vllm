@@ -68,8 +68,7 @@ try:
         rpc_rank: int
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
-            """
-            Adjust the rpc_rank based on the given mapping.
+            """Adjust the rpc_rank based on the given mapping.
             It is only used during the initialization of the executor,
             to adjust the rpc_rank of workers after we create all workers.
             """
@@ -234,14 +233,10 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
                 token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
             )
 
-    if output.routed_experts is not None:
-        routing_data, slot_mapping = output.routed_experts
-        routing_data_c = _copy_if_readonly(routing_data)
-        slot_mapping_c = _copy_if_readonly(slot_mapping)
-        if routing_data_c is not routing_data or slot_mapping_c is not slot_mapping:
-            output.routed_experts = type(output.routed_experts)(
-                routing_data_c, slot_mapping_c
-            )
+    aux_output = output.aux_output_connector_output
+    if aux_output is not None:
+        for request_output in aux_output.values():
+            request_output.rows = _copy_if_readonly(request_output.rows)
 
 
 class FutureWrapper(Future):
@@ -363,8 +358,7 @@ def get_bundles_for_indices(
     bundle_indices: list[int],
     world_size: int,
 ) -> list[tuple[int, str, str]]:
-    """
-    Return GPU bundle indices paired with node IDs and node IPs for
+    """Return GPU bundle indices paired with node IDs and node IPs for
     explicit bundle indices specified via VLLM_RAY_BUNDLE_INDICES.
     """
     assert len(bundle_indices) == world_size, (
@@ -391,8 +385,7 @@ def get_bundles_for_indices(
 def get_bundles_sorted_by_node(
     placement_group: "PlacementGroup",
 ) -> list[tuple[int, str, str]]:
-    """
-    Return GPU bundle indices paired with node IDs and node IPs,
+    """Return GPU bundle indices paired with node IDs and node IPs,
     sorted driver-first.
 
     This utility has to be invoked from the driver node.
@@ -533,6 +526,7 @@ def initialize_ray_cluster(
             on the current (driver) node and pin the first PG bundle to it.
             Set to False for executors like RayExecutorV2 where all GPU work
             is delegated to remote Ray actors.
+
     """
     assert_ray_available()
     from vllm.platforms import current_platform

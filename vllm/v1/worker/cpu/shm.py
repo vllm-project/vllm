@@ -76,14 +76,17 @@ import vllm.utils.torch_utils as torch_utils
 
 def async_tensor_h2d(
     data: list | np.ndarray | torch.Tensor,
-    device: str | torch.device,
+    device: str | torch.device | None = None,
     dtype: torch.dtype | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
-    if isinstance(data, torch.Tensor):
+    if not isinstance(data, torch.Tensor):
+        data = torch.tensor(data, dtype=dtype, device="cpu")
+    elif out is None:
         return data.to(dtype=dtype)
-    return torch.tensor(data, dtype=dtype, device="cpu")
+    return data if out is None else out.copy_(data)
 
 
 torch_utils.async_tensor_h2d = async_tensor_h2d

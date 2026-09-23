@@ -46,21 +46,35 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
 
 
 def _print_chat_stream(stream, stats: bool = False) -> str:
-    output = ""
-    start = time.perf_counter()
+    output: str = ""
+    in_reasoning: bool = False
+    start: float = time.perf_counter()
     ttft: float | None = None
-    completion_tokens = 0
+    completion_tokens: int = 0
     for chunk in stream:
         if chunk.usage is not None:
             completion_tokens = chunk.usage.completion_tokens
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
+        reasoning = getattr(delta, "reasoning", None) or getattr(
+            delta, "reasoning_content", None
+        )
+        if ttft is None and (reasoning or delta.content):
+            ttft = time.perf_counter() - start
+        if reasoning:
+            if not in_reasoning:
+                print("<think>", flush=True)
+                in_reasoning = True
+            print(reasoning, end="", flush=True)
         if delta.content:
-            if ttft is None:
-                ttft = time.perf_counter() - start
+            if in_reasoning:
+                print("\n</think>", flush=True)
+                in_reasoning = False
             output += delta.content
             print(delta.content, end="", flush=True)
+    if in_reasoning:
+        print("\n</think>", end="", flush=True)
     print()
     if stats:
         _print_metrics(start, ttft, completion_tokens)

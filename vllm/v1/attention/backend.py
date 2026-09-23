@@ -34,8 +34,7 @@ from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
-    """
-    Attention type.
+    """Attention type.
     Use string to be compatible with `torch.compile`.
     """
 
@@ -383,8 +382,7 @@ T = TypeVar("T", bound=AttentionMetadata)
 
 @dataclass
 class CommonAttentionMetadata:
-    """
-    Per-batch attention metadata, shared across layers and backends.
+    """Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
 
     For many of the tensors we keep both GPU and CPU versions.
@@ -655,8 +653,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> M:
-        """
-        Central method that builds attention metadata.
+        """Central method that builds attention metadata.
         Some builders (MLA) require reorder_batch to be called prior to build.
 
         Args:
@@ -665,6 +662,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
                 result of a build call may only be used for few layers/iters.
+
         """
         raise NotImplementedError
 
@@ -674,8 +672,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
-        """
-        Update the block table for the attention metadata.
+        """Update the block table for the attention metadata.
         Faster when theres multiple kv-cache groups that create virtually the
         same metadata but just with different block tables.
 
@@ -686,8 +683,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> M:
-        """
-        Build attention metadata for CUDA graph capture. Uses build by default.
+        """Build attention metadata for CUDA graph capture. Uses build by default.
         Subclasses that override this method should call self.build or
         super().build_for_cudagraph_capture.
         """
@@ -700,8 +696,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         common_attn_metadata: CommonAttentionMetadata,
         draft_index: int,
     ) -> M:
-        """
-        Build attention metadata for draft model. Uses build by default.
+        """Build attention metadata for draft model. Uses build by default.
 
         Args:
             common_attn_metadata: The common attention metadata.
@@ -710,6 +705,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 draft attempt for the i-th token.
                 For tree-based attention, this index instead refers to the
                 draft attempt for the i-th level in the tree of tokens.
+
         """
         return self.build(
             common_prefix_len=0,
@@ -910,8 +906,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         raise NotImplementedError
 
     def fused_output_quant_supported(self, quant_key: "QuantKey") -> bool:
-        """
-        Does this attention implementation support fused output quantization.
+        """Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
         onto implementations that support it.
 
@@ -920,20 +915,19 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
         Returns:
             is fusion supported for this type of quantization
+
         """
         return False
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        """
-        Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
+        """Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
         This is used by the QkNormRopeKvCachePattern to only fuse the QKNorm ops
         with the RoPE ops and the KV cache update for implementations that support it.
         """
         return False
 
     def fused_rope_kvcache_supported(self):
-        """
-        Does this attention implementation support RoPE+KVCache fusion.
+        """Does this attention implementation support RoPE+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
         with the KV cache update for implementations that support it.
         """
@@ -954,8 +948,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        """
-        If `fused_qk_norm_rope_kvcache_supported` returns True, this method
+        """If `fused_qk_norm_rope_kvcache_supported` returns True, this method
         will be called by the fused custom op. Applies QK-norm + RoPE and
         writes K/V to the KV cache. Results are written to the pre-allocated
         q_out and k_out tensors; V is split from QKV at the graph level.
@@ -974,8 +967,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        """
-        If `fused_rope_kvcache_supported` returns True, this method will be called
+        """If `fused_rope_kvcache_supported` returns True, this method will be called
         by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
         to perform the inplace RoPE and KV cache update.
         """
@@ -1040,8 +1032,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         raise NotImplementedError
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
-        """
-        Does this attention implementation support fused output quantization.
+        """Does this attention implementation support fused output quantization.
         Since MLA quantization is done manually in forward_impl (common code),
         all MLA backends support it by default.
         """
@@ -1080,9 +1071,7 @@ def subclass_attention_backend(
     attention_backend_cls: type[AttentionBackend],
     builder_cls: type[AttentionMetadataBuilder[M]],
 ) -> type[AttentionBackend]:
-    """
-    Return a new subclass where `get_builder_cls` returns `builder_cls`.
-    """
+    """Return a new subclass where `get_builder_cls` returns `builder_cls`."""
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
 
     return type(

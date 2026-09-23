@@ -12,7 +12,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -71,10 +71,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.deepseek_v4.amd.rocm import (
-    DeepseekV4ROCMAiterMLAAttention,
-    weight_already_preshuffled,
-)
+from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
@@ -152,13 +149,11 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        # Skip if the linear's kernel already shuffled it.
-        if not weight_already_preshuffled(self.gate_up_proj):
-            replace_parameter(
-                self.gate_up_proj,
-                "weight",
-                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-            )
+        replace_parameter(
+            self.gate_up_proj,
+            "weight",
+            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+        )
         self._gateup_scale = ws
 
     def forward(self, x):
@@ -509,11 +504,28 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         return routed + shared_out
 
 
-def _fuse_shared_experts_enabled(config) -> bool:
+def _fuse_shared_experts_enabled(config, parallel_config: ParallelConfig) -> bool:
+    if (
+        getattr(config, "n_shared_experts", None)
+        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        and not parallel_config.enable_expert_parallel
+        and parallel_config.data_parallel_size > 1
+    ):
+        # Fused shared experts are not supported under data parallelism:
+        # the fused path cannot load the FP8 shared expert into the MXFP4
+        # routed slot, which fails obscurely during weight loading. Fail
+        # fast with an actionable message instead.
+        raise ValueError(
+            "DeepSeek-V4 fused shared experts "
+            "(VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1) are not supported "
+            "with data parallelism (data_parallel_size > 1). Set "
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to run the shared "
+            "expert as an unfused FP8 MLP."
+        )
     return bool(
         getattr(config, "n_shared_experts", None)
         and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        and not get_current_vllm_config().parallel_config.enable_expert_parallel
+        and not parallel_config.enable_expert_parallel
     )
 
 
@@ -591,7 +603,7 @@ class DeepseekV4MoE(nn.Module):
         # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
         self.fuse_heterogeneous_shared_expert = fuse_heterogeneous_shared_expert
         fse_requested = (
-            _fuse_shared_experts_enabled(config)
+            _fuse_shared_experts_enabled(config, vllm_config.parallel_config)
             and not self.fuse_heterogeneous_shared_expert
         )
         fse_compatible = False

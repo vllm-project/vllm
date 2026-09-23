@@ -29,7 +29,12 @@ from vllm import SamplingParams
 sampling_params = SamplingParams(watermarking=False)
 ```
 
-The OpenAI-compatible APIs accept the same `watermarking: false` request field.
+The Python OpenAI-compatible APIs and the Rust chat/completions APIs accept the
+same `watermarking: false` request field. The Rust token API accepts it in
+`sampling_params`, and the Rust gRPC `GenerateRequest` accepts
+the optional `watermarking` field. Omitting the field keeps watermarking enabled
+when the engine has a watermark configuration.
+
 Deployments that require watermarking must restrict this field to trusted
 callers, or strip and validate it at the ingress boundary, so untrusted clients
 cannot opt out.

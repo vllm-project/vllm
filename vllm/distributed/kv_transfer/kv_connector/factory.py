@@ -87,6 +87,7 @@ class KVConnectorFactory:
 
         Returns:
             The connector class.
+
         """
         if connector_name not in cls._registry:
             raise ValueError(f"Connector '{connector_name}' is not registered.")

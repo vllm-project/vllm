@@ -42,8 +42,7 @@ SequencePoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
 class SequencePooler(Pooler):
-    """
-    A layer that pools specific information from hidden states.
+    """A layer that pools specific information from hidden states.
 
     This layer does the following:
     1. Extracts specific tokens or aggregates data based on pooling method.

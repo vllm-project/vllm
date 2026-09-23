@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 
-"""
-Example Python client for multimodal rerank API which is compatible with
+"""Example Python client for multimodal rerank API which is compatible with
 Jina and Cohere https://jina.ai/reranker
 
 Run `vllm serve <model> --runner pooling` to start up the server in vLLM.

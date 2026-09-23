@@ -339,6 +339,8 @@ class BasePattern:
 
 
 class GEMMReduceScatterPattern(BasePattern):
+    rocm_gemm = False
+
     def get_inputs(self) -> list[torch.Tensor]:
         mul = torch.empty([16, 4], device=self.device, dtype=self.dtype)
         mm_weight = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -346,7 +348,10 @@ class GEMMReduceScatterPattern(BasePattern):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(mul: torch.Tensor, mm_weight: torch.Tensor) -> torch.Tensor:
-            mm = torch.ops.aten.mm.default(mul, mm_weight)
+            if self.rocm_gemm:
+                mm = torch.ops.vllm.rocm_unquantized_gemm(mul, mm_weight, None)
+            else:
+                mm = torch.ops.aten.mm.default(mul, mm_weight)
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
                 mm,
                 dim=0,
@@ -358,7 +363,7 @@ class GEMMReduceScatterPattern(BasePattern):
         def replacement(mul: torch.Tensor, mm_weight: torch.Tensor) -> torch.Tensor:
             gemm_rs = torch.ops.symm_mem.fused_matmul_reduce_scatter(
                 mul,
-                mm_weight,
+                mm_weight.t() if self.rocm_gemm else mm_weight,
                 "sum",
                 scatter_dim=0,
                 group_name=self.tp.device_group.group_name,
@@ -371,7 +376,13 @@ class GEMMReduceScatterPattern(BasePattern):
         )
 
 
+class RocmGEMMReduceScatterPattern(GEMMReduceScatterPattern):
+    rocm_gemm = True
+
+
 class AllGatherGEMMPattern(BasePattern):
+    rocm_gemm = False
+
     def get_inputs(self) -> list[torch.Tensor]:
         x = torch.empty([4, 4], device=self.device, dtype=self.dtype)
         weight = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -390,12 +401,14 @@ class AllGatherGEMMPattern(BasePattern):
                 group_name=self.tp.unique_name,
             )
 
+            if self.rocm_gemm:
+                return torch.ops.vllm.rocm_unquantized_gemm(all_gather, weight, None)
             return torch.ops.aten.mm.default(all_gather, weight)
 
         def replacement(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
             ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
                 x,
-                [weight],
+                [weight.t() if self.rocm_gemm else weight],
                 gather_dim=0,
                 group_name=self.tp.device_group.group_name,
             )
@@ -404,6 +417,10 @@ class AllGatherGEMMPattern(BasePattern):
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
+
+
+class RocmAllGatherGEMMPattern(AllGatherGEMMPattern):
+    rocm_gemm = True
 
 
 class ScaledMMReduceScatterPattern(BasePattern):
@@ -906,6 +923,13 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
         GEMMReduceScatterPattern(self.model_dtype, self.device).register(self.pm_pass)
 
         AllGatherGEMMPattern(self.model_dtype, self.device).register(self.pm_pass)
+        if current_platform.is_rocm() and self.model_dtype == torch.bfloat16:
+            RocmGEMMReduceScatterPattern(self.model_dtype, self.device).register(
+                self.pm_pass
+            )
+            RocmAllGatherGEMMPattern(self.model_dtype, self.device).register(
+                self.pm_pass
+            )
 
         # These fusions are enabled only for bfloat16 models because
         # `scaled_mm` or `cutlass_scaled_mm` with per-token (row-wise) scaling

@@ -175,16 +175,22 @@ mod tests {
     }
 
     #[test]
-    fn invalid_reasoning_effort_maps_to_invalid_request() {
-        let error = vllm_chat::Error::InvalidReasoningEffort(
-            "DeepSeek V4.1 reasoning_effort must be within [1, 100]".to_string(),
-        );
-        let api_error = chat_submit_error("failed to submit chat request", error);
-        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            api_error.to_error_response().error.error_type,
-            "invalid_request_error"
-        );
+    fn invalid_reasoning_parameters_map_to_invalid_request() {
+        for error in [
+            vllm_chat::Error::InvalidReasoningEffort(
+                "DeepSeek V4.1 reasoning_effort must be within [1, 100]".to_string(),
+            ),
+            vllm_chat::Error::InvalidReasoningControl {
+                message: "template kwarg `thinking` must be a boolean".to_string(),
+            },
+        ] {
+            let api_error = chat_submit_error("failed to submit chat request", error);
+            assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                api_error.to_error_response().error.error_type,
+                "invalid_request_error"
+            );
+        }
     }
 
     #[test]

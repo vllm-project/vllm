@@ -39,11 +39,13 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -94,12 +96,10 @@ class GraniteMoeMoE(nn.Module):
         self.is_sequence_parallel = is_sequence_parallel
 
         # Gate always runs at half / full precision for now.
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             hidden_size,
             num_experts,
-            bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 

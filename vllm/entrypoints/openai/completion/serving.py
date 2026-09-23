@@ -89,14 +89,14 @@ class OpenAIServingCompletion(GenerateBaseServing):
         self,
         request: CompletionRequest,
     ) -> list[EngineInput] | ErrorResponse:
-        """
-        Validate the model and preprocess a completion request.
+        """Validate the model and preprocess a completion request.
 
         Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
             A list of engine_inputs on success, or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:

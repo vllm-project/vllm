@@ -205,9 +205,12 @@ def bind_hisparse_kv_caches(
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
     tensor_configs = {
-        name: tensor_config
+        name: (
+            tensor_config,
+            tensor_config.offset + layer_index * tensor_config.layer_stride,
+        )
         for tensor_config in kv_cache_config.kv_cache_tensors
-        for name in tensor_config.layers
+        for layer_index, name in enumerate(tensor_config.layers)
     }
     resident_source_index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
@@ -216,12 +219,12 @@ def bind_hisparse_kv_caches(
         for cache_name in group.layer_names:
             assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
-            tensor_config = tensor_configs[cache_name]
+            tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
             cache_handle.bind_cache(
                 kv_caches[cache_name],
-                byte_offset=tensor_config.offset,
+                byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
@@ -249,11 +252,11 @@ def bind_hisparse_kv_caches(
                 raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
             layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
-            tensor_config = tensor_configs[cache_name]
+            tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle.runtime.bind_hot_cache(
                 raw_tensor,
-                byte_offset=tensor_config.offset,
+                byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,

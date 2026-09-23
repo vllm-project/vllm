@@ -11,7 +11,10 @@ use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
-use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
+};
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
 use crate::error::Result;
@@ -44,6 +47,10 @@ pub struct CollectedGenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned one-to-one with generated token positions.
+    pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics from the terminal output.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -155,6 +162,10 @@ pub struct GenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned one-to-one with `token_ids`.
+    pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics, present on terminal outputs.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 impl GenerateOutput {
@@ -202,6 +213,8 @@ impl GenerateOutput {
             cached_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            sampling_mask: None,
+            spec_decode_metrics: None,
         }
     }
 }
@@ -271,6 +284,16 @@ impl Stream for GenerateOutputStream {
         }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
+        let sampling_mask = raw.new_sampling_mask.map(|value| value.into_direct().unwrap());
+        if let Some(mask) = sampling_mask.as_ref()
+            && mask.rows.len() != raw.new_token_ids.len()
+        {
+            return Poll::Ready(Some(Err(crate::Error::SamplingMaskTokenCountMismatch {
+                request_id: raw.request_id,
+                token_count: raw.new_token_ids.len(),
+                row_count: mask.rows.len(),
+            })));
+        }
         let cached_token_count = raw
             .prefill_stats
             .as_ref()
@@ -291,6 +314,8 @@ impl Stream for GenerateOutputStream {
             cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
+            sampling_mask,
+            spec_decode_metrics: raw.spec_decode_metrics,
         };
 
         Poll::Ready(Some(Ok(output)))
@@ -341,6 +366,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
 
             while let Some(output) = stream.next().await.transpose()? {
                 cached_token_count = cached_token_count.max(output.cached_token_count);
+                let sampling_mask = output.sampling_mask;
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
                         prompt_token_ids = Some(info.prompt_token_ids.to_vec());
@@ -359,6 +385,9 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                             existing.logprobs = Some(step_logprobs);
                         }
                     }
+                    if let Some(mut mask) = sampling_mask {
+                        existing.sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+                    }
                 } else {
                     collected = Some(CollectedGenerateOutput {
                         request_id: output.request_id,
@@ -374,6 +403,8 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
+                        sampling_mask,
+                        spec_decode_metrics: None,
                     });
                 }
 
@@ -387,6 +418,16 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     };
                     collected.kv_transfer_params = output.kv_transfer_params;
                     collected.ec_transfer_params = output.ec_transfer_params;
+                    collected.spec_decode_metrics = output.spec_decode_metrics;
+                    if let Some(mask) = collected.sampling_mask.as_ref()
+                        && mask.rows.len() != collected.token_ids.len()
+                    {
+                        return Err(crate::Error::SamplingMaskTokenCountMismatch {
+                            request_id: collected.request_id,
+                            token_count: collected.token_ids.len(),
+                            row_count: mask.rows.len(),
+                        });
+                    }
                     return Ok(collected);
                 }
             }

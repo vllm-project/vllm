@@ -213,5 +213,11 @@ class DFlash2Speculator(DFlashSpeculator):
             anchor_token_ids,
         )
         self._sample_path(candidate_ids, scores, num_reqs)
+        if self.enable_adaptive_verification:
+            self._maybe_predict_acceptance(
+                self._selector_scores[:num_reqs].flatten(0, 1),
+                self.sample_idx_mapping[:num_sample],
+                self.sample_col[:num_sample],
+            )
         if self.draft_logits is not None:
             self._cache_draft_logits(candidate_ids, num_sample)

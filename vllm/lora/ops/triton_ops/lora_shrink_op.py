@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Based on:
+"""Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
 Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
@@ -142,32 +141,31 @@ def _lora_shrink(
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
 ) -> None:
-    """
-    Args:
-        inputs (torch.Tensor): Input tensor
-        lora_a_weights (list[torch.Tensor]): LoRA weights
-        output_tensor (torch.Tensor): output tensor
-        token_lora_mapping (torch.Tensor): A tensor mapping each input token
-            to the lora-id related to that token. A value of -1 indicates that
-            LoRA doesn't apply to that token.
-        token_indices_sorted_by_lora_ids (torch.Tensor): Row/Token indices from
-            the A matrix grouped by LoRA IDs.
-        num_tokens_per_lora (torch.Tensor): num_tokens_per_lora[i] is the number
-            of tokens that are to be processed by LoRA ID lora_ids[i]
-        lora_token_start_loc (torch.Tensor): A cumulative sum of
-            num_tokens_per_lora. lora_token_start_loc[0] is always 0 so that
-            lora_token_start_loc[i], along with num_tokens_per_lora[i]
-            identifies the region in token_indices_sorted_by_lora_ids that
-            LoRA lora_ids[i] should process.
-        lora_ids (torch.Tensor): LoRA ids to process.
-        no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
-            if there are any requests that require LoRA.
-        num_active_loras (torch.Tensor): A CPU tensor of size 1, containing the
-            number of active LoRAs. Stored as a tensor (not int) so
-            torch.compile treats it as dynamic rather than a constant.
-        scaling (float): Scaling factor.
-    """
+    """Args:
+    inputs (torch.Tensor): Input tensor
+    lora_a_weights (list[torch.Tensor]): LoRA weights
+    output_tensor (torch.Tensor): output tensor
+    token_lora_mapping (torch.Tensor): A tensor mapping each input token
+        to the lora-id related to that token. A value of -1 indicates that
+        LoRA doesn't apply to that token.
+    token_indices_sorted_by_lora_ids (torch.Tensor): Row/Token indices from
+        the A matrix grouped by LoRA IDs.
+    num_tokens_per_lora (torch.Tensor): num_tokens_per_lora[i] is the number
+        of tokens that are to be processed by LoRA ID lora_ids[i]
+    lora_token_start_loc (torch.Tensor): A cumulative sum of
+        num_tokens_per_lora. lora_token_start_loc[0] is always 0 so that
+        lora_token_start_loc[i], along with num_tokens_per_lora[i]
+        identifies the region in token_indices_sorted_by_lora_ids that
+        LoRA lora_ids[i] should process.
+    lora_ids (torch.Tensor): LoRA ids to process.
+    no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
+        if there are any requests that require LoRA.
+    num_active_loras (torch.Tensor): A CPU tensor of size 1, containing the
+        number of active LoRAs. Stored as a tensor (not int) so
+        torch.compile treats it as dynamic rather than a constant.
+    scaling (float): Scaling factor.
 
+    """
     assert no_lora_flag_cpu.numel() == 1
     if no_lora_flag_cpu.item():
         # None of the inputs require LoRA.

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Pin vLLM dependencies to exact versions of custom ROCm wheels.
+"""Pin vLLM dependencies to exact versions of custom ROCm wheels.
 
 This script modifies vLLM's requirements files to replace version constraints
 with exact versions of custom-built ROCm wheels (torch, triton, torchvision, amdsmi).
@@ -18,12 +17,12 @@ import regex as re
 
 
 def extract_version_from_wheel(wheel_name: str) -> str:
-    """
-    Extract version from wheel filename.
+    """Extract version from wheel filename.
 
     Example:
         torch-2.9.0a0+git1c57644-cp312-cp312-linux_x86_64.whl -> 2.9.0a0+git1c57644
         triton-3.4.0-cp312-cp312-linux_x86_64.whl -> 3.4.0
+
     """
     # Wheel format:
     #    {distribution}-{version}(-{build tag})?-{python}-{abi}-{platform}.whl
@@ -38,11 +37,11 @@ def extract_version_from_wheel(wheel_name: str) -> str:
 
 
 def get_custom_wheel_versions(install_dir: str) -> dict[str, str]:
-    """
-    Read /install directory and extract versions of custom wheels.
+    """Read /install directory and extract versions of custom wheels.
 
     Returns:
         Dict mapping package names to exact versions
+
     """
     install_path = Path(install_dir)
     if not install_path.exists():
@@ -92,8 +91,7 @@ def get_custom_wheel_versions(install_dir: str) -> dict[str, str]:
 
 
 def pin_dependencies_in_requirements(requirements_path: str, versions: dict[str, str]):
-    """
-    Insert custom wheel pins at the TOP of requirements file.
+    """Insert custom wheel pins at the TOP of requirements file.
 
     This ensures that when setup.py processes the file line-by-line,
     custom wheels (torch, triton, etc.) are encountered FIRST, before

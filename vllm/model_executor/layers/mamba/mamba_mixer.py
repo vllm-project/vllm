@@ -49,8 +49,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 # --8<-- [start:mamba_mixer]
 @PluggableLayer.register("mamba_mixer")
 class MambaMixer(MambaBase, PluggableLayer):
-    """
-    Compute ∆, A, B, C, and D the state space parameters and compute
+    """Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
     (see Mamba paper [1] Section 3.5.2 "Interpretation of A"
     for why A isn't selective) ∆, B, C are input-dependent
@@ -237,8 +236,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         )
 
     def forward_impl(self, hidden_states: torch.Tensor, output: torch.Tensor):
-        """
-        Run the Mamba-1 SSM pipeline.
+        """Run the Mamba-1 SSM pipeline.
 
         Steps
         -----
@@ -258,7 +256,6 @@ class MambaMixer(MambaBase, PluggableLayer):
         decode tokens), both sets of kernels are executed independently
         and their outputs are concatenated before the final output projection.
         """
-
         forward_context: ForwardContext = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 

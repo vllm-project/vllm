@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HRM-Text: Hierarchical Reasoning Model — Text variant.
+"""HRM-Text: Hierarchical Reasoning Model — Text variant.
 
 Reference Hugging Face implementation:
     src/transformers/models/hrm_text/modeling_hrm_text.py

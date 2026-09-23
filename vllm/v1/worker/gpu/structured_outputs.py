@@ -5,8 +5,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -68,7 +67,7 @@ class StructuredOutputsWorker:
 
         # Asynchronously copy the bitmask to GPU.
         with torch.cuda.stream(self.copy_stream):
-            bitmask = async_copy_to_gpu(
+            bitmask = async_tensor_h2d(
                 grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
             )
 

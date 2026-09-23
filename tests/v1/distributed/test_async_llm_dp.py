@@ -493,7 +493,6 @@ async def test_dp_pause_abort(expert_parallel: bool):
 @pytest.mark.parametrize("expert_parallel", [False, True])
 async def test_dp_pause_keep_then_resume(expert_parallel: bool):
     """Start generation, pause after a few tokens (keep mode), resume; verify gap."""
-
     pause_duration = 2.0
     min_tokens_before_pause = 3
 
@@ -607,8 +606,7 @@ async def test_dp_pause_keep_race_staggered_engines():
 
 @pytest.mark.asyncio
 async def test_dp_pause_barrier_request_deadlock():
-    """
-    Test that start_dp_wave is ignored while paused.
+    """Test that start_dp_wave is ignored while paused.
 
     Sequence:
       1. Pause all engines (PAUSED_ALL).

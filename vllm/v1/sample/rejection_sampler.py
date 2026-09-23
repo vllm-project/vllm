@@ -19,6 +19,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -42,8 +43,7 @@ MAX_SPEC_LEN = 128
 
 
 class RejectionSampler(nn.Module):
-    """
-    The implementation strictly follows the algorithm described in
+    """The implementation strictly follows the algorithm described in
         https://arxiv.org/abs/2211.17192.
     However, we want to clarify the terminology used in the implementation:
     accepted tokens: tokens that are accepted based on the relationship
@@ -112,8 +112,7 @@ class RejectionSampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        """
-        Args:
+        """Args:
             metadata:
                 Metadata for spec decoding.
             draft_probs (Optional[torch.Tensor]):
@@ -129,10 +128,12 @@ class RejectionSampler(nn.Module):
             sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
+
         Returns:
             SamplerOutput:
                 Contains the final output token IDs and their logprobs if
                 requested.
+
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
 
@@ -271,6 +272,7 @@ class RejectionSampler(nn.Module):
         logprobs_tensors: LogprobsTensors | None = None,
     ) -> tuple[list[list[int]], LogprobsLists | None]:
         """Parse the output of the rejection sampler.
+
         Args:
             output_token_ids: The sampled token IDs in shape
                 [batch_size, max_spec_len + 1]. The rejected tokens are
@@ -279,8 +281,10 @@ class RejectionSampler(nn.Module):
             vocab_size: The size of the vocabulary.
             discard_req_indices: Optional row indices to discard tokens in.
             logprobs_tensors: Optional logprobs tensors to filter.
+
         Returns:
             A list of lists of token IDs.
+
         """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
@@ -327,9 +331,7 @@ class RejectionSampler(nn.Module):
             num_draft_tokens = torch.tensor(metadata.num_draft_tokens, device="cpu")
             original_indices = torch.arange(num_requests, device="cpu")
             repeat_indices_cpu = original_indices.repeat_interleave(num_draft_tokens)
-            repeat_indices = repeat_indices_cpu.to(
-                device=logits.device, non_blocking=True
-            )
+            repeat_indices = async_tensor_h2d(repeat_indices_cpu, logits.device)
             logits = self.apply_penalties(
                 logits, sampling_metadata, metadata, repeat_indices, output_token_ids
             )
@@ -537,6 +539,7 @@ def apply_sampling_constraints(
     Returns:
         torch.Tensor: Processed logits if non-greedy sampling is used,
         otherwise returns the original logits.
+
     """
     assert logits.ndim == 2
     assert cu_num_draft_tokens.ndim == 1
@@ -598,8 +601,10 @@ def expand_batch_to_tokens(
             Value to be replaced if it is found in x.
         replace_to: int = 0
             Value to replace with when replace_from is found.
+
     Returns:
         expanded_x: [num_tokens] tensor.
+
     """
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
@@ -620,8 +625,7 @@ def generate_uniform_probs(
     generators: dict[int, torch.Generator],
     device: torch.device,
 ) -> torch.Tensor:
-    """
-    Generates a batch of uniform random samples, with optional seeding
+    """Generates a batch of uniform random samples, with optional seeding
     if available.
 
     This method creates a tensor of shape `(num_tokens, )` filled
@@ -640,10 +644,12 @@ def generate_uniform_probs(
             `torch.Generator` objects.
         device: torch.device
             The device on which to allocate the tensor.
+
     Returns:
         uniform_rand: torch.Tensor
             A tensor of shape `(num_tokens, )` containing uniform
             random values in the range [0, 1).
+
     """
     # NOTE(woosuk): We deliberately use float64 instead of float32 here
     # because when using float32, there's a non-negligible chance that

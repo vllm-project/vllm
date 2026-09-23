@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-RLHF weight syncing against a `vllm serve` HTTP server, using CUDA IPC for the
+"""RLHF weight syncing against a `vllm serve` HTTP server, using CUDA IPC for the
 data plane.
 
   * OpenAI-compatible API for inference requests

@@ -57,7 +57,6 @@ def test_direct_function_call_object_preservation():
 
 def test_mixed_input_types_with_function_calls():
     """Test parsing with mixed input types including function calls."""
-
     request_data = {
         "model": "gpt-oss",
         "input": [
@@ -177,7 +176,6 @@ def test_empty_list_input():
 
 def test_function_call_output_not_affected():
     """Test that FunctionCallOutput is not affected by the function_call parsing."""
-
     # Test with FunctionCallOutput as dict (should not be parsed)
     request_data = {
         "model": "gpt-oss",
@@ -265,7 +263,6 @@ def test_function_call_validation_failure_logs_debug(caplog):
 
 def test_validator_handles_iterator_input():
     """Test that validator can handle ValidatorIterator input (Pydantic internal)."""
-
     # This test simulates when Pydantic passes a ValidatorIterator instead of a list
     # This happened with complex nested structures containing reasoning + function_call
 

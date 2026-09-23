@@ -32,11 +32,14 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R")
 
+# Memory-pool tags managed by sleep/wake_up/discard.
+SLEEP_TAGS = frozenset(("weights", "kv_cache"))
+
 FailureCallback = Callable[[], None]
 
 
 class Executor(ABC):
-    """Abstract base class for vLLM executors."
+    """Abstract base class for vLLM executors.
 
     An executor is responsible for executing the model on one device,
     or it can be a distributed executor that can execute the model on multiple devices.
@@ -108,7 +111,6 @@ class Executor(ABC):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self._init_executor()
-        self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
         self.ec_output_aggregator: ECOutputAggregator | None = None
@@ -139,8 +141,7 @@ class Executor(ABC):
             )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
-        """
-        Register a function to be called if the executor enters a permanent
+        """Register a function to be called if the executor enters a permanent
         failed state.
         """
         pass
@@ -168,8 +169,29 @@ class Executor(ABC):
         kwargs: dict | None = None,
         non_block: Literal[False] = False,
     ) -> list[_R]:
-        """
-        Execute an RPC call on all workers.
+        pass
+
+    @overload
+    def collective_rpc(
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: Literal[True] = True,
+    ) -> Future[list[_R]]:
+        pass
+
+    @abstractmethod
+    def collective_rpc(
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+    ) -> list[_R] | Future[list[_R]]:
+        """Execute an RPC call on all workers.
 
         Args:
             method: Name of the worker method to execute, or a callable that
@@ -191,24 +213,8 @@ class Executor(ABC):
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
+
         """
-        pass
-
-    @overload
-    def collective_rpc(
-        self,
-        method: str | Callable[[WorkerBase], _R],
-        timeout: float | None = None,
-        args: tuple = (),
-        kwargs: dict | None = None,
-        non_block: Literal[True] = True,
-    ) -> Future[list[_R]]:
-        pass
-
-    @abstractmethod
-    def collective_rpc(
-        self, method, timeout=None, args=(), kwargs=None, non_block: bool = False
-    ):
         raise NotImplementedError
 
     def get_kv_connector_handshake_metadata(
@@ -288,7 +294,7 @@ class Executor(ABC):
         self.collective_rpc("shutdown")
 
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
-        """Init KVOutputAggregator"""
+        """Init KVOutputAggregator."""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
             connector, self.parallel_config.world_size
         )
@@ -334,15 +340,18 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
+    @property
+    def is_sleeping(self) -> bool:
+        return bool(self.sleeping_tags)
+
     def sleep(self, level: int = 1):
-        if self.is_sleeping:
+        if "weights" in self.sleeping_tags:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
-        self.is_sleeping = True
+        self.sleeping_tags |= SLEEP_TAGS
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
         )
@@ -371,8 +380,23 @@ class Executor(ABC):
                 self.sleeping_tags.remove(tag)
         else:
             self.sleeping_tags.clear()
-        if not self.sleeping_tags:
-            self.is_sleeping = False
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        tags_to_discard = set(tags) - self.sleeping_tags
+        if not tags_to_discard:
+            logger.warning("Tags %s are already sleeping.", tags)
+            return
+        time_before_discard = time.perf_counter()
+        try:
+            self.collective_rpc("discard", args=(tuple(tags_to_discard),))
+        finally:
+            self.sleeping_tags |= tags_to_discard
+        time_after_discard = time.perf_counter()
+        logger.info(
+            "It took %.6f seconds to discard tags %s.",
+            time_after_discard - time_before_discard,
+            tags_to_discard,
+        )
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
@@ -381,9 +405,7 @@ class Executor(ABC):
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
-        """
-        Whether the executor supports async scheduling.
-        """
+        """Whether the executor supports async scheduling."""
         return False
 
 

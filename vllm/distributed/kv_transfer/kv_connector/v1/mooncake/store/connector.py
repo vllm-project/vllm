@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
@@ -358,6 +359,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids, metadata)
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        return self.connector_worker.get_transfer_results(finished_req_ids, metadata)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None

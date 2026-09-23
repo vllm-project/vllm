@@ -329,7 +329,6 @@ def test_consumer_xfer_quarantined_exception_settles():
 
 def test_consumer_xfer_quarantined_timeout_evicts_blocks():
     """Quarantine timeout should release handle and return READ_FAILED."""
-
     data = _make_data(xfer_state="PROC")
     x = _started(data)
     # First poll transitions to QUARANTINED (deadline extended by 60s)

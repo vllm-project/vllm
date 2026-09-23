@@ -9,7 +9,6 @@ from packaging import version
 
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm.config import set_current_vllm_config
-from vllm.config.load import LoadConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model_loader
@@ -58,65 +57,6 @@ def test_pre_quantized_model(monkeypatch, dist_init, workspace_init):
     monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
     positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
-    with (
-        set_current_vllm_config(vllm_config),
-        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
-    ):
-        hidden_states = model(input_ids, positions, None)
-        logits = model.compute_logits(hidden_states)
-    assert torch.isfinite(logits).all()
-
-
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-@pytest.mark.parametrize(
-    "pt_load_map_location",
-    [
-        f"{DEVICE_TYPE}:0",
-        # {"": "cuda"},
-    ],
-)
-def test_opt_125m_int8wo_model_loading_with_params(
-    pt_load_map_location, monkeypatch, dist_init, workspace_init
-):
-    torch._dynamo.reset()
-    model_name = "jerryzh168/opt-125m-int8wo-partial-quant"
-    model, vllm_config = load_model_without_vllm_runner(
-        model_name,
-        quantization="torchao",
-        vllm_config_kwargs={
-            "load_config": LoadConfig(pt_load_map_location=pt_load_map_location)
-        },
-    )
-
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
-    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
-    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
-    with (
-        set_current_vllm_config(vllm_config),
-        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
-    ):
-        hidden_states = model(input_ids, positions, None)
-        logits = model.compute_logits(hidden_states)
-    assert torch.isfinite(logits).all()
-
-
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-def test_qwenvl_int8wo_model_loading_with_params(
-    monkeypatch, dist_init, workspace_init
-):
-    torch._dynamo.reset()
-    model_name = "mobicham/Qwen2.5-VL-3B-Instruct_int8wo_ao"
-    model, vllm_config = load_model_without_vllm_runner(
-        model_name,
-        quantization="torchao",
-        vllm_config_kwargs={
-            "load_config": LoadConfig(pt_load_map_location=f"{DEVICE_TYPE}:0")
-        },
-    )
-
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
-    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
-    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE).expand(3, -1)
     with (
         set_current_vllm_config(vllm_config),
         set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),

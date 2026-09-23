@@ -39,6 +39,36 @@ where
     }
 }
 
+/// Effort level for reasoning models.
+///
+/// Fixed OpenAI HTTP request grades. Request conversion maps these names to
+/// the model-independent `vllm_chat::EffortValue` before renderer validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 // ============================================================================
 // String/Array Utilities
 // ============================================================================

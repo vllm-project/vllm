@@ -12,6 +12,8 @@ use std::str::FromStr;
 
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 
+pub use vllm_parser::output_grammar::ToolStrictLevel;
+
 use self::reasoning::ReasoningParserFactory;
 use self::tool::ToolParserFactory;
 use self::unified::UnifiedParserFactory;

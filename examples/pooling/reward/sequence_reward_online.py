@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Example online usage of sequence reward models.
+"""Example online usage of sequence reward models.
 
 Run `vllm serve <model> --runner pooling`
 to start up the server in vLLM. e.g.

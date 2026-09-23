@@ -27,13 +27,9 @@ _S = TypeVar("_S", list[int], "torch.Tensor")
 # Prompt keys whose entry i describes token i of the prompt, so they must be
 # reduced with the same slice as the prompt tokens themselves. Anything added
 # here is truncated by `TokenizeParams.apply_post_tokenization`.
-# `_assistant_tokens_mask` is renderer-internal: `HfRenderer.render_messages`
-# stashes it on the prompt so `_process_tokens` can move it onto the engine
-# input.
 _PARALLEL_TO_PROMPT_TOKENS = (
     "prompt_token_offsets",
     "prompt_is_token_ids",
-    "_assistant_tokens_mask",
 )
 
 
@@ -99,9 +95,6 @@ class ChatParams:
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
-    return_assistant_tokens_mask: bool = False
-    """Request a per-token assistant mask from apply_chat_template."""
-
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
 
@@ -136,7 +129,6 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
-            return_assistant_tokens_mask=self.return_assistant_tokens_mask,
             tool_choice=self.tool_choice,
             response_format=self.response_format,
         )
@@ -425,8 +417,7 @@ class TokenizeParams:
         tokenizer: TokenizerLike | None,
         prompt: TextPrompt,
     ) -> TextPrompt:
-        """
-        Ensure that the prompt meets the requirements set out by this config.
+        """Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run before tokenization occurs.
@@ -538,8 +529,7 @@ class TokenizeParams:
         tokenizer: TokenizerLike | None,
         prompt: TokensPrompt | EmbedsPrompt,
     ) -> TokensPrompt | EmbedsPrompt:
-        """
-        Ensure that the prompt meets the requirements set out by this config.
+        """Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run after tokenization occurs.

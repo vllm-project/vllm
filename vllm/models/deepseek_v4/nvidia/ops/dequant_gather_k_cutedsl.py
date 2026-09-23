@@ -23,10 +23,11 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
 class DequantGatherKCacheKernel(
     VllmCuTeDSLJitKernel["DequantGatherKCacheKernel.CompileKey"]
 ):
-    # Hard-coded for DSv4.
+    # DSv4 geometry. The record format (how much of the row is quantized and
+    # how wide a scale group is) comes from the compile key: V4 quantizes the
+    # 448 NoPE dims in groups of 64 and keeps a bf16 RoPE tail, V4.1 quantizes
+    # all 512 dims in groups of 32 (MXFP8) and has no tail.
     head_dim = 512
-    fp8_dim = 448
-    group_size = 64  # 1 scale per 64 elems
     num_warps = 4
     tb_size = num_warps * 32
     num_stages = 4
@@ -35,17 +36,20 @@ class DequantGatherKCacheKernel(
     class CompileKey:
         block_size: int
         has_gather_lens: bool
+        fp8_dim: int = 448
+        group_size: int = 64  # dims per scale
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
         head_dim = DequantGatherKCacheKernel.head_dim
-        fp8_dim = DequantGatherKCacheKernel.fp8_dim
-        group_size = DequantGatherKCacheKernel.group_size
+        fp8_dim = compile_key.fp8_dim
+        group_size = compile_key.group_size
         num_warps = DequantGatherKCacheKernel.num_warps
         tb_size = DequantGatherKCacheKernel.tb_size
         num_stages = DequantGatherKCacheKernel.num_stages
         bf16_dim = head_dim - fp8_dim
         data_dim = fp8_dim + bf16_dim * 2
+        scale_bytes = head_dim // group_size
         block_size = compile_key.block_size
 
         @cute.jit
@@ -62,8 +66,8 @@ class DequantGatherKCacheKernel(
         ):
             op = cpasync.CopyG2SOp(cute.nvgpu.LoadCacheMode.GLOBAL)
             cp16_atom = cute.make_copy_atom(op, Uint32, num_bits_per_copy=128)
-            cp8_atom = cute.make_copy_atom(
-                cpasync.CopyG2SOp(), Uint8, num_bits_per_copy=64
+            cp_scale_atom = cute.make_copy_atom(
+                cpasync.CopyG2SOp(), Uint8, num_bits_per_copy=scale_bytes * 8
             )
             page_id = block_table[req_id, pos // block_size]
             block_offset = pos % block_size
@@ -88,7 +92,7 @@ class DequantGatherKCacheKernel(
                 )
             elif idx == cutlass.const_expr(data_dim // 16):
                 cute.copy(
-                    cp8_atom,
+                    cp_scale_atom,
                     k_scale[page_id, block_offset, None],
                     s_kscale[None, stage_id],
                 )
@@ -119,8 +123,8 @@ class DequantGatherKCacheKernel(
             )[None, warp_id, None]
             s_kscale = smem.allocate_tensor(
                 Uint8,
-                cute.make_layout((8, num_warps, num_stages)),
-                byte_alignment=8,
+                cute.make_layout((scale_bytes, num_warps, num_stages)),
+                byte_alignment=scale_bytes,
             )[None, warp_id, None]
 
             # Prepare for 16B cp.async, also for BF16 smem loads later.
@@ -239,14 +243,16 @@ class DequantGatherKCacheKernel(
 
                 # Last 64 elems are BF16 tail, corresponds to dequant1 of last
                 # 8 threads. We have 448 FP8 + 64 BF16 -> 28x 16B for FP8 +
-                # 8x 16B for BF16.
-                if lane_id + 32 >= fp8_dim // 8:
-                    idx = fp8_dim // 16 + (lane_id + 32) - fp8_dim // 8
-                    cute.copy(
-                        cp16_atom,
-                        s_kdata_16B_slice[(None, idx), compute_stage],
-                        dequant1,
-                    )
+                # 8x 16B for BF16. The V4.1 record is fully quantized and has
+                # no tail.
+                if cutlass.const_expr(bf16_dim > 0):  # noqa: SIM102
+                    if lane_id + 32 >= fp8_dim // 8:
+                        idx = fp8_dim // 16 + (lane_id + 32) - fp8_dim // 8
+                        cute.copy(
+                            cp16_atom,
+                            s_kdata_16B_slice[(None, idx), compute_stage],
+                            dequant1,
+                        )
 
                 # Store two 16B BF16 chunks per lane: first half, then second half.
                 dst = out_slice[req_id, offset + i, (None, lane_id)]
@@ -269,7 +275,7 @@ class DequantGatherKCacheKernel(
         ):
             # Split k_cache into k_data and k_scale. Each [block_size, head_bytes]
             # block is actually a concat of
-            # [block_size, fp8_dim + bf16_dim * 2] and [block_size, 8].
+            # [block_size, fp8_dim + bf16_dim * 2] and [block_size, scale_bytes].
             k_data = cute.make_tensor(
                 k_cache.iterator,
                 layout=cute.make_layout(
@@ -282,8 +288,8 @@ class DequantGatherKCacheKernel(
             k_scale = cute.make_tensor(
                 k_cache.iterator + (block_size * data_dim),
                 layout=cute.make_layout(
-                    (k_cache.shape[0], block_size, 8),
-                    stride=(k_cache.stride[0], 8, 1),
+                    (k_cache.shape[0], block_size, scale_bytes),
+                    stride=(k_cache.stride[0], scale_bytes, 1),
                 ),
             )
 
@@ -311,10 +317,14 @@ class DequantGatherKCacheKernel(
         *,
         block_size: int,
         has_gather_lens: bool,
+        fp8_dim: int = 448,
+        group_size: int = 64,
     ) -> CompileKey:
         return self.CompileKey(
             block_size=block_size,
             has_gather_lens=has_gather_lens,
+            fp8_dim=fp8_dim,
+            group_size=group_size,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -345,9 +355,11 @@ class DequantGatherKCacheKernel(
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         num_reqs = cute.sym_int()
         head_dim = self.head_dim
-        fp8_dim = self.fp8_dim
+        fp8_dim = compile_key.fp8_dim
         block_size = compile_key.block_size
-        head_bytes = fp8_dim + (head_dim - fp8_dim) * 2 + 8
+        head_bytes = (
+            fp8_dim + (head_dim - fp8_dim) * 2 + head_dim // compile_key.group_size
+        )
 
         out = make_fake_tensor(BFloat16, (num_reqs, cute.sym_int(), head_dim), 16)
         k_cache = cute.runtime.make_fake_tensor(
@@ -384,10 +396,14 @@ class DequantGatherKCacheKernel(
         block_table: torch.Tensor,
         block_size: int,
         offset: int,
+        fp8_dim: int = 448,
+        group_size: int = 64,
     ) -> CuTeDSLLaunchSpec["DequantGatherKCacheKernel.CompileKey"]:
         compile_key = self.dispatch(
             block_size=block_size,
             has_gather_lens=gather_lens is not None,
+            fp8_dim=fp8_dim,
+            group_size=group_size,
         )
         launch_args = (
             out,

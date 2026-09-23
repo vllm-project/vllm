@@ -233,7 +233,7 @@ Two implementations ship with vLLM:
 | `RayVLLMWeightSyncClient(handle)` | One or more `AsyncLLM`/`LLM` Ray actors. Accepts a list and fans each call out to every handle, blocking on all of them, so a multi-actor (e.g. multi-DP) deployment is driven as one unit |
 | `HTTPVLLMWeightSyncClient(base_url, timeout=300)` | A vLLM server over the RLHF HTTP routes |
 
-Custom weight sync clients can be implement like so:
+Custom weight sync clients can be implemented like so:
 
 ```python
 class MyFrameworkWeightSyncClient:

@@ -22,10 +22,14 @@ description: Write or review Triton kernels for vLLM, with practical guidance fo
   a small, legible heuristic when workloads need different choices. Use
   `triton.autotune` only when tuning is critical to performance, such as for a
   matrix multiplication. Otherwise prioritize simple code and fast startup.
-- Be careful to avoid unintended runtime JIT compilation. For example, put
-  unimportant runtime integer scalars in `do_not_specialize`, especially those
-  that may alternate between values such as 0 and 1, which can produce
-  different specialization keys.
+- Avoid unintended runtime JIT compilation. Put unimportant runtime integer
+  scalars in `do_not_specialize`, especially values that alternate between 0
+  and 1. Pointer alignment also affects specialization: an offset tensor view
+  can trigger a new variant after warmup used an aligned allocation. For
+  scalar-only pointers whose alignment provides no useful optimization, use
+  `@triton.jit(do_not_specialize_on_alignment=["end_ptr"])`. Retain alignment
+  specialization when vectorized accesses benefit from it. See the
+  [Triton JIT options](https://triton-lang.org/main/python-api/generated/triton.jit.html).
 - The Triton compiler does not guarantee safe ordering when a kernel writes to
   a pointer and subsequently reads from the same pointer. This pattern must
   have a `tl.debug_barrier()` between the write and read. The barrier
@@ -49,7 +53,9 @@ description: Write or review Triton kernels for vLLM, with practical guidance fo
 ## Validation
 
 - Check correctness at boundary shapes and at sizes that exercise masks and
-  large offsets.
+  large offsets. Include offset tensor views, not only fresh allocations.
+  Warm aligned buffers, then exercise offset views with vLLM's
+  `--jit-monitor-mode error --jit-monitor-verbose` to catch missing variants.
 - Choose accumulation and intermediate dtypes explicitly. Test numerically
   difficult inputs, not only random, well-scaled tensors.
 - Use `$kernel-microbenchmark` for benchmark construction, measurement, and

@@ -25,8 +25,7 @@ def test_processor_with_audio_sample_rate(
     audio_sample_rate: int,
     audio_duration_sec: float,
 ) -> None:
-    """
-    Test that vLLM's processor generates expected outputs with audio_sample_rate.
+    """Test that vLLM's processor generates expected outputs with audio_sample_rate.
 
     This validates that the processor correctly handles audio_sample_rate
     passed via hf_processor_mm_kwargs and generates audio tokens.
@@ -70,8 +69,7 @@ def test_processor_with_audio_sample_rate(
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen3-Omni-30B-A3B-Instruct"])
 def test_longer_audio_generates_more_tokens(model_id: str) -> None:
-    """
-    Test that longer audio generates more tokens than shorter audio.
+    """Test that longer audio generates more tokens than shorter audio.
 
     This validates that audio_sample_rate is being used correctly by checking
     that audio duration affects token count as expected.

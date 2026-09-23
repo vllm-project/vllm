@@ -102,6 +102,7 @@ class SampleRequest:
             images).
         prompt_len: The length of the prompt in tokens.
         expected_output_len: The expected length of the output in tokens.
+
     """
 
     prompt: str
@@ -305,8 +306,7 @@ async def get_request(
     request_rate: float,
     burstiness: float = 1.0,
 ) -> AsyncGenerator[tuple[int, SampleRequest], None]:
-    """
-    Asynchronously generates requests at a specified rate
+    """Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness.
 
     Args:
@@ -322,6 +322,7 @@ async def get_request(
             A lower burstiness value (0 < burstiness < 1) results
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
+
     """
     input_requests = iter(input_requests)
 

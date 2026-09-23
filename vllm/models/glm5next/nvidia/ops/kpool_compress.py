@@ -116,6 +116,7 @@ def fwht128_quant_fp8(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
     Returns:
         (q_fp8 ``[rows, 128]`` float8_e4m3fn, scale ``[rows, 1]`` float32).
+
     """
     assert q.ndim == 2 and q.shape[1] == 128, q.shape
     assert q.dtype == torch.bfloat16
@@ -276,6 +277,13 @@ def kpool_compress_and_write_cache(
         slot_score: ``[n_pools, pool_size, head_dim]`` — per-token gate score.
         ape: ``[pool_size, head_dim]`` fp32 — per-slot position bias.
         loc: ``[n_pools]`` int64 — flat physical slot per pool.
+        pool_size: Number of tokens compressed into one cache entry.
+        head_dim: Indexer head dimension.
+        write_mask: ``[n_pools]`` bool — pools to write, or None for all.
+        round_scale: Round each fp8 scale down to a power of two.
+        return_compressed: Also return the compressed K and scales.
+        write_cache: Write the compressed result into ``kv_cache``.
+
     """
     assert slot_k.ndim == 3
     assert slot_score.shape == slot_k.shape
@@ -375,6 +383,8 @@ def _kpool_tail_seed_kernel(
     tslot_ptr,
     tail_ptr,
     n_tokens,
+    TAIL_BLOCK_ELEMS: tl.constexpr,
+    KPOOL_HEAD: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     KPOOL: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -385,6 +395,11 @@ def _kpool_tail_seed_kernel(
     ahead belongs to a different tail block (or is past the batch / padding,
     slot < 0). ``tslot = block * KPOOL + pos % KPOOL``; the destination is
     ``tail[block, {0:K, 1:score}, pos % KPOOL, :]``.
+
+    The tail cache aliases the indexer cache with the indexer's (padded) block
+    stride, so blocks are addressed through ``TAIL_BLOCK_ELEMS`` /
+    ``KPOOL_HEAD`` (``tail.stride(0)`` / ``tail.stride(1)``), never as a dense
+    ``[num_blocks, 2, KPOOL, HEAD_DIM]`` array.
     """
     i = tl.program_id(0)
     t = tl.load(tslot_ptr + i).to(tl.int64)
@@ -401,11 +416,11 @@ def _kpool_tail_seed_kernel(
         return
     offs = tl.arange(0, BLOCK_D)
     m = offs < HEAD_DIM
-    base = (blk * 2 * KPOOL + t % KPOOL) * HEAD_DIM
+    base = blk * TAIL_BLOCK_ELEMS + (t % KPOOL) * HEAD_DIM
     k = tl.load(key_ptr + i * HEAD_DIM + offs, mask=m)
     s = tl.load(score_ptr + i * HEAD_DIM + offs, mask=m)
     tl.store(tail_ptr + base + offs, k, mask=m)
-    tl.store(tail_ptr + base + KPOOL * HEAD_DIM + offs, s, mask=m)
+    tl.store(tail_ptr + base + KPOOL_HEAD + offs, s, mask=m)
 
 
 def kpool_seed_tail_cache(
@@ -418,6 +433,8 @@ def kpool_seed_tail_cache(
 ) -> None:
     """Seed the paged tail cache from a prefill batch (see the kernel)."""
     assert tail_kv_cache.dtype == torch.bfloat16
+    assert tail_kv_cache.ndim == 4 and tail_kv_cache.shape[1] == 2
+    assert tail_kv_cache.stride(3) == 1 and tail_kv_cache.stride(2) == head_dim
     assert key.dtype == torch.bfloat16
     n = tslot.shape[0]
     if n == 0:
@@ -428,6 +445,8 @@ def kpool_seed_tail_cache(
         tslot,
         tail_kv_cache,
         n,
+        TAIL_BLOCK_ELEMS=tail_kv_cache.stride(0),
+        KPOOL_HEAD=tail_kv_cache.stride(1),
         HEAD_DIM=head_dim,
         KPOOL=kpool,
         BLOCK_D=triton.next_power_of_2(head_dim),
@@ -642,6 +661,10 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         ape: ``[pool_size, head_dim]`` fp32.
         slot_mapping: ``[num_requests, next_n]`` int32.
         positions: ``[num_requests, next_n]`` int32.
+        pool_size: Number of tokens compressed into one cache entry.
+        head_dim: Indexer head dimension.
+        round_scale: Round each fp8 scale down to a power of two.
+
     """
     num_requests, next_n = key.shape[0], key.shape[1]
     if num_requests == 0 or next_n == 0:

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Generates documentation table for attention backends showing feature support.
+"""Generates documentation table for attention backends showing feature support.
 
 This script parses all registered attention backends using AST (no imports needed)
 and generates a markdown table showing what features each backend supports,
@@ -304,6 +303,7 @@ def parse_mla_prefill_registry() -> dict[str, str]:
 
     Returns:
         A dict mapping backend names to their class paths.
+
     """
     if not MLA_PREFILL_REGISTRY_FILE.exists():
         return {}
@@ -325,6 +325,7 @@ def parse_mla_prefill_priorities() -> dict[str, list[str]]:
     Returns:
         A dict with keys like 'blackwell' and 'default' containing
         lists of backend enum names in priority order.
+
     """
     if not MLA_PREFILL_SELECTOR_FILE.exists():
         return {}
@@ -549,6 +550,7 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
 
     Returns:
         A dict with backend properties, or None if parsing fails.
+
     """
     file_path = get_file_from_class_path(class_path)
     if file_path is None:

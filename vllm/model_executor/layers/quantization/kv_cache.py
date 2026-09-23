@@ -41,8 +41,7 @@ class KVCacheScaleParameter(torch.nn.Parameter):
 
 
 class BaseKVCacheMethod(QuantizeMethodBase):
-    """
-    Quant method that adds `_k_scale` and `_v_scale` attributes to the
+    """Quant method that adds `_k_scale` and `_v_scale` attributes to the
     Attention layer to support loading those scaling factors from checkpoints.
     The k/v_scale will be used to:
         - quantize k/v_cache entries before saving them to the cache
@@ -50,6 +49,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
     Args:
         quant_config: the appropriate QuantizationConfig
+
     """
 
     supports_pre_processed_weights = True
@@ -58,8 +58,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module):
-        """
-        Create "weight" (aka q_scale, k_scale and v_scale)
+        """Create "weight" (aka q_scale, k_scale and v_scale)
         for an attention layer.
         """
         # Initialize the Q and KV cache scales to -1.0, an invalid value.

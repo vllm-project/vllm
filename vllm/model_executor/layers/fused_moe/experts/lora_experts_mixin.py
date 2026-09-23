@@ -7,8 +7,7 @@ from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRACon
 
 
 class LoRAExpertsMixin:
-    """
-    Mixin for FusedMoEExpertsModular subclasses that natively handle
+    """Mixin for FusedMoEExpertsModular subclasses that natively handle
     MoELoRAContext inside their apply() implementation.
 
     Mixing this class in:

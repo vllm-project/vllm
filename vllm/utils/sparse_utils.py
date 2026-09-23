@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Safe deserialization helpers for client-supplied embedding tensors.
+"""Safe deserialization helpers for client-supplied embedding tensors.
 
 `check_sparse_tensor_invariants_threadsafe()` is a thread-safe wrapper for
 sparse tensor invariant validation. `safe_to_dense()` bounds the memory a

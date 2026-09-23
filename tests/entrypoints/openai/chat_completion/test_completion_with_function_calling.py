@@ -451,7 +451,7 @@ async def test_inconsistent_tool_choice_and_tools(
 async def test_max_tokens_with_tool_choice_required(
     client: openai.AsyncOpenAI, tool_choice
 ):
-    """ """
+    """Requesting a single token with a required tool choice must not crash."""
     models = await client.models.list()
     model_name: str = models.data[0].id
 

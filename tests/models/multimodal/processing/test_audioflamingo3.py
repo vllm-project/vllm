@@ -25,6 +25,7 @@ import torch
 from transformers import PretrainedConfig
 
 from tests.models.registry import HF_EXAMPLE_MODELS
+from vllm.config.multimodal import MultiModalDummyOptions
 
 
 class MockAudioFlamingo3Config(PretrainedConfig):
@@ -127,7 +128,7 @@ def test_dummy_data_generation(mock_ctx):
     builder = AudioFlamingo3DummyInputsBuilder(info)
 
     mm_counts = {"audio": 2}
-    dummy_data = builder.get_dummy_mm_data(100, mm_counts, {})
+    dummy_data = builder.get_dummy_mm_data(100, mm_counts, MultiModalDummyOptions())
 
     assert "audio" in dummy_data
     assert len(dummy_data["audio"]) == 2

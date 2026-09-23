@@ -22,8 +22,7 @@ __all__ = ["CompressedTensorsW8A8Mxfp8"]
 
 
 class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
-    """
-    Compressed tensors scheme for MXFP8 quantization (W8A8).
+    """Compressed tensors scheme for MXFP8 quantization (W8A8).
 
     Loads pre-quantized MXFP8 weights from compressed-tensors checkpoints.
     Activations are dynamically quantized to MXFP8 at runtime.

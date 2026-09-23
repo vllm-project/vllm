@@ -30,7 +30,6 @@ async def build_and_serve_renderer(
 
     Returns the shutdown task for the caller to await.
     """
-
     # Get uvicorn log config (from file or with endpoint filter)
     log_config = get_uvicorn_log_config(args)
     if log_config is not None:

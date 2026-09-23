@@ -45,6 +45,7 @@ def create_ec_vllm_config(
 
     Returns:
         A `VllmConfig`-specced mock carrying the configs above.
+
     """
     parallel_config = ParallelConfig(
         tensor_parallel_size=tensor_parallel_size,

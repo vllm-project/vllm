@@ -23,6 +23,23 @@ The following are the supported quantization formats for vLLM:
 - [TorchAO](torchao.md)
 - [FP8 ViT Encoder Attention](fp8_vit_attn.md)
 
+## Selecting Linear Backends per Quantization
+
+`--linear-backend` selects one backend for all quantized linear layers. For
+mixed-precision models that use more than one linear quantization scheme, use
+`linear_backend_per_quant` to override the backend for individual schemes:
+
+```bash
+vllm serve <model> \
+  --linear-backend cutlass \
+  --kernel-config '{"linear_backend_per_quant":{"nvfp4_w4a16":"humming"}}'
+```
+
+Here, NVFP4 W4A16 linear layers use Humming, while all other quantized linear
+layers use CUTLASS. Per-quantization overrides take precedence over
+`--linear-backend`; schemes without an override continue to use the global
+setting, including automatic selection when it is `auto`.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:

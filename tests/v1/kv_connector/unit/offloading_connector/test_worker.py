@@ -13,6 +13,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -97,10 +98,9 @@ def _make_worker(
     kv_cache_config: KVCacheConfig,
     replicated_layout: bool = False,
     rank: int = 0,
+    canonical_layout: bool = False,
 ):
-    """
-    Create an OffloadingConnectorWorker with mocked dependencies.
-    """
+    """Create an OffloadingConnectorWorker with mocked dependencies."""
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,
     )
@@ -108,6 +108,7 @@ def _make_worker(
     spec = MagicMock(spec=OffloadingSpec)
     spec.replicated_layout = replicated_layout
     spec.config = MagicMock()
+    spec.config.canonical_layout = canonical_layout
     spec.config.parallel.rank = rank
     spec.get_worker.return_value = MagicMock()
 
@@ -206,11 +207,13 @@ def test_prepare_store_kv_non_writer_marks_completed_without_submit():
     assert meta.completed_jobs == {7: 1}
 
 
-def test_prepare_store_kv_writer_submits_store():
+@pytest.mark.parametrize("rank,canonical_layout", [(0, False), (0, True), (1, True)])
+def test_prepare_store_kv_writer_submits_store(rank, canonical_layout):
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         replicated_layout=True,
-        rank=0,
+        rank=rank,
+        canonical_layout=canonical_layout,
     )
 
     worker.prepare_store_kv(_store_metadata(8))
@@ -516,6 +519,47 @@ def test_register_kv_caches(backend):
             assert actual.page_size_bytes == expected.page_size_bytes
             # Every layer gets a canonical mapping, certified or opaque
             assert actual.mapping is not None
+
+
+def test_register_packed_kv_caches_skips_scratch_group():
+    attn_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    page = attn_spec.page_size_bytes
+    layers = ["layer0", "layer1"]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * page * NUM_BLOCKS,
+                layers=layers,
+                layer_stride=page,
+                block_stride=2 * page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layers, attn_spec),
+            KVCacheGroupSpec(
+                ["scratch"],
+                CircularBufferSpec(
+                    block_size=4, num_kv_heads=1, head_size=1, dtype=DTYPE
+                ),
+            ),
+        ],
+    )
+    kv_caches = _allocate_kv_caches(
+        kv_cache_config, [], device=torch.device(f"{DEVICE_TYPE}:0")
+    )
+    worker, spec = _make_worker(kv_cache_config)
+    worker.register_kv_caches(kv_caches)
+
+    canonical = spec.get_worker.call_args[0][0]
+    assert len(canonical.tensors) == 1
+    assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, 2 * page)
+    assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, 2 * page)]]
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)

@@ -49,6 +49,22 @@ def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.mark.skipif(not gpu_worker.HAS_TRITON, reason="Requires Triton")
+def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Triton load path dereferences CPU pointers on the GPU, so pageable
+    host memory takes the DMA path even for pages where Triton would win."""
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
+    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is not (
+        ops.swap_blocks_batch
+    )
+    assert gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, host_memory_is_pinned=False
+    ) is (ops.swap_blocks_batch)
+
+
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
     """Both directions drain before the worker releases its shared region."""
     worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)

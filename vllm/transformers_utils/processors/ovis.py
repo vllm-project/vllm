@@ -50,10 +50,10 @@ class OvisProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-a
 
 
 class OvisProcessor(ProcessorMixin):
-    r"""
-    Constructs an Ovis processor which wraps an Ovis image processor and a Qwen2 tokenizer into a single processor.
+    r"""Constructs an Ovis processor which wraps an Ovis image processor and a Qwen2 tokenizer into a single processor.
     [`OvisProcessor`] offers all the functionalities of [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`]. See the
     [`~OvisProcessor.__call__`] and [`~OvisProcessor.decode`] for more information.
+
     Args:
         image_processor ([`Qwen2VLImageProcessor`], *optional*):
             The image processor is a required input.
@@ -61,6 +61,7 @@ class OvisProcessor(ProcessorMixin):
             The tokenizer is a required input.
         chat_template (`str`, *optional*): A Jinja template which will be used to convert lists of messages
             in a chat into a tokenizable string.
+
     """
 
     attributes = ["image_processor", "tokenizer"]
@@ -107,12 +108,12 @@ class OvisProcessor(ProcessorMixin):
         | list[PreTokenizedInput] = None,
         **kwargs: Unpack[OvisProcessorKwargs],
     ) -> BatchFeature:
-        """
-        Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
+        """Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
         and `kwargs` arguments to Qwen2TokenizerFast's [`~Qwen2TokenizerFast.__call__`] if `text` is not `None` to encode
         the text. To prepare the vision inputs, this method forwards the `vision_infos` and `kwrags` arguments to
         Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`] if `vision_infos` is not `None`.
-            Args:
+
+        Args:
                 images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `list[PIL.Image.Image]`, `list[np.ndarray]`, `list[torch.Tensor]`):
                     The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
                     tensor. Both channels-first and channels-last formats are supported.
@@ -129,7 +130,8 @@ class OvisProcessor(ProcessorMixin):
                     - `'pt'`: Return PyTorch `torch.Tensor` objects.
                     - `'np'`: Return NumPy `np.ndarray` objects.
                     - `'jax'`: Return JAX `jnp.ndarray` objects.
-            Returns:
+
+        Returns:
                 [`BatchFeature`]: A [`BatchFeature`] with the following fields:
                 - **input_ids** -- List of token ids to be fed to a model. Returned when `text` is not `None`.
                 - **attention_mask** -- List of indices specifying which tokens should be attended to by the model (when
@@ -140,8 +142,8 @@ class OvisProcessor(ProcessorMixin):
                 - **image_grid_thw** -- List of image 3D grid in LLM. Returned when `images` is not `None`.
                 - **video_grid_thw** -- List of video 3D grid in LLM. Returned when `videos` is not `None`.
                 - **second_per_grid_ts** -- List of video seconds per time grid. Returned when `videos` is not `None`.
-        """
 
+        """
         max_partition = kwargs.pop("max_partition", 9)
         covering_threshold = kwargs.pop("covering_threshold", 0.9)
 
@@ -416,28 +418,28 @@ class OvisProcessor(ProcessorMixin):
         return torch.tensor(pixel_values), image_placeholders, torch.tensor(grid)
 
     def batch_decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to Qwen2TokenizerFast's [`~PythonBackend.batch_decode`]. Please
+        """This method forwards all its arguments to Qwen2TokenizerFast's [`~PythonBackend.batch_decode`]. Please
         refer to the docstring of this method for more information.
         """
         return self.tokenizer.batch_decode(*args, **kwargs)
 
     def decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to Qwen2TokenizerFast's [`~PythonBackend.decode`]. Please refer to
+        """This method forwards all its arguments to Qwen2TokenizerFast's [`~PythonBackend.decode`]. Please refer to
         the docstring of this method for more information.
         """
         return self.tokenizer.decode(*args, **kwargs)
 
     def post_process_image_text_to_text(self, generated_outputs):
-        """
-        Post-process the output of the model to decode the text.
+        """Post-process the output of the model to decode the text.
+
         Args:
             generated_outputs (`torch.Tensor` or `np.ndarray`):
                 The output of the model `generate` function. The output is expected to be a tensor of shape `(batch_size, sequence_length)`
                 or `(sequence_length,)`.
+
         Returns:
             `list[str]`: The decoded text.
+
         """
         return self.tokenizer.batch_decode(
             generated_outputs,

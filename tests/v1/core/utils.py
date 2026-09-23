@@ -7,6 +7,7 @@ import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
+    DiffusionConfig,
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
@@ -52,6 +53,7 @@ def mock_kv(matched_tokens: int, is_async: bool, num_defers_before_matching: int
 def create_scheduler(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
+    max_num_active_seqs: int | None = None,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
@@ -76,6 +78,8 @@ def create_scheduler(
     kv_cache_spec: KVCacheSpec | None = None,
     per_request_spec_decode_metrics: str = "none",
     scheduling_policy: SchedulerPolicy = "fcfs",
+    diffusion_canvas_length: int | None = None,
+    scheduler_cls: type[Scheduler] | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -89,6 +93,7 @@ def create_scheduler(
 
     Returns:
       {class}`Scheduler` instance
+
     """
     model_config = ModelConfig(
         model=model,
@@ -106,6 +111,7 @@ def create_scheduler(
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
+        max_num_active_seqs=max_num_active_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
@@ -175,6 +181,12 @@ def create_scheduler(
         else None
     )
 
+    diffusion_config: DiffusionConfig | None = None
+    if diffusion_canvas_length is not None:
+        # A diffusion checkpoint declares its canvas in the HF config.
+        model_config.hf_config.canvas_length = diffusion_canvas_length
+        diffusion_config = DiffusionConfig(canvas_length=diffusion_canvas_length)
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -185,6 +197,7 @@ def create_scheduler(
         ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
+        diffusion_config=diffusion_config,
         ec_transfer_config=ec_transfer_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
@@ -204,7 +217,8 @@ def create_scheduler(
     )
     cache_config.num_gpu_blocks = num_blocks
     register_all_kvcache_specs(vllm_config)
-    scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+    if scheduler_cls is None:
+        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
     scheduler = scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,

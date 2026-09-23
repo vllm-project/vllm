@@ -228,7 +228,7 @@ def test_decode_span_identity_is_exact(
     api_url: str,
     chat: bool,
 ) -> None:
-    """latency - ttft must equal sum(itl) exactly.
+    """Latency - ttft must equal sum(itl) exactly.
 
     On a scripted clock this can only drift if a code path reads the clock an
     extra time or attributes a read to the wrong event.

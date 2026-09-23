@@ -111,8 +111,8 @@ def select_mxfp8_moe_backend(
 
     Returns:
         A tuple of (fp8_backend, experts_cls).
-    """
 
+    """
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         backend = _BACKEND_NAME_MAP.get(runner_backend)

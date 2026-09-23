@@ -79,11 +79,6 @@ def _run_engine_core_handshake(
         "resolve_kv_cache_block_sizes",
         lambda kv_cache_config, vllm_config: (16, 16),
     )
-    monkeypatch.setattr(
-        engine_core_module,
-        "MULTIMODAL_REGISTRY",
-        SimpleNamespace(engine_receiver_cache_from_config=lambda vllm_config: None),
-    )
     monkeypatch.setattr(engine_core_module, "freeze_gc_heap", lambda: None)
     monkeypatch.setattr(
         engine_core_module, "maybe_attach_gc_debug_callback", lambda: None
@@ -105,7 +100,11 @@ def _run_engine_core_handshake(
         speculative_config=None,
         ec_transfer_config=None,
         max_concurrent_batches=1,
-        model_config=SimpleNamespace(runner_type="generate", is_diffusion=False),
+        model_config=SimpleNamespace(
+            runner_type="generate",
+            is_diffusion=False,
+            supports_multimodal_inputs=False,
+        ),
         cache_config=SimpleNamespace(
             enable_prefix_caching=False,
             prefix_caching_hash_algo="builtin",

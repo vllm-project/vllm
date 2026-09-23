@@ -26,6 +26,7 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/reset_encoder_cache",
     "/collective_rpc",
     "/sleep",
+    "/release_kv_cache_memory",
     "/wake_up",
     "/is_sleeping",
 ];

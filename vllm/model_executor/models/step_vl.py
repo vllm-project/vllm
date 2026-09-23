@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""This is basically a copy from perception_models/core/vision_encoder/pe.py"""
+"""This is basically a copy from perception_models/core/vision_encoder/pe.py."""
 
 from collections.abc import Callable
 from functools import partial

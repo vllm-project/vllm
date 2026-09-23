@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
+    prepare_sparse_mla_safe_lengths,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -113,6 +114,16 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            return (
+                "FLASHINFER_MLA_SPARSE does not support combined PCP+DCP; "
+                "use FLASHMLA_SPARSE, which gathers each DCP KV shard before "
+                "running the rank-local PCP prefill queries"
+            )
         if kv_cache_dtype == "fp8_ds_mla":
             return (
                 "FLASHINFER_MLA_SPARSE SM10 does not support fp8_ds_mla kv-cache dtype"
@@ -265,6 +276,31 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     hisparse_supports_multi_token_decode: ClassVar[bool] = True
 
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+        # Under DCP the workspace must hold the trtllm-gen softmax-stats slab.
+        # The buffer address is baked into CUDA graphs, so it has to reach its
+        # final size here, before the first forward/capture (no lazy regrow).
+        if self.dcp_world_size > 1:
+            num_q_heads = vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            )
+            _get_workspace_buffer(
+                device,
+                _required_workspace_bytes(
+                    self.dcp_world_size,
+                    num_q_heads,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                ),
+            )
+
     def _build_req_id_per_token(
         self,
         common_attn_metadata: "CommonAttentionMetadata",
@@ -275,14 +311,98 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
 # Global workspace buffer (lazily initialized)
 _fi_sparse_workspace: torch.Tensor | None = None
 
+# trtllm-gen carves a softmax-stats slab from the workspace whenever LSE is
+# requested (FlashInfer csrc/trtllm_fmha_kernel_launcher.cu, unchanged from
+# v0.6.14 through current main):
+#   sizeof(float2) * num_qo_heads * batch_size * round_up(max_q_len, 256)
+#   + 1 MiB guard
+# forward_mqa always passes q_len == 1, so each (head, token) pair costs
+# round_up(1, 256) == 256 slots.
+_TRTLLM_GEN_SOFTMAX_STAT_BYTES = 8  # sizeof(float2)
+_TRTLLM_GEN_SOFTMAX_SLOTS_PER_TOKEN = 256  # round_up(q_len=1, 256)
+_TRTLLM_GEN_SOFTMAX_GUARD_BYTES = 1024 * 1024
 
-def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
+# Keep in sync with the VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE default in
+# vllm/envs.py.
+_DEFAULT_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
+
+
+def compute_trtllm_sparse_mla_workspace_bytes(
+    base_workspace_bytes: int,
+    dcp_world_size: int,
+    num_heads_per_rank: int,
+    max_num_batched_tokens: int,
+) -> int:
+    """Workspace bytes needed by the trtllm-gen sparse MLA decode kernel.
+
+    Under DCP the query is all-gathered across the DCP group in the head dim
+    and the kernel is asked for LSE, so trtllm-gen carves the softmax-stats
+    slab described above from the workspace before its (batch-independent)
+    counter and scratch regions. ``base_workspace_bytes`` must stay available
+    for those regions, so the slab is added on top of it (see #50781).
+
+    Without DCP no LSE is requested, no slab is carved, and the base size is
+    returned unchanged.
+    """
+    if dcp_world_size <= 1:
+        return base_workspace_bytes
+    softmax_bytes = (
+        _TRTLLM_GEN_SOFTMAX_STAT_BYTES
+        * (num_heads_per_rank * dcp_world_size)
+        * max_num_batched_tokens
+        * _TRTLLM_GEN_SOFTMAX_SLOTS_PER_TOKEN
+        + _TRTLLM_GEN_SOFTMAX_GUARD_BYTES
+    )
+    return base_workspace_bytes + softmax_bytes
+
+
+def _required_workspace_bytes(
+    dcp_world_size: int,
+    num_heads_per_rank: int,
+    max_num_batched_tokens: int,
+) -> int:
+    """Resolve the workspace size, honoring an explicit env override."""
+    computed = compute_trtllm_sparse_mla_workspace_bytes(
+        _DEFAULT_WORKSPACE_BUFFER_SIZE,
+        dcp_world_size,
+        num_heads_per_rank,
+        max_num_batched_tokens,
+    )
+    if not envs.is_set("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE"):
+        return computed
+    env_bytes = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+    if env_bytes < computed:
+        logger.warning_once(
+            "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=%d is below the %d bytes "
+            "computed for the sparse MLA workspace with dcp_world_size=%d, "
+            "%d heads/rank and max_num_batched_tokens=%d. Respecting the "
+            "override, but the trtllm-gen kernel may crash with a workspace "
+            "overflow; set VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=%d or unset "
+            "it to use the computed size.",
+            env_bytes,
+            computed,
+            dcp_world_size,
+            num_heads_per_rank,
+            max_num_batched_tokens,
+            computed,
+        )
+    return env_bytes
+
+
+def _get_workspace_buffer(
+    device: torch.device, min_bytes: int | None = None
+) -> torch.Tensor:
     global _fi_sparse_workspace
-    if _fi_sparse_workspace is None:
+    required = (
+        min_bytes
+        if min_bytes is not None
+        else envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+    )
+    if _fi_sparse_workspace is None or _fi_sparse_workspace.numel() < required:
         # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
         # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
         _fi_sparse_workspace = torch.zeros(
-            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+            required,
             dtype=torch.int8,
             device=device,
         )
@@ -578,18 +698,16 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         sparse_topk_capacity = topk_indices.shape[1]
 
         extra_kwargs: dict[str, torch.Tensor] = {}
-        empty_rows: torch.Tensor | None = None
+        needs_empty_query_guard = self.need_to_return_lse_for_decode or isinstance(
+            self.index_group, HiSparseMLAIndexGroup
+        )
         if self.is_nope_mla:
-            # The native no-rope kernel takes the active top-k length per query
-            # token (``seq_lens`` here is already the compacted per-token valid
-            # count, int32) and rejects zero-length rows. Point empty rows at a
-            # single valid dummy slot with length 1 and zero their output after
-            # the launch. ``triton_convert_req_index_to_global_index`` packs the
-            # valid indices into a contiguous prefix, which is what the kernel
-            # requires of the page table.
-            empty_rows = seq_lens == 0
-            topk_indices[:, 0] = topk_indices[:, 0].masked_fill(empty_rows, 0)
-            extra_kwargs["sparse_mla_top_k_lens"] = seq_lens.clamp(min=1)
+            # Resident TP queries have nonempty selections. Preserve empty-query
+            # handling for DCP's local selections and host-backed HiSparse.
+            topk_lens = seq_lens
+            if needs_empty_query_guard:
+                topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
+            extra_kwargs["sparse_mla_top_k_lens"] = topk_lens
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
@@ -618,12 +736,17 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         out = o.view(-1, o.shape[-2], o.shape[-1])
         if lse is not None:
             lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
-        if empty_rows is None and lse is not None:
-            empty_rows = (topk_indices == -1).all(dim=-1)
-        if empty_rows is not None:
-            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+        if self.is_nope_mla and needs_empty_query_guard:
+            empty_queries = seq_lens == 0
             if lse is not None:
-                lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+                # DCP combine already suppresses outputs with zero LSE weight.
+                lse.masked_fill_(empty_queries[:, None], float("-inf"))
+            else:
+                out.masked_fill_(empty_queries[:, None, None], 0.0)
+        elif lse is not None:
+            empty_rows = (topk_indices == -1).all(dim=-1)
+            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         return out, lse
 
     @staticmethod

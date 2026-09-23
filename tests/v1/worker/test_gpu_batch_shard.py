@@ -183,6 +183,12 @@ def test_local_batch_partition(tp_size: int, seed: int):
         ).all()
         assert (_np(local.logits_indices) == _np(batch.logits_indices)[rows]).all()
         assert (_np(local.seq_lens) == _np(batch.seq_lens)[owned]).all()
+        # Indexed by batch position, like seq_lens: a consumer holding local row
+        # indices reads another request's length if this is not localised too.
+        assert (
+            _np(local.seq_lens_cpu_upper_bound)
+            == _np(batch.seq_lens_cpu_upper_bound)[owned]
+        ).all()
         assert batch.num_draft_tokens_per_req is not None
         assert local.num_draft_tokens_per_req is not None
         assert (

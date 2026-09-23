@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
@@ -16,9 +17,7 @@ logger = init_logger(__name__)
 
 
 class ParserManager:
-    """
-    Provides a unified Parser by composing reasoning and tool parser adapters.
-    """
+    """Provides a unified Parser by composing reasoning and tool parser adapters."""
 
     @classmethod
     def get_tool_parser(
@@ -79,9 +78,9 @@ class ParserManager:
         enable_auto_tools: bool = False,
         model_name: str | None = None,
         is_harmony: bool = False,
+        tool_strict_level: str = "auto",
     ) -> type[Parser] | None:
-        """
-        Get a Parser that handles both reasoning and tool parsing.
+        """Get a Parser that handles both reasoning and tool parsing.
 
         Composes the individual parsers into a ``DelegatingParser`` subclass.
 
@@ -92,9 +91,12 @@ class ParserManager:
             model_name: The model name for parser-specific warnings.
             is_harmony: Whether the selected model uses the Harmony format.
                         If True, HarmonyParser is always returned.
+            tool_strict_level: Server-side floor for tool-call structural
+                tags (``--tool-strict-level``).
 
         Returns:
             A Parser class, or None if neither parser is specified.
+
         """
         if not tool_parser_name and not reasoning_parser_name:
             return None
@@ -107,11 +109,14 @@ class ParserManager:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
+        strict_level = ToolStrictLevel.from_name(tool_strict_level)
+
         if is_harmony:
             from vllm.parser.harmony import HarmonyParser
 
             HarmonyParser.reasoning_parser_cls = reasoning_parser_cls
             HarmonyParser.tool_parser_cls = tool_parser_cls
+            HarmonyParser.tool_strict_level = strict_level
             return HarmonyParser
 
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
@@ -123,6 +128,7 @@ class ParserManager:
             class _KimiK3Parser(KimiK3Parser):
                 reasoning_parser_cls = r_cls
                 tool_parser_cls = t_cls
+                tool_strict_level = strict_level
 
             return _KimiK3Parser
 
@@ -138,6 +144,7 @@ class ParserManager:
             class _CohereCommandParser(CohereCommandParser):
                 reasoning_parser_cls = r_cls
                 tool_parser_cls = t_cls
+                tool_strict_level = strict_level
 
             return _CohereCommandParser
 
@@ -149,5 +156,6 @@ class ParserManager:
         class _Parser(DelegatingParser):
             reasoning_parser_cls = r_cls
             tool_parser_cls = t_cls
+            tool_strict_level = strict_level
 
         return _Parser

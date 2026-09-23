@@ -67,6 +67,7 @@ def compute_skip_topk_layers(config: PretrainedConfig) -> set[int]:
     Raises:
         ValueError: If ``indexer_types`` has the wrong length or an unknown
             entry, or if ``index_topk_freq`` is not a positive integer.
+
     """
     if not hasattr(config, "index_topk"):
         return set()
@@ -115,6 +116,7 @@ def is_skip_topk_indexer_weight(weight_name: str, skip_topk_layers: set[int]) ->
     Returns:
         True when the weight is an indexer weight of a layer that has no
         indexer module and therefore must be dropped.
+
     """
     if ".indexer." not in weight_name or not skip_topk_layers:
         return False
@@ -557,6 +559,7 @@ class HYV4MLAAttention(nn.Module):
             The backend class to bind, or None when no sink-capable backend is
             available; the caller then loads the sink weight but disables the
             bias.
+
         """
         head_size = self.kv_lora_rank + self.qk_rope_head_dim
         dtype = torch.get_default_dtype()
@@ -755,6 +758,8 @@ class HYV4MLAAttention(nn.Module):
         """
         if self.indexer is not None and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        if self.is_sparse:
+            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
         out.copy_(
             self.mla_attn(
                 q,

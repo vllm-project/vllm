@@ -22,12 +22,12 @@ async def wait_for_endpoint(
     timeout_seconds: int = 600,
     retry_interval: int = 5,
 ) -> RequestFuncOutput:
-    """
-    Wait for an endpoint to become available before starting benchmarks.
+    """Wait for an endpoint to become available before starting benchmarks.
 
     Args:
         request_func: The async request function to call
         test_input: The RequestFuncInput to test with
+        session: The aiohttp session used to issue the probe requests
         timeout_seconds: Maximum time to wait in seconds (default: 10 minutes)
         retry_interval: Time between retries in seconds (default: 5 seconds)
 
@@ -36,6 +36,7 @@ async def wait_for_endpoint(
 
     Raises:
         ValueError: If the endpoint doesn't become available within the timeout
+
     """
     deadline = time.perf_counter() + timeout_seconds
     output = RequestFuncOutput(success=False)

@@ -16,7 +16,7 @@ from transformers import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
@@ -73,12 +73,11 @@ from .vision import (
 
 
 class SiglipImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -159,20 +158,16 @@ class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -399,7 +394,7 @@ class SiglipAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -778,8 +773,9 @@ class SiglipVisionTransformer(nn.Module):
         """Apply the post layer norm and head if they are enabled,
         given the last hidden states tensor.
 
-        args:
+        Args:
             encoder_outputs: The last hidden states from the visual encoder.
+
         """
         if self.post_layernorm is not None:
             encoder_outputs = self.post_layernorm(encoder_outputs)

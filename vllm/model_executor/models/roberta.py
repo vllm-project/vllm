@@ -275,6 +275,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     Attributes:
         roberta: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True

@@ -42,7 +42,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward of RowParallelLinear
+        """Forward of RowParallelLinear.
 
         Args:
             input_: tensor whose last dimension is `input_size`. If
@@ -52,6 +52,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         Returns:
             - output
             - bias
+
         """
         # set up backprop all-reduce.
         if self.base_layer.input_is_parallel:
@@ -99,8 +100,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
 
 class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
-    """
-    Differs from RowParallelLinearWithLoRA by slicing the
+    """Differs from RowParallelLinearWithLoRA by slicing the
     LoRA B's also.
 
     Based on S-LoRA, slicing happens along the output dim.

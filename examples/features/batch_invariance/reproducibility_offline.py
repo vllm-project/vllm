@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Demonstrates how to achieve reproducibility in vLLM.
+"""Demonstrates how to achieve reproducibility in vLLM.
 
 Main article: https://docs.vllm.ai/en/latest/usage/reproducibility.html
 """

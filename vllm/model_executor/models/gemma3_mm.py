@@ -11,7 +11,7 @@ from transformers.models.gemma3.image_processing_gemma3 import Gemma3ImageProces
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -19,6 +19,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -57,14 +58,13 @@ logger = init_logger(__name__)
 
 
 class Gemma3ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - p: Number of patches total (over each image over each prompt in the
-          batch)
-        - c: Number of channels (3)
-        - h: Height of each patch
-        - w: Width of each patch
-        - bn: Batch size * number of images
+    """Dimensions:
+    - p: Number of patches total (over each image over each prompt in the
+      batch)
+    - c: Number of channels (3)
+    - h: Height of each patch
+    - w: Width of each patch
+    - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -244,26 +244,22 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
 
 class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -677,52 +673,23 @@ class Gemma3ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        """
-        Calculate the number of tokens output by the vision encoder.
-
-        The vision encoder processes images into patch embeddings. For Gemma3,
-        the relationship between prompt placeholder tokens and actual vision
-        encoder output tokens depends on the patch grid size.
-
-        Args:
-            num_image_tokens: Number of image placeholder tokens in the prompt
-                              (typically mm_tokens_per_image per image)
-
-        Returns:
-            Number of tokens output by the vision encoder
-        """
-        # For Gemma3, the vision encoder outputs tokens_per_side x tokens_per_side
-        # tokens per image. Since num_image_tokens represents the number of
-        # connector output tokens (mm_tokens_per_image = 256), and tokens_per_side
-        # is sqrt(256) = 16, we need to account for the token expansion.
-        # Based on empirical testing, the multiplier of 16 works correctly.
-        return num_image_tokens * 16
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        """
-        Calculate the number of tokens output by the multimodal connector.
-
-        The connector applies projection and normalization but maintains the
-        token count for Gemma3.
-
-        Args:
-            num_vision_tokens: Number of tokens from vision encoder
-
-        Returns:
-            Number of tokens after connector processing
-        """
-        # The Gemma3 connector maintains a 1:1 token mapping
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        tower_tokens = num_mm_embeds * 16
+        return tower_tokens, tower_tokens
 
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (

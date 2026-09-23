@@ -138,14 +138,14 @@ class ApplyRotaryEmb(CustomOp):
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> torch.Tensor:
-        """
-        Args:
-            x: [batch_size (optional), seq_len, num_heads, head_size]
-            cos: [seq_len, head_size // 2]
-            sin: [seq_len, head_size // 2]
-            is_neox_style: Whether to use the Neox-style or GPT-J-style.
-            enable_fp32_compute: Temporarily convert x, cos, sin to FP32 dtype
-                                 for higher accuracy.
+        """Args:
+        x: [batch_size (optional), seq_len, num_heads, head_size]
+        cos: [seq_len, head_size // 2]
+        sin: [seq_len, head_size // 2]
+        is_neox_style: Whether to use the Neox-style or GPT-J-style.
+        enable_fp32_compute: Temporarily convert x, cos, sin to FP32 dtype
+                             for higher accuracy.
+
         """
         origin_dtype = x.dtype
         if enable_fp32_compute:
@@ -236,6 +236,18 @@ class ApplyRotaryEmb(CustomOp):
 
         output = self._post_process(output, origin_shape, origin_dtype)
         return output
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_apply_rotary_emb
+
+        x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
+        output = torch.ops.vllm.xpu_apply_rotary_emb(x, cos, sin, self.is_neox_style)
+        return self._post_process(output, origin_shape, origin_dtype)
 
     def forward_hip(
         self,

@@ -16,7 +16,7 @@ import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
@@ -975,7 +975,7 @@ class HiSparseRuntime:
     ) -> None:
         group = self.index_group
         compute_stream = current_stream()
-        if group.logical_topk_ready is not None:
+        if group.logical_topk_ready is not None and not in_piecewise_cudagraph():
             group.copy_stream.wait_event(group.logical_topk_ready)
         else:
             group.copy_stream.wait_stream(compute_stream)
