@@ -87,6 +87,20 @@ steps:
     - tests/compile/h100/
   commands:
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  mirror:
+    amd:
+      label: ":amd: (MI355) PyTorch Compilation H100 Cases"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/utils.py
+      - csrc/
+      commands:
+      - pytest -v -s compile/h100/test_startup.py
 
 - label: ":nvidia: (L4) PyTorch Compilation Passes"
   key: pytorch-compilation-passes-unit-tests
@@ -122,6 +136,21 @@ steps:
     - tests/compile/passes
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
+  mirror:
+    amd:
+      label: ':amd: (MI300) PyTorch Compilation Passes'
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 80
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/
+      - tests/compile/passes
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
   device: h200_35gb
@@ -154,6 +183,7 @@ steps:
   - vllm/utils/
   - vllm/v1/
   - tests/compile
+  - csrc/
   commands:
   # Run smoke tests under fullgraph directory, except test_full_cudagraph.py
   # as it is a heavy test that is covered in other steps.
