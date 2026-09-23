@@ -43,6 +43,7 @@ def _make_config(**parallel_kwargs):
         numa_bind=False,
         numa_bind_nodes=None,
         numa_bind_cpus=None,
+        assigned_physical_gpu_ids=None,
         distributed_executor_backend="mp",
         data_parallel_backend="mp",
         nnodes_within_dp=1,
@@ -543,6 +544,14 @@ def test_parallel_config_validates_numa_bind_nodes():
         ParallelConfig(numa_bind_nodes=[0, -1])
 
 
+def test_parallel_config_numa_lists_imply_numa_bind():
+    assert ParallelConfig().numa_bind is None
+    assert ParallelConfig(numa_bind_nodes=[0, 1]).numa_bind is True
+    assert ParallelConfig(numa_bind_cpus=["0-3"]).numa_bind is True
+    with pytest.raises(ValueError, match="require numa_bind"):
+        ParallelConfig(numa_bind=False, numa_bind_nodes=[0, 1])
+
+
 @pytest.mark.parametrize("cpuset", ["", "abc", "1-", "4-1", "1,,2", "1:2"])
 def test_parallel_config_rejects_invalid_numa_bind_cpus(cpuset):
     with pytest.raises(ValueError, match="numa_bind_cpus"):
@@ -564,7 +573,7 @@ def test_configure_subprocess_numa_fallback(monkeypatch):
     import multiprocessing
 
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/numactl")
-    monkeypatch.setattr(numa_utils.envs, "VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     node_config = _make_config(numa_bind=True, numa_bind_nodes=[0])
 
     monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
@@ -593,3 +602,55 @@ def test_configure_subprocess_numa_fallback(monkeypatch):
     with numa_utils.configure_subprocess(node_config, local_rank=0):
         assert multiprocessing.spawn.get_executable() == before
         assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+
+
+def _patch_auto_numa(monkeypatch, start_method, detect):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/numactl")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", start_method)
+    monkeypatch.setattr(
+        numa_utils, "_is_auto_numa_available", lambda verbose=True: True
+    )
+    monkeypatch.setattr(numa_utils, "get_auto_numa_nodes", detect)
+
+
+def test_configure_subprocess_auto_binds_and_records_result(monkeypatch):
+    """Default mode resolves once in the launcher and stores the result, so
+    spawned children bind with it instead of re-checking eligibility."""
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0])
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+
+    vllm_config = _make_config(numa_bind=None)
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=0 --membind=0"
+    assert vllm_config.parallel_config.numa_bind is True
+
+
+def _raise_probe_error():
+    raise RuntimeError("amdsmi init failed")
+
+
+@pytest.mark.parametrize(
+    ("start_method", "detect", "assigned_gpus"),
+    [
+        ("fork", lambda: [0], None),
+        ("spawn", lambda: None, None),
+        ("spawn", lambda: [], None),
+        ("spawn", _raise_probe_error, None),
+        ("spawn", lambda: [0, 1], [1]),
+    ],
+    ids=["fork", "no-topology", "no-visible-gpus", "probe-raises", "device-ids"],
+)
+def test_configure_subprocess_auto_falls_back_to_unbound(
+    monkeypatch, start_method, detect, assigned_gpus
+):
+    """Default mode never fails startup or forces spawn; when binding cannot
+    engage (or would pick the wrong node) it starts unbound."""
+    import multiprocessing
+
+    _patch_auto_numa(monkeypatch, start_method, detect)
+
+    vllm_config = _make_config(numa_bind=None, assigned_physical_gpu_ids=assigned_gpus)
+    before = multiprocessing.spawn.get_executable()
+    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+        assert multiprocessing.spawn.get_executable() == before
+    assert vllm_config.parallel_config.numa_bind is False

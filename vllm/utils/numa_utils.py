@@ -56,9 +56,17 @@ def _can_set_mempolicy() -> bool:
         return False
 
 
-def _is_auto_numa_available() -> bool:
-    """Check whether automatic GPU-to-NUMA detection should be attempted."""
+def _is_auto_numa_available(verbose: bool = True) -> bool:
+    """Check whether automatic GPU-to-NUMA detection should be attempted.
+
+    Args:
+        verbose: Log why detection is skipped at warning level; otherwise at
+            debug level, for the default mode where skipping is expected.
+
+    """
     from vllm.platforms import current_platform
+
+    log = logger.warning if verbose else logger.debug
 
     if not current_platform.is_cuda_alike():
         return False
@@ -71,7 +79,7 @@ def _is_auto_numa_available() -> bool:
         cpu_affinity = process.cpu_affinity()
         cpu_count = psutil.cpu_count()
         if cpu_count is not None and cpu_affinity != list(range(cpu_count)):
-            logger.warning(
+            log(
                 "CPU affinity is already constrained for this process. "
                 "Skipping automatic NUMA binding; pass --numa-bind-nodes "
                 "explicitly to override."
@@ -81,7 +89,7 @@ def _is_auto_numa_available() -> bool:
         pass
 
     if not _can_set_mempolicy():
-        logger.warning(
+        log(
             "User lacks permission to set NUMA memory policy. "
             "Automatic NUMA detection may not work; if you are using Docker, "
             "try adding --cap-add SYS_NICE."
@@ -89,7 +97,7 @@ def _is_auto_numa_available() -> bool:
         return False
 
     if not hasattr(current_platform, "get_all_device_numa_nodes"):
-        logger.warning(
+        log(
             "Platform %s does not support automatic NUMA detection",
             type(current_platform).__name__,
         )
@@ -110,6 +118,30 @@ def get_auto_numa_nodes() -> list[int] | None:
     if numa_nodes is not None:
         logger.info("Auto-detected NUMA nodes for GPUs: %s", numa_nodes)
     return numa_nodes
+
+
+def _can_auto_bind(parallel_config) -> bool:
+    """Whether the default (unset) ``numa_bind`` should bind in this process.
+
+    Unlike ``--numa-bind``, this never fails startup or forces the ``spawn``
+    start method: any unmet requirement means starting unbound.
+    """
+    from shutil import which
+
+    if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
+        return False
+    # Topology is indexed in visible-device order, which --device-ids remaps.
+    if parallel_config.assigned_physical_gpu_ids is not None:
+        return False
+    if which("numactl") is None or not _is_auto_numa_available(verbose=False):
+        return False
+    try:
+        # Empty when this process sees no GPUs (e.g. a zero-GPU Ray actor).
+        return bool(get_auto_numa_nodes())
+    except Exception:
+        # e.g. amdsmi init failing outside the platform's own error handling.
+        logger.debug("GPU-to-NUMA detection failed", exc_info=True)
+        return False
 
 
 # PCT (Priority Core Turbo) auto-detection workaround for Granite Rapids
@@ -481,6 +513,13 @@ def configure_subprocess(
 ):
     """Temporarily replace the multiprocessing executable with a numactl wrapper."""
     parallel_config = vllm_config.parallel_config
+    if parallel_config.numa_bind is None:
+        # Resolve once in the launching process; spawned children inherit the
+        # result through the pickled config instead of re-checking (a bound
+        # EngineCore would fail the unconstrained-affinity check).
+        parallel_config.numa_bind = _can_auto_bind(parallel_config)
+        if not parallel_config.numa_bind:
+            logger.debug("Automatic NUMA binding unavailable; starting unbound.")
     if not parallel_config.numa_bind:
         yield
         return

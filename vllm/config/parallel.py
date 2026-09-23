@@ -326,12 +326,18 @@ class ParallelConfig:
     nnodes: int = Field(default=1, ge=1)
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
-    numa_bind: bool = False
+    numa_bind: bool | None = None
     """Enable NUMA binding for GPU worker subprocesses.
 
-    By default, workers are pinned to their GPU's NUMA-local CPUs and
+    When enabled, workers are pinned to their GPU's NUMA-local CPUs and
     memory; on PCT-capable Xeons they also auto-bind to the SKU's
     PCT priority cores.
+
+    If None (default), vLLM binds only when the environment supports it
+    (e.g. multiple NUMA nodes, `numactl` installed, and the `spawn` start
+    method) and starts unbound otherwise. With `True`, a missing `numactl`
+    or undetectable GPU-to-NUMA topology is a startup error; `False`
+    disables binding.
     """
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
@@ -553,12 +559,12 @@ class ParallelConfig:
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
 
-        if not self.numa_bind and (
-            self.numa_bind_nodes is not None or self.numa_bind_cpus is not None
-        ):
-            raise ValueError(
-                "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
-            )
+        if self.numa_bind_nodes is not None or self.numa_bind_cpus is not None:
+            if self.numa_bind is False:
+                raise ValueError(
+                    "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
+                )
+            self.numa_bind = True
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
