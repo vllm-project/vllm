@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+
 import torch
 
 from vllm.model_executor.layers.mamba.checkpoint.builder import (
@@ -10,6 +12,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
+@dataclass(frozen=True)
 class MambaPrefillCheckpointExporter:
     """Write a mid-prefill checkpoint into the paged conv and SSM states.
 
@@ -19,6 +22,8 @@ class MambaPrefillCheckpointExporter:
     materializes every chunk state, such as Mamba2, pass that array plus
     ``recurrent_row_ids`` to select the checkpoint rows out of it.
     """
+
+    state_len: int | None = None
 
     def export(
         self,
@@ -44,7 +49,9 @@ class MambaPrefillCheckpointExporter:
                 Defaults to one row per request, in order.
 
         """
-        state_len = conv_state.shape[-1]
+        state_len = (
+            self.state_len if self.state_len is not None else conv_state.shape[-1]
+        )
         width = conv_input.shape[-1]
         recurrent_row_size = recurrent_checkpoint[0].numel()
         block_size = 256
