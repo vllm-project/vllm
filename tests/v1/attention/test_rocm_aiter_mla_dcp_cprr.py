@@ -221,9 +221,31 @@ def test_min_cprr_qlen_is_above_two():
     """Qlen 2 is the steady state at num_speculative_tokens=1. The per-step
     gate omits the global-position window below _MIN_CPRR_QLEN, which is
     correct for qlen 1 (a decode row sees every local token) but WRONG for
-    qlen 2, where a row can still be causally truncated. The builder must
-    refuse it at boot rather than degrade acceptance silently."""
+    qlen 2, where a row can still be causally truncated. A configured qlen
+    of 2 is refused at boot; a clamped qlen-2 batch under a larger threshold
+    uses segmented MLA when available rather than the plain kernel."""
     assert MIN_QLEN > 2
+
+
+@pytest.mark.parametrize(
+    "supports,causal,qlen,asm,expected",
+    [
+        (True, True, 1, True, False),
+        (True, True, 2, True, True),
+        (True, True, 3, True, False),
+        (True, True, 4, True, False),
+        (True, True, 4, False, True),
+        (True, False, 2, True, False),
+        (False, True, 2, True, False),
+    ],
+)
+def test_segmented_fallback_only_below_cprr_floor(
+    supports, causal, qlen, asm, expected
+):
+    assert (
+        rocm_aiter_mla._use_segmented_dcp_verify(supports, causal, qlen, asm)
+        is expected
+    )
 
 
 # Kernel numerics live in test_rocm_aiter_mla_dcp_cprr_numerics.py, which runs

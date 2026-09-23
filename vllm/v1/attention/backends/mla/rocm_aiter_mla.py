@@ -257,9 +257,34 @@ def _asm_dcp_verify_heads(decode_num_heads: int) -> int:
 
 
 # shortest query length the cprr asm decode has a kernel for.
-# A DSpark draft group runs at qlen = 1 + num_speculative_tokens, so nspec=1
-# would sit below this and must not silently fall back to a non-cprr call.
+# A DSpark draft group runs at qlen = 1 + num_speculative_tokens, so a
+# *configured* nspec=1 sits below this and is refused at init. A larger
+# configured width can still be clamped to qlen 2 at runtime; that batch
+# must not silently fall back to the non-cprr kernel (local causality over
+# a round-robin shard) and uses segmented MLA instead when it is available.
 _MIN_CPRR_QLEN: Final = 3
+
+
+def _use_segmented_dcp_verify(
+    supports_segmented: bool,
+    causal: bool,
+    max_qo_len: int,
+    asm_selected: bool,
+) -> bool:
+    """Whether THIS batch should run DCP verify on segmented MLA.
+
+    CPRR is the preferred route when selected, but it has no kernel below
+    ``_MIN_CPRR_QLEN``. A causal batch in that hole uses segmented MLA as a
+    per-batch correctness fallback (the scheduler can clamp a K=4 draft to
+    qlen 2). The plain MLA kernel is never a fallback: its causality is local
+    to the round-robin shard.
+    """
+    return (
+        supports_segmented
+        and causal
+        and max_qo_len > 1
+        and (not asm_selected or max_qo_len < _MIN_CPRR_QLEN)
+    )
 
 
 def _parse_dcp_verify_env() -> tuple[str, frozenset[int]]:
@@ -662,11 +687,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.cp_kv_cache_interleave_size,
         )
         # prefer the tuned fp8 asm cprr decode for DCP verify.
-        # When it can serve this shape it *replaces* the segmented route, so the
-        # two are mutually exclusive and only one set of buffers is allocated.
-        # The head-count half of the predicate needs self.num_heads, which is
-        # per-KV-group and only known after super().__init__; the config half is
-        # enough to answer supports_dcp_with_varlen for the DSpark DCP gate.
+        # CPRR is the preferred per-batch route when it can serve the shape,
+        # but segmented stays reachable as a qlen-floor fallback (and for
+        # VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented). Full CUDA graphs therefore
+        # allocate both buffer sets. The head-count half of the predicate needs
+        # self.num_heads, which is per-KV-group and only known after
+        # super().__init__; the config half is enough to answer
+        # supports_dcp_with_varlen for the DSpark DCP gate.
         asm_dcp_verify_config = _asm_dcp_verify_configured(
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
@@ -700,8 +727,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
                 )
             self._asm_dcp_verify = True
-            # The asm route replaces the segmented one; never build both.
-            supports_segmented_dcp_verify = False
+            # Keep segmented allocated: a later batch can land below
+            # _MIN_CPRR_QLEN (partial-draft clamp) and needs the fallback.
         self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
         # Cap on per-batch KV splits, defaulting to one split per CU.
         #
@@ -739,10 +766,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # for qlen 1 (a decode row sees every local token) but WRONG for qlen
         # 2, where a row can still be causally truncated.
         #
-        # This rejects a CONFIGURED qlen of 2, the steady state at nspec=1. It
-        # does not cover a qlen-2 batch arriving under a larger configured
-        # threshold, which the scheduler can produce by clamping a running spec
-        # request; _forward_decode raises for that.
+        # This rejects a CONFIGURED qlen of 2, the steady state at nspec=1.
+        # A qlen-2 batch under a larger configured threshold (K=4 clamped by
+        # the scheduler) is a per-batch fallback to segmented verify, or a
+        # fail-fast in _forward_decode if segmented cannot run.
         if self._asm_dcp_verify and 1 < self._mtp_decode_qlen < _MIN_CPRR_QLEN:
             raise ValueError(
                 "ROCM_AITER_MLA asm cprr DCP verify has no kernel below qlen "
@@ -925,8 +952,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
 
             if self._supports_segmented_dcp_verify and self._mtp_decode_qlen > 1:
-                # A DCP rank's shard of the longest sequence bounds every verify
-                # row, and full graphs need that bound to be constant.
+                # Allocate even when CPRR is the preferred route: a later
+                # replay can fall below _MIN_CPRR_QLEN and needs these
+                # addresses. A DCP rank's shard of the longest sequence
+                # bounds every verify row, and full graphs need that bound
+                # to be constant.
                 num_dcp_partitions = (
                     self.dcp_world_size * self.cp_kv_cache_interleave_size
                 )
@@ -1367,8 +1397,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             causal,
             self._kv_cache_bytes,
         )
-        use_segmented_dcp_verify = (
-            self._supports_segmented_dcp_verify and max_qo_len > 1
+        use_segmented_dcp_verify = _use_segmented_dcp_verify(
+            self._supports_segmented_dcp_verify,
+            causal,
+            int(max_qo_len),
+            self._asm_dcp_verify,
         )
 
         # Segmented DCP verify carries its own per-row subpage table, so the
@@ -1433,11 +1466,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # build the GLOBAL per-request page indptr the cprr asm
         # kernel needs to apply global-position causal masking over this rank's
         # local round-robin KV shard (page_size==1, so pages==tokens).
-        # Only the cprr asm route consumes this, and only that route allocates
-        # the buffer; a DCP run on the segmented route must not enter here.
+        # Only the cprr asm route consumes this. Segmented fallback (and any
+        # batch below the CPRR kernel floor) must not enter here.
         g_kv_indptr = None
         if (
             self._asm_dcp_verify
+            and not use_segmented_dcp_verify
+            and int(max_qo_len) >= _MIN_CPRR_QLEN
             and self.dcp_world_size > 1
             and g_tot_seq_lens is not None
         ):
@@ -1462,6 +1497,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             not use_gluon_decode
             and not use_gluon_verify
             and not use_segmented_dcp_verify
+            # No cprr kernel below the floor; do not build a schedule for it.
+            and not (self._asm_dcp_verify and int(max_qo_len) < _MIN_CPRR_QLEN)
             # A padded rank has no bf16 persistent kernel past qlen 4 where the
             # gfx950 fold is absent; the non-persistent entry covers it. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
@@ -1503,9 +1540,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             # round-robin CP applies causality via global
             # positions plus the qlen window *inside* the kernel, so is_causal
-            # must be False whenever g_kv_indptr is handed over.
+            # must be False whenever g_kv_indptr is handed over. Otherwise the
+            # schedule follows the block (a non-causal draft must not get a
+            # causal staircase).
             cprr_kwargs: dict = {}
-            is_causal = True
+            is_causal = causal
             if self.dcp_world_size > 1:
                 cprr_kwargs = dict(
                     max_split_per_batch=self._mla_max_split_per_batch,
@@ -2396,6 +2435,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and int(decode.max_qo_len) > 1
             and decode.g_kv_indptr is None
         ):
+            batch_qlen = int(decode.max_qo_len)
+            if decode.asm_decode_num_heads and batch_qlen < _MIN_CPRR_QLEN:
+                raise RuntimeError(
+                    f"AITER cprr DCP verify got a batch with max_qo_len="
+                    f"{batch_qlen}, which has no cprr kernel (minimum "
+                    f"{_MIN_CPRR_QLEN}) and no segmented DCP-verify "
+                    f"fallback. The plain kernel cannot be used: its "
+                    f"causality is local to the round-robin shard."
+                )
             raise RuntimeError(
                 "ROCM_AITER_MLA DCP multi-token verify requires either segmented "
                 "MLA or the round-robin asm decode (g_kv_indptr)."
@@ -2470,13 +2518,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             # kernel is already correct and the cprr entry (no kernel below
             # _MIN_CPRR_QLEN) must not be asked for it.
             #
-            # qlen 2 has neither. There is no cprr kernel for it, and the plain
-            # kernel would apply causality on LOCAL indices over a round-robin
-            # shard, which is silently wrong rather than an error. The
-            # constructor rejects a configured qlen of 2, but max_qo_len is a
-            # per-batch value: the scheduler clamps a running spec request near
-            # max_model_len (v1/core/sched/scheduler.py), so a qlen-2 batch can
-            # reach here with a larger threshold configured. Fail loudly.
+            # qlen 2 has no cprr kernel. The builder routes a causal batch in
+            # that hole to segmented MLA when it is available (decode.dcp_verify
+            # is then set and this path is not reached). The plain kernel would
+            # apply causality on LOCAL indices over a round-robin shard, which
+            # is silently wrong. If segmented fallback was not built, fail
+            # loudly rather than calling that kernel.
             if asm_dcp_heads:
                 batch_qlen = int(decode.max_qo_len)
                 if batch_qlen >= _MIN_CPRR_QLEN:
@@ -2484,14 +2531,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                     mla_kwargs["g_kv_indptr"] = decode.g_kv_indptr
                     mla_kwargs["cp_world_size"] = decode.cp_world_size
                     mla_kwargs["cp_rank"] = decode.cp_rank
-                elif batch_qlen > 1:
+                elif batch_qlen > 1 and decode.dcp_verify is None:
                     raise RuntimeError(
                         f"AITER cprr DCP verify got a batch with max_qo_len="
                         f"{batch_qlen}, which has no cprr kernel (minimum "
-                        f"{_MIN_CPRR_QLEN}) and cannot use the plain kernel, "
-                        f"whose causality is local to the round-robin shard. "
-                        f"Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented for this "
-                        f"configuration."
+                        f"{_MIN_CPRR_QLEN}) and no segmented DCP-verify "
+                        f"fallback. The plain kernel cannot be used: its "
+                        f"causality is local to the round-robin shard."
                     )
             if asm_dcp_heads:
                 # Must match the schedule get_mla_metadata_v1 was built with.
