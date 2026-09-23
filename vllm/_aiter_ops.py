@@ -11,6 +11,7 @@ import torch.distributed as dist
 from torch._ops import OpOverload
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -3320,17 +3321,25 @@ class rocm_aiter_ops:
         v_scale: torch.Tensor,
         kv_cache_dtype: str,
         use_shuffle_layout: bool,
+        dequant_k_out: bool = True,
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
         Shared by the AITER FA and unified-attention impls. The caller splits
         kv_cache, since the unbind dim depends on the layout (e.g. the unified
         encoder-decoder path is K/V-first), and passes use_shuffle_layout
-        (unified reads NHD and must pass False).
+        (unified reads NHD and must pass False). For fp8 caches the kernel
+        emits k_out in the cache dtype (quantized K); dequant_k_out converts it
+        to the activation dtype for impls whose prefill consumes k_out
+        (unified reads K from the cache and passes False).
         """
+        kernel_k_out = k_out
         if kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
+            fp8_dtype = current_platform.fp8_dtype()
+            key_cache = key_cache.view(fp8_dtype)
+            value_cache = value_cache.view(fp8_dtype)
+            if dequant_k_out:
+                kernel_k_out = torch.empty_like(k_out, dtype=fp8_dtype)
         # Partial-rotary support (e.g. GLM-4.7 applies rotary to only a prefix
         # of each head's channel dim).
         rotary_dim = cos_sin_cache.shape[-1]
@@ -3353,7 +3362,7 @@ class rocm_aiter_ops:
             slot_mapping=slot_mapping,
             k_scale=k_scale,
             v_scale=v_scale,
-            k_out=k_out,
+            k_out=kernel_k_out,
             v_out=None,
             return_kv=True,
             use_shuffle_layout=use_shuffle_layout,
@@ -3361,6 +3370,8 @@ class rocm_aiter_ops:
             x=16 // key_cache.element_size(),
             rotary_dim=kernel_rotary_dim,
         )
+        if kernel_k_out is not k_out:
+            ops.convert_fp8(k_out, kernel_k_out, float(k_scale), kv_cache_dtype)
 
     @staticmethod
     def triton_rope_and_cache(
@@ -3733,8 +3744,8 @@ class rocm_aiter_ops:
         scale: float,
         K_QScale_hip: torch.Tensor,
         V_QScale_hip: torch.Tensor,
-        K_QScale_asm: torch.Tensor,
-        V_QScale_asm: torch.Tensor,
+        K_QScale_asm: torch.Tensor | None,
+        V_QScale_asm: torch.Tensor | None,
         out_: torch.Tensor,
         kv_cache_dtype: str,
     ):
