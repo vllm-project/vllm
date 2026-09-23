@@ -19,113 +19,9 @@ from vllm.config import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.prompt_tail import is_padded_prompt_tail_batch
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 pytestmark = pytest.mark.cpu_test
-
-
-def _prompt_tail_batch(k=3):
-    output = SimpleNamespace(
-        num_scheduled_tokens={"tail": k + 1, "decode": k + 1},
-        scheduled_spec_decode_tokens={"tail": [-1] * k, "decode": list(range(k))},
-    )
-    state = SimpleNamespace(
-        has_prefill=True,
-        req_ids=["tail", "decode"],
-        num_tokens=2 * (k + 1),
-        is_prefilling_np=[True, False],
-        num_computed_prefill_tokens_np=[4095, 100],
-        prefill_len_np=[4096, 100],
-    )
-    return output, state
-
-
-@pytest.mark.parametrize("k", [1, 2, 3, 5, 8])
-@pytest.mark.parametrize("mixed", [False, True])
-def test_padded_prompt_tail_preserves_prefill_state(k, mixed):
-    output, state = _prompt_tail_batch(k)
-    if not mixed:
-        state.req_ids = ["tail"]
-        state.num_tokens = k + 1
-        del output.num_scheduled_tokens["decode"]
-        del output.scheduled_spec_decode_tokens["decode"]
-    assert (
-        is_padded_prompt_tail_batch(
-            output,
-            state,
-            decode_query_len=k + 1,
-            num_speculative_tokens=k,
-            supported=True,
-        )
-        is True
-    )
-    assert state.has_prefill
-    assert state.is_prefilling_np[0]
-    assert state.num_computed_prefill_tokens_np[0] == 4095
-    assert output.scheduled_spec_decode_tokens["tail"] == [-1] * k
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "short_prefill",
-        "uncached",
-        "partial_drafts",
-        "missing_decode_drafts",
-        "real_drafts",
-        "ragged",
-        "trimmed",
-        "unsupported",
-        "dummy",
-        "decode",
-        "no_speculation",
-        "wrong_width",
-        "second_prefill",
-    ],
-)
-def test_padded_prompt_tail_rejects_incompatible_batches(case):
-    output, state = _prompt_tail_batch()
-    supported, k, width = True, 3, 4
-    if case == "short_prefill":
-        state.num_computed_prefill_tokens_np[0] = 4092
-    elif case == "uncached":
-        state.num_computed_prefill_tokens_np[0] = 0
-        state.prefill_len_np[0] = 1
-    elif case == "partial_drafts":
-        output.scheduled_spec_decode_tokens["tail"] = [-1, -1]
-    elif case == "missing_decode_drafts":
-        del output.scheduled_spec_decode_tokens["decode"]
-    elif case == "real_drafts":
-        output.scheduled_spec_decode_tokens["tail"] = [-1, 42, -1]
-    elif case == "ragged":
-        output.num_scheduled_tokens["decode"] = 3
-    elif case == "trimmed":
-        state.num_tokens -= 1
-    elif case == "unsupported":
-        supported = False
-    elif case == "dummy":
-        state = None
-    elif case == "decode":
-        state.has_prefill = False
-    elif case == "no_speculation":
-        k = 0
-    elif case == "wrong_width":
-        width = 3
-    elif case == "second_prefill":
-        state.is_prefilling_np[1] = True
-        state.prefill_len_np[1] = 102
-        output.scheduled_spec_decode_tokens["decode"] = [-1] * k
-    assert (
-        is_padded_prompt_tail_batch(
-            output,
-            state,
-            decode_query_len=width,
-            num_speculative_tokens=k,
-            supported=supported,
-        )
-        is False
-    )
 
 
 def _create_vllm_config_for_dsd(
@@ -191,20 +87,37 @@ def _create_vllm_config_for_dsd(
 
 
 @pytest.mark.parametrize(
-    ("mixed", "remaining_prompt_tokens", "hybrid", "expected_width"),
+    ("k", "mixed", "case", "expected_full"),
     [
-        pytest.param(False, 1, False, 4, id="idle-to-padded-tail"),
-        pytest.param(True, 1, False, 4, id="tail-with-running-decode"),
-        pytest.param(True, 4, False, None, id="same-shape-real-prefill"),
-        pytest.param(True, 1, True, None, id="recurrent-target"),
+        pytest.param(k, mixed, "padded-tail", True, id=f"tail-k{k}-mixed{mixed}")
+        for k in (1, 2, 3, 5, 8)
+        for mixed in (False, True)
+    ]
+    + [
+        pytest.param(3, True, "real-prefill", False, id="same-shape-real-prefill"),
+        pytest.param(3, True, "recurrent", False, id="recurrent-target"),
+        pytest.param(3, True, "partial-tail-drafts", False, id="partial-tail-drafts"),
+        pytest.param(
+            3, True, "missing-decode-drafts", False, id="missing-decode-drafts"
+        ),
+        pytest.param(
+            3, True, "partial-decode-drafts", False, id="partial-decode-drafts"
+        ),
+        pytest.param(3, True, "ragged", False, id="nonuniform-verifier-layout"),
+        pytest.param(3, True, "async-decode", True, id="tail-with-async-decode"),
+        pytest.param(
+            3, True, "async-real-prefill", False, id="sentinels-are-not-padding"
+        ),
+        pytest.param(3, True, "uncached-tail", True, id="one-token-prompt-with-decode"),
+        pytest.param(0, False, "padded-tail", False, id="no-speculation"),
     ],
 )
 def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
     monkeypatch,
+    k,
     mixed,
-    remaining_prompt_tokens,
-    hybrid,
-    expected_width,
+    case,
+    expected_full,
 ):
     """Exercise actual request gathering and graph dispatch before GPU preparation."""
     monkeypatch.setattr(
@@ -212,9 +125,10 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
         "get_pp_group",
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
+    width = 1 + k
     config = _create_vllm_config_for_dsd(
         2,
-        3,
+        k,
         cudagraph_mode="FULL_DECODE_ONLY",
         use_dynamic_sd=False,
     )
@@ -222,19 +136,36 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
         config,
         torch.device("cpu"),
         CUDAGraphMode.FULL_DECODE_ONLY,
-        decode_query_len=4,
+        decode_query_len=width,
     )
     manager._graphs_captured = True
 
     output = SchedulerOutput.make_empty()
-    output.num_scheduled_tokens = {"tail": 4, **({"decode": 4} if mixed else {})}
-    output.total_num_scheduled_tokens = sum(output.num_scheduled_tokens.values())
-    output.scheduled_spec_decode_tokens = {
-        "tail": [-1] * 3,
-        **({"decode": [10, 11, 12]} if mixed else {}),
+    output.num_scheduled_tokens = {
+        "tail": width,
+        **({"decode": width} if mixed else {}),
     }
-    if remaining_prompt_tokens > 1:
+    output.scheduled_spec_decode_tokens = {
+        "tail": [-1] * k,
+        **({"decode": list(range(k))} if mixed else {}),
+    }
+    remaining_prompt_tokens = 1
+    if case in ("real-prefill", "async-real-prefill"):
+        remaining_prompt_tokens = width
         del output.scheduled_spec_decode_tokens["tail"]
+    if case in ("async-decode", "async-real-prefill"):
+        output.scheduled_spec_decode_tokens["decode"] = [-1] * k
+    elif case == "partial-tail-drafts":
+        output.scheduled_spec_decode_tokens["tail"].pop()
+    elif case == "missing-decode-drafts":
+        del output.scheduled_spec_decode_tokens["decode"]
+    elif case == "partial-decode-drafts":
+        output.scheduled_spec_decode_tokens["decode"].pop()
+    elif case == "ragged":
+        output.num_scheduled_tokens["decode"] -= 1
+        output.scheduled_spec_decode_tokens["decode"].pop()
+    output.total_num_scheduled_tokens = sum(output.num_scheduled_tokens.values())
+    prompt_len = 1 if case == "uncached-tail" else 4096
 
     runner = object.__new__(GPUModelRunner)
     for method in (
@@ -249,16 +180,20 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
     runner.aux_output_connector = None
     runner.req_states = SimpleNamespace(
         req_id_to_index={"tail": 0, "decode": 1},
-        prefill_len=SimpleNamespace(np=np.array([4096, 100])),
-        num_computed_prefill_tokens=np.array([4096 - remaining_prompt_tokens, 100]),
+        prefill_len=SimpleNamespace(np=np.array([prompt_len, 100])),
+        num_computed_prefill_tokens=np.array(
+            [prompt_len - remaining_prompt_tokens, 100]
+        ),
     )
-    runner.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    runner.speculative_config = SimpleNamespace(num_speculative_tokens=k)
     runner.speculator = SimpleNamespace(supports_padded_prompt_tail_graph=True)
-    runner.model_config = SimpleNamespace(is_hybrid=hybrid, is_attention_free=False)
+    runner.model_config = SimpleNamespace(
+        is_hybrid=case == "recurrent", is_attention_free=False
+    )
     runner.model_state = SimpleNamespace(num_new_sampled_tokens_per_step=1)
     runner.parallel_config = config.parallel_config
     runner.observability_config = SimpleNamespace(cudagraph_metrics=False)
-    runner.decode_query_len = 4
+    runner.decode_query_len = width
     runner.dp_size, runner.dp_rank = 1, 0
     runner.cudagraph_manager = manager
     runner.pcp_manager = runner.lora_config = runner.adaptive_verification = None
@@ -270,7 +205,7 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
         assert scheduled is output
         assert state.has_prefill
         assert state.is_prefilling_np[state.req_ids.index("tail")]
-        expected_mode = CUDAGraphMode.FULL if expected_width else CUDAGraphMode.NONE
+        expected_mode = CUDAGraphMode.FULL if expected_full else CUDAGraphMode.NONE
         assert desc.cg_mode == expected_mode
         return prepared_batch
 
@@ -280,7 +215,7 @@ def test_model_runner_dispatches_prompt_tail_and_preserves_draft_classification(
     def prepare_attn(batch):
         assert batch is prepared_batch
         assert batch.has_prefill
-        assert batch.is_padded_prompt_tail is (expected_width is not None)
+        assert batch.is_padded_prompt_tail is expected_full
         raise ReachedAttentionPreparation
 
     runner.prepare_inputs = prepare_inputs

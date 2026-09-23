@@ -137,7 +137,6 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
-from vllm.v1.worker.gpu.prompt_tail import is_padded_prompt_tail_batch
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_logits,
@@ -1255,28 +1254,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_prefilling_np=is_prefilling_np,
             has_prefill=bool(is_prefilling_np.any()),
         )
-        is_padded_prompt_tail = is_padded_prompt_tail_batch(
-            scheduler_output,
-            batch_state,
-            decode_query_len=self.decode_query_len,
-            num_speculative_tokens=(
-                self.speculative_config.num_speculative_tokens
-                if self.speculative_config is not None
-                else 0
-            ),
-            supported=(
-                self.speculative_config is not None
-                and self.speculator is not None
-                and self.speculator.supports_padded_prompt_tail_graph
-                and not self.model_config.is_hybrid
-                and not self.model_config.is_attention_free
-                and not self.is_encoder_decoder
-                and not self.supports_mm_inputs
-                and self.adaptive_verification is None
-                and self.pcp_manager is None
-                and self.parallel_config.pipeline_parallel_size == 1
-                and self.model_state.num_new_sampled_tokens_per_step == 1
-            ),
+        supports_padded_prompt_tail_graph = (
+            self.speculative_config is not None
+            and self.speculator is not None
+            and self.speculator.supports_padded_prompt_tail_graph
+            and not self.model_config.is_hybrid
+            and not self.model_config.is_attention_free
+            and not self.is_encoder_decoder
+            and not self.supports_mm_inputs
+            and self.adaptive_verification is None
+            and self.pcp_manager is None
+            and self.parallel_config.pipeline_parallel_size == 1
+            and self.model_state.num_new_sampled_tokens_per_step == 1
+        )
+        # The scheduler gives prefilling requests draft slots only when padding
+        # their final token. Require that complete verifier layout on every row.
+        is_padded_prompt_tail = (
+            batch_state.has_prefill
+            and supports_padded_prompt_tail_graph
+            and self.decode_query_len > 1
+            and all(
+                n == self.decode_query_len
+                and len(draft_tokens.get(req_id, ())) == n - 1
+                for req_id, n in num_tokens_per_req.items()
+            )
         )
         batch_state = batch_state._replace(is_padded_prompt_tail=is_padded_prompt_tail)
         return batch_state, get_uniform_decode_token_count(

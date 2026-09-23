@@ -750,9 +750,10 @@ def get_uniform_decode_token_count(
 ) -> int | None:
     """Per-request token count of a uniform decode batch, or None.
 
-    ``is_padded_prompt_tail`` requires a validated reject-only verifier layout
-    and execution support. It permits prefill input preparation without treating
-    an ordinary same-shaped prompt chunk as decode. Shape must still be uniform.
+    ``is_padded_prompt_tail`` requires a complete scheduler-provided verifier
+    layout and execution support. It permits prefill input preparation without
+    treating an ordinary same-shaped prompt chunk as decode. Shape must still
+    be uniform.
     """
     if (not has_prefill or is_padded_prompt_tail) and is_uniform_query_len(
         num_reqs, num_tokens, max_query_len
