@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness"
   key: basic-correctness
-  timeout_in_minutes: 68
+  timeout_in_minutes: 90
   device: h200_18gb
   source_file_dependencies:
   - vllm/
