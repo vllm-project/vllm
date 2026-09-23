@@ -358,6 +358,7 @@ def _pack_sampler_output_kernel(
     num_src_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """Pack one local request's sampler outputs into a row for the all-gather."""
     req_idx = tl.program_id(0)
     cols = tl.arange(0, BLOCK_SIZE)
     row_ptr = packed_ptr + req_idx * packed_stride
@@ -407,6 +408,7 @@ def _unpack_gathered_output_kernel(
     max_num_logits_per_req,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """Copy one gathered row back to its request's place in the batch."""
     req_idx = tl.program_id(0)
     src = tl.load(gathered_src_indices_ptr + req_idx)
     row_ptr = gathered_ptr + src * gathered_stride
@@ -616,6 +618,7 @@ def gather_sampler_output(
     logprobs_dims: tuple[int, int] | None = None,
     gather_thinking_loop_breaks: bool = False,
 ) -> SamplerOutput:
+    """All-gather each rank's sampler output back into batch order."""
     max_num_logits_per_req = metadata.max_num_logits_per_req
     thinking_loop_breaks_col = max_num_logits_per_req + 2 + int(gather_num_nans)
     num_packed_cols = thinking_loop_breaks_col + int(gather_thinking_loop_breaks)

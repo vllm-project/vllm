@@ -367,6 +367,7 @@ LOOP_MESSAGES = [
 
 @pytest.fixture(scope="module")
 def loop_break_server():
+    """A Qwen3-0.6B server on Model Runner V2 with loop breaking on."""
     args = [
         "--reasoning-parser",
         "qwen3",
@@ -386,6 +387,7 @@ def loop_break_server():
 
 
 def _thinking_loop_breaks(server: RemoteOpenAIServer) -> float:
+    """The value the server exports for ``vllm:thinking_loop_breaks_total``."""
     response = requests.get(server.url_for("metrics"))
     response.raise_for_status()
     for family in text_string_to_metric_families(response.text):
