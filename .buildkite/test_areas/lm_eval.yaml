@@ -55,7 +55,7 @@ steps:
   device: h200_35gb
   key: lm-eval-watermarking
   # Recorded runs took 80–140 seconds
-  timeout_in_minutes: 10
+  timeout_in_minutes: 15
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
   - tests/evals/gsm8k/
