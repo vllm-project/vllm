@@ -2,15 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
+import vllm.entrypoints.launchers.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
 from vllm.entrypoints.launchers.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 LORA_MODULE = {
@@ -149,7 +152,7 @@ def test_multiple_valid_inputs(serve_parser):
 
 ### Tests for serve argument validation that run prior to loading
 def test_enable_auto_choice_passes_without_tool_call_parser(serve_parser):
-    """Ensure validation fails if tool choice is enabled with no call parser"""
+    """Ensure validation fails if tool choice is enabled with no call parser."""
     # If we enable-auto-tool-choice, explode with no tool-call-parser
     args = serve_parser.parse_args(args=["--enable-auto-tool-choice"])
     with pytest.raises(TypeError):
@@ -157,7 +160,7 @@ def test_enable_auto_choice_passes_without_tool_call_parser(serve_parser):
 
 
 def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
-    """Ensure validation passes with tool choice enabled with a call parser"""
+    """Ensure validation passes with tool choice enabled with a call parser."""
     args = serve_parser.parse_args(
         args=[
             "--enable-auto-tool-choice",
@@ -169,7 +172,7 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
 
 
 def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
-    """Ensure validation fails if reasoning is enabled with auto tool choice"""
+    """Ensure validation fails if reasoning is enabled with auto tool choice."""
     args = serve_parser.parse_args(
         args=[
             "--enable-auto-tool-choice",
@@ -194,7 +197,7 @@ def test_passes_with_reasoning_parser(serve_parser):
 
 
 def test_chat_template_validation_for_happy_paths(serve_parser):
-    """Ensure validation passes if the chat template exists"""
+    """Ensure validation passes if the chat template exists."""
     args = serve_parser.parse_args(
         args=["--chat-template", CHATML_JINJA_PATH.absolute().as_posix()]
     )
@@ -202,9 +205,9 @@ def test_chat_template_validation_for_happy_paths(serve_parser):
 
 
 def test_chat_template_validation_for_sad_paths(serve_parser):
-    """Ensure validation fails if the chat template doesn't exist"""
+    """Ensure validation fails if the chat template doesn't exist."""
     args = serve_parser.parse_args(args=["--chat-template", "does/not/exist"])
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         validate_parsed_serve_args(args)
 
 
@@ -301,13 +304,13 @@ def test_sse_keep_alive_interval_non_integer(serve_parser, value):
     ],
 )
 def test_middleware(serve_parser, cli_args, expected_middleware):
-    """Ensure multiple middleware args are parsed properly"""
+    """Ensure multiple middleware args are parsed properly."""
     args = serve_parser.parse_args(args=cli_args)
     assert args.middleware == expected_middleware
 
 
 def test_default_chat_template_kwargs_parsing(serve_parser):
-    """Ensure default_chat_template_kwargs JSON is parsed correctly"""
+    """Ensure default_chat_template_kwargs JSON is parsed correctly."""
     args = serve_parser.parse_args(
         args=["--default-chat-template-kwargs", '{"enable_thinking": false}']
     )
@@ -315,7 +318,7 @@ def test_default_chat_template_kwargs_parsing(serve_parser):
 
 
 def test_default_chat_template_kwargs_complex(serve_parser):
-    """Ensure complex default_chat_template_kwargs JSON is parsed correctly"""
+    """Ensure complex default_chat_template_kwargs JSON is parsed correctly."""
     kwargs_json = '{"enable_thinking": false, "custom_param": "value", "num": 42}'
     args = serve_parser.parse_args(args=["--default-chat-template-kwargs", kwargs_json])
     assert args.default_chat_template_kwargs == {
@@ -326,13 +329,33 @@ def test_default_chat_template_kwargs_complex(serve_parser):
 
 
 def test_default_chat_template_kwargs_default_none(serve_parser):
-    """Ensure default_chat_template_kwargs defaults to None"""
+    """Ensure default_chat_template_kwargs defaults to None."""
     args = serve_parser.parse_args(args=[])
     assert args.default_chat_template_kwargs is None
 
 
+@pytest.mark.parametrize(
+    "default_kwargs,cohere_format,expected",
+    [
+        (None, "cmd3", {"cohere_format": "cmd3"}),
+        (
+            {"cohere_format": "cmd4", "custom": True},
+            "cmd3",
+            {"cohere_format": "cmd4", "custom": True},
+        ),
+    ],
+)
+def test_resolve_default_chat_template_kwargs(default_kwargs, cohere_format, expected):
+    args = SimpleNamespace(
+        default_chat_template_kwargs=default_kwargs,
+        cohere_format=cohere_format,
+    )
+
+    assert cli_args_module.resolve_default_chat_template_kwargs(args) == expected
+
+
 def test_default_chat_template_kwargs_invalid_json(serve_parser):
-    """Ensure invalid JSON raises an error"""
+    """Ensure invalid JSON raises an error."""
     with pytest.raises(SystemExit):
         serve_parser.parse_args(
             args=["--default-chat-template-kwargs", "not valid json"]
@@ -379,7 +402,7 @@ def test_served_model_name_parsing(tmp_path, vllm_parser, args, raises):
 
 ### Tests for LoRA target modules parsing
 def test_lora_target_modules_single(serve_parser):
-    """Test parsing single lora-target-modules argument"""
+    """Test parsing single lora-target-modules argument."""
     args = serve_parser.parse_args(
         args=["--enable-lora", "--lora-target-modules", "o_proj"]
     )
@@ -387,7 +410,7 @@ def test_lora_target_modules_single(serve_parser):
 
 
 def test_lora_target_modules_multiple(serve_parser):
-    """Test parsing multiple lora-target-modules arguments"""
+    """Test parsing multiple lora-target-modules arguments."""
     args = serve_parser.parse_args(
         args=[
             "--enable-lora",
@@ -401,6 +424,6 @@ def test_lora_target_modules_multiple(serve_parser):
 
 
 def test_lora_target_modules_default_none(serve_parser):
-    """Test that lora-target-modules defaults to None"""
+    """Test that lora-target-modules defaults to None."""
     args = serve_parser.parse_args(args=[])
     assert args.lora_target_modules is None

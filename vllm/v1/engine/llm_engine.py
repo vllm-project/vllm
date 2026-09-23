@@ -36,6 +36,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
@@ -174,7 +175,6 @@ class LLMEngine:
         enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
-
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
@@ -219,7 +219,6 @@ class LLMEngine:
 
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
-
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
@@ -235,6 +234,7 @@ class LLMEngine:
         priority: int = 0,
         session_id: str | None = None,
         prompt_text: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> str:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -268,6 +268,7 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 priority=priority,
                 session_id=session_id,
+                kv_hints=kv_hints,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -380,10 +381,17 @@ class LLMEngine:
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    def wake_up(self, tags: list[str] | None = None):
-        self.engine_core.wake_up(tags)
+    def release_kv_cache_memory(self) -> None:
+        self.renderer.clear_mm_cache()
+        self.engine_core.release_kv_cache_memory()
 
         if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(1, 0)
+
+    def wake_up(self, tags: list[str] | None = None):
+        fully_awake = self.engine_core.wake_up(tags)
+
+        if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
 
     def is_sleeping(self) -> bool:
@@ -470,8 +478,8 @@ class LLMEngine:
         dp_group = getattr(self, "dp_group", None)
         external_launcher_dp = getattr(self, "external_launcher_dp", False)
         if dp_group is not None and not external_launcher_dp:
-            stateless_destroy_torch_distributed_process_group(dp_group)
             self.dp_group = None
+            stateless_destroy_torch_distributed_process_group(dp_group)
 
     def shutdown(self, timeout: float | None = None) -> None:
         if getattr(self, "_shutdown", False):

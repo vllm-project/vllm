@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -236,6 +237,10 @@ def test_swiglu_limit_func_without_routing_uses_output_buffer() -> None:
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.parametrize(
+    ("alpha", "beta"),
+    [(1.0, 0.0), (1.702, 0.0), (1.0, 1.0)],
+)
 @pytest.mark.parametrize("swiglu_limit", SWIGLU_LIMITS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
@@ -245,6 +250,8 @@ def test_swiglu_limit_func_without_routing_uses_output_buffer() -> None:
 @torch.inference_mode()
 def test_silu_and_mul_with_clamp(
     default_vllm_config,
+    alpha: float,
+    beta: float,
     swiglu_limit: float,
     num_tokens: int,
     d: int,
@@ -258,8 +265,38 @@ def test_silu_and_mul_with_clamp(
     # Use large values to ensure clamping is exercised.
     x = torch.randn(num_tokens, 2 * d, dtype=dtype) * swiglu_limit * 2
 
-    layer = SiluAndMulWithClamp(swiglu_limit, compile_native=False)
-    out = layer(x)
+    default_vllm_config.compilation_config.custom_ops = [
+        "none",
+        "+silu_and_mul_with_clamp",
+    ]
+    layer = SiluAndMulWithClamp(
+        swiglu_limit,
+        alpha=alpha,
+        beta=beta,
+        compile_native=False,
+    )
+    if current_platform.is_rocm():
+        # forward_hip is always dispatched; the alpha/beta gate is checked
+        # inside it at call time rather than picked at construction time, so
+        # verify the actual routing by spying on the two candidate methods.
+        assert layer._forward_method == layer.forward_hip
+        with (
+            patch.object(layer, "forward_cuda", wraps=layer.forward_cuda) as cuda_spy,
+            patch.object(
+                layer, "forward_native", wraps=layer.forward_native
+            ) as native_spy,
+        ):
+            out = layer(x)
+        if alpha == 1.0 and beta == 0.0:
+            cuda_spy.assert_called_once()
+            native_spy.assert_not_called()
+        else:
+            native_spy.assert_called_once()
+            cuda_spy.assert_not_called()
+    else:
+        assert layer._forward_method == layer.forward_cuda
+        out = layer(x)
+
     ref_out = layer.forward_native(x)
 
     rtol = {
@@ -273,10 +310,11 @@ def test_silu_and_mul_with_clamp(
 
     # Verify clamping is actually being applied: the clamped output should
     # differ from the unclamped SiluAndMul output when inputs are large.
-    unclamped_out = SiluAndMul.forward_native(x)
-    assert not torch.equal(ref_out.float(), unclamped_out.float()), (
-        "Input was not large enough to exercise the clamp; increase scale"
-    )
+    if alpha == 1.0 and beta == 0.0:
+        unclamped_out = SiluAndMul.forward_native(x)
+        assert not torch.equal(ref_out.float(), unclamped_out.float()), (
+            "Input was not large enough to exercise the clamp; increase scale"
+        )
 
     # Verify gate clamping semantics with a controlled scalar case.
     # gate=large_val is clamped to limit first, then silu(limit) * 1.0.
@@ -309,7 +347,10 @@ def test_silu_and_mul_with_clamp(
 
     # opcheck
     out_buf = torch.empty(x.shape[:-1] + (d,), dtype=dtype, device=device)
-    opcheck(torch.ops._C.silu_and_mul_with_clamp, (out_buf, x, swiglu_limit))
+    opcheck(
+        torch.ops._C.silu_and_mul_with_clamp,
+        (out_buf, x, swiglu_limit, layer.alpha, layer.beta),
+    )
 
 
 @pytest.mark.parametrize("linear_beta", [-1.0, 2.0])
@@ -352,49 +393,46 @@ def test_masked_situ_and_mul(
     )
 
 
-@pytest.mark.parametrize(
-    ("activation", "activation_config"),
-    [
-        (MoEActivation.SILU, ApplyMoEActivationConfig()),
-        (
-            MoEActivation.SILU,
-            ApplyMoEActivationConfig(clamp_limit=3.0),
+MOE_ACTIVATION_CASES = [
+    pytest.param(MoEActivation.SILU, ApplyMoEActivationConfig(), id="silu"),
+    pytest.param(
+        MoEActivation.SILU, ApplyMoEActivationConfig(clamp_limit=3.0), id="silu_clamp"
+    ),
+    pytest.param(MoEActivation.GELU, ApplyMoEActivationConfig(), id="gelu"),
+    pytest.param(MoEActivation.GELU_TANH, ApplyMoEActivationConfig(), id="gelu_tanh"),
+    pytest.param(
+        MoEActivation.SITU,
+        ApplyMoEActivationConfig(
+            activation_situ_beta=1.5,
+            activation_situ_linear_beta=2.0,
         ),
-        (MoEActivation.GELU, ApplyMoEActivationConfig()),
-        (MoEActivation.GELU_TANH, ApplyMoEActivationConfig()),
-        (
-            MoEActivation.SITU,
-            ApplyMoEActivationConfig(
-                activation_situ_beta=1.5,
-                activation_situ_linear_beta=2.0,
-            ),
-        ),
-        (MoEActivation.SWIGLUOAI, ApplyMoEActivationConfig()),
-        (
-            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            ApplyMoEActivationConfig(clamp_limit=3.0, alpha=1.3, beta=0.5),
-        ),
-        (MoEActivation.SWIGLUSTEP, ApplyMoEActivationConfig()),
-        (MoEActivation.SILU_NO_MUL, ApplyMoEActivationConfig()),
-        (MoEActivation.GELU_NO_MUL, ApplyMoEActivationConfig()),
-        (MoEActivation.GELU_TANH_NO_MUL, ApplyMoEActivationConfig()),
-        (MoEActivation.RELU2_NO_MUL, ApplyMoEActivationConfig()),
-    ],
-    ids=[
-        "silu",
-        "silu_clamp",
-        "gelu",
-        "gelu_tanh",
-        "situ",
-        "swigluoai",
-        "swigluoai_uninterleave",
-        "swiglustep",
-        "silu_no_mul",
-        "gelu_no_mul",
-        "gelu_tanh_no_mul",
-        "relu2_no_mul",
-    ],
-)
+        id="situ",
+    ),
+    pytest.param(MoEActivation.SWIGLUOAI, ApplyMoEActivationConfig(), id="swigluoai"),
+    pytest.param(
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ApplyMoEActivationConfig(clamp_limit=3.0, alpha=1.3, beta=0.5),
+        id="swigluoai_uninterleave",
+    ),
+    pytest.param(MoEActivation.SWIGLUSTEP, ApplyMoEActivationConfig(), id="swiglustep"),
+    pytest.param(
+        MoEActivation.SILU_NO_MUL, ApplyMoEActivationConfig(), id="silu_no_mul"
+    ),
+    pytest.param(
+        MoEActivation.GELU_NO_MUL, ApplyMoEActivationConfig(), id="gelu_no_mul"
+    ),
+    pytest.param(
+        MoEActivation.GELU_TANH_NO_MUL,
+        ApplyMoEActivationConfig(),
+        id="gelu_tanh_no_mul",
+    ),
+    pytest.param(
+        MoEActivation.RELU2_NO_MUL, ApplyMoEActivationConfig(), id="relu2_no_mul"
+    ),
+]
+
+
+@pytest.mark.parametrize(("activation", "activation_config"), MOE_ACTIVATION_CASES)
 @torch.inference_mode()
 def test_masked_moe_activation_dispatch(
     default_vllm_config,
@@ -497,3 +535,73 @@ def test_activation(
 
     out = torch.empty_like(x)
     opcheck(fn, (out, x))
+
+
+HUMMING_ACTIVATION_CASES = MOE_ACTIVATION_CASES + [
+    pytest.param(MoEActivation.RELU2, ApplyMoEActivationConfig(), id="relu2"),
+]
+HUMMING_ACTIVATION_CASES += [
+    pytest.param(
+        MoEActivation.SITU,
+        ApplyMoEActivationConfig(
+            activation_situ_beta=1.5,
+            activation_situ_linear_beta=linear_beta,
+        ),
+        id=f"situ-linear-beta-{linear_beta}",
+    )
+    for linear_beta in (None, 0.0, -1.0)
+]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA")
+@pytest.mark.parametrize(("activation", "activation_config"), HUMMING_ACTIVATION_CASES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(("num_tokens", "d"), [(1, 512), (7, 768), (83, 512)])
+@torch.inference_mode()
+def test_humming_activation_matches_framework(
+    activation: MoEActivation,
+    activation_config: ApplyMoEActivationConfig,
+    dtype: torch.dtype,
+    num_tokens: int,
+    d: int,
+) -> None:
+    """Compare activation math/layouts without quantization or Hadamard error."""
+    pytest.importorskip("humming")
+    from humming.ops import process_input
+
+    from vllm.model_executor.layers.quantization.utils.humming.activation import (
+        get_humming_activation,
+    )
+
+    set_random_seed(0)
+    width = d * 2 if activation.is_gated else d
+    x = 4 * torch.randn(num_tokens, width, dtype=dtype, device=CUDA_DEVICES[0])
+    # Exercise zero, saturation, and both sides of the clamp limits (3 and 7).
+    edges = x.new_tensor([0, 0.001, 1, 2.99, 3, 3.01, 6.99, 7, 7.01, 8, 16])
+    edges = torch.cat((-edges[1:].flip(0), edges))
+    x[0] = edges[torch.arange(width, device=x.device) % edges.numel()]
+
+    actual, _, _ = process_input(
+        x,
+        quant_mode="none",
+        hadamard_block_size=0,
+        **get_humming_activation(activation, activation_config),
+    )
+    expected = torch.empty(num_tokens, d, dtype=dtype, device=x.device)
+    if activation == MoEActivation.RELU2:
+        # apply_moe_activation has only the non-gated ReLU2 variant.
+        gate, up = x.float().chunk(2, dim=-1)
+        activated_gate = torch.empty_like(gate)
+        apply_moe_activation(MoEActivation.RELU2_NO_MUL, activated_gate, gate.clone())
+        expected.copy_(activated_gate * up)
+    else:
+        # The framework's non-gated ReLU2 path modifies its input in place.
+        apply_moe_activation(
+            activation, expected, x.clone(), activation_config=activation_config
+        )
+    torch.testing.assert_close(
+        actual,
+        expected,
+        atol=get_default_atol(expected),
+        rtol=get_default_rtol(expected),
+    )

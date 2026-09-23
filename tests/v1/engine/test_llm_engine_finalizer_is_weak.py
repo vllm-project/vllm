@@ -123,3 +123,36 @@ def test_shutdown_continues_after_error(monkeypatch):
     assert calls == ["finalizer", "renderer", "core", "dp"]
     assert llm_engine.engine_core is None
     assert llm_engine.model_executor is None
+
+
+@pytest.mark.parametrize("destroy_fails", [False, True])
+def test_dp_shutdown_after_core_error(monkeypatch, destroy_fails):
+    from vllm.v1.engine import core as core_module
+
+    engine = core_module.DPEngineCoreProc.__new__(core_module.DPEngineCoreProc)
+    group = engine.dp_group = object()
+    cleaned = []
+    core_error = RuntimeError("core shutdown")
+
+    def shutdown(self):
+        raise core_error
+
+    def destroy(pg):
+        assert engine.dp_group is group
+        cleaned.append(pg)
+        if destroy_fails:
+            raise RuntimeError("group shutdown")
+
+    monkeypatch.setattr(core_module.EngineCore, "shutdown", shutdown)
+    monkeypatch.setattr(
+        core_module, "stateless_destroy_torch_distributed_process_group", destroy
+    )
+    with pytest.raises(RuntimeError) as error:
+        engine.shutdown()
+
+    assert cleaned == [group]
+    assert engine.dp_group is None
+    if destroy_fails:
+        assert error.value.__context__ is core_error
+    else:
+        assert error.value is core_error

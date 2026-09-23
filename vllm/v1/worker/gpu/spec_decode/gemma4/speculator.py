@@ -16,6 +16,7 @@ from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
@@ -40,7 +41,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             draft_model = get_model(
                 vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
-                load_config=self.speculative_config.draft_load_config,
+                load_config=get_draft_load_config(draft_vllm_config),
             )
         self._setup_gemma4_kv_sharing(draft_model, target_attn_layer_names)
         self._share_embeddings(draft_model, target_model)
