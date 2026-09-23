@@ -4,7 +4,7 @@
 """DFlash backbone with the LiLiCorr candidate-lattice correlator."""
 
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -13,8 +13,6 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.linear import (
     LinearBase,
     ReplicatedLinear,
@@ -26,9 +24,10 @@ from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMetho
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
+from .nemotron_h import NemotronHMLP
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .qwen3_dflash2 import DFlash2Qwen3DecoderLayer
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class LiLiCorrLatticeAttention(nn.Module):
@@ -86,51 +85,6 @@ class LiLiCorrLatticeAttention(nn.Module):
         )
 
 
-class LiLiCorrMLP(nn.Sequential):
-    """Biased SiLU MLP retaining the checkpoint's numeric module names."""
-
-    def __init__(
-        self,
-        input_size: int,
-        intermediate_size: int,
-        output_size: int,
-        quant_config: QuantizationConfig | None,
-        prefix: str,
-        normalize_input: bool = False,
-    ) -> None:
-        modules: list[nn.Module] = [nn.LayerNorm(input_size)] if normalize_input else []
-        input_index = len(modules)
-        modules.extend(
-            [
-                ReplicatedLinear(
-                    input_size,
-                    intermediate_size,
-                    return_bias=False,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, str(input_index)),
-                ),
-                get_act_fn("silu"),
-                ReplicatedLinear(
-                    intermediate_size,
-                    output_size,
-                    return_bias=False,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, str(input_index + 2)),
-                ),
-            ]
-        )
-        super().__init__(*modules)
-        self._input_index = input_index
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self._input_index:
-            x = self[0](x)
-        x = self[self._input_index](x)
-        down_proj = cast(ReplicatedLinear, self[-1])
-        x = maybe_fused_act_quant(self[self._input_index + 1], x, down_proj)
-        return down_proj(x)
-
-
 class LiLiCorrLayer(nn.Module):
     def __init__(
         self,
@@ -149,10 +103,12 @@ class LiLiCorrLayer(nn.Module):
         self.mlp_norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
         mlp_hidden_size = int(hidden_size * mlp_ratio)
         # The checkpoint uses a biased, nongated MLP, unlike Qwen's SwiGLU.
-        self.mlp = LiLiCorrMLP(
-            hidden_size,
-            mlp_hidden_size,
-            hidden_size,
+        self.mlp = NemotronHMLP(
+            config=None,
+            hidden_size=hidden_size,
+            intermediate_size=mlp_hidden_size,
+            hidden_act="silu",
+            bias=True,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "mlp"),
         )
@@ -198,7 +154,7 @@ class LiLiCorrHead(nn.Module):
         self.vector_eps = config["lilicorr_vector_eps"]
         self.logit_scale = config["lilicorr_logit_scale"]
         # Candidate IDs and embeddings are replicated across TP ranks, so each
-        # rank scores the same lattice without further head collectives.
+        # rank scores the same lattice; the MLPs use standard tensor parallelism.
         self.token_proj = (
             nn.Identity()
             if model_hidden_size == hidden_size
@@ -217,13 +173,16 @@ class LiLiCorrHead(nn.Module):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "pass_hidden_proj"),
         )
-        self.feature_mlp = LiLiCorrMLP(
-            self.num_candidate_features,
-            hidden_size,
-            hidden_size,
+        self.feature_norm = nn.LayerNorm(self.num_candidate_features)
+        self.feature_mlp = NemotronHMLP(
+            config=None,
+            hidden_size=self.num_candidate_features,
+            intermediate_size=hidden_size,
+            hidden_act="silu",
+            output_size=hidden_size,
+            bias=True,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "feature_mlp"),
-            normalize_input=True,
         )
         self.slot_embedding = nn.Parameter(
             torch.zeros(1, 1, self.num_candidate_slots, 1, hidden_size)
@@ -408,7 +367,7 @@ class LiLiCorrHead(nn.Module):
         )
         hidden_states = token_states + pass_states
         hidden_states = hidden_states + self.feature_mlp(
-            features.to(dtype=token_states.dtype)
+            self.feature_norm(features.to(dtype=token_states.dtype))
         )
         hidden_states = hidden_states + self.slot_embedding[:, 0, :n_slots]
         hidden_states = hidden_states + self.rank_embedding[:, 0]
@@ -506,6 +465,20 @@ class LiLiCorr(DFlashQwen3Model):
 
 class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
     model_cls = LiLiCorr
+    # Keep exported Sequential names compatible with the shared Nemotron MLP.
+    _lilicorr_weights_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "lilicorr.feature_mlp.0": "lilicorr.feature_norm",
+            "lilicorr.feature_mlp.1": "lilicorr.feature_mlp.up_proj",
+            "lilicorr.feature_mlp.3": "lilicorr.feature_mlp.down_proj",
+            ".mlp.0": ".mlp.up_proj",
+            ".mlp.2": ".mlp.down_proj",
+        }
+    )
+
+    hf_to_vllm_mapper = (
+        DFlashQwen3ForCausalLM.hf_to_vllm_mapper | _lilicorr_weights_mapper
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         spec = vllm_config.speculative_config
@@ -563,14 +536,21 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
             and name.removeprefix("model.") not in quantized_metadata
         }
         seen: set[str] = set()
+        head_weights: list[tuple[str, torch.Tensor]] = []
 
         def normalized_weights():
-            for name, value in weights:
+            for name, value in self._lilicorr_weights_mapper.apply(weights):
                 name = name.removeprefix("model.")
                 seen.add(name)
-                yield name, value
+                # The backbone stacks up_proj into gate_up_proj. Load the
+                # nongated correlator separately to avoid that transformation.
+                if name.startswith("lilicorr."):
+                    head_weights.append((name.removeprefix("lilicorr."), value))
+                else:
+                    yield name, value
 
         super().load_weights(normalized_weights())
+        AutoWeightsLoader(self.model.lilicorr).load_weights(head_weights)
         missing = expected - seen
         if missing:
             raise ValueError(

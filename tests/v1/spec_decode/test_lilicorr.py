@@ -17,7 +17,7 @@ from vllm.config import (
 )
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers import logits_processor
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.lilicorr import LiLiCorrHead
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
@@ -25,8 +25,8 @@ from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculato
 
 
 @pytest.fixture(autouse=True)
-def replicated_head_tp(monkeypatch):
-    # The head has no collectives; unit tests only need TP metadata.
+def head_tp_metadata(monkeypatch):
+    # Single-rank unit tests only need TP metadata.
     monkeypatch.setattr(
         parallel_state, "_TP", SimpleNamespace(rank_in_group=0, world_size=1)
     )
@@ -63,8 +63,8 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
         -1,
     )
     x = head.token_proj(embeddings) + head.pass_hidden_proj(hidden).unsqueeze(-2)
-    features = head.feature_mlp[0](features.to(x.dtype))
-    x = x + head.feature_mlp[3](F.silu(head.feature_mlp[1](features)))
+    features = head.feature_norm(features.to(x.dtype))
+    x = x + head.feature_mlp.down_proj(F.silu(head.feature_mlp.up_proj(features)[0]))[0]
     x = x + head.slot_embedding[:, 0, :slots] + head.rank_embedding[:, 0]
     x = x.flatten(1, 2)
     positions = torch.arange(slots, device=x.device).repeat_interleave(top_k)
@@ -88,7 +88,7 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
                 normalized, normalized, normalized, attn_mask=bias, need_weights=False
             )[0]
         )
-        x = x + layer.mlp[2](F.silu(layer.mlp[0](layer.mlp_norm(x))))
+        x = x + layer.mlp.down_proj(F.silu(layer.mlp.up_proj(layer.mlp_norm(x))[0]))[0]
     x = head.output_norm(x).view(batch, slots, top_k, -1)
     a = head.anchor_norm(head.context_proj(anchor) * valid[:, None])
     expanded = a[:, None, None].expand_as(x)
@@ -129,7 +129,7 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
     # vLLM linear parameters are initialized by the checkpoint loader.
     with torch.no_grad():
         for module in head.modules():
-            if isinstance(module, ReplicatedLinear):
+            if isinstance(module, LinearBase):
                 for parameter in module.parameters():
                     parameter.weight_loader(
                         parameter, torch.randn_like(parameter) * 0.1
@@ -464,11 +464,12 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
 def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     monkeypatch, convolution, mismatch, quantized
 ):
-    from vllm.model_executor.models.lilicorr import LiLiCorrForCausalLM
+    from vllm.model_executor.models.lilicorr import LiLiCorr, LiLiCorrForCausalLM
 
     wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)
     nn.Module.__init__(wrapper)
-    wrapper.model = nn.Module()
+    wrapper.model = LiLiCorr.__new__(LiLiCorr)
+    nn.Module.__init__(wrapper.model)
     wrapper.has_own_lm_head = False
     with set_current_vllm_config(
         VllmConfig(
@@ -535,7 +536,17 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     monkeypatch.setattr(
         wrapper.model, "_build_fused_kv_buffers", lambda: None, raising=False
     )
-    supplied = [("model." + name, value) for name, value in weights.items()]
+    # Exercise the checkpoint's original numeric names through the real loader.
+    supplied = []
+    for name, value in weights.items():
+        name = name.replace("lilicorr.feature_norm.", "lilicorr.feature_mlp.0.")
+        name = name.replace("lilicorr.feature_mlp.up_proj.", "lilicorr.feature_mlp.1.")
+        name = name.replace(
+            "lilicorr.feature_mlp.down_proj.", "lilicorr.feature_mlp.3."
+        )
+        name = name.replace(".mlp.up_proj.", ".mlp.0.")
+        name = name.replace(".mlp.down_proj.", ".mlp.2.")
+        supplied.append(("model." + name, value))
     if mismatch:
         message = (
             "no module or parameter"
@@ -694,7 +705,23 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch
 
     calls = []
     configured = []
-    quant_config = object()
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+    from vllm.model_executor.models.lilicorr import LiLiCorrForCausalLM
+
+    quant_config = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        exclude_modules=[
+            "model.lilicorr.feature_mlp.1",
+            "model.lilicorr.layers.*.mlp.2",
+        ],
+    )
+    quant_config.apply_vllm_mapper(
+        LiLiCorrForCausalLM.hf_to_vllm_mapper.get_rename_mapper()
+    )
+    assert quant_config.is_layer_excluded("model.lilicorr.feature_mlp.up_proj")
+    assert quant_config.is_layer_excluded("model.lilicorr.layers.0.mlp.down_proj")
+    assert not quant_config.is_layer_excluded("model.lilicorr.feature_mlp.down_proj")
 
     class PackedMethod(UnquantizedLinearMethod):
         def apply(self, layer, x, bias=None):
@@ -725,7 +752,7 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch
         )
     with torch.no_grad():
         for module in head.modules():
-            if isinstance(module, ReplicatedLinear):
+            if isinstance(module, LinearBase):
                 if module.quant_config is None:
                     module.weight.normal_(std=0.1)
                     module.bias.zero_()
@@ -765,5 +792,5 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch
     assert set(calls) == set(configured)
     assert len(configured) == len(set(configured))
     for name, module in head.named_modules():
-        if isinstance(module, ReplicatedLinear):
+        if isinstance(module, LinearBase):
             assert module.prefix == f"model.lilicorr.{name}"
