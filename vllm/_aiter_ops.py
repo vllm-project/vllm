@@ -1971,7 +1971,6 @@ class rocm_aiter_ops:
 
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
-    _gdn_flydsl_prefill_import_error: str | None = None
     # Chunk length the AITER FlyDSL K5 prefill kernels are compiled for.
     GDN_FLYDSL_CHUNK_SIZE = 64
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
@@ -2419,14 +2418,8 @@ class rocm_aiter_ops:
                 chunk_gated_delta_rule_opt_vk,
             )
 
-            rocm_aiter_ops._gdn_flydsl_prefill_import_error = None
             return True
-        except (ImportError, ModuleNotFoundError) as e:
-            rocm_aiter_ops._gdn_flydsl_prefill_import_error = f"{type(e).__name__}: {e}"
-            logger.warning(
-                "AITER FlyDSL GDN prefill kernels are not importable: %s",
-                rocm_aiter_ops._gdn_flydsl_prefill_import_error,
-            )
+        except (ImportError, ModuleNotFoundError):
             return False
 
     @classmethod
@@ -2447,30 +2440,13 @@ class rocm_aiter_ops:
 
         Selecting the backend is an explicit opt-in in itself, but it still
         runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch that
-        turns all of them off. Asking for the backend with AITER disabled is a
-        contradiction, and the caller reports it rather than quietly picking
-        one of the two answers.
+        turns all of them off.
         """
         return (
             cls._AITER_ENABLED
             and is_aiter_found_and_supported()
             and cls._gdn_flydsl_prefill_kernels_importable()
         )
-
-    @classmethod
-    def gdn_flydsl_prefill_unavailable_reason(cls) -> str:
-        """Human-readable reason the FlyDSL GDN prefill path cannot run."""
-        if not cls._AITER_ENABLED:
-            return "AITER is disabled; set VLLM_ROCM_USE_AITER=1 to enable it"
-        if not is_aiter_found_and_supported():
-            return "AITER is not installed or this GPU is not CDNA 3 or newer"
-        if cls._gdn_flydsl_prefill_import_error:
-            return cls._gdn_flydsl_prefill_import_error
-        if not cls._gdn_flydsl_prefill_kernels_importable():
-            return cls._gdn_flydsl_prefill_import_error or (
-                "AITER FlyDSL GDN prefill APIs are missing"
-            )
-        return "unknown"
 
     @classmethod
     def build_gdn_flydsl_prefill_metadata(

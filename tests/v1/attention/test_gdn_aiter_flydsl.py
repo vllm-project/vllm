@@ -96,14 +96,7 @@ def test_explicit_aiter_flydsl_unavailable_kernels_fail_closed():
             "is_gdn_flydsl_prefill_available",
             return_value=False,
         ),
-        patch.object(
-            qwen_gdn_linear_attn.rocm_aiter_ops,
-            "gdn_flydsl_prefill_unavailable_reason",
-            return_value=(
-                "ImportError: No module named 'aiter.ops.flydsl.kernels.gdr_prefill'"
-            ),
-        ),
-        pytest.raises(RuntimeError, match="kernels.gdr_prefill"),
+        pytest.raises(RuntimeError, match="not importable"),
     ):
         _resolve_gdn_prefill_backend(config)
 
@@ -261,10 +254,6 @@ def test_flydsl_availability_respects_the_aiter_switch(monkeypatch):
     rocm_aiter_ops.is_gdn_flydsl_prefill_available.cache_clear()
     try:
         assert rocm_aiter_ops.is_gdn_flydsl_prefill_available() is False
-        assert (
-            "VLLM_ROCM_USE_AITER"
-            in rocm_aiter_ops.gdn_flydsl_prefill_unavailable_reason()
-        )
     finally:
         rocm_aiter_ops.is_gdn_flydsl_prefill_available.cache_clear()
 
