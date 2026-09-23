@@ -95,6 +95,13 @@ def gather_engram_hashes(
     return dp_group.all_gather(hash_ids, dim=0)
 
 
+def engram_table_bytes(layout: EngramLayout, block_size: int = 32) -> int:
+    """Host bytes of one full set of Engram tables: fp8 rows plus ue8m0 scales."""
+    return sum(layout.num_embeddings) * (
+        layout.head_dim + layout.head_dim // block_size
+    )
+
+
 def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     """Whether co-located DP replicas exist and /dev/shm can hold the full tables."""
     if not os.path.isdir(SHM_PATH):
@@ -110,9 +117,7 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
             "storing the offloaded tables per rank instead of sharing them."
         )
         return False
-    num_bytes = sum(layout.num_embeddings) * (
-        layout.head_dim + layout.head_dim // block_size
-    )
+    num_bytes = engram_table_bytes(layout, block_size)
     if shutil.disk_usage(SHM_PATH).total < num_bytes:
         logger.warning_once(
             "Sharing Engram tables across DP replicas needs %.1f GiB of %s "

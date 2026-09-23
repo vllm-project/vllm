@@ -101,6 +101,60 @@ class EngramConfig:
                 "Engram embedding_across_dp is not supported with elastic EP yet."
             )
 
+    def verify_host_memory(
+        self, table_bytes: int, parallel_config: "ParallelConfig"
+    ) -> None:
+        """Refuse to pin more host memory for Engram than this node can hold.
+
+        Offloaded tables are pinned, so they can be neither reclaimed nor
+        swapped. That makes a preflight worthwhile, and it makes the per-rank
+        view misleading: every rank of an engine pins its shard inside the same
+        container, so a TP8 engine needs the whole table from one cgroup even
+        though each rank asks for only an eighth of it.
+
+        Only an impossible request is rejected -- more than the hard cgroup
+        limit, or more than physical RAM. Tight but possible headroom is left
+        to check_cgroup_memory_available, which only warns because current
+        usage may be reclaimable. Assumes an engine's TP ranks share one node.
+        """
+        if not self.cpu_offload or self.dp_shared_memory:
+            # GPU-resident, or backed by /dev/shm and checked against it there.
+            return
+        import psutil
+
+        from vllm.utils.cpu_resource_utils import (
+            check_cgroup_memory_available,
+            get_cgroup_memory_limit,
+        )
+
+        dp_local = parallel_config.data_parallel_size_local
+        if self.embedding_across_dp:
+            # One table is sharded over every DP replica; this node holds the
+            # share owned by its local replicas.
+            required = table_bytes * dp_local // parallel_config.data_parallel_size
+        else:
+            # Each local DP replica holds a full table split over its TP ranks.
+            required = table_bytes * dp_local
+
+        limit, source = psutil.virtual_memory().total, "physical RAM"
+        hint = "use a host with more memory"
+        cgroup_limit = get_cgroup_memory_limit()
+        if cgroup_limit is not None and cgroup_limit < limit:
+            limit, source = cgroup_limit, "container memory limit"
+            hint = "raise the container memory limit"
+
+        if required > limit:
+            gib = 1 << 30
+            raise ValueError(
+                f"Engram tables need {required / gib:.1f} GiB of pinned host "
+                f"memory on this node, but the {source} is "
+                f"{limit / gib:.1f} GiB. Pinned memory cannot be reclaimed or "
+                "swapped, so this allocation cannot succeed. Keep the tables in "
+                "GPU memory with --engram-config '{\"cpu_offload\": false}', "
+                f"or {hint}."
+            )
+        check_cgroup_memory_available(required, "Engram pinned host tables")
+
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
         size = parallel_config.tensor_parallel_size
