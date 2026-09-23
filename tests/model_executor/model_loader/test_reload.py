@@ -51,6 +51,34 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 
 
+def test_model_finalize_binds_broadcast_created_after_state_builder():
+    """Derived mHC storage must be bound after PWAL and survive reload."""
+    from vllm.model_executor.model_loader.reload.model import (
+        create_deepseek_model_reload_state,
+    )
+
+    model = torch.nn.Module()
+    model.layer = torch.nn.Module()
+    model.layer.hc_attn_fn = torch.nn.Parameter(torch.ones(2, 3))
+    model.layer.hc_attn_fn_broadcast = None
+
+    def finalize():
+        model.layer.hc_attn_fn_broadcast.copy_(model.layer.hc_attn_fn.sum(0))
+
+    model.finalize_mhc_broadcast_weights = finalize
+    state = create_deepseek_model_reload_state(model, "model")
+    assert state.dependencies == ("model.layer",)
+    model.layer.hc_attn_fn_broadcast = torch.zeros(3)
+    broadcast = model.layer.hc_attn_fn_broadcast
+    state.policy.bind(state)
+    state.policy.finish(state)
+    assert model.layer.hc_attn_fn_broadcast is broadcast
+    torch.testing.assert_close(broadcast, torch.full((3,), 2.0))
+    model.layer.hc_attn_fn_broadcast = broadcast.clone()
+    with pytest.raises(ReloadError):
+        state.policy.finish(state)
+
+
 def _trace_weight_loader(param, loaded_weight, shard_id=None):
     if shard_id == "remote":
         return False

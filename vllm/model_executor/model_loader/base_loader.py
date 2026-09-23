@@ -106,10 +106,14 @@ class BaseModelLoader(ABC):
                 finalize_layerwise_processing(model, model_config)
 
             # Cold-load PWAL converts loaded weights into the runtime layout.
+            logger.info("Starting cold-load post-processing")
             process_weights_after_loading(model, model_config, target_device)
+            logger.info("Finished cold-load post-processing")
             if trace is not None:
                 # Bind the resulting runtime tensors, kernels, and quant configs.
+                logger.info("Binding model reload tracer runtime state")
                 trace.bind_runtime()
+                logger.info("Bound model reload tracer runtime state")
                 # Expose the bound tracer to subsequent reload requests.
                 model._reload_tracer = trace
 

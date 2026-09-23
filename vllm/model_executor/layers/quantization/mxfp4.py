@@ -803,6 +803,46 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
 
+    def create_reload_state(self, layer, key: str):
+        """Build the canonical reload state for MXFP4 emulation."""
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            Mxfp4MoeBackend,
+        )
+        from vllm.model_executor.model_loader.reload.moe import (
+            RoutedExpertsReloadPlan,
+        )
+        from vllm.model_executor.model_loader.reload.mxfp4 import (
+            FlashInferMxfp4MoEReloadPolicy,
+            Mxfp4EmulationMoEReloadPolicy,
+        )
+        from vllm.model_executor.model_loader.reload.trace import ReloadState
+
+        if self.mxfp4_backend is Mxfp4MoeBackend.EMULATION:
+            policy: Mxfp4EmulationMoEReloadPolicy | (
+                FlashInferMxfp4MoEReloadPolicy
+            ) = Mxfp4EmulationMoEReloadPolicy()
+        elif self.mxfp4_backend is Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16:
+            policy = FlashInferMxfp4MoEReloadPolicy()
+        else:
+            raise NotImplementedError(
+                f"MXFP4 reload is not implemented for {self.mxfp4_backend.value}"
+            )
+        roles = [
+            "w13_weight",
+            "w2_weight",
+            "w13_weight_scale",
+            "w2_weight_scale",
+        ]
+        if self.moe.has_bias:
+            roles.extend(("w13_bias", "w2_bias"))
+        return ReloadState(
+            key=key,
+            module=layer,
+            roles=tuple(roles),
+            policy=policy,
+            expert_plan=RoutedExpertsReloadPlan(),
+        )
+
     def get_fused_moe_quant_config(
         self,
         layer: RoutedExperts,

@@ -64,19 +64,34 @@ def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
     )
     from vllm.utils.torch_utils import is_quantized_kv_cache
 
-    if hasattr(model, "process_weights_after_loading"):
-        raise NotImplementedError("Trace reload needs a model-level post-load policy")
     trace = ModelReloadTracer()
     # Parameter identity -> owning CopyReloadPolicy state. This covers only
     # the ordinary copy path, not custom builders or distinct Parameter objects
     # sharing storage.
     copy_owners: dict[int, str] = {}
+    model_state_registered = False
     for key, module in model.named_modules():
         if isinstance(module, MLAAttention):
             trace.register_state(module.create_reload_state(key))
             continue
+        builder = getattr(module, "create_reload_state", None)
+        if builder is not None:
+            is_model_builder = callable(
+                getattr(module, "process_weights_after_loading", None)
+            )
+            if is_model_builder and model_state_registered:
+                continue
+            trace.register_state(builder(key))
+            model_state_registered |= is_model_builder
+            continue
         method = getattr(module, "quant_method", None)
         if is_deferred_attention_layer(module):
+            # Some multimodal attention helpers only own the runtime
+            # attention operator. Their trainable/loadable parameters live in
+            # child Linear modules, which are registered independently below.
+            # There is no PWAL or checkpoint role to reload for this wrapper.
+            if not any(module.named_parameters(recurse=False)) and method is None:
+                continue
             if type(module) is not Attention or is_quantized_kv_cache(
                 module.kv_cache_dtype
             ):
