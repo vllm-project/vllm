@@ -364,6 +364,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            positions=self.input_buffers.positions[:num_tokens],
             is_prefilling=self.draft_is_prefilling[:num_reqs],
         )
         return attn_metadata
