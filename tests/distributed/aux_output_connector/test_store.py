@@ -177,17 +177,20 @@ def test_mooncake_worker_and_publisher_reuse_prefix_and_finalize_tail(remote_sto
 
 
 @pytest.mark.parametrize("prompt_length", [6, 8, 9])
-@pytest.mark.parametrize("local_hit", [0, 4])
-def test_mooncake_pd_import_preserves_local_hits_and_old_keys(
-    remote_store, prompt_length, local_hit
+def test_mooncake_pd_reads_only_boundary_and_reuses_shared_blocks(
+    remote_store, prompt_length
 ):
-    """D restores only skipped positions; completed imports survive a local hit."""
+    """D reads only its boundary, preserving shared first-writer values."""
     rows = np.arange(72, dtype=np.uint8).reshape(12, *_SHAPE)
     source = rows[:prompt_length].copy()
-    # Distinguish P's recomputed boundary and locally cached prefix from D's.
+    # P's boundary differs from recomputation; published full blocks win.
     source[prompt_length - 1] = 200
-    source[:local_hit] = 201
+    hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
+    full_end = prompt_length // _BLOCK_SIZE * _BLOCK_SIZE
     source_keys = [f"prefill-{i}" for i in range(0, prompt_length, _BLOCK_SIZE)]
+    source_keys[: full_end // _BLOCK_SIZE] = routed_experts_keys(
+        hashes[: full_end // _BLOCK_SIZE], "0"
+    )
     objects = [
         BlockObject(key, source[i : i + _BLOCK_SIZE].tobytes())
         for key, i in zip(source_keys, range(0, prompt_length, _BLOCK_SIZE))
@@ -197,32 +200,38 @@ def test_mooncake_pd_import_preserves_local_hits_and_old_keys(
     worker._store.close()
     worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
     worker._return_keys = True
-    worker._key_namespace = "decoder:"
-    hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
-    if local_hit:
-        remote_store.put(
-            [
-                BlockObject(
-                    routed_experts_keys(hashes[:1], "decoder:0")[0], rows[:4].tobytes()
-                )
-            ]
-        )
     step = _metadata(
         0,
         [_request_metadata("decode", prompt_length - 1, 13 - prompt_length, 0, hashes)],
         {},
     )
-    step.metadata.remote_prefixes["decode"] = (local_hit, source_keys)
+    if (prompt_length - 1) % _BLOCK_SIZE:
+        step.metadata.remote_tails["decode"] = source_keys[
+            (prompt_length - 1) // _BLOCK_SIZE
+        ]
+    remote_store._store.put_batch.reset_mock()
     output = _process_output(
         worker, step, rows[prompt_length - 1 :], ["decode"], np.array([0])
     )["decode"]
-    assert remote_store.get_concatenated(output.block_keys) == rows.tobytes()
+    calls = remote_store._store.batch_get_buffer.call_args_list
+    boundary = (prompt_length - 1) // _BLOCK_SIZE
+    assert [call.args[0] for call in calls] == (
+        [[source_keys[boundary]]] if (prompt_length - 1) % _BLOCK_SIZE else []
+    )
+    published = {
+        key
+        for call in remote_store._store.put_batch.call_args_list
+        for key in call.args[0]
+    }
+    assert not published.intersection(source_keys[:boundary])
+    expected = rows.copy()
+    expected[:full_end] = source[:full_end]
+    assert remote_store.get_concatenated(output.block_keys) == expected.tobytes()
     assert remote_store.get_concatenated(source_keys) == source.tobytes()
-    assert not set(source_keys) & set(output.block_keys)
     # No handoff manifest on the next request: D's own cache is self-contained.
-    step = _metadata(0, [_request_metadata("local", 11, 1, 0, hashes)], {"decode": []})
-    output = _process_output(worker, step, rows[11:], ["local"], np.array([0]))["local"]
-    assert remote_store.get_concatenated(output.block_keys) == rows.tobytes()
+    step = _metadata(0, [_request_metadata("local", 8, 4, 0, hashes)], {"decode": []})
+    output = _process_output(worker, step, rows[8:], ["local"], np.array([0]))["local"]
+    assert remote_store.get_concatenated(output.block_keys) == expected.tobytes()
     worker.close()
 
 
@@ -234,6 +243,7 @@ def test_remote_kv_requires_r3_handoff_manifest(prefix):
         [b"a" * 32],
         num_tokens=7,
         num_output_tokens=0,
+        num_computed_tokens=6,
         prefill_stats=SimpleNamespace(
             num_local_cached_tokens=4, num_external_cached_tokens=2
         ),
@@ -247,7 +257,7 @@ def test_remote_kv_requires_r3_handoff_manifest(prefix):
         "aux_output_prefix": {"block_size": _BLOCK_SIZE, "keys": ["full", "tail"]}
     }
     metadata = connector.build_connector_meta(scheduled, {"decode": request})
-    assert metadata.remote_prefixes == {"decode": (4, ["full", "tail"])}
+    assert metadata.remote_tails == {"decode": "tail"}
 
 
 def test_mooncake_pd_missing_tail_fails_closed(remote_store):
@@ -256,7 +266,7 @@ def test_mooncake_pd_missing_tail_fails_closed(remote_store):
     worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
     worker._return_keys = True
     step = _metadata(0, [_request_metadata("decode", 1, 1, 0, [])], {})
-    step.metadata.remote_prefixes["decode"] = (0, ["missing-tail"])
+    step.metadata.remote_tails["decode"] = "missing-tail"
     with pytest.raises(BlockObjectStoreError, match="missing-tail"):
         _process_output(
             worker,
@@ -579,7 +589,6 @@ def _make_worker(
     )
     worker._requests = {}
     worker._return_keys = False
-    worker._key_namespace = ""
     worker._generation = 0
     worker._step_metadata = None
     worker._pending_outputs = []
@@ -596,27 +605,6 @@ def test_worker_rejects_metadata_generation_rollback():
         _begin_step(worker, _metadata(0, [], {}))
 
     worker.close()
-
-
-def test_mooncake_keys_isolate_independent_dp_caches(monkeypatch):
-    from vllm.distributed.aux_output_connector import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "RoutedExpertsCapturer", Mock())
-    monkeypatch.setattr(worker_module, "bind_routed_experts_capturer", Mock())
-    monkeypatch.setattr(
-        worker_module, "get_tp_group", lambda: SimpleNamespace(is_first_rank=False)
-    )
-    config = Mock(instance_id="deployment", max_concurrent_batches=2)
-    config.aux_output_config.backend = "mooncake"
-    keys = []
-    for rank in (0, 1, 0):
-        config.parallel_config.data_parallel_rank = rank
-        worker = AuxOutputWorkerConnector(
-            vllm_config=config, model=Mock(), kv_cache_config=Mock()
-        )
-        keys.append(routed_experts_keys([b"a" * 32], worker._key_namespace + "0"))
-    assert keys[0] != keys[1]
-    assert keys[0] == keys[2]
 
 
 def test_worker_rejects_run_and_finish_in_one_step():
@@ -989,7 +977,6 @@ def test_publish_routed_experts_publishes_full_blocks():
 def test_worker_data_plane_publishes_blocks_and_reuses_prefix(backend, remote_store):
     worker = _make_worker(2)
     if backend == "mooncake":
-        worker._key_namespace = "test-instance:"
         worker._return_keys = True
         worker._store.close()
         worker._store = BackgroundBlockObjectStore(

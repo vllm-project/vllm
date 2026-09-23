@@ -34,8 +34,8 @@ class AuxOutputConnectorMetadata:
     requests: dict[str, int]
     block_hashes: dict[str, PackedBlockHashes]
     finished_requests: tuple[str, ...]
-    # First remote prefill: local KV hit length and P's ordered R3 object keys.
-    remote_prefixes: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
+    # First remote prefill: key containing the unaligned execution boundary.
+    remote_tails: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -65,7 +65,7 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
-        remote_prefixes = {}
+        remote_tails = {}
         for request_id in scheduler_output.num_scheduled_tokens:
             is_new = request_id not in self._sent_hash_counts
             num_sent = self._sent_hash_counts.setdefault(request_id, 0)
@@ -84,10 +84,11 @@ class AuxOutputSchedulerConnector:
                         "Remote KV reuse requires aux_output_prefix with matching "
                         "R3 block_size and ordered keys covering the uncropped prompt"
                     )
-                remote_prefixes[request_id] = (
-                    stats.num_local_cached_tokens,
-                    prefix["keys"],
-                )
+                start = request.num_computed_tokens
+                if start % self._hash_block_size:
+                    remote_tails[request_id] = prefix["keys"][
+                        start // self._hash_block_size
+                    ]
             packed = self._pack_new_hashes(request.block_hashes, num_sent)
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
@@ -122,7 +123,7 @@ class AuxOutputSchedulerConnector:
             scheduled_requests,
             block_hashes_by_request,
             finished_requests,
-            remote_prefixes,
+            remote_tails,
         )
 
     def take_output(
