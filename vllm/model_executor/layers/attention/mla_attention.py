@@ -1025,9 +1025,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q_pe = mqa_pe_padded
 
             if self.is_aiter_triton_fp4_bmm_enabled:
-                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-                mqa_ql_nope = batched_gemm_a16wfp4(
+                mqa_ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                     mqa_q_nope,
                     self.W_K,
                     self.W_K_scale,
@@ -1553,7 +1551,10 @@ class _DecodeConcatQuantFP8(QuantFP8):
             scale: torch.Tensor,
             scale_ub: torch.Tensor | None = None,
         ) -> torch.Tensor:
-            decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
+            if decode_q_pe.shape[-1] == 0 and decode_ql_nope.is_contiguous():
+                decode_q0 = decode_ql_nope
+            else:
+                decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
             decode_q_flat = decode_q0.reshape(decode_q0.shape[0], -1)
             decode_q, _ = quant_fn(self, decode_q_flat, scale, scale_ub)
             return decode_q.view(decode_q0.shape)
@@ -2470,6 +2471,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
@@ -2634,6 +2636,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
+                max_query_len=min(
+                    common_attn_metadata.max_query_len, self.reorder_batch_threshold
+                ),
                 dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
             )
 
