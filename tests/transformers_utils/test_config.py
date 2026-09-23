@@ -208,6 +208,7 @@ def test_model_config_generation_fallback_forwards_code_revision():
             model="org/model",
             trust_remote_code=True,
             revision="model-pin",
+            _hf_config_revision=None,
             code_revision="code-pin",
             config_format="auto",
             hf_token=None,
