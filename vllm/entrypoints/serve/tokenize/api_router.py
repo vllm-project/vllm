@@ -99,3 +99,10 @@ def attach_router(app: FastAPI):
             )
 
     app.include_router(router)
+    # Also under /v1: OpenAI SDK clients and most gateways point base_url at
+    # a URL ending in /v1 and resolve every endpoint relative to it, so the
+    # root-only routes were a genuine 404 for them. FastAPI derives a route's
+    # operation id from name + path + method, so the two mounts carry
+    # distinct ids (tokenize_tokenize_post / tokenize_v1_tokenize_post) and
+    # the OpenAPI schema stays valid.
+    app.include_router(router, prefix="/v1")
