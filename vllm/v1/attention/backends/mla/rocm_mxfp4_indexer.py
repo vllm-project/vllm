@@ -17,7 +17,11 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+    MultipleOf,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerMetadataBuilder,
@@ -135,6 +139,12 @@ class DeepseekV41RocmMxfp4IndexerBackend(DeepseekV41IndexerBackend):
         return "DEEPSEEK_V41_ROCM_MXFP4_INDEXER"
 
     @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # 128 is preferred (see DeepseekV4ROCMAiterMLASparseBackend); 64 keeps
+        # an explicit --block-size 64 working.
+        return [64, 128]
+
+    @staticmethod
     def get_builder_cls() -> type["DeepseekV41RocmMxfp4IndexerMetadataBuilder"]:
         return DeepseekV41RocmMxfp4IndexerMetadataBuilder
 
@@ -237,7 +247,7 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
             **{f.name: getattr(base, f.name) for f in fields(base)}
         )
         if base.decode is not None:
-            lengths = base.decode.seq_lens.reshape(-1)
+            lengths = base.decode.seq_lens.view(-1)
             metadata.decode_row_lens = lengths
             block = self.candidate_block_size
             if block:

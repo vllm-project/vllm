@@ -36,7 +36,7 @@ from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_man
 if (_reason := ops.rocm_mxfp4_indexer_unsupported_reason()) is not None:
     pytest.skip(_reason, allow_module_level=True)
 
-HEADS, HEAD_DIM, BLOCK = 32, 128, 64
+HEADS, HEAD_DIM = 32, 128
 WIDTH = HEAD_DIM // 2 + HEAD_DIM // 32
 # V4.1's 8-token blocks, with the pool (2048 blocks) and top-k (512) scaled
 # down so short test contexts still select.
@@ -68,23 +68,23 @@ class _Case:
     ratio-1 pages side by side in every block) and into natural-order caches
     the reference reads."""
 
-    def __init__(self, seq_lens, seed=0):
+    def __init__(self, seq_lens, block, seed=0):
         torch.manual_seed(seed)
         self.seq_lens = seq_lens
-        num_blocks = sum(cdiv(n, BLOCK) for n in seq_lens) + 3
+        num_blocks = sum(cdiv(n, block) for n in seq_lens) + 3
         perm = torch.randperm(num_blocks)
-        width = max(cdiv(n, BLOCK) for n in seq_lens)
+        width = max(cdiv(n, block) for n in seq_lens)
         self.block_table = torch.zeros(len(seq_lens), width, dtype=torch.int32)
         used = 0
         for req, n in enumerate(seq_lens):
-            self.block_table[req, : cdiv(n, BLOCK)] = perm[used : used + cdiv(n, BLOCK)]
-            used += cdiv(n, BLOCK)
+            self.block_table[req, : cdiv(n, block)] = perm[used : used + cdiv(n, block)]
+            used += cdiv(n, block)
         self.block_table = self.block_table.to(DEVICE)
 
         def align(n):
             return cdiv(n, 576) * 576
 
-        page2, page1 = BLOCK // 2 * WIDTH, BLOCK * WIDTH
+        page2, page1 = block // 2 * WIDTH, block * WIDTH
         stride = align(page2) + align(page1) + 576
         self.pool = torch.zeros(num_blocks * stride, dtype=torch.uint8, device=DEVICE)
         self.page_bytes = torch.zeros_like(self.pool, dtype=torch.bool)
@@ -95,11 +95,11 @@ class _Case:
             self.page_bytes[base : base + page1] = True
         self.cache = {
             2: torch.as_strided(
-                self.pool, (num_blocks, BLOCK // 2, WIDTH), (stride, WIDTH, 1), 0
+                self.pool, (num_blocks, block // 2, WIDTH), (stride, WIDTH, 1), 0
             ),
             1: torch.as_strided(
                 self.pool,
-                (num_blocks, BLOCK, WIDTH),
+                (num_blocks, block, WIDTH),
                 (stride, WIDTH, 1),
                 align(page2),
             ),
@@ -249,13 +249,18 @@ def _prefill_metadata(case, rows, ratio, chunk_bounds, query_start_loc):
     )
 
 
+# 128-token pages are what vLLM allocates for this kernel; 64 is the default.
+BLOCKS = pytest.mark.parametrize("block", [128, 64])
+
+
+@BLOCKS
 @pytest.mark.parametrize("ratio", [2, 1])
-def test_k_cache_is_the_kernels_preshuffled_order(ratio):
+def test_k_cache_is_the_kernels_preshuffled_order(ratio, block):
     """The writer stores what aiter's preshuffle_cache makes of the natural
     bytes, page by page, inside the pool and nowhere else."""
     from aiter.ops.triton.attention.pa_mqa_logits_mxfp4 import preshuffle_cache
 
-    case = _Case([700, 333])
+    case = _Case([700, 333], block)
     cache = case.cache[ratio]
     entries = cache.shape[1]
     for req, n in enumerate(case.seq_lens):
@@ -365,9 +370,10 @@ def _run_layers(monkeypatch, case, rows, metadata):
             _assert_topk(out[i], allowed[i], TOPK)
 
 
-def test_decode_layers_match_reference(monkeypatch):
+@BLOCKS
+def test_decode_layers_match_reference(monkeypatch, block):
     """Flattened speculative decode: two query rows per request."""
-    case = _Case([900, 333, 610])
+    case = _Case([900, 333, 610], block)
     rows = [(req, n - 2 + j) for req, n in enumerate(case.seq_lens) for j in range(2)]
     _run_layers(monkeypatch, case, rows, lambda r: _decode_metadata(case, rows, r))
 
@@ -382,8 +388,11 @@ def test_decode_layers_match_reference(monkeypatch):
     ],
     ids=["sliced", "batched"],
 )
-def test_prefill_layers_match_reference(monkeypatch, seq_lens, new_tokens, chunks):
-    case = _Case(seq_lens)
+@BLOCKS
+def test_prefill_layers_match_reference(
+    monkeypatch, seq_lens, new_tokens, chunks, block
+):
+    case = _Case(seq_lens, block)
     rows = [
         (req, n - q + i)
         for req, (n, q) in enumerate(zip(seq_lens, new_tokens))
