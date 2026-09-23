@@ -3,8 +3,6 @@
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 
@@ -26,7 +24,7 @@ AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "openbmb/MiniCPM3-4B",
     "Qwen/Qwen2.5-0.5B-Instruct",
-    "TitanML/tiny-mixtral",
+    "axolotl-ai-co/tiny-mixtral-30m",
     "Qwen/Qwen3-8B",
 ]
 
@@ -95,7 +93,7 @@ AITER_MODEL_LIST = [
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
-            "TitanML/tiny-mixtral",  # mixtral
+            "axolotl-ai-co/tiny-mixtral-30m",  # mixtral
             marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
@@ -125,12 +123,6 @@ def test_models(
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
-    if current_platform.is_rocm() and model == "TitanML/tiny-mixtral":
-        # Its single-token router selects LLMM1, whose low-precision
-        # accumulation can change the top-2 experts. Keep the optimized kernel
-        # enabled generally, but use the reference GEMM for this accuracy test.
-        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -166,17 +158,9 @@ def test_models(
                 hf_model.model.device
             )
             if prompt_embeds is not None:
-                embed = hf_model.model.get_input_embeddings()(token_ids)
-
-                if "gemma" in model.lower() and (
-                    Version(TRANSFORMERS_VERSION) < Version("5.3.0.dev0")
-                ):
-                    # For Gemma 1/2 models with Transformers 5.4.0+, the prompt
-                    # embeddings are normalised in `get_prompt_embeddings`,
-                    # like Gemma 3. For older versions, we need to manually normalise.
-                    embed_scale = hf_model.config.hidden_size**0.5
-                    normalizer = torch.tensor(embed_scale, dtype=embed.dtype)
-                    embed *= normalizer
+                # Retained prompt values must not keep reference weights alive.
+                with torch.no_grad():
+                    embed = hf_model.model.get_input_embeddings()(token_ids)
 
                 # MiniCPM models apply scale_emb to embeddings internally.
                 # vLLM expects pre-scaled embeddings when using inputs_embeds.

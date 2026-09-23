@@ -12,6 +12,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -52,6 +53,7 @@ from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollec
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -207,9 +209,11 @@ class AsyncLLM(EngineClient):
             pass
 
         self.profiler = profiler
+        configured_activities = vllm_config.profiler_config.torch_profiler_activities
         if (
             vllm_config.profiler_config.profiler == "torch"
             and not vllm_config.profiler_config.ignore_frontend
+            and (configured_activities is None or "CPU" in configured_activities)
         ):
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
@@ -383,6 +387,7 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
         if self.errored:
@@ -401,10 +406,6 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        if isinstance(params, SamplingParams) and params.n > 1:
-            # TODO (NickLucche) Batch check admission check for all n requests
-            self.check_admission(params.n, request_id)
-
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
@@ -421,6 +422,7 @@ class AsyncLLM(EngineClient):
                 priority,
                 data_parallel_rank,
                 session_id,
+                kv_hints,
             )
 
         # Convert Input --> Request.
@@ -454,6 +456,7 @@ class AsyncLLM(EngineClient):
                     priority=priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    kv_hints=kv_hints,
                 )
             else:
                 # Raw prompts require tokenization and possibly multimodal
@@ -470,6 +473,7 @@ class AsyncLLM(EngineClient):
                     priority=priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    kv_hints=kv_hints,
                 )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -500,14 +504,28 @@ class AsyncLLM(EngineClient):
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request)
+        child_requests: list[EngineCoreRequest] = []
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = child_params
-            await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
-            )
+            child_requests.append(child_request)
+
+        self.check_admission(parent_params.n, parent_request.request_id)
+        try:
+            for idx, child_request in enumerate(child_requests):
+                self.output_processor.add_request(
+                    child_request, prompt_text, parent_request, idx, queue
+                )
+
+            for child_request in child_requests:
+                await self.engine_core.add_request_async(child_request)
+                if self.log_requests:
+                    logger.info("Added request %s.", child_request.request_id)
+        except BaseException:
+            await self.abort(parent_request.request_id, internal=True)
+            raise
         return queue
 
     async def _add_request(
@@ -544,6 +562,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> RequestOutputCollector:
         self._validate_streaming_input_sampling_params(sampling_params)
 
@@ -556,6 +575,7 @@ class AsyncLLM(EngineClient):
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
+            kv_hints=kv_hints,
         )
 
         if not sampling_params.skip_clone:
@@ -657,6 +677,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -697,6 +718,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 session_id=session_id,
+                kv_hints=kv_hints,
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
@@ -1079,10 +1101,17 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    async def wake_up(self, tags: list[str] | None = None) -> None:
-        await self.engine_core.wake_up_async(tags)
+    async def release_kv_cache_memory(self) -> None:
+        await self.renderer.clear_mm_cache_async()
+        await self.engine_core.release_kv_cache_memory_async()
 
         if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(1, 0)
+
+    async def wake_up(self, tags: list[str] | None = None) -> None:
+        fully_awake = await self.engine_core.wake_up_async(tags)
+
+        if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
 
     async def checkpoint_prepare(self) -> None:
@@ -1265,3 +1294,6 @@ class AsyncLLM(EngineClient):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return await self.engine_core.get_weight_version_async()
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        return self.engine_core.get_kv_event_sources()
