@@ -516,6 +516,7 @@ class IterationStats:
         lora_states: "LoRARequestStates",
         lora_name: str | None,
     ):
+        """Record the engine core events carried by one request's output."""
         # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
 

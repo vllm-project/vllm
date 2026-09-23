@@ -797,6 +797,7 @@ class OutputProcessor:
         req_state: RequestState,
         iteration_stats: IterationStats | None,
     ) -> None:
+        """Emit the ``llm_request`` span for a finished request."""
         assert req_state.stats is not None
         assert iteration_stats is not None
 

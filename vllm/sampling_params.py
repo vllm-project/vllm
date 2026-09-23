@@ -425,6 +425,7 @@ class SamplingParams(
         # rebind every later positional argument of existing callers.
         thinking_loop_break: bool | Literal["force", "ramp"] | None = None,
     ) -> "SamplingParams":
+        """Build SamplingParams from request fields, using defaults for ``None``."""
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
             # to identify the exact offending entry for the error message.

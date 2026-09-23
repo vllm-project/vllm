@@ -673,6 +673,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         default_sampling_params: dict,
     ) -> SamplingParams:
+        """Build the engine's sampling parameters for this request."""
         # Priority: user -> server default -> OpenAI default
         sampling_params = {
             name: (

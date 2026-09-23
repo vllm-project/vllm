@@ -330,6 +330,7 @@ class CompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         default_sampling_params: dict | None = None,
     ) -> SamplingParams:
+        """Build the engine's sampling parameters for this request."""
         if default_sampling_params is None:
             default_sampling_params = {}
 

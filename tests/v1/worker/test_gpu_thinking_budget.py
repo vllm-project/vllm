@@ -356,6 +356,7 @@ def _loop_break_state(
     config=None,
     params: SamplingParams | None = None,
 ) -> tuple[RequestState, ThinkingBudgetState]:
+    """Request state plus a ThinkingBudgetState holding one request in slot 3."""
     req_states = _make_req_states(tokens, prompt_len=1)
     state = ThinkingBudgetState(
         req_states, config if config is not None else MockLoopBreakReasoningConfig()
@@ -399,6 +400,7 @@ def test_v2_loop_break_reports_each_fire_once():
 
 
 def test_v2_loop_break_reports_nothing_for_an_opted_out_batch():
+    """A batch without a tracked request skips the copy to the host."""
     tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
     _, state = _loop_break_state(
         tokens, params=SamplingParams(thinking_loop_break=False)
@@ -408,6 +410,7 @@ def test_v2_loop_break_reports_nothing_for_an_opted_out_batch():
 
 
 def test_v2_loop_break_ignores_non_periodic_reasoning():
+    """Reasoning without an exact cycle is left alone."""
     tokens = [1, START, *_filler(26)]
     _, state = _loop_break_state(tokens)
 
@@ -467,6 +470,7 @@ def test_v2_loop_break_pattern_may_not_span_the_section_start():
 
 
 def test_v2_loop_break_honours_the_check_interval():
+    """Detection runs only every ``loop_break_check_interval`` tokens."""
     tokens = [1, START, 7, 8, 7, 8]
     req_states, state = _loop_break_state(tokens, config=MockIntervalReasoningConfig())
 
@@ -514,6 +518,7 @@ def test_v2_loop_break_keeps_forcing_until_the_end_lands():
 
 
 def test_v2_loop_break_rearms_after_the_section_closes():
+    """Closing the section clears the flag for the next section."""
     tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
     req_states, state = _loop_break_state(tokens)
 
@@ -537,6 +542,7 @@ def test_v2_loop_break_rearms_after_the_section_closes():
 
 
 def test_v2_loop_break_per_request_opt_out():
+    """``thinking_loop_break=False`` turns loop breaking off for the request."""
     tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
     _, state = _loop_break_state(
         tokens, params=SamplingParams(thinking_loop_break=False)
@@ -550,6 +556,7 @@ def test_v2_loop_break_per_request_opt_out():
 
 
 def test_v2_loop_break_opt_in_cannot_enable_an_unconfigured_server():
+    """``True`` cannot turn on a feature the server has not configured."""
     tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
     _, state = _loop_break_state(
         tokens,
@@ -851,6 +858,7 @@ def test_v2_ramp_biases_the_parsers_marker_instead_of_forcing():
 
 
 def test_v2_ramp_grows_per_token_across_steps_and_draft_positions():
+    """Each position is biased by its own distance from the fire, drafts included."""
     req_states, state = _loop_break_state(_LOOPING, config=MockRampDistinctEndConfig())
 
     out = _apply(state, torch.zeros((2, VOCAB_SIZE), device=DEVICE), [8, 9], [0, 1])
@@ -862,6 +870,7 @@ def test_v2_ramp_grows_per_token_across_steps_and_draft_positions():
 
 
 def test_v2_ramp_falls_back_to_the_forced_sequence():
+    """Past the ramp's last token, the forced sequence takes over."""
     _, state = _loop_break_state(_LOOPING, config=MockRampDistinctEndConfig())
 
     out = _apply(
@@ -877,6 +886,7 @@ def test_v2_ramp_falls_back_to_the_forced_sequence():
 
 
 def test_v2_ramp_ends_on_a_natural_close():
+    """A close, drafted or committed, ends the ramp."""
     req_states, state = _loop_break_state(_LOOPING, config=MockRampDistinctEndConfig())
 
     # A drafted marker closes the section for the positions after it.
@@ -891,6 +901,7 @@ def test_v2_ramp_ends_on_a_natural_close():
 
 
 def test_v2_ramp_finishes_a_multi_token_marker_the_model_started():
+    """Once the model starts a multi-token marker, the rest of it is forced."""
     _, state = _loop_break_state(_LOOPING, config=MockRampMultiTokenEndConfig())
 
     out = _apply(state, torch.zeros((2, VOCAB_SIZE), device=DEVICE), [8, END_A], [0, 1])
@@ -900,6 +911,7 @@ def test_v2_ramp_finishes_a_multi_token_marker_the_model_started():
 
 
 def test_v2_request_picks_the_release():
+    """``thinking_loop_break`` picks the release per request."""
     _, state = _loop_break_state(
         _LOOPING,
         config=MockRampDistinctEndConfig(),
