@@ -3,6 +3,7 @@
 
 """Tests for tensor IPC queue functionality."""
 
+import logging
 import multiprocessing as mp
 import time
 from dataclasses import dataclass
@@ -1039,3 +1040,34 @@ def test_tensor_cleanup_after_decode():
     sender = receiver._tensor_buffers[sender_id]
     tensors = sender.tensors.get(message_id, {})
     assert tensor_id not in tensors, "Tensor should be removed from buffer"
+
+
+def test_receiver_reports_how_many_stale_tensors_it_discards(caplog):
+    """A newer message drops the sender's older buffered tensors.
+
+    The warning has to name the count and the sender; a mismatch between the
+    format string and the arguments makes `logging` raise and swallow it.
+    """
+    receiver = TensorIpcReceiver(_MP_CTX.Queue())
+
+    sender_id = "test_sender"
+    sender = receiver._tensor_buffers[sender_id]
+    # Two tensors still buffered for the stale message 0.
+    sender.tensors[0] = {0: torch.zeros(2), 1: torch.zeros(2)}
+    # The tensor we are about to ask for, from the newer message 1.
+    wanted = torch.arange(4, dtype=torch.float32)
+    sender.tensors[1] = {0: wanted}
+
+    with caplog.at_level(logging.WARNING, logger="vllm.v1.engine.tensor_ipc"):
+        received = receiver(
+            "float32",
+            wanted.shape,
+            {"sender_id": sender_id, "message_id": 1, "tensor_id": 0},
+        )
+
+    assert received is wanted
+    assert 0 not in sender.tensors, "stale message should be dropped"
+    assert sender.current_message_id == 1
+    assert "Discarding 2 stale tensors from sender test_sender" in [
+        record.getMessage() for record in caplog.records
+    ]

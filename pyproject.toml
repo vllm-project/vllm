@@ -85,6 +85,10 @@ select = [
     "G",
     # flake8-no-pep420
     "INP",
+    # pylint: logging format string / argument count mismatch. Both raise
+    # inside `logging` at runtime and swallow the message; `G` does not
+    # cover them.
+    "PLE1205", "PLE1206",
 ]
 ignore = [
     # don't enforce that everything has a docstring
