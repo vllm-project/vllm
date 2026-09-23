@@ -261,15 +261,71 @@ def _launch_sparse_decode_reduce(
     adaptive_splits: bool,
     positions: torch.Tensor | None = None,
     cos_sin_cache: torch.Tensor | None = None,
+    out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Run the reduce kernel, with the inverse-RoPE epilogue if given positions."""
+    out, _ = _run_sparse_decode_reduce(
+        part_m,
+        part_l,
+        part_acc,
+        adaptive_splits,
+        positions,
+        cos_sin_cache,
+        out_dtype,
+        quant=False,
+    )
+    return out
+
+
+def _launch_sparse_decode_reduce_mxfp8(
+    part_m: torch.Tensor,
+    part_l: torch.Tensor,
+    part_acc: torch.Tensor,
+    adaptive_splits: bool,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The MXFP8 epilogue: ([Q, H * D] e4m3, [Q, H * D // 32] E8M0)."""
+    out, out_scale = _run_sparse_decode_reduce(
+        part_m,
+        part_l,
+        part_acc,
+        adaptive_splits,
+        positions,
+        cos_sin_cache,
+        torch.float8_e4m3fn,
+        quant=True,
+    )
+    assert out_scale is not None
+    return out.view(out.shape[0], -1), out_scale
+
+
+def _run_sparse_decode_reduce(
+    part_m: torch.Tensor,
+    part_l: torch.Tensor,
+    part_acc: torch.Tensor,
+    adaptive_splits: bool,
+    positions: torch.Tensor | None,
+    cos_sin_cache: torch.Tensor | None,
+    out_dtype: torch.dtype,
+    quant: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     num_queries, num_splits, num_heads = part_m.shape
     out = torch.empty(
         (num_queries, num_heads, HEAD_DIM),
-        dtype=torch.bfloat16,
+        dtype=out_dtype,
         device=part_m.device,
+    )
+    out_scale = (
+        torch.empty(
+            (num_queries, num_heads * HEAD_DIM // 32),
+            dtype=torch.uint8,
+            device=part_m.device,
+        )
+        if quant
+        else None
     )
     attn_sink = torch.empty(1, dtype=torch.float32, device=part_m.device)
     mod._sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
@@ -280,8 +336,11 @@ def _launch_sparse_decode_reduce(
         out,
         positions,
         cos_sin_cache,
+        out_scale,
         out.stride(0),
         out.stride(1),
+        out_scale.stride(0) if out_scale is not None else 0,
+        HEAD_DIM // 32,
         part_m.stride(0),
         part_m.stride(1),
         part_acc.stride(0),
@@ -298,9 +357,10 @@ def _launch_sparse_decode_reduce(
         FUSE_INV_ROPE=positions is not None,
         NOPE=NOPE_HEAD_DIM,
         HALF=ROPE_HEAD_DIM // 2,
+        QUANT_OUT=quant,
         num_warps=4,
     )
-    return out
+    return out, out_scale
 
 
 @torch.inference_mode()
@@ -1055,6 +1115,281 @@ def test_sparse_attn_decode_reduce_inverse_rope_epilogue(adaptive_splits: bool) 
     assert torch.equal(actual[..., :NOPE_HEAD_DIM], unfused[..., :NOPE_HEAD_DIM])
     # An epilogue that quietly did nothing would satisfy everything above.
     assert not torch.equal(actual[..., NOPE_HEAD_DIM:], unfused[..., NOPE_HEAD_DIM:])
+
+
+def _random_reduce_inputs(
+    num_queries: int, num_splits: int, num_heads: int, max_pos: int, seed: int
+) -> tuple[torch.Tensor, ...]:
+    device = torch.device("cuda")
+    torch.manual_seed(seed)
+    shape = (num_queries, num_splits, num_heads)
+    part_m = torch.randn(shape, dtype=torch.float32, device=device)
+    part_l = torch.rand(shape, dtype=torch.float32, device=device) + 0.5
+    part_acc = torch.randn((*shape, HEAD_DIM), dtype=torch.float32, device=device)
+    # Spread block amaxes over many binades so the E8M0 scales vary.
+    block_exp = torch.randint(-12, 6, (*shape, HEAD_DIM // 32), device=device)
+    part_acc *= torch.exp2(block_exp.float()).repeat_interleave(32, dim=-1)
+    positions = torch.randint(
+        0, max_pos, (num_queries,), dtype=torch.int64, device=device
+    )
+    angle = torch.randn(max_pos, ROPE_HEAD_DIM // 2, device=device)
+    cos_sin_cache = torch.cat((angle.cos(), angle.sin()), dim=-1).contiguous()
+    return part_m, part_l, part_acc, positions, cos_sin_cache
+
+
+def _mxfp8_dequant(data: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    blocks = data.float().view(*data.shape[:-1], -1, 32)
+    return (blocks * torch.exp2(scale.float() - 127.0)[..., None]).view(data.shape)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("adaptive_splits", [False, True])
+@torch.inference_mode()
+def test_sparse_attn_decode_reduce_mxfp8_epilogue(adaptive_splits: bool) -> None:
+    """QUANT_OUT must equal MXFP8-quantizing the rotated fp32 reduce output.
+
+    Checked bit for bit against ``_mxfp8_e4m3_quantize_torch``, the reference
+    the ROCm MXFP8 linear kernels are held to, so wo_a sees exactly what a
+    standalone quant of the reduce output would have given it.
+    """
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+
+    part_m, part_l, part_acc, positions, cos_sin_cache = _random_reduce_inputs(
+        6, 4, 8, 64, seed=11
+    )
+    rotated_fp32 = _launch_sparse_decode_reduce(
+        part_m,
+        part_l,
+        part_acc,
+        adaptive_splits,
+        positions,
+        cos_sin_cache,
+        out_dtype=torch.float32,
+    )
+    expected_data, expected_scale = _mxfp8_e4m3_quantize_torch(
+        rotated_fp32.view(rotated_fp32.shape[0], -1)
+    )
+    data, scale = _launch_sparse_decode_reduce_mxfp8(
+        part_m, part_l, part_acc, adaptive_splits, positions, cos_sin_cache
+    )
+
+    assert data.dtype == torch.float8_e4m3fn and scale.dtype == torch.uint8
+    assert torch.equal(scale, expected_scale)
+    assert torch.equal(data.view(torch.uint8), expected_data.view(torch.uint8))
+    assert scale.unique().numel() > 4
+
+
+@requires_gfx950
+@pytest.mark.parametrize("num_tokens", [1, 7, 33])
+@torch.inference_mode()
+def test_inverse_rope_mxfp8_rows_matches_reference(num_tokens: int) -> None:
+    """The prefill rotate+quant pass must write what the reduce epilogue writes.
+
+    Both have to agree with inverse-RoPE-then-MXFP8 in fp32, since one wo_a
+    GEMM consumes decode and prefill rows side by side.
+    """
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_inverse_rope_mxfp8_rows,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(5)
+    num_heads, max_pos = 4, 128
+    o = torch.randn(num_tokens, num_heads, HEAD_DIM, device=device).to(torch.bfloat16)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+    angle = torch.randn(max_pos, ROPE_HEAD_DIM // 2, device=device)
+    cos_sin_cache = torch.cat((angle.cos(), angle.sin()), dim=-1).contiguous()
+
+    ref = o.float().clone()
+    cos = cos_sin_cache[positions, : ROPE_HEAD_DIM // 2][:, None, :]
+    sin = cos_sin_cache[positions, ROPE_HEAD_DIM // 2 :][:, None, :]
+    even = o[..., NOPE_HEAD_DIM::2].float()
+    odd = o[..., NOPE_HEAD_DIM + 1 :: 2].float()
+    ref[..., NOPE_HEAD_DIM::2] = even * cos + odd * sin
+    ref[..., NOPE_HEAD_DIM + 1 :: 2] = odd * cos - even * sin
+    _, expected_scale = _mxfp8_e4m3_quantize_torch(ref.view(num_tokens, -1))
+
+    data = torch.empty(
+        num_tokens, num_heads * HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
+    scale = torch.empty(
+        num_tokens, num_heads * HEAD_DIM // 32, dtype=torch.uint8, device=device
+    )
+    rocm_inverse_rope_mxfp8_rows(
+        o, positions, cos_sin_cache, ROPE_HEAD_DIM, data, scale
+    )
+
+    assert torch.equal(scale, expected_scale)
+    # Half an e4m3 step at the top of each block's range.
+    bound = 16.0 * torch.exp2(expected_scale.float() - 127.0).repeat_interleave(32, -1)
+    err = (_mxfp8_dequant(data, scale) - ref.view(num_tokens, -1)).abs()
+    assert bool((err <= bound).all())
+
+
+def _random_mxfp8(
+    rows: int, cols: int, device: torch.device
+) -> tuple[torch.Tensor, ...]:
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+
+    return _mxfp8_e4m3_quantize_torch(torch.randn(rows, cols, device=device))
+
+
+class _FakeMxfp8WoA(torch.nn.Module):
+    """wo_a as the ROCm MXFP8 linear leaves it: e4m3 weight, per-row E8M0."""
+
+    def __init__(self, weight: torch.Tensor, weight_scale: torch.Tensor) -> None:
+        super().__init__()
+        self.weight = weight
+        self.weight_scale = weight_scale
+
+
+@requires_gfx950
+@pytest.mark.parametrize(
+    "num_tokens, n_groups",
+    # Covers every tile tier of _mxfp8_wo_a_bmm_config, plus partial M tiles.
+    [
+        (1, 4),
+        (5, 2),
+        (20, 4),
+        (48, 4),
+        (77, 4),
+        (130, 4),
+        (300, 2),
+        (700, 4),
+        (1025, 4),
+        (1100, 8),
+    ],
+)
+@torch.inference_mode()
+def test_rocm_mxfp8_wo_a_bmm(num_tokens: int, n_groups: int) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_mxfp8_wo_a_bmm
+
+    device = torch.device("cuda")
+    torch.manual_seed(3)
+    o_lora_rank, group_dim = 128, 2048
+    a, a_scale = _random_mxfp8(num_tokens, n_groups * group_dim, device)
+    w, w_scale = _random_mxfp8(n_groups * o_lora_rank, group_dim, device)
+
+    out = rocm_mxfp8_wo_a_bmm(
+        a, a_scale, _FakeMxfp8WoA(w, w_scale), n_groups, o_lora_rank
+    )
+
+    expected = torch.einsum(
+        "tgd,grd->tgr",
+        _mxfp8_dequant(a, a_scale).view(num_tokens, n_groups, group_dim),
+        _mxfp8_dequant(w, w_scale).view(n_groups, o_lora_rank, group_dim),
+    ).reshape(num_tokens, -1)
+    assert out.shape == (num_tokens, n_groups * o_lora_rank)
+    assert out.dtype == torch.bfloat16
+    torch.testing.assert_close(out.float(), expected, atol=5e-2, rtol=1e-2)
+
+
+@requires_gfx950
+def test_mxfp8_wo_a_bmm_supported_checks_loaded_layout() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import mxfp8_wo_a_bmm_supported
+
+    device = torch.device("cuda")
+    n_groups, o_lora_rank, group_dim = 2, 128, 4096
+    w, w_scale = _random_mxfp8(n_groups * o_lora_rank, group_dim, device)
+    assert mxfp8_wo_a_bmm_supported(
+        _FakeMxfp8WoA(w, w_scale), n_groups, o_lora_rank, group_dim
+    )
+    # A weight an emulated kernel already dequantized.
+    assert not mxfp8_wo_a_bmm_supported(
+        _FakeMxfp8WoA(w.to(torch.bfloat16), w_scale), n_groups, o_lora_rank, group_dim
+    )
+    # Checkpoint-style 32x32 block scales rather than the per-row expansion.
+    assert not mxfp8_wo_a_bmm_supported(
+        _FakeMxfp8WoA(w, w_scale[::32].contiguous()), n_groups, o_lora_rank, group_dim
+    )
+    assert not mxfp8_wo_a_bmm_supported(_FakeWoA(w), n_groups, o_lora_rank, group_dim)
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_decode_mxfp8_wo_a_matches_bf16_path() -> None:
+    """Decode -> wo_a through the MXFP8 path against today's bf16 path.
+
+    Runs the real split-K decode kernels both ways on identical inputs: bf16
+    output + inverse RoPE + bf16 einsum, and the MXFP8 epilogue + grouped FP8
+    GEMM. The FP8 result must match the einsum of its own dequantized
+    activations tightly (layout / group mapping) and the bf16 path to within
+    the MXFP8 activation error.
+    """
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_triton,
+        rocm_mxfp8_wo_a_bmm,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(9)
+    block_size, num_queries, num_heads, n_groups, o_lora_rank = 4, 5, 16, 2, 64
+    group_dim = num_heads * HEAD_DIM // n_groups
+    q = torch.randn(num_queries, num_heads, HEAD_DIM, device=device).to(torch.bfloat16)
+    kv = torch.randn(40, HEAD_DIM, device=device).to(torch.bfloat16)
+    cache = _pack_fp8_ds_mla_cache(
+        kv, block_size, use_fnuz=current_platform.is_fp8_fnuz()
+    )
+    lens = torch.tensor([3, 17, 40, 9, 26], dtype=torch.int32, device=device)
+    indptr = torch.zeros(num_queries + 1, dtype=torch.int32, device=device)
+    torch.cumsum(lens, 0, out=indptr[1:])
+    indices = torch.cat(
+        [torch.randperm(40, device=device)[:n] for n in lens.tolist()]
+    ).to(torch.int32)
+    positions = torch.randint(0, 64, (num_queries,), dtype=torch.int64, device=device)
+    angle = torch.randn(64, ROPE_HEAD_DIM // 2, device=device)
+    cos_sin_cache = torch.cat((angle.cos(), angle.sin()), dim=-1).contiguous()
+    attn_sink = torch.randn(num_heads, device=device)
+    w, w_scale = _random_mxfp8(n_groups * o_lora_rank, group_dim, device)
+    w_ref = _mxfp8_dequant(w, w_scale).view(n_groups, o_lora_rank, group_dim)
+    common = dict(
+        q=q,
+        main_cache=cache,
+        main_indices=indices,
+        main_indptr=indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        inv_rope_positions=positions,
+        inv_rope_cos_sin_cache=cos_sin_cache,
+    )
+
+    bf16_out = _rocm_sparse_attn_decode_ragged_triton(**common)
+    z_bf16 = torch.einsum(
+        "tgd,grd->tgr",
+        bf16_out.view(num_queries, n_groups, group_dim),
+        w_ref.to(torch.bfloat16),
+    ).reshape(num_queries, -1)
+
+    data = torch.empty(
+        num_queries, num_heads * HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
+    scale = torch.empty(
+        num_queries, num_heads * HEAD_DIM // 32, dtype=torch.uint8, device=device
+    )
+    _rocm_sparse_attn_decode_ragged_triton(**common, out_mxfp8=(data, scale))
+    z_fp8 = rocm_mxfp8_wo_a_bmm(
+        data, scale, _FakeMxfp8WoA(w, w_scale), n_groups, o_lora_rank
+    )
+
+    z_own = torch.einsum(
+        "tgd,grd->tgr",
+        _mxfp8_dequant(data, scale).view(num_queries, n_groups, group_dim),
+        w_ref,
+    ).reshape(num_queries, -1)
+    torch.testing.assert_close(z_fp8.float(), z_own, atol=2e-2, rtol=1e-2)
+    rel = (z_fp8.float() - z_bf16.float()).norm() / z_bf16.float().norm()
+    assert rel < 4e-2, f"MXFP8 wo_a drifted {rel:.3e} from the bf16 path"
 
 
 @requires_gfx950
