@@ -1426,6 +1426,81 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
         return _replacement
 
 
+class AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern(
+    BasePattern, VllmPatternReplacement
+):
+    """Fuse ``all_reduce -> fused_add_rms_norm -> per-token FP8 quant``.
+
+    The per-token analogue of
+    ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern``. Per-group scales
+    only apply to models whose linear weights are FP8 block-scaled; models
+    that quantise activations per token (Kimi-K3, for example, whose experts
+    are MXFP4) fall through the per-group pattern, so their post-attention and
+    post-MLP all_reduces stay unfused and the trailing quant launches as a
+    separate kernel.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.FUSED_AR_RMS_QUANT_OP = (
+            rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_op()
+        )
+        self.quant_dtype = current_platform.fp8_dtype()
+        self.quant_matcher = MatcherQuantFP8(
+            QuantKey(
+                dtype=self.quant_dtype,
+                scale=ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN),
+                symmetric=True,
+            ),
+            match_rocm_aiter=True,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # residual, input, weight
+        return [self.empty(5, 16), self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            residual: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
+            quant, scale = self.quant_matcher(rms)
+            return quant, scale, residual_out
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            residual: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result = self.FUSED_AR_RMS_QUANT_OP(
+                input_=input,
+                residual=residual,
+                weight=weight.to(input.dtype),
+                epsilon=self.epsilon,
+            )
+            # quant_out, residual_out, scale_out
+            return result[0], result[2], result[1]
+
+        return _replacement
+
+
 class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     BasePattern, VllmPatternReplacement
 ):
@@ -1602,6 +1677,17 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 "FP8 quant fusion."
             )
 
+        # Per-token is the granularity used by models whose linear weights are
+        # not FP8 block-scaled, so they never match the per-group pattern.
+        supports_per_token_quant = ca_comm.supports_per_token_quant
+        if not supports_per_token_quant:
+            logger.warning_once(
+                "AITER AR+RMS+per-token-FP8-quant fusion disabled: this aiter "
+                "build's 'fused_ar_rms' does not accept "
+                "'post_per_token_quant'. The trailing per-token quant will "
+                "launch as a separate kernel."
+            )
+
         for epsilon in [1e-5, 1e-6]:
             # Quant-fused variants must register first so the pattern matcher
             # tries them before the AR+RMS-only variants. Otherwise the
@@ -1626,6 +1712,15 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 )
                 self.register(
                     AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                    )
+                )
+
+            if supports_per_token_quant:
+                self.register(
+                    AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern(
                         epsilon,
                         self.model_dtype,
                         self.device,

@@ -1139,6 +1139,53 @@ def _rocm_aiter_fused_allreduce_rmsnorm_fake(
     return torch.empty_like(input_), torch.empty_like(residual)
 
 
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused AllReduce + RMSNorm + per-token FP8 quant.
+
+    Per-token is the scale granularity used by models whose linear weights are
+    not FP8 block-scaled, so the per-group launcher does not apply to them.
+    """
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+    ca = aiter_ar.aiter_ca
+
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
+
+    result = ca.fused_ar_rms(
+        input_,
+        residual,
+        w=weight,
+        eps=epsilon,
+        registered=torch.cuda.is_current_stream_capturing(),
+        use_1stage=use_1stage,
+        post_per_token_quant=True,
+    )
+    assert result is not None
+    # quant_out, residual_out, scale_out
+    return result[0], result[1], result[2]
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    quant_out = torch.empty(input_.shape, dtype=FP8_DTYPE, device=input_.device)
+    residual_out = torch.empty_like(residual)
+    scale_out = torch.empty(
+        input_.shape[:-1] + (1,),
+        dtype=torch.float32,
+        device=input_.device,
+    )
+    return quant_out, residual_out, scale_out
+
+
 def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
     input_: torch.Tensor,
     residual: torch.Tensor,
@@ -2703,6 +2750,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_rmsnorm_quant",
+                op_func=_rocm_aiter_fused_allreduce_rmsnorm_quant_impl,
+                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_fused_allreduce_rmsnorm_quant_per_group",
                 op_func=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl),
                 fake_impl=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake),
@@ -2781,6 +2834,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_allreduce_rmsnorm_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm.default
+
+    @staticmethod
+    def get_fused_allreduce_rmsnorm_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant.default
 
     @staticmethod
     def get_fused_allreduce_rmsnorm_quant_per_group_op() -> OpOverload:

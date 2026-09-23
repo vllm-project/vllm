@@ -383,6 +383,53 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
         ]
 
 
+class TestAiterAllReduceRMSNormPerTokenQuantFP8Model(torch.nn.Module):
+    """Exercises the ROCm AITER AR+RMS+per-token-FP8-quant pattern.
+
+    ``all_reduce -> fused_add_rms_norm -> per_token_fp8_quant``
+    -> ``AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern``
+
+    Per-token is the granularity used by models whose linear weights are not
+    FP8 block-scaled, so they never match the per-group patterns. The result is
+    dequantized back to bf16 rather than fed to a real FP8 GEMM, matching the
+    per-group sibling above.
+    """
+
+    def __init__(
+        self,
+        hidden_size=128,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.dtype = dtype
+        self.norm = RMSNorm(hidden_size, eps)
+        self.w = torch.rand(hidden_size, hidden_size, dtype=dtype)
+
+    def forward(self, hidden_states):
+        z = torch.relu(hidden_states)
+        x = tensor_model_parallel_all_reduce(torch.mm(z, self.w))
+        rms, resid = self.norm(x, z.clone())
+        q, s = torch.ops.vllm.rocm_aiter_per_token_quant.default(
+            rms, current_platform.fp8_dtype()
+        )
+        # Per-token scale broadcasts over the hidden dim on its own.
+        y = q.to(self.dtype) * s.to(self.dtype)
+        return y, resid
+
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm.all_reduce.default,
+            torch.ops.vllm.rocm_aiter_per_token_quant.default,
+        ]
+
+    def ops_in_model_after(self):
+        return [rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_op()]
+
+
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     def __init__(
         self, hidden_size=16, token_num=16, eps=1e-6, dtype: torch.dtype = torch.float16
@@ -731,6 +778,63 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
                 num_processes,
                 master_port,
                 TestAiterAllReduceRMSNormGroupQuantFP8Model,
+                batch_size,
+                seq_len,
+                hidden_size,
+                dtype,
+                enable_rms_norm_custom_op,
+                monkeypatch,
+            ),
+            nprocs=nprocs,
+        )
+
+    run_torch_spawn(rocm_aiter_group_quant_fusion_pass_on_test_model, num_processes)
+
+
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [8])
+@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm AITER AR+RMS+per-token-FP8-quant fusion is ROCm-only",
+)
+@pytest.mark.skipif(not IS_AITER_FOUND, reason="aiter is not found")
+def test_rocm_aiter_all_reduce_rmsnorm_per_token_quant_fp8_fusion_pass_replace(
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    enable_rms_norm_custom_op: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Per-token sibling of the per-group AR+RMS+quant fusion test.
+
+    Validates ``AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern``: without
+    it, ``all_reduce -> fused_add_rms_norm -> per-token FP8 quant`` fuses only
+    its AR+RMS half and leaves the quant as a standalone kernel.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+    if not AiterCustomAllreduce.build_supports_per_token_quant():
+        pytest.skip(
+            "this aiter build's 'fused_ar_rms' does not accept "
+            "'post_per_token_quant'; the pattern isn't registered."
+        )
+
+    num_processes = 2
+
+    def run_torch_spawn(fn, nprocs):
+        master_port = get_open_port()
+        torch.multiprocessing.spawn(
+            fn,
+            args=(
+                num_processes,
+                master_port,
+                TestAiterAllReduceRMSNormPerTokenQuantFP8Model,
                 batch_size,
                 seq_len,
                 hidden_size,

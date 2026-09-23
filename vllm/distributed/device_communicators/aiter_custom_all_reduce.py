@@ -139,3 +139,30 @@ class AiterCustomAllreduce:
     @property
     def supports_per_group_quant(self) -> bool:
         return self.build_supports_per_group_quant()
+
+    @staticmethod
+    def build_supports_per_token_quant() -> bool:
+        """True if the running AITER build's fused AR+RMS launcher can emit a
+        per-token FP8 quant epilogue.
+
+        Unlike the per-group kernel this is a keyword on ``fused_ar_rms``
+        rather than a separate method, so the probe inspects the signature.
+        """
+        import inspect
+
+        from aiter.dist.device_communicators.custom_all_reduce import (
+            CustomAllreduce as _AiterCustomAllreduce,
+        )
+
+        fused_ar_rms = getattr(_AiterCustomAllreduce, "fused_ar_rms", None)
+        if fused_ar_rms is None:
+            return False
+        try:
+            params = inspect.signature(fused_ar_rms).parameters
+        except (TypeError, ValueError):
+            return False
+        return "post_per_token_quant" in params
+
+    @property
+    def supports_per_token_quant(self) -> bool:
+        return self.build_supports_per_token_quant()
