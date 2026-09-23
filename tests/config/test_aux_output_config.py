@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from vllm.config import AuxOutputConfig, VllmConfig
+from vllm.config.kv_transfer import KVRole, KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
 pytestmark = pytest.mark.cpu_test
@@ -19,6 +20,7 @@ def _config(
     dcp: int = 1,
     pcp: int = 1,
     connector: str | None = None,
+    kv_role: KVRole = "kv_both",
     runner_type: str = "generate",
     is_moe: bool = True,
     sliding_window: int | None = None,
@@ -51,9 +53,9 @@ def _config(
         kv_transfer_config=(
             None
             if connector is None
-            else SimpleNamespace(
-                is_kv_transfer_instance=True,
+            else KVTransferConfig(
                 kv_connector=connector,
+                kv_role=kv_role,
             )
         ),
     )
@@ -102,12 +104,48 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
         ({"pp": 2}, "pipeline parallelism"),
         ({"dcp": 2}, "context parallelism"),
         ({"pcp": 2}, "context parallelism"),
-        ({"connector": "MooncakeConnector"}, "incompatible with KV connectors"),
     ],
 )
 def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
     with pytest.raises(ValueError, match=error):
         VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
+
+
+@pytest.mark.parametrize(
+    "connector",
+    [
+        "NixlConnector",
+        "NixlPullConnector",
+        "NixlPushConnector",
+        "MoRIIOConnector",
+        "MooncakeConnector",
+        "MooncakeStoreConnector",
+        "OffloadingConnector",
+        "LMCacheConnectorV1",
+        "LMCacheMPConnector",
+        "SimpleCPUOffloadConnector",
+    ],
+)
+@pytest.mark.parametrize("kv_role", ["kv_both", "kv_producer", "kv_consumer"])
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("backend", ["shm", "mooncake"])
+def test_aux_output_does_not_restrict_kv_connector_configuration(
+    connector, kv_role, multi, backend
+):
+    config = _config(connector=connector, kv_role=kv_role)
+    config.aux_output_config.backend = backend
+    if multi:
+        config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role=kv_role,
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"},
+                    {"kv_connector": connector, "kv_role": kv_role},
+                ]
+            },
+        )
+    VllmConfig._verify_aux_output_compatibility(config)
 
 
 @pytest.mark.parametrize(
@@ -124,9 +162,3 @@ def test_aux_output_guards_are_inactive_when_capture_is_disabled():
     config.aux_output_config = AuxOutputConfig()
 
     config._verify_aux_output_compatibility()
-
-
-def test_mooncake_pd_requires_remote_aux_backend():
-    config = _config(connector="MooncakeConnector")
-    config.aux_output_config.backend = "mooncake"
-    VllmConfig._verify_aux_output_compatibility(config)
