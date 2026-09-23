@@ -129,19 +129,79 @@ PARTIALLY_PREQUANTIZED_MODEL_NAME = (
 )
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        None,
+        {"ignore": ["model.layers.0.self_attn.o_proj"]},
+        {
+            "linear": "fp8_per_block",
+            "ignore": ["model.layers.0.self_attn.o_proj"],
+        },
+    ],
+    ids=["defaults", "ignore", "linear-and-ignore"],
+)
 def test_legacy_fp8_online_quantization_uses_per_tensor_shorthand(
-    tmp_path, caplog, disable_log_dedup
+    tmp_path, caplog, disable_log_dedup, overrides
 ) -> None:
-    """Legacy FP8 online quantization uses the per-tensor shorthand."""
+    """The legacy alias preserves overrides and fills in per-tensor defaults."""
     _write_minimal_llama_config(tmp_path)
-    model_config = ModelConfig(model=str(tmp_path), quantization="fp8")
+    model_config = ModelConfig(
+        model=str(tmp_path), quantization="fp8", quantization_config=overrides
+    )
 
     result = weight_utils.get_quant_config(model_config, LoadConfig())
 
     assert isinstance(result, OnlineQuantizationConfig)
-    assert result.args == resolve_quantization_config("fp8_per_tensor", None)
+    assert result.args == resolve_quantization_config("fp8_per_tensor", overrides)
     assert "--quantization fp8 is deprecated for online quantization" in caplog.text
     assert "--quantization fp8_per_tensor instead" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "shorthand,method_cls",
+    [
+        ("fp8_per_tensor", Fp8PerTensorOnlineLinearMethod),
+        ("fp8_per_block", Fp8PerBlockOnlineLinearMethod),
+        ("fp8_per_channel", Fp8PtpcOnlineLinearMethod),
+    ],
+)
+def test_qianfan_online_fp8_keeps_vision_layers_unquantized(
+    shorthand, method_cls
+) -> None:
+    """Model exclusions preserve the language backbone and shared defaults."""
+    from vllm.model_executor.models.qianfan_ocr import (
+        QianfanOCRForConditionalGeneration,
+    )
+
+    args = resolve_quantization_config(shorthand, None)
+    assert args is not None
+    config = OnlineQuantizationConfig(args)
+    other_config = OnlineQuantizationConfig(args)
+    model = QianfanOCRForConditionalGeneration.__new__(
+        QianfanOCRForConditionalGeneration
+    )
+    model._patch_quant_config(
+        SimpleNamespace(vision_config=SimpleNamespace(num_hidden_layers=2)),
+        config,
+    )
+
+    layer = Mock(spec=LinearBase)
+    for prefix in (
+        "vision_model.encoder.layers.0.attn.qkv",
+        "vision_model.encoder.layers.1.mlp.fc2",
+        "language_model.lm_head",
+        "mlp1.1",
+        "mlp1.3",
+    ):
+        assert config.resolve_quant_method_cls(layer, prefix) is None
+
+    resolved = config.resolve_quant_method_cls(
+        layer, "language_model.model.layers.0.self_attn.qkv_proj"
+    )
+    assert resolved is not None and resolved[-1] is method_cls
+    assert other_config.ignored_layers == []
+    assert args.ignore == []
 
 
 def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(

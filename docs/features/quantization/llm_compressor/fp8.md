@@ -143,14 +143,14 @@ If you encounter any issues or have feature requests, please open an issue on th
 
 ## Online Dynamic Quantization
 
-Dynamic quantization of an original precision BF16/FP16 model to FP8 can be achieved with vLLM without any calibration data required. You can enable the feature by specifying `--quantization="fp8"` in the command line or setting `quantization="fp8"` in the LLM constructor.
+Dynamic quantization of an original precision BF16/FP16 model to FP8 can be achieved with vLLM without any calibration data required. You can enable the feature by specifying `--quantization="fp8_per_tensor"` in the command line or setting `quantization="fp8_per_tensor"` in the LLM constructor.
 
 In this mode, all Linear modules (except for the final `lm_head`) have their weights quantized down to FP8_E4M3 precision with a per-tensor scale. Activations have their minimum and maximum values calculated during each forward pass to provide a dynamic per-tensor scale for high accuracy. As a result, latency improvements are limited in this mode.
 
 ```python
 from vllm import LLM
 
-llm = LLM("facebook/opt-125m", quantization="fp8")
+llm = LLM("facebook/opt-125m", quantization="fp8_per_tensor")
 # INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
 result = llm.generate("Hello, my name is")
 print(result[0].outputs[0].text)

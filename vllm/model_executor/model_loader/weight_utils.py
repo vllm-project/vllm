@@ -192,7 +192,11 @@ def get_quant_config(
     if model_config.quantization is None:
         raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
-    from vllm.config.quantization import _ONLINE_SHORTHANDS, QuantizationConfigArgs
+    from vllm.config.quantization import (
+        _ONLINE_SHORTHANDS,
+        QuantizationConfigArgs,
+        resolve_quantization_config,
+    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -337,7 +341,9 @@ def get_quant_config(
                 "--quantization fp8 is deprecated for online quantization; "
                 "use --quantization fp8_per_tensor instead."
             )
-            return OnlineQuantizationConfig(args=_ONLINE_SHORTHANDS["fp8_per_tensor"])
+            fp8_args = resolve_quantization_config("fp8_per_tensor", online_args)
+            assert fp8_args is not None
+            return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
             args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
             assert isinstance(args, QuantizationConfigArgs)
