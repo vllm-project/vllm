@@ -248,7 +248,7 @@ def _copy_mamba_state_block(
     # Widen block ids to int64 before they reach `block_id * state_block_stride`
     # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
     # and Triton would otherwise do the multiply in int32 and wrap.
-    # FIX I: the block-table columns below are derived from per-request
+    # The block-table columns below are derived from per-request
     # accepted-token counts. A wrong count walks the read past this request's
     # row; the loaded int32 is then multiplied by state_block_stride and
     # dereferenced, so an out-of-range column becomes a wild (and possibly
