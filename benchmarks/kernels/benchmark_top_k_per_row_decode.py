@@ -2,28 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the ROCm sparse-indexer decode top-k in isolation.
 
-The end-to-end serving sweep cannot resolve this kernel, so measure it directly.
-Widths are in *logit columns*: for a kpool indexer such as GLM-5.3-Flash
-(index_topk=2048, index_kpool=4) a column is a pool, so a 1M context gives
---capacity 262144 and an 8K prompt gives --lens 2048, with k = 2048 // 4 = 512.
-For a token-granular indexer such as DeepSeek-V4-Flash a column is a token.
-
-    .venv/bin/python benchmarks/kernels/benchmark_top_k_per_row_decode.py \
-        --rows 4 16 32 --lens 2048 8192 16384 65536 --capacity 262144
-
-Run the same command on the base and candidate builds to compare.
-
-The defaults cover low-concurrency long-context decode (256K-512K tokens at 1-8
-concurrent requests), which is the band where both kernels fall back to a
-per-row serial phase and neither has been calibrated.
-
-Both kernels are radix selects, so their cost depends on how tightly the logits
-cluster, not only on the shape: a narrow value distribution puts a large share of
-a row in the bin holding the threshold, and every refinement pass has to rescan
-it. Real indexer MQA scores are fp8-derived dot products over highly correlated
-neighbouring keys, so they are far more clustered than `torch.randn` and cost the
-in-tree kernel ~2.5x more. `--dist indexer` (the default) reproduces that; use
-`--dist randn` only to reproduce older well-spread numbers.
+Example usage:
+python3 benchmarks/kernels/benchmark_top_k_per_row_decode.py \
+    --rows 4 16 32 --lens 2048 8192 16384 65536 --capacity 262144
 """
 
 import argparse
