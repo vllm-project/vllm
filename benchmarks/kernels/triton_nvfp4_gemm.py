@@ -15,6 +15,7 @@ Data format (NVFP4):
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -179,7 +180,8 @@ def _triton_nvfp4_gemm_kernel(
 # Autotuning over this list reaches a geometric mean of 0.971 of the best config
 # per case, and at least 0.909 in every case. Small BLOCK_M entries serve
 # decode-sized M. Configs that do not fit a GPU's shared memory are pruned per
-# device by _prune_configs. Not yet swept on SM100 (B200).
+# device by _prune_configs. Not yet swept on SM100 (B200), where only the entries
+# with BLOCK_M >= 128 compile (see nvfp4_gemm_min_block_m).
 NVFP4_GEMM_CONFIGS = [
     triton.Config(
         {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_SIZE_M": 32},
@@ -254,12 +256,37 @@ def nvfp4_gemm_smem_bytes(bm: int, bn: int, bk: int, stages: int) -> int:
     return max(stages - 1, 1) * per_stage
 
 
+def nvfp4_gemm_min_block_m(device_index: int) -> int:
+    """Return the smallest BLOCK_M that this kernel compiles for on a GPU.
+
+    On SM100 (B200) with Triton 3.7.1, BLOCK_M of 16, 32 and 64 fail to compile
+    ("PassManager::run failed") for every BLOCK_N, BLOCK_K, num_warps and
+    num_stages tried, while 128 and 256 compile and match the reference. SM120
+    compiles BLOCK_M of 16 and up. Other architectures are not measured and get
+    the SM120 bound.
+
+    Args:
+        device_index: CUDA device index of the output tensor.
+
+    Returns:
+        128 on compute capability 10.x, otherwise 16.
+
+    """
+    capability = current_platform.get_device_capability(device_index)
+    if capability is not None and capability.major == 10:
+        return 128
+    return 16
+
+
 def _prune_configs(configs, named_args, **kwargs):
     """Drop configs that cannot fit this GPU or that are far larger than M/N.
 
-    Keeping BLOCK_M no larger than the smallest power of two >= M (at least
-    16) avoids tuning 128-row tiles for M=1, and likewise for N. If nothing is
-    left, the smallest config is kept so a launch always has a candidate.
+    Keeping BLOCK_M no larger than the smallest power of two >= M (at least the
+    GPU's minimum BLOCK_M) avoids tuning 128-row tiles for M=1 where smaller
+    tiles compile, and likewise for N. Configs below the GPU's minimum BLOCK_M
+    are dropped, since they do not compile there. If nothing is left, the
+    config with the smallest tile that meets the minimum is kept so a launch
+    always has a candidate.
     """
     m, n = named_args["M"], named_args["N"]
     # Shared memory of the GPU the output tensor lives on.
@@ -267,7 +294,8 @@ def _prune_configs(configs, named_args, **kwargs):
         named_args["c_ptr"].device.index
     )
     max_smem = props["max_shared_mem"]
-    m_cap = max(16, triton.next_power_of_2(m))
+    min_bm = nvfp4_gemm_min_block_m(named_args["c_ptr"].device.index)
+    m_cap = max(min_bm, triton.next_power_of_2(m))
     n_cap = max(16, triton.next_power_of_2(n))
     kept = []
     for cfg in configs:
@@ -278,18 +306,24 @@ def _prune_configs(configs, named_args, **kwargs):
             )
             <= max_smem
         )
-        if fits and kw["BLOCK_M"] <= m_cap and kw["BLOCK_N"] <= n_cap:
+        if fits and min_bm <= kw["BLOCK_M"] <= m_cap and kw["BLOCK_N"] <= n_cap:
             kept.append(cfg)
     if kept:
         return kept
+    compilable = [c for c in configs if c.kwargs["BLOCK_M"] >= min_bm] or configs
+    # Smallest tile first (M, then N), then the least shared memory.
     return [
         min(
-            configs,
-            key=lambda c: nvfp4_gemm_smem_bytes(
+            compilable,
+            key=lambda c: (
                 c.kwargs["BLOCK_M"],
                 c.kwargs["BLOCK_N"],
-                c.kwargs["BLOCK_K"],
-                c.num_stages,
+                nvfp4_gemm_smem_bytes(
+                    c.kwargs["BLOCK_M"],
+                    c.kwargs["BLOCK_N"],
+                    c.kwargs["BLOCK_K"],
+                    c.num_stages,
+                ),
             ),
         )
     ]
@@ -415,6 +449,12 @@ def triton_scaled_fp4_mm(
         assert config["BLOCK_K"] % (2 * VEC_SIZE) == 0, (
             f"BLOCK_K={config['BLOCK_K']} must be a multiple of {2 * VEC_SIZE}"
         )
+        min_bm = nvfp4_gemm_min_block_m(a.device.index)
+        if config["BLOCK_M"] < min_bm:
+            raise ValueError(
+                f"BLOCK_M={config['BLOCK_M']} does not compile on this GPU; "
+                f"use BLOCK_M >= {min_bm}"
+            )
         _nvfp4_gemm_kernel[grid](*args, VEC_SIZE=VEC_SIZE, **config)
 
     return c

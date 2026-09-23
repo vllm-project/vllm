@@ -499,9 +499,13 @@ def test_triton_nvfp4_gemm_every_config(
     device_index = torch.accelerator.current_device_index()
     max_smem = driver.utils.get_device_properties(device_index)["max_shared_mem"]
     out_of_resources = triton_nvfp4_module.triton.runtime.OutOfResources
+    min_bm = triton_nvfp4_module.nvfp4_gemm_min_block_m(device_index)
     ran = 0
     for cfg in triton_nvfp4_module.NVFP4_GEMM_CONFIGS:
         kw = cfg.kwargs
+        if kw["BLOCK_M"] < min_bm:
+            # Does not compile on this GPU; _prune_configs never offers it here.
+            continue
         smem = triton_nvfp4_module.nvfp4_gemm_smem_bytes(
             kw["BLOCK_M"], kw["BLOCK_N"], kw["BLOCK_K"], cfg.num_stages
         )
@@ -532,12 +536,13 @@ def test_triton_nvfp4_gemm_every_config(
 def test_triton_nvfp4_gemm_prune_keeps_a_config(
     triton_nvfp4_module: ModuleType, m: int, n: int
 ) -> None:
-    """Pruning leaves at least one config, and every kept config fits the GPU.
+    """Pruning leaves at least one config, and every kept config runs on the GPU.
 
     _prune_configs reads only M, N and c_ptr's device, so c can be empty.
     """
     mod = triton_nvfp4_module
     c = torch.empty(0, device=CUDA_DEVICES[0], dtype=torch.bfloat16)
+    min_bm = mod.nvfp4_gemm_min_block_m(c.device.index)
     kept = mod._prune_configs(mod.NVFP4_GEMM_CONFIGS, {"M": m, "N": n, "c_ptr": c})
     assert kept, "no config left after pruning"
     props = mod.triton.runtime.driver.active.utils.get_device_properties(c.device.index)
@@ -547,5 +552,34 @@ def test_triton_nvfp4_gemm_prune_keeps_a_config(
             kw["BLOCK_M"], kw["BLOCK_N"], kw["BLOCK_K"], cfg.num_stages
         )
         assert smem <= props["max_shared_mem"], f"kept config {cfg} does not fit"
+        assert kw["BLOCK_M"] >= min_bm, f"kept BLOCK_M={kw['BLOCK_M']} < {min_bm}"
         if m <= 16:
-            assert kw["BLOCK_M"] == 16, f"M={m} kept BLOCK_M={kw['BLOCK_M']}"
+            assert kw["BLOCK_M"] == min_bm, f"M={m} kept BLOCK_M={kw['BLOCK_M']}"
+
+
+@torch.inference_mode()
+def test_triton_nvfp4_gemm_rejects_small_block_m(
+    triton_nvfp4_module: ModuleType,
+) -> None:
+    """A fixed config below the GPU's minimum BLOCK_M raises a clear error.
+
+    On SM100 BLOCK_M < 128 does not compile; the wrapper says so instead of
+    surfacing a compiler failure. Skipped where BLOCK_M=16 compiles.
+    """
+    mod = triton_nvfp4_module
+    min_bm = mod.nvfp4_gemm_min_block_m(torch.accelerator.current_device_index())
+    if min_bm <= 16:
+        pytest.skip("BLOCK_M=16 compiles on this GPU")
+    dtype = torch.bfloat16
+    a, b = linear_nvfp4(16, 256, dtype), linear_nvfp4(128, 256, dtype)
+    alpha = 1.0 / (a.global_scale * b.global_scale)
+    config = {
+        "BLOCK_M": 16,
+        "BLOCK_N": 128,
+        "BLOCK_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 3,
+    }
+    with pytest.raises(ValueError, match="does not compile on this GPU"):
+        mod.triton_scaled_fp4_mm(a.fp4, b.fp4, a.sf, b.sf, alpha, dtype, config=config)
