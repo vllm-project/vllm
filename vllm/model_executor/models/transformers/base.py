@@ -493,10 +493,6 @@ class Base(
 
         orig_to_new_stacked: dict[str, tuple[str, ShardId]] = {}
 
-        # OlmoForCausalLM does not benefit from the swap; exclude it.
-        arch = self.config.architectures[0].lower()
-        swap_layernorm = "olmoforcausallm" not in arch
-
         def register_fusion(fuser: BaseFuser, prefix: str, module: nn.Module):
             """Register a fused layer's mappings just before it is built."""
             self.fusers.setdefault(prefix, []).append(fuser)
@@ -562,7 +558,7 @@ class Base(
                     new_module = replace_embedding_class(
                         child_module, self.quant_config, prefix=qual_name
                     )
-                elif isinstance(child_module, nn.LayerNorm) and swap_layernorm:
+                elif isinstance(child_module, nn.LayerNorm):
                     new_module = replace_layernorm_class(child_module)
                 elif child_module_fusers := fusers[child_module]:
                     for fuser in child_module_fusers:
