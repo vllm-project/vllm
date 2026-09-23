@@ -234,4 +234,176 @@ class PackDCPTopkCandidatesKernel(
         )
 
 
+# Stable top-k key layout (int64): bit 62 = valid | bits 30..61 =
+# order-transformed fp32 score | bits 0..29 = complemented candidate id, so
+# equal scores resolve to the LOWEST id — the dcp=1 selector's tie rule,
+# which matters because fp8-quantized indexer logits tie often. The id field
+# could address 2^30 slots, but ids ride the gathered buffer as fp32, exact
+# only to 2^24 (~16.7M slots): the transport, not the key, is the binding
+# limit. The float-ordering transform, -0.0 unification, and NaN demotion
+# follow the ATOM-ported MiniMax-M3 indexer top-k (#57909).
+_STABLE_KEY_ID_MASK = (1 << 30) - 1
+_STABLE_KEY_VALID = 1 << 62
+
+
+@triton.jit
+def _pack_stable_key(score, candidate_id, valid):
+    bits = score.to(tl.uint32, bitcast=True)
+    # -0.0 and 0.0 are one score with two bit patterns; give them one key.
+    bits = tl.where(bits == 0x80000000, 0, bits)
+    # fp32 compares like a sign-magnitude integer: flip the whole word for
+    # negatives and just the sign bit for positives.
+    ordered = bits ^ tl.where(bits >> 31 != 0, 0xFFFFFFFF, 0x80000000)
+    # NaN bitcasts above +inf and would win every selection; send it to the
+    # bottom. Testing bits keeps this in the integer domain.
+    ordered = tl.where((bits & 0x7FFFFFFF) > 0x7F800000, 0, ordered)
+    complemented = (_STABLE_KEY_ID_MASK - candidate_id).to(tl.int64)
+    key = _STABLE_KEY_VALID | (ordered.to(tl.int64) << 30) | complemented
+    return tl.where(valid, key, 0)
+
+
+class StableTopKFromGatheredCandidatesTritonKernel(
+    VllmTritonJitKernel["StableTopKFromGatheredCandidatesTritonKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_candidates: int
+        topk: int
+
+    @staticmethod
+    @triton.jit(
+        do_not_specialize=[
+            "gathered_stride0",
+            "gathered_stride1",
+            "gathered_stride2",
+            "out_stride0",
+        ]
+    )
+    def kernel(
+        gathered,
+        out,
+        gathered_stride0,
+        gathered_stride1,
+        gathered_stride2,
+        out_stride0,
+        NUM_CANDIDATES: tl.constexpr,
+        TOPK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        base = gathered + row * gathered_stride0
+
+        # Streaming top-k in TOPK-wide tiles: after tile i, `winners` holds
+        # the top-TOPK of tiles 0..i (anything dropped was already beaten by
+        # >= TOPK candidates and can never re-enter). NUM_CANDIDATES is
+        # dcp_world_size * TOPK by construction, so tiles divide evenly and
+        # padding lanes carry (-inf, -1) pairs that pack to key 0.
+        offs = tl.arange(0, TOPK)
+        score = tl.load(base + offs * gathered_stride1)
+        cid = tl.load(base + offs * gathered_stride1 + gathered_stride2).to(tl.int32)
+        winners = tl.topk(_pack_stable_key(score, cid, cid >= 0), TOPK)
+
+        for start in tl.range(TOPK, NUM_CANDIDATES, TOPK):
+            offs = start + tl.arange(0, TOPK)
+            score = tl.load(base + offs * gathered_stride1)
+            cid = tl.load(base + offs * gathered_stride1 + gathered_stride2).to(
+                tl.int32
+            )
+            tile = tl.topk(_pack_stable_key(score, cid, cid >= 0), TOPK)
+            winners = tl.topk(tl.cat(winners, tile, can_reorder=True), TOPK)
+
+        selected_valid = winners >= _STABLE_KEY_VALID
+        ids = (_STABLE_KEY_ID_MASK - (winners & _STABLE_KEY_ID_MASK)).to(tl.int32)
+        tl.store(
+            out + row * out_stride0 + tl.arange(0, TOPK),
+            tl.where(selected_valid, ids, -1),
+        )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_candidates: int,
+        topk: int,
+    ) -> CompileKey:
+        return self.CompileKey(num_candidates=num_candidates, topk=topk)
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        if dcp_world_size <= 1:
+            return []
+        topk = vllm_config.model_config.hf_config.index_topk
+        if topk <= 0:
+            return []
+        return self._trace_dispatch(self.dispatch)(
+            num_candidates=dcp_world_size * topk,
+            topk=topk,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            gathered=TritonWarmupTensor(torch.float32),
+            out=TritonWarmupTensor(torch.int32),
+            gathered_stride0=1,
+            gathered_stride1=1,
+            gathered_stride2=1,
+            out_stride0=1,
+            num_candidates=compile_key.num_candidates,
+            topk=compile_key.topk,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        gathered: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        gathered_stride0: int,
+        gathered_stride1: int,
+        gathered_stride2: int,
+        out_stride0: int,
+        num_candidates: int,
+        topk: int,
+    ) -> LaunchSpec:
+        grid = (gathered.shape[0],)
+        return grid, dict(
+            NUM_CANDIDATES=num_candidates,
+            TOPK=topk,
+            # Bench knob (Phase E): retune for gfx950 wave64 rather than
+            # inheriting a CUDA-shaped default.
+            num_warps=8,
+        )
+
+
+def stable_topk_from_gathered_candidates_triton(
+    gathered: torch.Tensor,
+    topk: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Select the global top-k from all-gathered (score, global_id) pairs.
+
+    Portable Triton twin of ``stable_topk_from_gathered_candidates_cutedsl``:
+    same contract (score descending, ties to the lowest id, -1 padding),
+    same signature, platform-agnostic.
+    """
+    if out is None:
+        out = torch.empty(
+            (gathered.shape[0], topk),
+            dtype=torch.int32,
+            device=gathered.device,
+        )
+    _STABLE_TOPK_FROM_GATHERED_CANDIDATES_TRITON_KERNEL(
+        gathered,
+        out,
+        gathered_stride0=gathered.stride(0),
+        gathered_stride1=gathered.stride(1),
+        gathered_stride2=gathered.stride(2),
+        out_stride0=out.stride(0),
+        num_candidates=gathered.shape[1],
+        topk=topk,
+    )
+    return out
+
+
 _PACK_DCP_TOPK_CANDIDATES_KERNEL = PackDCPTopkCandidatesKernel()
+_STABLE_TOPK_FROM_GATHERED_CANDIDATES_TRITON_KERNEL = (
+    StableTopKFromGatheredCandidatesTritonKernel()
+)
