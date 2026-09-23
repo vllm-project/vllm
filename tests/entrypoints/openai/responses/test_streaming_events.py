@@ -14,8 +14,11 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
     _StateType,
     emit_browser_tool_events,
+    emit_content_delta_events,
+    emit_previous_item_done_events,
     split_delta,
 )
+from vllm.parser.harmony import Segment
 
 
 def test_browser_find_uses_responses_action_type():
@@ -151,3 +154,29 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+class TestHarmonyUnknownChannel:
+    """Segments on a channel outside analysis/commentary/final are dropped.
+
+    This pins the existing streaming behaviour so it stays in sync with the
+    completed-message parser (``harmony_to_response_output``), which must
+    also drop such messages rather than raise ``ValueError: Unknown channel``.
+    """
+
+    def test_content_delta_on_unknown_channel_emits_nothing(self):
+        segment = Segment(channel="comment", recipient=None, delta="stray text")
+
+        events = emit_content_delta_events(segment, StreamingState())
+
+        assert events == []
+
+    def test_previous_item_done_on_unknown_channel_emits_nothing(self):
+        previous = Message.from_role_and_content(
+            Role.ASSISTANT, "stray text"
+        ).with_channel("comment")
+        state = StreamingState(sent_output_item_added=True)
+
+        events = emit_previous_item_done_events(previous, state)
+
+        assert events == []

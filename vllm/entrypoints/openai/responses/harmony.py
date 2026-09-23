@@ -433,7 +433,17 @@ def _parse_message_no_recipient(
         # See: https://cookbook.openai.com/articles/openai-harmony
         return [_parse_final_message(message, incomplete=incomplete)]
 
-    raise ValueError(f"Unknown channel: {message.channel}")
+    # gpt-oss occasionally emits a channel outside {analysis, commentary,
+    # final} (e.g. "comment"). Drop it, as the streaming dispatchers and the
+    # chat parser (_SegmentType.IGNORE) already do; raising here aborts the
+    # whole /v1/responses request and, when streaming, the SSE connection.
+    logger.warning_once(
+        "Dropping Harmony message on unrecognized channel %r; only the "
+        "analysis, commentary and final channels are rendered as Responses "
+        "API output items.",
+        message.channel,
+    )
+    return []
 
 
 # ---------------------------------------------------------------------------
