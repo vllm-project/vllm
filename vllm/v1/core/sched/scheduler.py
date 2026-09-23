@@ -2334,6 +2334,20 @@ class Scheduler(SchedulerInterface):
         if not request.resumable:
             return True
 
+        # Any remaining work belongs to the completed turn. Retire it without
+        # allowing it to affect this turn.
+        # The current result has already consumed its own output placeholder.
+        # Roll back the optimistic frontier over the remaining old-turn
+        # placeholders before clearing them. This is the materialized frontier
+        # that the next turn and worker must use.
+        safe_frontier = request.num_computed_tokens - request.num_output_placeholders
+        assert safe_frontier >= 0
+        request.num_computed_tokens = safe_frontier
+        request.spec_token_ids = []
+        request.drop_stale_output = True
+        request.num_stale_output_tokens = request.num_in_flight_tokens
+        request.num_output_placeholders = 0
+
         if request.streaming_queue:
             update = request.streaming_queue.popleft()
             if update is None:
