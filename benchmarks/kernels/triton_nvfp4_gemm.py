@@ -190,25 +190,36 @@ NVFP4_GEMM_CONFIGS = [
     _nvfp4_config(64, 128, 128, 4, 4),
     _nvfp4_config(32, 128, 128, 4, 4),
     _nvfp4_config(16, 128, 128, 4, 4),
+    # Narrow N tiles: at M <= 16 only BLOCK_M=16 survives pruning, and with
+    # BLOCK_N=128 an N=4096 GEMM launches 32 programs on a 148 to 170 SM GPU.
+    _nvfp4_config(16, 64, 128, 4, 4),
+    _nvfp4_config(16, 32, 256, 4, 4),
 ]
 
 
 def nvfp4_gemm_smem_bytes(bm: int, bn: int, bk: int, stages: int) -> int:
     """Estimate the shared memory one config needs for its pipelined loads.
 
+    Triton's pipeliner gives each pipelined load num_stages - 1 buffers. This
+    is an estimate, not the compiler's count: it leaves out epilogue
+    layout-conversion scratch. It only skips configs that clearly cannot fit;
+    a config the compiler finds too large raises OutOfResources, which the
+    autotuner scores as inf.
+
     Args:
         bm: BLOCK_M.
         bn: BLOCK_N.
         bk: BLOCK_K, in unpacked FP4 elements.
-        stages: num_stages, the number of K steps loaded ahead.
+        stages: num_stages.
 
     Returns:
         Bytes of shared memory: packed A and B tiles (two FP4 values per
-        byte) plus one e4m3 scale per 16 values, times the number of stages.
+        byte) plus one e4m3 scale per 16 values, per buffer, times
+        max(num_stages - 1, 1).
 
     """
     per_stage = bm * bk // 2 + bn * bk // 2 + (bm + bn) * (bk // 16)
-    return stages * per_stage
+    return max(stages - 1, 1) * per_stage
 
 
 def _prune_configs(configs, named_args, **kwargs):

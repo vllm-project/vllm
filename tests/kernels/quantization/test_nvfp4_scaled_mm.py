@@ -469,7 +469,11 @@ def test_triton_nvfp4_gemm_host_alpha(
 
 
 # Shapes with partial tiles on every axis, for checking each tile config.
-TRITON_CONFIG_SHAPES = [(17, 130, 320), (150, 100, 2880)]
+# K=320 and K=2880 run each config's masked K loop (EVEN_K=False). K=512 is a
+# multiple of every BLOCK_K, so it runs the EVEN_K=True kernel, and M=1100 gives
+# every BLOCK_M more than GROUP_SIZE_M tile rows (a short last band) across
+# two or more tile columns.
+TRITON_CONFIG_SHAPES = [(17, 130, 320), (150, 100, 2880), (1100, 260, 512)]
 
 
 @pytest.mark.parametrize("shape", TRITON_CONFIG_SHAPES)
@@ -481,8 +485,9 @@ def test_triton_nvfp4_gemm_every_config(
 
     The autotuner picks per shape and per GPU, so a config that is wrong on
     partial tiles could be chosen on some other device or shape. Each config
-    is run directly on shapes with M, N and K tails. Configs that do not fit
-    this GPU's shared memory are skipped, as the autotuner prunes them.
+    is run directly on shapes with M, N and K tails. Configs that the estimate
+    or the compiler finds too large for this GPU's shared memory are skipped,
+    as the autotuner never launches them.
     """
     set_random_seed(SEEDS[0])
     m, n, k = shape
@@ -493,6 +498,7 @@ def test_triton_nvfp4_gemm_every_config(
     driver = triton_nvfp4_module.triton.runtime.driver.active
     device_index = torch.accelerator.current_device_index()
     max_smem = driver.utils.get_device_properties(device_index)["max_shared_mem"]
+    out_of_resources = triton_nvfp4_module.triton.runtime.OutOfResources
     ran = 0
     for cfg in triton_nvfp4_module.NVFP4_GEMM_CONFIGS:
         kw = cfg.kwargs
@@ -502,9 +508,15 @@ def test_triton_nvfp4_gemm_every_config(
         if smem > max_smem:
             continue
         config = {**kw, "num_warps": cfg.num_warps, "num_stages": cfg.num_stages}
-        out = triton_nvfp4_module.triton_scaled_fp4_mm(
-            a.fp4, b.fp4, a.sf, b.sf, alpha, dtype, config=config
-        )
+        try:
+            out = triton_nvfp4_module.triton_scaled_fp4_mm(
+                a.fp4, b.fp4, a.sf, b.sf, alpha, dtype, config=config
+            )
+        except out_of_resources as e:
+            # The estimate is not the compiler's count. The autotuner scores a
+            # config that is out of resources as inf and never launches it.
+            print(f"skipped config {config}: {e}")
+            continue
         torch.testing.assert_close(
             out,
             expected,
@@ -520,9 +532,20 @@ def test_triton_nvfp4_gemm_every_config(
 def test_triton_nvfp4_gemm_prune_keeps_a_config(
     triton_nvfp4_module: ModuleType, m: int, n: int
 ) -> None:
-    """Config pruning always leaves at least one candidate to launch."""
-    c = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
-    kept = triton_nvfp4_module._prune_configs(
-        triton_nvfp4_module.NVFP4_GEMM_CONFIGS, {"M": m, "N": n, "c_ptr": c}
-    )
-    assert len(kept) >= 1
+    """Pruning leaves at least one config, and every kept config fits the GPU.
+
+    _prune_configs reads only M, N and c_ptr's device, so c can be empty.
+    """
+    mod = triton_nvfp4_module
+    c = torch.empty(0, device=CUDA_DEVICES[0], dtype=torch.bfloat16)
+    kept = mod._prune_configs(mod.NVFP4_GEMM_CONFIGS, {"M": m, "N": n, "c_ptr": c})
+    assert kept, "no config left after pruning"
+    props = mod.triton.runtime.driver.active.utils.get_device_properties(c.device.index)
+    for cfg in kept:
+        kw = cfg.kwargs
+        smem = mod.nvfp4_gemm_smem_bytes(
+            kw["BLOCK_M"], kw["BLOCK_N"], kw["BLOCK_K"], cfg.num_stages
+        )
+        assert smem <= props["max_shared_mem"], f"kept config {cfg} does not fit"
+        if m <= 16:
+            assert kw["BLOCK_M"] == 16, f"M={m} kept BLOCK_M={kw['BLOCK_M']}"
