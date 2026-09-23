@@ -791,6 +791,9 @@ class VllmConfig:
             or model.dtype != torch.bfloat16
             or model.quantization is not None
             or not current_platform.is_cuda()
+            # Sequence parallelism / async TP are torch.compile passes.
+            or self.compilation_config.pass_config.enable_sp
+            or self.compilation_config.pass_config.fuse_gemm_comms
         ):
             return False
         table = bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS.get(
@@ -1780,14 +1783,7 @@ class VllmConfig:
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
         if pass_config.enable_sp:
-            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
-                logger.warning_once(
-                    "Sequence parallelism and async TP require compilation mode "
-                    "VLLM_COMPILE; disabling them."
-                )
-                pass_config.enable_sp = False
-                pass_config.fuse_gemm_comms = False
-            elif self.parallel_config.tensor_parallel_size == 1:
+            if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning_once("Sequence Parallelism requires TP>1, disabling")
                 pass_config.enable_sp = False
                 pass_config.fuse_gemm_comms = False

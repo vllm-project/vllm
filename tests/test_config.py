@@ -624,6 +624,7 @@ def test_breakable_cudagraph_platform_default(
         ("bi-off", 2048, (16, 8), 6144, 1, False),
         ("opt-out", 2048, (16, 8), 6144, 1, False),
         ("eager", 2048, (16, 8), 6144, 1, False),
+        ("sp", 2048, (16, 8), 6144, 1, False),
         ("fp16", 2048, (16, 8), 6144, 1, False),
         ("quantized", 2048, (16, 8), 6144, 1, False),
         ("untuned", 4096, (32, 32), 11008, 1, False),
@@ -666,7 +667,11 @@ def test_batch_invariant_breakable_cudagraph(
         get_num_kv_heads=lambda pc: heads[1],
     )
     config.parallel_config = SimpleNamespace(tensor_parallel_size=tp)
-    config.compilation_config = CompilationConfig()
+    config.compilation_config = (
+        CompilationConfig(pass_config=PassConfig(enable_sp=True))
+        if case == "sp"
+        else CompilationConfig()
+    )
     try:
         assert config._maybe_enable_breakable_cudagraph() is expected
         if expected:
@@ -832,26 +837,6 @@ def test_late_piecewise_restrictions_without_compilation(monkeypatch, engine_kwa
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
     assert config.compilation_config.cudagraph_capture_sizes == []
     assert config.compilation_config.max_cudagraph_capture_size == 0
-
-
-def test_sequence_parallelism_disabled_without_full_graph_compilation(
-    monkeypatch, caplog_vllm, disable_log_dedup
-):
-    from vllm.engine.arg_utils import EngineArgs
-
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
-    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
-        config = EngineArgs(
-            model="facebook/opt-125m",
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.NONE,
-                pass_config=PassConfig(enable_sp=True, fuse_gemm_comms=True),
-            ),
-        ).create_engine_config()
-
-    assert config.compilation_config.pass_config.enable_sp is False
-    assert config.compilation_config.pass_config.fuse_gemm_comms is False
-    assert "require compilation mode VLLM_COMPILE" in caplog_vllm.text
 
 
 def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
