@@ -62,11 +62,11 @@ curl -X POST 'http://localhost:8000/weight_checker' \
 This randomizes the covered inference tensors. The endpoint stores no baseline
 state, so a reset cannot make a later `compare` use a stale baseline.
 
-`reset` takes effect immediately, so pause the engine straight after it:
-requests that run between `reset` and the weight transfer generate from random
-weights, and the prefix cache keeps those blocks. The pause has to come after
-the reset rather than before it, because a paused engine answers every action
-with HTTP 409. See [Reset is not atomic](#reset-is-not-atomic).
+`reset` takes effect immediately, so stop serving around it: requests that run
+between the `reset` and the weight transfer generate from random weights, and
+the prefix cache keeps those blocks. Whether to pause is the caller's decision,
+since the endpoint works either way. See
+[Reset is not atomic](#reset-is-not-atomic).
 
 ### Compare weights with the baseline
 
@@ -169,7 +169,7 @@ a shared reference rather than against each other. See
 ### RLHF weight-update workflow
 
 The verification sequence is
-`checksum -> reset -> pause -> transfer -> resume -> compare`, with the weight
+`checksum -> pause -> reset -> transfer -> compare -> resume`, with the weight
 transfer or reload occurring while the engine is paused. Keep the checksum
 client-side and pass it to `compare`:
 
@@ -179,14 +179,13 @@ curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
   -d '{"action":"checksum"}'
 
-# 2. Randomize the inference weights before transfer. This has to happen
-#    before the pause: every action is refused while the engine is paused.
+# 2. Stop serving before the reset.
+curl -X POST 'http://localhost:8000/pause?mode=abort'
+
+# 3. Randomize the inference weights before transfer.
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
   -d '{"action":"reset"}'
-
-# 3. Stop serving before the transfer.
-curl -X POST 'http://localhost:8000/pause?mode=abort'
 
 # Start, perform, and finish the configured weight transfer.
 curl -X POST 'http://localhost:8000/start_weight_update'
@@ -195,22 +194,21 @@ curl -X POST 'http://localhost:8000/finish_weight_update' \
   -H 'Content-Type: application/json' \
   -d '{"weight_version":"step-100"}'
 
-# 4. Serve again.
-curl -X POST 'http://localhost:8000/resume'
-
-# 5. Compare the transferred weights with the original baseline. Like the
-#    reset, this needs an unpaused engine.
+# 4. Compare the transferred weights with the original baseline.
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
   -d '{"action":"compare","baseline":{"...":"..."}}'
+
+# 5. Serve again.
+curl -X POST 'http://localhost:8000/resume'
 ```
 
-`reset` and `compare` sit outside the pause window because a paused engine
-answers every action with HTTP 409. Nothing may serve between the `reset` and
-the `resume` all the same: the weights are random until the transfer restores
-them, so any request in that window generates from random weights and the
-prefix cache keeps those blocks. The pause after `reset` clears the cache, and
-[Reset is not atomic](#reset-is-not-atomic) covers what to do when it does not.
+The pause is the caller's choice: every action works whether or not the engine
+is paused, since hashing and rewriting weights do not need the scheduler. It is
+placed around the reset because the weights are random until the transfer
+restores them, so any request in that window generates from random weights and
+the prefix cache keeps those blocks. A pause with `mode=abort` clears that
+cache, and [Reset is not atomic](#reset-is-not-atomic) covers the rest.
 
 There is no separate `checksum` between the transfer and the `compare`:
 `compare` hashes the current weights itself, so a preceding `checksum` would
@@ -246,9 +244,9 @@ so anything served in that window is meaningless:
   It answers `{"success": false}` while blocks are still held, so retry until
   it succeeds.
 
-The window therefore opens at the `reset`, before the engine is paused. Nothing
-may serve until the resume, and the caller must not treat a request that slipped
-in as meaningful. In a multi-frontend deployment, pause and resume every
+The window opens at the `reset` and closes when the weights are restored.
+Nothing may serve while it is open, and the caller must not treat a request that
+slipped in as meaningful. In a multi-frontend deployment, pause and resume every
 frontend that can reach the engine, since `/pause` only reaches the engines the
 frontend it lands on manages.
 
@@ -261,17 +259,16 @@ frontend it lands on manages.
 | `compare` | Diff current weights against `baseline`, plus any extra `checksums` | No |
 
 Invalid or missing actions return HTTP 400, and so does `compare` without a
-`baseline` object. A paused engine returns HTTP 409 for every action, checked
-before the per-action arguments: call `/resume` first, which is what a
-weight-update cycle does anyway.
+`baseline` object. Every action works while the engine is paused, so a caller
+can bracket a weight update with `/pause` and `/resume` without ordering the
+checks around them.
 
 ## Limitations
 
-- The engine must be awake and unpaused. The endpoint rejects a paused engine
-  with HTTP 409, but sleep state is the caller's responsibility to check, since
-  `/is_paused` reports the scheduler pause only. Sleep level 2 discards the
-  weight storage, so digests taken while asleep would describe freed memory and
-  `reset` would write to it.
+- The engine must be awake. Sleep level 2 discards the weight storage, so
+  digests taken while asleep would describe freed memory and `reset` would
+  write to it. The endpoint does not check this, since `/is_paused` reports the
+  scheduler pause and not the sleep state.
 - Checksum calculation copies every covered tensor to CPU and hashes all its
   bytes, so it should not be placed on a latency-sensitive request path.
 - `compare` sends the whole baseline mapping, which is large for big models.

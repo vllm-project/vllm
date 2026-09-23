@@ -233,13 +233,10 @@ def test_compare_does_not_mutate_its_reports():
 
 
 class _FakeClient:
-    """Stand in for an engine client that is reachable and not paused."""
+    """Stand in for an engine client that reports one engine's checksums."""
 
     def __init__(self, checksums: dict[str, str] | None = None):
         self._checksums = _DP0_W_A if checksums is None else checksums
-
-    async def is_paused(self) -> bool:
-        return False
 
     async def compute_weight_checksums_all(self) -> list[dict[str, str]]:
         return [self._checksums]
