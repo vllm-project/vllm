@@ -1726,28 +1726,6 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             config.scheduler_config.max_num_batched_tokens,
         )
 
-        # Only register the AR+RMS+per-group-FP8-quant patterns when the
-        # running aiter exposes the kernel. Older aiter builds (pre PR #2823)
-        # fall back to the AR+RMS-only fusion paired with PR #41825's
-        # standalone RMS+quant fusion -- still correct, just leaves the
-        # post-AR quant as a standalone kernel.
-        supports_per_group_quant = ca_comm.supports_per_group_quant
-        if not supports_per_group_quant:
-            logger.warning_once(
-                "AITER AR+RMS+per-group-FP8-quant fusion disabled: aiter "
-                "build is missing 'fused_ar_rms_per_group_quant'. Upgrade "
-                "aiter past PR #2823 to enable the trailing per-group "
-                "FP8 quant fusion."
-            )
-
-        supports_per_token_quant = ca_comm.supports_per_token_quant
-        if not supports_per_token_quant:
-            logger.warning_once(
-                "AITER AR+RMS+per-token-FP8-quant fusion disabled: aiter "
-                "build is missing 'custom_fused_ar_rms_quant'. Upgrade aiter "
-                "to enable the trailing per-token FP8 quant fusion."
-            )
-
         for epsilon in [1e-5, 1e-6]:
             # Quant-fused variants must register first so the pattern matcher
             # tries them before the AR+RMS-only variants. Otherwise the
@@ -1755,46 +1733,44 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             # leaving the trailing quant op stranded as an unfused kernel.
             # Register larger subgraphs first (DeepSeek indexer fan-out, then
             # quant-only AR+RMS+quant, then AR+RMS-only).
-            if supports_per_group_quant:
-                self.register(
-                    AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
-                        epsilon,
-                        self.model_dtype,
-                        self.device,
-                    )
+            self.register(
+                AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
                 )
-                self.register(
-                    AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
-                        epsilon,
-                        self.model_dtype,
-                        self.device,
-                    )
+            )
+            self.register(
+                AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
                 )
-                self.register(
-                    AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
-                        epsilon,
-                        self.model_dtype,
-                        self.device,
-                    )
+            )
+            self.register(
+                AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
                 )
+            )
 
             # Per-token quant variants -- must precede the AR+RMS-only patterns
             # below so the larger (quant-inclusive) subgraph wins the match.
-            if supports_per_token_quant:
-                self.register(
-                    AiterAllreduceFusedRMSNormPerTokenQuantFP8Pattern(
-                        epsilon,
-                        self.model_dtype,
-                        self.device,
-                    )
+            self.register(
+                AiterAllreduceFusedRMSNormPerTokenQuantFP8Pattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
                 )
-                self.register(
-                    AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern(
-                        epsilon,
-                        self.model_dtype,
-                        self.device,
-                    )
+            )
+            self.register(
+                AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
                 )
+            )
 
             self.register(
                 AiterAllreduceFusedRMSNormPattern(

@@ -33,9 +33,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
-    AiterCustomAllreduce,
-)
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -776,12 +773,6 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         rocm_aiter_ops.refresh_env_variables()
 
-    if not AiterCustomAllreduce.build_supports_per_group_quant():
-        pytest.skip(
-            "aiter build is missing 'fused_ar_rms_per_group_quant' (needs "
-            "ROCm/aiter PR #2823); the new patterns aren't registered."
-        )
-
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
@@ -943,12 +934,6 @@ def test_rocm_aiter_all_reduce_rmsnorm_per_token_quant_fp8_fusion_pass_replace(
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         rocm_aiter_ops.refresh_env_variables()
 
-    if not AiterCustomAllreduce.build_supports_per_token_quant():
-        pytest.skip(
-            "aiter build is missing 'custom_fused_ar_rms_quant'; the per-token "
-            "patterns aren't registered."
-        )
-
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
@@ -1049,8 +1034,7 @@ def rocm_aiter_per_token_quant_fusion_pass_on_test_model(
         results_fused = compiled_model(hidden_states)
         # The fused kernel's internal per-token FP8 quant rounds slightly
         # differently from the standalone dynamic_per_token_scaled_quant used by
-        # the unfused reference, so allow an FP8-scale tolerance (a wiring bug --
-        # e.g. a scale/residual swap -- diverges far more than this).
+        # the unfused reference, so allow an FP8-scale tolerance.
         torch.testing.assert_close(results_unfused, results_fused, atol=1e-1, rtol=1e-1)
 
         # Four pattern firings: norm[0] (no-add quant), norm[1..3] (add quant).
