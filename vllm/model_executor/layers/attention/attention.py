@@ -115,10 +115,7 @@ def _largest_kernel_block_within(
     """
     from vllm.v1.attention.backend import MultipleOf
 
-    if kv_cache_spec is None:
-        sizes = attn_backend.get_supported_kernel_block_sizes()
-    else:
-        sizes = attn_backend.get_supported_kernel_block_sizes(kv_cache_spec)
+    sizes = attn_backend.get_supported_kernel_block_sizes(kv_cache_spec)
     max_block_size = page_budget // per_token_bytes
     candidates = [s for s in sizes if isinstance(s, int)]
     candidates.extend(
@@ -657,7 +654,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 sw_per_token,
                 page_budget,
                 block_size,
-                kv_cache_spec=kv_cache_spec,
+                kv_cache_spec,
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,

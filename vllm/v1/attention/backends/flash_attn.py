@@ -575,12 +575,7 @@ def _get_sliding_window_configs(
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        impls = (
-            layer.impl.get_impl_variants()
-            if hasattr(layer.impl, "get_impl_variants")
-            else (layer.impl,)
-        )
-        for impl in impls:
+        for impl in layer.impl.get_impl_variants():
             if isinstance(impl, FlashAttentionImpl):
                 sliding_window_configs.add(impl.sliding_window)
     return sliding_window_configs

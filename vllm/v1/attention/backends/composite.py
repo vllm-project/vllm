@@ -124,18 +124,8 @@ def _intersect_kernel_block_sizes(
 
     result: list[int | MultipleOf] = []
     seen: set[tuple[type, int]] = set()
-    first_sizes = (
-        first.get_supported_kernel_block_sizes()
-        if kv_cache_spec is None
-        else first.get_supported_kernel_block_sizes(kv_cache_spec)
-    )
-    second_sizes = (
-        second.get_supported_kernel_block_sizes()
-        if kv_cache_spec is None
-        else second.get_supported_kernel_block_sizes(kv_cache_spec)
-    )
-    for lhs in first_sizes:
-        for rhs in second_sizes:
+    for lhs in first.get_supported_kernel_block_sizes(kv_cache_spec):
+        for rhs in second.get_supported_kernel_block_sizes(kv_cache_spec):
             candidate: int | MultipleOf | None = None
             if isinstance(lhs, MultipleOf) and isinstance(rhs, MultipleOf):
                 candidate = MultipleOf(math.lcm(lhs.base, rhs.base))
