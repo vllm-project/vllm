@@ -236,9 +236,11 @@ def _run_sparse_mla_decode_autotune_v2(
     log_label: str,
     dummy_run_kwargs: dict,
 ) -> bool:
-    """Same warmup through FlashInfer's managed store: every rank tunes into
-    the shared store and re-reads its final state after the barrier, so no
-    leader broadcast or vLLM-side cache file is needed."""
+    """Run every rank's sparse warmup in the managed autotune context.
+
+    FlashInfer owns persistence; some sparse kernels use a separate calibration
+    cache instead of managed winner entries.
+    """
     from flashinfer import autotune_v2, autotune_v2_reload
 
     from vllm.distributed.parallel_state import get_world_group
@@ -248,8 +250,8 @@ def _run_sparse_mla_decode_autotune_v2(
     cache_root = resolve_flashinfer_autotune_v2_root()
     if world.rank_in_group == 0:
         logger.info(
-            "Autotuning FlashInfer SM120 sparse MLA %s decode into the managed "
-            "autotune cache (root=%s)",
+            "Autotuning FlashInfer SM120 sparse MLA %s decode with the managed "
+            "autotune context (root=%s)",
             log_label,
             cache_root if cache_root is not None else "flashinfer default",
         )
