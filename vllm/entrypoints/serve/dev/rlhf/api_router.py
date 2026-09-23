@@ -41,8 +41,10 @@ def _summarize_type(value: object) -> str:
 async def _json_object_body(raw_request: Request) -> dict:
     """Parse the request body and require a top-level JSON object.
 
-    Mirrors the Rust frontend, where a ``Json<T>`` extractor rejects a body that
-    is not an object at the extractor stage.
+    Payload shape only: the Rust frontend's ``Json<T>`` extractor also rejects a
+    mismatched ``Content-Type``, which this Python side keeps accepting as before.
+    What matters for the weight-operation metrics is that an invalid *body shape*
+    is rejected before the recorder is entered.
     """
     try:
         body = await raw_request.json()
@@ -137,7 +139,11 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
     """
     engine = engine_client(raw_request)
 
-    body = await _json_object_body(raw_request)
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+
     request_ids = body.get("request_ids")
 
     try:
@@ -195,8 +201,8 @@ async def init_weight_transfer_engine(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'init_info' in request body",
         )
-    # Shape validation must happen before the recorder, and must match the Rust
-    # frontend, so a malformed payload is never counted as a failed operation.
+    # Shape checked before the recorder, with the same rule the Rust frontend
+    # applies, so a malformed payload is never counted as a failed operation.
     if not isinstance(init_info, dict):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
@@ -232,8 +238,8 @@ async def update_weights(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'update_info' in request body",
         )
-    # Mirrors the Rust frontend: an object, or a list of per-worker objects.
-    # Checked before the recorder so invalid input is not counted.
+    # Same shape rule as the Rust frontend: an object, or a list of per-worker
+    # objects. Checked before the recorder so invalid input is not counted.
     valid_update_info = isinstance(update_info, dict) or (
         isinstance(update_info, list)
         and all(isinstance(item, dict) for item in update_info)

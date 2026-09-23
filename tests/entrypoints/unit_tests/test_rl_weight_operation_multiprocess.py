@@ -237,15 +237,16 @@ def test_mark_process_dead_clears_stale_in_flight(tmp_path, monkeypatch):
 def test_metrics_are_created_lazily_after_multiprocess_setup(tmp_path):
     """Importing the module must not create collectors; first use must."""
     multiproc_dir = str(tmp_path)
-    code = (
-        "from vllm.entrypoints.serve.dev.rlhf import metrics;"
-        "print('before', metrics._metrics is not None);"
-        f"m = metrics.weight_operation_metrics();"
-        f"m.operations.labels(operation='{OP_LAZY}', status='success').inc();"
-        f"m.duration.labels(operation='{OP_LAZY}').observe(1.0);"
-        f"m.in_flight.labels(operation='{OP_LAZY}').inc();"
-        "print('after', metrics._metrics is not None)"
-    )
+    code = f"""
+from vllm.entrypoints.serve.dev.rlhf import metrics
+print('before', metrics._metrics is not None)
+m = metrics.weight_operation_metrics()
+# A real operation: creates the collector on first use and records in all three
+# families, which is what makes them mmap-backed.
+with m.record('{OP_LAZY}'):
+    pass
+print('after', metrics._metrics is not None)
+"""
     out = subprocess.run(
         [sys.executable, "-c", code],
         env=_child_env(multiproc_dir),
