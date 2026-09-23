@@ -21,6 +21,7 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
 use crate::reasoning::ReasoningError;
 use crate::tool::{Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput};
+use crate::utils::SpecialToken;
 
 /// Result alias for unified parser operations.
 pub type Result<T> = std::result::Result<T, UnifiedParserError>;
@@ -305,5 +306,13 @@ pub enum UnifiedParserError {
 fn token_id(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<u32> {
     tokenizer.token_to_id(token).ok_or_else(|| UnifiedParserError::MissingToken {
         token: token.to_string(),
+    })
+}
+
+/// Resolves `token` to a [`SpecialToken`], or an error if it's not found.
+fn special_token(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<SpecialToken> {
+    Ok(SpecialToken {
+        id: token_id(tokenizer, token)?,
+        text: token.to_string(),
     })
 }

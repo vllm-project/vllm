@@ -221,6 +221,14 @@ fn find_earliest<'m>(text: &str, mut spellings: impl Iterator<Item = &'m str>) -
     range.map(|range| range.start)
 }
 
+/// A special token's spelling and its ID in the active tokenizer, resolved
+/// together so a marker cannot pair one token's spelling with another's ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpecialToken {
+    pub text: String,
+    pub id: u32,
+}
+
 /// A fixed marker string whose special-token segments are guarded by token
 /// identity.
 ///
@@ -229,9 +237,7 @@ fn find_earliest<'m>(text: &str, mut spellings: impl Iterator<Item = &'m str>) -
 /// definition the safe-text scanner stops in front of.
 ///
 /// ```ignore
-/// let think_close = Marker::special("<|close|>", close_id)
-///     .then_text("think")
-///     .then_special("<|sep|>", sep_id);
+/// let think_close = Marker::special(&close).then_text("think").then_special(&sep);
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Marker {
@@ -256,9 +262,9 @@ impl Marker {
         }
     }
 
-    /// A marker beginning with the special token `token_id` spelled `spelling`.
-    pub fn special(spelling: &str, token_id: u32) -> Self {
-        Self::text(String::new()).then_special(spelling, token_id)
+    /// A marker beginning with the special token `token`.
+    pub fn special(token: &SpecialToken) -> Self {
+        Self::text(String::new()).then_special(token)
     }
 
     /// Append ordinary text, matched by spelling.
@@ -268,14 +274,14 @@ impl Marker {
         self
     }
 
-    /// Append the special token `token_id` spelled `spelling`.
+    /// Append the special token `token`.
     #[must_use]
-    pub fn then_special(mut self, spelling: &str, token_id: u32) -> Self {
+    pub fn then_special(mut self, token: &SpecialToken) -> Self {
         let start = self.text.len();
-        self.text.push_str(spelling);
+        self.text.push_str(&token.text);
         self.guards.push(Guard {
             range: start..self.text.len(),
-            token_id,
+            token_id: token.id,
         });
         self
     }
@@ -387,7 +393,7 @@ mod tests {
     use winnow::error::ErrMode;
     use winnow::stream::{Partial, Stream};
 
-    use super::{Marker, MarkerLike, MarkerStream, attributed};
+    use super::{Marker, MarkerLike, MarkerStream, SpecialToken, attributed};
     use crate::utils::safe_text_len_mul;
 
     const CLOSE_ID: u32 = 256;
@@ -409,12 +415,19 @@ mod tests {
         decoded
     }
 
+    fn token(text: &str, id: u32) -> SpecialToken {
+        SpecialToken {
+            text: text.to_string(),
+            id,
+        }
+    }
+
     fn close() -> Marker {
-        Marker::special("<|close|>", CLOSE_ID)
+        Marker::special(&token("<|close|>", CLOSE_ID))
     }
 
     fn think_close() -> Marker {
-        close().then_text("think").then_special("<|sep|>", SEP_ID)
+        close().then_text("think").then_special(&token("<|sep|>", SEP_ID))
     }
 
     /// `<|close|>` spelled by ordinary tokens.
@@ -533,7 +546,10 @@ mod tests {
         assert_eq!(think_close().as_marker().first_token_id(), Some(CLOSE_ID));
         assert_eq!(Marker::text("</think>").as_marker().first_token_id(), None);
         assert_eq!(
-            Marker::text("x").then_special("<|sep|>", SEP_ID).as_marker().first_token_id(),
+            Marker::text("x")
+                .then_special(&token("<|sep|>", SEP_ID))
+                .as_marker()
+                .first_token_id(),
             None
         );
         assert_eq!("</think>".as_marker().first_token_id(), None);
@@ -587,7 +603,7 @@ mod tests {
     fn scan_skips_rejected_text_candidate_starting_with_multibyte_char() {
         // A marker whose leading text is found by spelling but whose guard then
         // fails: the scan must move past the whole char, not retry inside it.
-        let marker = Marker::text("é").then_special("<|sep|>", SEP_ID);
+        let marker = Marker::text("é").then_special(&token("<|sep|>", SEP_ID));
         let buffer = pieces(&[("aé", 1), ("<", 60), ("|sep|>", 904), ("b", 2)]);
         let mut input = attributed(&buffer);
 
