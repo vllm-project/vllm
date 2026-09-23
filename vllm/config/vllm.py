@@ -242,7 +242,7 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
-    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER."""
+    """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_enabled():
@@ -1340,6 +1340,19 @@ class VllmConfig:
 
         self._resolve_mm_encoder_only()
 
+        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
+            # Such an instance publishes encoder embeddings and runs no language
+            # model, so it holds no KV cache for prefix caching to reuse and its
+            # coordinator would have no group to manage. Disable before
+            # `try_verify_and_update_config` so model config hooks (e.g. the
+            # hybrid mamba hook setting `mamba_block_size`) already see prefix
+            # caching as disabled.
+            logger.info(
+                "Disabling prefix caching: this instance runs the "
+                "multi-modal encoder only."
+            )
+            self.cache_config.enable_prefix_caching = False
+
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
@@ -2088,16 +2101,6 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
-
-        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
-            # Such an instance publishes encoder embeddings and runs no language
-            # model, so it holds no KV cache for prefix caching to reuse and its
-            # coordinator would have no group to manage.
-            logger.info(
-                "Disabling prefix caching: this instance runs the "
-                "multi-modal encoder only."
-            )
-            self.cache_config.enable_prefix_caching = False
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
