@@ -60,6 +60,8 @@ def kernel_unified_attention_diffkv(
     query_ptr,
     key_cache_ptr,  # view of packed cache: [..., :head_size_qk]
     value_cache_ptr,  # view of packed cache: [..., head_size_qk:hqk+hv]
+    k_descale_ptr,
+    v_descale_ptr,
     sink_ptr,
     block_tables_ptr,
     seq_lens_ptr,
@@ -83,6 +85,7 @@ def kernel_unified_attention_diffkv(
     USE_ALIBI_SQRT: tl.constexpr,
     USE_SOFTCAP: tl.constexpr,
     USE_SINKS: tl.constexpr,
+    USE_KV_SCALES: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     # Strides for both cache views (they share the same packed buffer, so
     # dims 0/1/2 strides match; only the per-head extent differs).
@@ -154,6 +157,10 @@ def kernel_unified_attention_diffkv(
         other=0.0,
     )
 
+    if USE_KV_SCALES:
+        k_descale = tl.load(k_descale_ptr)
+        v_descale = tl.load(v_descale_ptr)
+
     block_table_offset = seq_idx * block_table_stride
 
     M = init_softmax_M(
@@ -212,6 +219,8 @@ def kernel_unified_attention_diffkv(
             mask=dim_mask_qk[:, None] & tile_mask[None, :],
             other=0.0,
         )
+        if USE_KV_SCALES:
+            K_load = K_load.to(tl.float32) * k_descale
         K = K_load.to(Q.dtype)
         # V : (TILE_SIZE, HEAD_SIZE_V_PADDED)
         V_load = tl.load(
@@ -219,6 +228,8 @@ def kernel_unified_attention_diffkv(
             mask=dim_mask_v[None, :] & tile_mask[:, None],
             other=0.0,
         )
+        if USE_KV_SCALES:
+            V_load = V_load.to(tl.float32) * v_descale
         V = V_load.to(Q.dtype)
 
         query_abs_pos = context_len + query_pos[:, None]
@@ -403,6 +414,8 @@ def unified_attention_diffkv(
     softmax_segm_output: torch.Tensor | None = None,
     softmax_segm_max: torch.Tensor | None = None,
     softmax_segm_expsum: torch.Tensor | None = None,
+    k_descale: torch.Tensor | None = None,
+    v_descale: torch.Tensor | None = None,
 ):
     assert causal, "Only causal attention is supported"
 
@@ -470,6 +483,8 @@ def unified_attention_diffkv(
         query_ptr=q,
         key_cache_ptr=k,
         value_cache_ptr=v,
+        k_descale_ptr=k_descale,
+        v_descale_ptr=v_descale,
         sink_ptr=sinks,
         block_tables_ptr=block_table,
         seq_lens_ptr=seqused_k,
@@ -493,6 +508,7 @@ def unified_attention_diffkv(
         USE_ALIBI_SQRT=use_alibi_sqrt,
         USE_SOFTCAP=(softcap > 0),
         USE_SINKS=(sinks is not None),
+        USE_KV_SCALES=k_descale is not None,
         SLIDING_WINDOW=sliding_window_val,
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
