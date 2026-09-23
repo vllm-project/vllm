@@ -145,7 +145,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix"
   key: spec-decode-ngram-suffix
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   device: h200_35gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
