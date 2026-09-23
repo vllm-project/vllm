@@ -3659,6 +3659,47 @@ steps:
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
 
+- label: ":amd: (MI355) Fusion E2E TP2 Quick (AITER subset)" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/compilation/
+  - vllm/distributed/
+  - vllm/model_executor/
+  - vllm/v1/attention/
+  - tests/compile/fusions_e2e/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    not +quant_fp8 and not +rms_norm and Llama-3 and
+    ROCM_AITER_UNIFIED_ATTN'
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    +quant_fp8 and +rms_norm and qwen3 and
+    ROCM_AITER_UNIFIED_ATTN'
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
+    ROCM_AITER_MLA'
+
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server) %N"
