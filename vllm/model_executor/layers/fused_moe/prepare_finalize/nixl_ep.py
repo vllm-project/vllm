@@ -99,6 +99,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             return tensor.to(dtype=topk_indices_dtype)
 
         self.global_to_physical = _maybe_cast(global_to_physical)
+        self.supports_token_dropping = self.global_to_physical is None
         self.physical_to_global = _maybe_cast(physical_to_global)
         self.local_expert_global_ids = _maybe_cast(local_expert_global_ids)
 

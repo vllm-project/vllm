@@ -584,6 +584,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     top_k_num=top_k_num,
                 )
 
+        if self.expert_capacity is not None:
+            intermediate_cache3.masked_fill_(topk_ids.unsqueeze(-1) < 0, 0)
+
         # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)
 

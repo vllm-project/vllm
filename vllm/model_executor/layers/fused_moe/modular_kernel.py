@@ -245,6 +245,8 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     described above for the Modular case.
     """
 
+    supports_token_dropping: bool = False
+
     @abstractmethod
     def prepare(
         self,
@@ -488,6 +490,7 @@ class FusedMoEExperts(ABC):
         )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
+        self.expert_capacity: int | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
@@ -811,7 +814,10 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace for the last gemm.
 
         Inputs:
-        - M: number of tokens.
+        - M: dispatched token dimension, after any capacity reduction. For
+          batched activations this is the physical per-expert batch size,
+          including padding and all dispatchers. Do not multiply it by the
+          dispatcher count or clamp it to expert_capacity.
         - N: Row (or column) dimension of expert weights.
         - K: hidden dimension
         - topk: The number of top-k experts to select.
@@ -1065,6 +1071,17 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        self.expert_capacity = (
+            fused_experts.moe_config.expert_capacity
+            if prepare_finalize.supports_token_dropping
+            else None
+        )
+        fused_experts.expert_capacity = self.expert_capacity
+        if self.expert_capacity is not None:
+            if self.expert_capacity < 0:
+                raise ValueError("expert_capacity must be nonnegative")
+            if fused_experts.moe_config.is_lora_enabled:
+                raise NotImplementedError("Token dropping does not support LoRA")
         self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
@@ -1099,6 +1116,8 @@ class FusedMoEKernelModularImpl:
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
+        # M comes from the prepared activations, so capacity reduction and
+        # dispatch padding are already reflected in both workspace dimensions.
         # Get intermediate workspace shapes based off the chunked M size.
         workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
             M_chunk,
@@ -1413,6 +1432,62 @@ class FusedMoEKernelModularImpl:
 
         return output
 
+    def _drop_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Cap expert assignments and compact rows with surviving routes.
+
+        Returns:
+            Compacted states, IDs, weights, and original row indices. The row
+            indices are None when dropping is disabled. Equal weights retain
+            their original token/slot order.
+
+        """
+        capacity = self.expert_capacity
+        if capacity is None:
+            return hidden_states, topk_ids, topk_weights, None
+        if torch.compiler.is_compiling() or (
+            hidden_states.is_cuda and torch.cuda.is_current_stream_capturing()
+        ):
+            raise RuntimeError("Token dropping requires eager execution")
+
+        if topk_ids.numel() == 0 or capacity == 0:
+            retained_rows = torch.empty(
+                0, dtype=torch.long, device=hidden_states.device
+            )
+            return hidden_states[:0], topk_ids[:0], topk_weights[:0], retained_rows
+
+        ids = topk_ids.reshape(-1)
+        weights = topk_weights.reshape(-1)
+        weight_order = torch.argsort(weights, descending=True, stable=True)
+        expert_order = torch.argsort(ids[weight_order], stable=True)
+        order = weight_order[expert_order]
+        sorted_ids = ids[order]
+
+        positions = torch.arange(ids.numel(), device=ids.device)
+        group_start = torch.cat(
+            (
+                torch.ones(1, dtype=torch.bool, device=ids.device),
+                sorted_ids[1:] != sorted_ids[:-1],
+            )
+        )
+        starts = torch.where(group_start, positions, 0).cummax(dim=0).values
+        keep_sorted = (sorted_ids >= 0) & (positions - starts < capacity)
+        keep = torch.empty_like(keep_sorted)
+        keep.scatter_(0, order, keep_sorted)
+        keep = keep.reshape_as(topk_ids)
+        retained_rows = keep.any(dim=1).nonzero(as_tuple=True)[0]
+
+        return (
+            hidden_states.index_select(0, retained_rows),
+            topk_ids.masked_fill(~keep, -1).index_select(0, retained_rows),
+            topk_weights.masked_fill(~keep, 0).index_select(0, retained_rows),
+            retained_rows,
+        )
+
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -1456,11 +1531,16 @@ class FusedMoEKernelModularImpl:
             torch.Tensor: The output tensor after applying the MoE layer.
 
         """
-        output = torch.empty_like(hidden_states)
+        original_shape = hidden_states.shape
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
+
+        hidden_states, topk_ids, topk_weights, retained_rows = self._drop_tokens(
+            hidden_states, topk_ids, topk_weights
+        )
+        output = torch.empty_like(hidden_states)
 
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
@@ -1498,7 +1578,7 @@ class FusedMoEKernelModularImpl:
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
 
-        return self._finalize(
+        output = self._finalize(
             output,
             fused_out,
             hidden_states,
@@ -1508,6 +1588,11 @@ class FusedMoEKernelModularImpl:
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
+        if retained_rows is not None:
+            restored_output = output.new_zeros(original_shape)
+            restored_output.index_copy_(0, retained_rows, output)
+            return restored_output
+        return output
 
 
 @final
@@ -1517,6 +1602,8 @@ class FusedMoEKernelMonolithicImpl:
         prepare_finalize: FusedMoEPrepareAndFinalizeMonolithic,
         fused_experts: FusedMoEExpertsMonolithic,
     ):
+        if fused_experts.moe_config.expert_capacity is not None:
+            raise NotImplementedError("Token dropping requires a modular MoE kernel")
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
 

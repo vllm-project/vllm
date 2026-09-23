@@ -631,12 +631,9 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        assert self.num_dispatchers is not None
-        assert self.max_num_tokens is not None
-        num_dp = self.num_dispatchers
         num_experts = local_num_experts
-        workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
-        workspace2 = (self.max_num_tokens * num_dp, N)
+        workspace13 = (num_experts, M, K)
+        workspace2 = (M, N)
         output = workspace13
         return (workspace13, workspace2, output)
 
@@ -871,15 +868,11 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        assert self.num_dispatchers is not None
-        assert self.max_num_tokens is not None
-        num_dp = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = self.max_num_tokens
         activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dp, activation_out_dim)
-        output = (num_experts, max_num_tokens * num_dp, K)
+        workspace13 = (num_experts, M, max(K, N))
+        workspace2 = (num_experts, M, activation_out_dim)
+        output = (num_experts, M, K)
         return (workspace13, workspace2, output)
 
     def apply(

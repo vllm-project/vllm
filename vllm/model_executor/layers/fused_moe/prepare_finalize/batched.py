@@ -21,6 +21,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     that the batched dispatch/combine kernels use.
     """
 
+    supports_token_dropping = True
+
     def __init__(
         self,
         max_num_tokens: int,
@@ -33,6 +35,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_local_experts = num_local_experts
         self.rank = rank
         self.num_dispatchers_ = num_dispatchers
+        self.expert_capacity: int | None = None
+
+    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
+        self.expert_capacity = fused_experts.expert_capacity
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -80,6 +86,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         num_tokens, hidden_dim = a1.size()
         topk = topk_ids.size(1)
+        max_tokens = self.max_num_tokens
+        if self.expert_capacity is not None:
+            max_tokens = max(1, min(max_tokens, self.expert_capacity))
 
         tokens_per_expert = torch.zeros(num_experts, dtype=torch.int, device=a1.device)
 
@@ -91,14 +100,14 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             b_type = quant_config.quant_dtype
 
         b_a1 = torch.zeros(
-            (num_local_experts, self.max_num_tokens, hidden_dim),
+            (num_local_experts, max_tokens, hidden_dim),
             dtype=b_type,
             device=a1.device,
         )
 
         if quant_config.is_quantized:
             scale_shape = quant_config.batched_scale_shape(
-                num_local_experts, self.max_num_tokens, hidden_dim
+                num_local_experts, max_tokens, hidden_dim
             )
 
             b_a1_scale = torch.zeros(scale_shape, dtype=torch.float32, device=a1.device)

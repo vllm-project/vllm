@@ -1284,6 +1284,9 @@ class FusedMoEConfig:
     is_lora_enabled: bool = False
     has_hash_routing: bool = False
 
+    # Per-source-rank assignments retained per expert. None disables dropping.
+    expert_capacity: int | None = None
+
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is
     # then responsible for the reduction (e.g. fusing it into the next RMSNorm).
@@ -1332,6 +1335,8 @@ class FusedMoEConfig:
             )
 
         assert self.max_num_tokens > 0
+        if self.expert_capacity is not None and self.expert_capacity < 0:
+            raise ValueError("expert_capacity must be nonnegative")
 
         if self.router_logits_dtype is None:
             self.router_logits_dtype = self.in_dtype

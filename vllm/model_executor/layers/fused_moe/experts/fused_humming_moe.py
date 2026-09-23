@@ -480,12 +480,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         output_shape: tuple[int, ...]
         if self.is_batched():
-            max_num_tokens = self.max_num_tokens
-            num_dispatchers = self.num_dispatchers
-            assert max_num_tokens is not None and num_dispatchers is not None
-            real_shape_m = num_experts * max_num_tokens * num_dispatchers
+            real_shape_m = num_experts * M
             input_shape_m = real_shape_m
-            output_shape = (num_experts, max_num_tokens * num_dispatchers, K)
+            output_shape = (num_experts, M, K)
         else:
             input_shape_m = M
             if self.humming_gemm_type() != HummingGemmType.INDEXED:
@@ -1027,6 +1024,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         assert not apply_router_weight_on_input
         assert expert_tokens_meta is not None
 
+        batch_tokens = hidden_states.size(1)
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         # Keep the (batched) block-FP8 scale row-aligned with the flattened
         # [num_experts * max_tokens, K] hidden states above.
@@ -1038,7 +1036,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         buffers = self.prepare_buffers(
             workspace13,
             workspace2,
-            topk_ids.size(0),
+            batch_tokens,
             topk_ids.size(1),
             activation,
         )
