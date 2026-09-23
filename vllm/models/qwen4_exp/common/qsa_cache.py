@@ -556,8 +556,10 @@ def _build_qsa_metadata_torch(
         k_work_metadata_buffer[:, 1].copy_(
             torch.where(active, work_in_request, -1).to(torch.int32)
         )
-    if compress_ratio != 1 and common_attn_metadata.is_dummy_batch:
-        # Same reason as the fused path above.
+    if (
+        circular_buffer_size > 0 or compress_ratio != 1
+    ) and common_attn_metadata.is_dummy_batch:
+        # Same reason as the Triton path above.
         slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 

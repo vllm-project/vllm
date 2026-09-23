@@ -151,11 +151,21 @@ def test_padding_tail_is_excluded():
 
 
 @pytest.mark.parametrize("builder", BUILDERS, ids=["triton", "torch"])
-def test_dummy_batch_stays_inert_under_dcp(builder):
+@pytest.mark.parametrize(
+    "compress_ratio,circular_buffer_size",
+    [(RATIO, 0), (1, 64)],
+    ids=["compressed", "circular-buffer"],
+)
+def test_dummy_batch_stays_inert_under_dcp(
+    builder, compress_ratio, circular_buffer_size
+):
     """The two signals must not be confused, in either direction.
 
     A dummy batch writes nothing even though every rank owns real positions.
     A real batch writes everything even though the mapping is full of PAD.
+
+    A circular-buffer layer has compress_ratio 1, so a predicate that keys on
+    the ratio alone misses it and the layer writes on a dummy batch.
     """
     all_pad = torch.full((NUM_TOKENS,), PAD, dtype=torch.int64, device="cuda")
     metadata = _metadata(all_pad)
@@ -167,6 +177,7 @@ def test_dummy_batch_stays_inert_under_dcp(builder):
         torch.zeros(NUM_TOKENS, dtype=torch.int32, device="cuda"),
         torch.zeros(NUM_TOKENS, dtype=torch.int64, device="cuda"),
         storage_block_size=STORAGE_BLOCK,
-        compress_ratio=RATIO,
+        compress_ratio=compress_ratio,
+        circular_buffer_size=circular_buffer_size,
     )[3]
     assert int((slots >= 0).sum()) == 0, "a dummy batch must write nothing"
