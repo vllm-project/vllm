@@ -7,11 +7,33 @@
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 # ruff: noqa: E501
 
+import functools
+
 import torch
 
 from vllm.third_party.flash_linear_attention.ops.op import exp, log
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
+
+
+@functools.lru_cache(maxsize=None)
+def _num_cus(device_index: int) -> int:
+    return torch.cuda.get_device_properties(device_index).multi_processor_count
+
+
+def _select_bv(V: int, num_launch_units: int, device_index: int) -> int:
+    """Pick the V tile for the gate-fused recurrent kernel.
+
+    The grid is cdiv(V, BV) * N * H, so a decode-shaped launch leaves most of
+    the device idle at BV=32: a single K3 TP8 request is 48 blocks on 256 CUs.
+    A smaller BV buys parallelism, but every tile re-reads the whole q/k/g
+    head, so shrink only until the grid covers the device a few times over.
+    """
+    target = 3 * _num_cus(device_index)
+    for bv in (16, 8):
+        if cdiv(V, bv) * num_launch_units >= target:
+            return bv
+    return 8
 
 
 @triton.heuristics(
@@ -344,8 +366,8 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
-    BV = 32 if use_gate_in_kernel else 8
-    num_warps = 4 if use_gate_in_kernel else 1
+    BV = _select_bv(V, N * H, q.device.index) if use_gate_in_kernel else 8
+    num_warps = 2 if use_gate_in_kernel else 1
     grid = (cdiv(V, BV) * N * H,)
     fused_recurrent_kda_fwd_kernel[grid](
         q=q,
