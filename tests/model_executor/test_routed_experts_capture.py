@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode
+from vllm.config.expert_load import ExpertLoadStatsConfig
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -22,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.expert_load_stats import ExpertLoadStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -128,6 +130,72 @@ def test_base_router_capture_pre_eplb_mapping(eplb_enabled):
     assert len(captured) == 1
     assert torch.equal(captured[0], torch.tensor([[1, 2], [3, 4]]))
     assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
+
+
+def test_expert_load_monitor_coexists_with_raw_capture():
+    router = _make_router()
+    capture = Mock()
+    monitor = Mock()
+    router.set_capture_fn(capture)
+    router.expert_load_stats = monitor
+    weights, ids = router.select_experts(torch.empty(1), torch.empty(1))
+    capture.assert_called_once()
+    monitor.record.assert_called_once()
+    torch.testing.assert_close(
+        capture.call_args.args[0], monitor.record.call_args.args[0]
+    )
+    torch.testing.assert_close(ids, torch.tensor([[11, 12], [13, 14]]))
+    torch.testing.assert_close(weights, torch.ones((2, 2)))
+
+
+@pytest.mark.parametrize("enable_eplb", [False, True])
+def test_expert_load_binding_preserves_placement_and_capture(monkeypatch, enable_eplb):
+    import vllm.model_executor.layers.fused_moe.layer as layer_module
+    import vllm.v1.worker.expert_load_stats as stats_module
+
+    class DummyMoE:
+        layer_id = 3
+        moe_config = SimpleNamespace(num_logical_experts=4, sp_size=1)
+        _quant_method = SimpleNamespace(is_monolithic=False)
+        do_naive_dispatch_combine = False
+
+        def __init__(self):
+            self.router = _make_router()
+            self.weights = torch.arange(16).view(4, 4)
+
+    module = DummyMoE()
+    module.router.capture_fn = Mock()
+    capture = module.router.capture_fn
+    mapping = torch.tensor([2, 0, 3, 1])
+    module.router.eplb_state = (
+        SimpleNamespace(logical_to_physical_map=mapping) if enable_eplb else None
+    )
+    eplb_state = module.router.eplb_state
+    expected_weights = module.weights.clone()
+    monkeypatch.setattr(layer_module, "MoERunner", DummyMoE)
+    monkeypatch.setattr(ExpertLoadStats, "validate", lambda _: None)
+
+    def cpu_init(self, config, layers, num_experts, ranks, device):
+        self.counts = torch.zeros(len(layers), num_experts, dtype=torch.int64)
+        self.num_valid_tokens = torch.tensor(0, dtype=torch.int32)
+
+    monkeypatch.setattr(ExpertLoadStats, "__init__", cpu_init)
+    for name in ("get_tp_group", "get_pp_group", "get_ep_group"):
+        monkeypatch.setattr(
+            stats_module, name, lambda: SimpleNamespace(rank_in_group=0)
+        )
+    config = SimpleNamespace(
+        expert_load_stats_config=ExpertLoadStatsConfig(enabled=True),
+        parallel_config=SimpleNamespace(data_parallel_rank=0, tensor_parallel_size=1),
+    )
+    stats = ExpertLoadStats.create(
+        config, SimpleNamespace(modules=lambda: [module]), torch.device("cpu")
+    )
+    assert module.router.expert_load_stats.counts.data_ptr() == stats.counts.data_ptr()
+    assert module.router.capture_fn is capture
+    assert module.router.eplb_state is eplb_state
+    torch.testing.assert_close(module.weights, expected_weights)
+    torch.testing.assert_close(mapping, torch.tensor([2, 0, 3, 1]))
 
 
 def test_public_binding_binds_target_model_router(monkeypatch):

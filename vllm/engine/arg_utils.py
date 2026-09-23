@@ -46,6 +46,7 @@ from vllm.config import (
     EncoderCacheManagerConfig,
     EngramConfig,
     EPLBConfig,
+    ExpertLoadStatsConfig,
     FaultToleranceConfig,
     KernelConfig,
     KVEventsConfig,
@@ -749,6 +750,9 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
+    expert_load_stats_config: ExpertLoadStatsConfig = get_field(
+        VllmConfig, "expert_load_stats_config"
+    )
 
     logging_config: LoggingConfig | None = None
     log_level: LogLevel | None = None
@@ -861,6 +865,10 @@ class EngineArgs:
             self.ec_manager_config = EncoderCacheManagerConfig(**self.ec_manager_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        if isinstance(self.expert_load_stats_config, dict):
+            self.expert_load_stats_config = ExpertLoadStatsConfig(
+                **self.expert_load_stats_config
+            )
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
@@ -1829,6 +1837,9 @@ class EngineArgs:
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
+            "--expert-load-stats-config", **vllm_kwargs["expert_load_stats_config"]
+        )
+        vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
         vllm_group.add_argument("--performance-mode", **vllm_kwargs["performance_mode"])
@@ -2791,6 +2802,7 @@ class EngineArgs:
             ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
+            expert_load_stats_config=self.expert_load_stats_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,

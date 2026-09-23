@@ -210,6 +210,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.expert_load_stats import ExpertLoadStats
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -572,6 +573,7 @@ class GPUModelRunner(
         )
 
         self.eplb_state: EplbState | None = None
+        self.expert_load_stats: ExpertLoadStats | None = None
         self._moe_model: MixtureOfExperts | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
         self.eep_eplb_suppressed = False
@@ -5338,6 +5340,14 @@ class GPUModelRunner(
                     )
                     eplb_models += 1
 
+                self.expert_load_stats = ExpertLoadStats.create(
+                    self.vllm_config, self.model, self.device
+                )
+                if self.expert_load_stats is not None:
+                    self.execute_model = self.expert_load_stats.wrap_execute(
+                        self.execute_model
+                    )
+
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
         except torch.cuda.OutOfMemoryError as e:
@@ -6511,6 +6521,10 @@ class GPUModelRunner(
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.expert_load_stats is not None:
+            self.expert_load_stats.close()
+            self.execute_model = type(self).execute_model.__get__(self)
+            self.expert_load_stats = None
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.v1.worker.workspace import reset_workspace_manager
 

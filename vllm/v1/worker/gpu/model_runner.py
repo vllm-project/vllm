@@ -80,6 +80,7 @@ from vllm.v1.watermarking.spec_decode import (
 )
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker.expert_load_stats import ExpertLoadStats
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
@@ -343,6 +344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
+        self.expert_load_stats: ExpertLoadStats | None = None
         # The AuxOutput Connector owns R3 capture, copying, and storage.
         self.aux_output_connector: AuxOutputWorkerConnector | None = None
 
@@ -509,6 +511,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model, self.model_config, load_dummy_weights
         )
         self.eplb.maybe_start_async_loop(eplb_models_added)
+        self.expert_load_stats = ExpertLoadStats.create(
+            self.vllm_config, self.model, self.device
+        )
+        if self.expert_load_stats is not None:
+            self.execute_model = self.expert_load_stats.wrap_execute(self.execute_model)
 
         if not self.is_first_pp_rank:
             # For non-first PP ranks, create intermediate tensors sized
@@ -2222,6 +2229,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.expert_load_stats is not None:
+            self.expert_load_stats.close()
+            self.execute_model = type(self).execute_model.__get__(self)
+            self.expert_load_stats = None
         torch.accelerator.synchronize()
         if self.aux_output_connector is not None:
             self.aux_output_connector.close()

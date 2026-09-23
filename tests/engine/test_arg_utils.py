@@ -52,6 +52,29 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--expert-load-stats-config", '{"enabled":true,"log_interval":17}'],
+        [
+            "--expert-load-stats-config.enabled",
+            "true",
+            "--expert-load-stats-config.log_interval",
+            "17",
+        ],
+    ],
+)
+@pytest.mark.parametrize("enable_eplb", [False, True])
+def test_expert_load_stats_cli(options, enable_eplb):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    if enable_eplb:
+        options = [*options, "--enable-expert-parallel", "--enable-eplb"]
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert args.expert_load_stats_config.enabled
+    assert args.expert_load_stats_config.log_interval == 17
+    assert args.enable_eplb == enable_eplb
+
+
 def test_watermark_config_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(
