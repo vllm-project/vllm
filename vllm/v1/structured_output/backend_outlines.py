@@ -53,6 +53,7 @@ class OutlinesBackend(StructuredOutputBackend):
             _outlines_compile_index,
             regex_string,
             vocabulary.inner,
+            pattern=regex_string,
         )
         self.cache[cache_key] = index
 

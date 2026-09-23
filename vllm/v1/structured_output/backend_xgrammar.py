@@ -168,6 +168,7 @@ class XgrammarBackend(StructuredOutputBackend):
                 _xgr_compile_regex,
                 self.tokenizer_info_json,
                 grammar_spec,
+                pattern=grammar_spec,
             )
             ctx = xgr.CompiledGrammar.deserialize_json(serialized, self.tokenizer_info)
         elif request_type == StructuredOutputOptions.CHOICE:
@@ -505,6 +506,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             compile_regex_with_timeout(
                 _xgr_grammar_from_regex,
                 so_params.regex,
+                pattern=so_params.regex,
             )
         except Exception as err:
             raise VLLMValidationError(
