@@ -505,6 +505,10 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
+        # A block that already carries hashes has described its own boundaries in
+        # an earlier event (and promotion reports their removal), so the gap
+        # between them must not be re-reported here.
+        is_first_partial_registration = block.block_hash is None
         if replace_existing_hashes:
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
@@ -526,6 +530,10 @@ class BlockPool:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
             )
+            if is_first_partial_registration:
+                self._emit_skipped_partial_ancestry(
+                    request, block_start, block_size, kv_cache_group_id
+                )
             parent_block_hash = (
                 maybe_convert_block_hash(parent_hash)
                 if parent_hash is not None
@@ -580,6 +588,62 @@ class BlockPool:
         )
         block_start = (num_hash_blocks - 1) * self.hash_block_size
         return parent_hash, block_start
+
+    def _emit_skipped_partial_ancestry(
+        self,
+        request: Request,
+        block_start: int,
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> None:
+        """Report prefix boundaries between the last reported ancestor and the entry.
+
+        ``cache_full_blocks`` reports hashes at ``block_size`` boundaries while a
+        partial entry is keyed at a ``hash_block_size`` boundary, so the entry's
+        parent can name a boundary that no event reported and an external consumer
+        cannot attach the entry to its prefix chain. Emitting those intermediate
+        boundaries keeps the stream reconstructable without changing the event
+        schema.
+
+        Boundaries are only emitted when they follow a reported ancestor: if the
+        entry lies inside the first cache block there is nothing to attach to, and
+        emitting a leading chunk would misrepresent what the prefix map holds.
+        """
+        aligned_start = block_start // block_size * block_size
+        if aligned_start <= 0:
+            return
+        first_hash_idx = aligned_start // self.hash_block_size
+        last_hash_idx = block_start // self.hash_block_size
+        for hash_idx in range(first_hash_idx, last_hash_idx):
+            chunk_start = hash_idx * self.hash_block_size
+            chunk_end = chunk_start + self.hash_block_size
+            extra_keys, _ = generate_block_hash_extra_keys(
+                request, chunk_start, chunk_end, -1 if chunk_start > 0 else 0
+            )
+            self.kv_event_queue.append(
+                BlockStored(
+                    block_hashes=[
+                        maybe_convert_block_hash(request.block_hashes[hash_idx])
+                    ],
+                    parent_block_hash=maybe_convert_block_hash(
+                        request.block_hashes[hash_idx - 1]
+                    )
+                    if hash_idx > 0
+                    else None,
+                    token_ids=request.all_token_ids[chunk_start:chunk_end],
+                    block_size=self.hash_block_size,
+                    lora_id=request.lora_request.adapter_id
+                    if request.lora_request
+                    else None,
+                    medium=self.medium,
+                    lora_name=request.lora_request.name
+                    if request.lora_request
+                    else None,
+                    extra_keys=[extra_keys],
+                    group_idx=kv_cache_group_id,
+                    session_id=request.session_id,
+                )
+            )
 
     def _remove_cached_block_hashes(
         self,

@@ -464,3 +464,171 @@ def test_partial_block_promotes_to_direct_full_block_hash(dcp_world_size: int):
     )
     assert pool.get_cached_block(promoted_full_hash, [kv_cache_group_id]) == [blocks[1]]
     assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) is None
+
+
+# ---------------------------------------------------------------------------
+# A partial entry is keyed at ``hash_block_size`` granularity while full blocks
+# are reported at ``block_size`` granularity, so a partial entry's parent can name
+# a boundary that no event reported. The stream must still let an external
+# consumer attach the entry to its prefix chain (#58119).
+# ---------------------------------------------------------------------------
+
+
+def test_partial_block_event_reports_unreported_ancestry():
+    hash_block_size = 128
+    block_size = 1536
+    partial_boundary = 1792
+    token_ids = list(range(1800))
+
+    req = make_request("partial-ancestry", token_ids, hash_block_size, sha256)
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    pool.cache_partial_block(
+        request=req,
+        block=blocks[1],
+        num_tokens=partial_boundary,
+        kv_cache_group_id=0,
+        block_size=block_size,
+    )
+
+    events = [e for e in pool.take_events() if isinstance(e, BlockStored)]
+
+    def external(num_tokens: int):
+        return kv_cache_utils.maybe_convert_block_hash(
+            boundary_hash(req, hash_block_size, num_tokens)
+        )
+
+    # The full block, the previously unreported 1664-token boundary, then the
+    # partial entry itself.
+    assert [e.block_hashes for e in events] == [
+        [external(block_size)],
+        [external(1664)],
+        [external(partial_boundary)],
+    ]
+    assert [e.parent_block_hash for e in events] == [
+        None,
+        external(block_size),
+        external(1664),
+    ]
+    assert events[1].token_ids == token_ids[block_size:1664]
+    assert events[1].block_size == hash_block_size
+    assert events[2].token_ids == token_ids[1664:partial_boundary]
+
+    # Every parent reference now resolves to a hash the stream reported.
+    reported = {h for e in events for h in e.block_hashes}
+    for event in events:
+        if event.parent_block_hash is not None:
+            assert event.parent_block_hash in reported
+
+
+def test_partial_block_in_first_cache_block_reports_nothing_extra():
+    # Inside the first cache block there is no reported ancestor to attach to, so
+    # no intermediate boundary is invented: the partial entry stays the only
+    # event, matching the behaviour pinned by
+    # test_cache_partial_block_kv_cache_events.
+    hash_block_size = 4
+    block_size = 12
+    req = make_request("first-block", list(range(8)), hash_block_size, sha256)
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    block = pool.get_new_blocks(1)[0]
+    assert pool.cache_partial_block(
+        request=req,
+        block=block,
+        num_tokens=8,
+        kv_cache_group_id=0,
+        block_size=block_size,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[1])
+    ]
+    assert events[0].parent_block_hash == kv_cache_utils.maybe_convert_block_hash(
+        req.block_hashes[0]
+    )
+
+
+def test_partial_block_event_reports_every_unreported_boundary():
+    # Several hash boundaries can sit between the last reported block-aligned
+    # ancestor and the entry, and every one of them has to be reported for the
+    # stream to stay contiguous.
+    hash_block_size = 2
+    block_size = 12
+    num_tokens = 22
+    token_ids = list(range(num_tokens))
+    req = make_request("multi-gap", token_ids, hash_block_size, sha256)
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    pool.cache_partial_block(
+        request=req,
+        block=blocks[1],
+        num_tokens=num_tokens,
+        kv_cache_group_id=0,
+        block_size=block_size,
+    )
+
+    events = [e for e in pool.take_events() if isinstance(e, BlockStored)]
+
+    def external(tokens: int):
+        return kv_cache_utils.maybe_convert_block_hash(
+            boundary_hash(req, hash_block_size, tokens)
+        )
+
+    # The 12-token full block, the boundaries at 14/16/18/20, then the entry.
+    assert [e.block_hashes for e in events] == [
+        [external(12)],
+        [external(14)],
+        [external(16)],
+        [external(18)],
+        [external(20)],
+        [external(22)],
+    ]
+    assert [e.parent_block_hash for e in events] == [
+        None,
+        external(12),
+        external(14),
+        external(16),
+        external(18),
+        external(20),
+    ]
+    # The reported token ranges tile the prefix without gaps.
+    assert [e.token_ids[0] for e in events[1:]] == [12, 14, 16, 18, 20]
+    assert [e.token_ids[-1] for e in events[1:]] == [13, 15, 17, 19, 21]
+
+    reported = {h for e in events for h in e.block_hashes}
+    for event in events:
+        if event.parent_block_hash is not None:
+            assert event.parent_block_hash in reported
