@@ -731,7 +731,11 @@ class Platform:
                     # Skipped: kept at its own native (higher-precision) dtype.
                     padded_pages.append(
                         per_token_page_bytes(
-                            model_config.dtype, "auto", num_kv_heads, head_size, head_size_v
+                            model_config.dtype,
+                            "auto",
+                            num_kv_heads,
+                            head_size,
+                            head_size_v,
                         )
                     )
 
