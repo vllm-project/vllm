@@ -17,7 +17,29 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance requires NVIDIA GPUs with compute capability 8.0 or higher.
+Batch invariance is supported on the following platforms:
+
+- NVIDIA GPUs with compute capability 8.0 or higher.
+- Intel XPUs with Triton support.
+
+### Attention Backend Selection for XPU
+
+On XPU, Triton Attention backend is required for batch invariance.
+Select this backend using Qwen/Qwen3-1.7B model as an example:
+
+```python
+llm = LLM(
+    model="Qwen/Qwen3-1.7B",
+    attention_config={"backend": "TRITON_ATTN"},
+)
+```
+
+Or via the CLI:
+
+```bash
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-1.7B \
+    --attention-config.backend TRITON_ATTN
+```
 
 ## Enabling Batch Invariance
 
@@ -112,6 +134,7 @@ Batch invariance has been tested and verified on the following models:
 - **Granite 3.1 (MoE)**: `ibm-granite/granite-3.1-1b-a400m-instruct`, `ibm-granite/granite-3.1-3b-a800m-instruct`
 - **Granite 3.1 (Dense)**: `ibm-granite/granite-3.1-2b-instruct`, `ibm-granite/granite-3.1-8b-instruct`
 - **EXAONE 4.0 series**: `LGAI-EXAONE/EXAONE-4.0-1.2B`, `LGAI-EXAONE/EXAONE-4.0.1-32B`, `LGAI-EXAONE/EXAONE-4.0-32B`
+- **OLMo 2**: `allenai/OLMo-2-0425-1B-Instruct`
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
@@ -122,6 +145,9 @@ When batch invariance is enabled, vLLM:
 1. Uses deterministic kernel implementations for attention and other operations
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism (such as custom all-reduce operations in tensor parallel mode)
+4. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
+   runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out
+   (not applied when sequence parallelism / async TP are enabled, since those are `torch.compile` passes).
 
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.

@@ -52,6 +52,9 @@ source ~/.venv-vllm-metal/bin/activate
 vllm serve
 ```
 
+Wait for 2-3 minutes until you see application startup complete:
+> INFO:     Application startup complete.
+
 Once the server is running, you have multiple options to interact with it:
 
 #### Option 1: Interactive chat
