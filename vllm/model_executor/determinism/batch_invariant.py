@@ -9,6 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.determinism.batch_invariant_configs import (
+    _get_descriptor_matmul_config,
     _get_matmul_config,
     resolve_tuned_matmul_configs,
 )
@@ -133,6 +134,150 @@ def matmul_kernel_persistent(
         tl.store(c_ptrs, c, mask=c_mask)
 
 
+@triton.jit(launch_metadata=_matmul_launch_metadata)
+def matmul_kernel_descriptor_persistent(
+    a_ptr,
+    b_ptr,
+    c_ptr,  #
+    bias_ptr,
+    M,
+    N,
+    K,  #
+    BLOCK_SIZE_M: tl.constexpr,  #
+    BLOCK_SIZE_N: tl.constexpr,  #
+    BLOCK_SIZE_K: tl.constexpr,  #
+    GROUP_SIZE_M: tl.constexpr,  #
+    NUM_SMS: tl.constexpr,  #
+    HAS_BIAS: tl.constexpr,
+):
+    """Persistent matmul using tensor descriptors for 2D block I/O.
+
+    Expects b_ptr to point to a transposed B matrix of shape [N, K] with
+    row-major (K-contiguous) layout.  The dot product transposes each loaded
+    B-tile back: dot(A_tile, B_tile.T).
+
+    ~3x faster than the pointer-based persistent kernel on Intel XPU because
+    tensor descriptors leverage hardware 2D block load/store with automatic
+    bounds checking (no explicit masks needed).
+    """
+    dtype = c_ptr.dtype.element_ty
+    start_pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
+    num_tiles = num_pid_m * num_pid_n
+
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr,
+        shape=[M, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr,
+        shape=[N, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr,
+        shape=[M, N],
+        strides=[N, 1],
+        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+    )
+
+    tile_id_c = start_pid - NUM_SMS
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+
+    for tile_id in tl.range(start_pid, num_tiles, NUM_SMS, flatten=True):
+        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M)
+        offs_am = pid_m * BLOCK_SIZE_M
+        offs_bn = pid_n * BLOCK_SIZE_N
+
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        for ki in range(k_tiles):
+            offs_k = ki * BLOCK_SIZE_K
+            a = a_desc.load([offs_am, offs_k])
+            b = b_desc.load([offs_bn, offs_k])
+            accumulator = tl.dot(a, b.T, accumulator)
+
+        tile_id_c += NUM_SMS
+        pid_m, pid_n = _compute_pid(
+            tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M
+        )
+        offs_cm = pid_m * BLOCK_SIZE_M
+        offs_cn = pid_n * BLOCK_SIZE_N
+
+        if HAS_BIAS:
+            bias_offs = offs_cn + tl.arange(0, BLOCK_SIZE_N)
+            bias_vals = tl.load(bias_ptr + bias_offs, mask=bias_offs < N, other=0.0).to(
+                tl.float32
+            )
+            accumulator += bias_vals[None, :]
+
+        c = accumulator.to(dtype)
+        c_desc.store([offs_cm, offs_cn], c)
+
+
+def matmul_descriptor_persistent(
+    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Persistent matmul using tensor descriptors (Intel XPU fast path).
+
+    Args:
+        a: Input matrix [M, K], must be contiguous.
+        b: Weight matrix [K, N] (standard layout — transposed internally).
+        bias: Optional 1D bias vector [N].
+
+    Returns:
+        Output matrix [M, N] with dtype matching the inputs.
+
+    """
+    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+    assert a.dtype == b.dtype, "Incompatible dtypes"
+    assert bias is None or bias.dim() == 1, "bias must be 1D"
+
+    M, K = a.shape
+    _, N = b.shape
+    dtype = a.dtype
+
+    # Tensor descriptors require contiguous row-major layout.
+    a = a.contiguous()
+    # Descriptor kernel expects B in [N, K] layout (K-contiguous).
+    b_t = b.t().contiguous()
+
+    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    # This path is XPU-only. _NUM_SMS is set by enable_batch_invariant_mode()
+    # before torch.compile traces this function, so Dynamo can lift it
+    # as a compile-time constant.
+    NUM_SMS = _NUM_SMS if _NUM_SMS > 0 else num_compute_units(a.device.index)
+
+    def grid(META):
+        return (
+            min(
+                NUM_SMS,
+                triton.cdiv(M, META["BLOCK_SIZE_M"])
+                * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+            ),
+        )
+
+    cfg = _get_descriptor_matmul_config(M, N, K, dtype)
+
+    matmul_kernel_descriptor_persistent[grid](
+        a,
+        b_t,
+        c,
+        bias,
+        M,
+        N,
+        K,
+        NUM_SMS=NUM_SMS,
+        HAS_BIAS=bias is not None,
+        **cfg,
+    )
+    return c
+
+
 def matmul_persistent(
     a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
 ):
@@ -234,7 +379,7 @@ def bmm_kernel(
     B_LARGE: tl.constexpr,
     C_LARGE: tl.constexpr,
 ):
-    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N)
+    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N).
 
     Each program computes one (batch_idx, tile_m, tile_n) tile, accumulating
     along K in a fixed order to preserve batch invariance.
@@ -351,8 +496,7 @@ def _log_softmax_kernel(
     n_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    Compute log_softmax along the last dimension of a 2D tensor.
+    """Compute log_softmax along the last dimension of a 2D tensor.
     Each block handles one row of the input tensor.
     """
     # Get the row index for this block
@@ -406,8 +550,7 @@ def _log_softmax_kernel(
 
 
 def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """
-    Compute log_softmax using Triton kernel.
+    """Compute log_softmax using Triton kernel.
 
     Args:
         input: Input tensor
@@ -416,6 +559,7 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
     Returns:
         Tensor with log_softmax applied along the specified dimension
+
     """
     if dim != -1 and dim != input.ndim - 1:
         raise ValueError(
@@ -463,8 +607,7 @@ def mean_kernel(
     K,  # size after reduction dim
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    Kernel for computing mean along a single dimension.
+    """Kernel for computing mean along a single dimension.
     Input is viewed as (M, N, K) where N is the dimension being reduced.
     """
     # Program ID gives us which output element we're computing
@@ -505,8 +648,7 @@ def mean_dim(
     keepdim: bool = False,
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """
-    Triton implementation of torch.mean with single dimension reduction.
+    """Triton implementation of torch.mean with single dimension reduction.
 
     Args:
         input: Input tensor
@@ -517,6 +659,7 @@ def mean_dim(
 
     Returns:
         Tensor with mean values along specified dimension
+
     """
     # Validate inputs
     assert -input.ndim <= dim < input.ndim, (
@@ -589,15 +732,17 @@ def mean_dim(
     return output
 
 
-def mm_batch_invariant(a, b):
-    return matmul_persistent(a, b)
+def mm_batch_invariant(a, b, bias=None):
+    if a.device.type == "xpu":
+        return matmul_descriptor_persistent(a, b, bias=bias)
+    return matmul_persistent(a, b, bias=bias)
 
 
 def matmul_batch_invariant(a, b, *, out=None):
     # torch.matmul can handle various dimensions
     # For 2D x 2D, it's the same as mm
     if a.ndim == 2 and b.ndim == 2:
-        result = matmul_persistent(a, b)
+        result = mm_batch_invariant(a, b)
         if out is not None:
             out.copy_(result)
             return out
@@ -609,7 +754,7 @@ def matmul_batch_invariant(a, b, *, out=None):
         hidden = a.shape[-1]
         out_dim = b.shape[-1]
         a_2d = a.reshape(-1, hidden)
-        result_2d = matmul_persistent(a_2d, b)
+        result_2d = mm_batch_invariant(a_2d, b)
         result = result_2d.reshape(batch_dims + (out_dim,))
         if out is not None:
             out.copy_(result)
@@ -732,7 +877,7 @@ def bmm_batch_invariant(a, b, *, out=None):
 
 
 def addmm_batch_invariant(bias, a, b):
-    return matmul_persistent(a, b, bias=bias)
+    return mm_batch_invariant(a, b, bias=bias)
 
 
 def _log_softmax_batch_invariant(input, dim, _half_to_float):
@@ -787,8 +932,7 @@ def _rms_norm_kernel(
     BLOCK_SIZE: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
 ):
-    """
-    Compute RMS normalization along the last dimension of a 2D tensor.
+    """Compute RMS normalization along the last dimension of a 2D tensor.
     RMS Norm: y = x / sqrt(mean(x^2) + eps) * weight
     Each block handles one row of the input tensor.
     """
@@ -834,9 +978,7 @@ def rms_norm_batch_invariant(
     eps: float = 1e-6,
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute RMS normalization using Triton kernel.
-
+    """Compute RMS normalization using Triton kernel.
 
     Args:
         input: Input tensor of shape (..., hidden_size)
@@ -848,6 +990,7 @@ def rms_norm_batch_invariant(
     Returns:
         RMS normalized tensor, or ``(output, residual_out)`` when ``residual``
         is provided
+
     """
     if residual is not None:
         assert input.shape == residual.shape, (
@@ -903,11 +1046,13 @@ _batch_invariant_LIB = None
 _fp16_block_size_n = 256
 _fp32_block_size_n = 128
 _fp32_num_stages = 3
+_NUM_SMS: int = 0
 
 
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB
     global _fp16_block_size_n, _fp32_block_size_n, _fp32_num_stages
+    global _NUM_SMS
 
     if _batch_invariant_MODE:
         return
@@ -916,7 +1061,6 @@ def enable_batch_invariant_mode():
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
     key = current_platform.dispatch_key
-
     if current_platform.is_cuda():
         if current_platform.is_device_capability_family(80):
             # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
@@ -945,24 +1089,40 @@ def enable_batch_invariant_mode():
             _fp32_block_size_n = 32
             _fp32_num_stages = 2
     elif current_platform.is_xpu():
+        # Tensor descriptors need a global-memory allocator; must be set outside
+        # torch.compile regions (triton.set_allocator modifies global state).
+        def _triton_alloc_fn(size: int, alignment: int, stream: int | None):
+            return torch.empty(size, device="xpu", dtype=torch.int8)
+
+        triton.set_allocator(_triton_alloc_fn)
+
+        _NUM_SMS = num_compute_units(0)
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
-        # TODO: register matmul and linear for XPU
-        # once suitable Triton kernels are implemented
+        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
 
         _fp16_block_size_n = 128
 
-    _batch_invariant_LIB.impl("aten::_log_softmax", _log_softmax_batch_invariant, key)
-    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
-    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
+    # Native mean can change reduction order with the row count on XPU too.
     _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
-    # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
-    # (torch._native.ops.bmm_outer_product), so we need allow_override
-    # to replace it at the dispatcher level.
-    _batch_invariant_LIB.impl(
-        "aten::bmm", bmm_batch_invariant, key, allow_override=True
-    )
-    torch.bmm = bmm_batch_invariant
+
+    # Softmax, log_softmax, and bmm are already batch-invariant on XPU
+    # (oneDNN backend produces bitwise-identical results regardless of batch
+    # context). Only register these overrides on CUDA where they are needed.
+    if not current_platform.is_xpu():
+        _batch_invariant_LIB.impl(
+            "aten::_log_softmax", _log_softmax_batch_invariant, key
+        )
+        _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
+        # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
+        # (torch._native.ops.bmm_outer_product), so we need allow_override
+        # to replace it at the dispatcher level.
+        _batch_invariant_LIB.impl(
+            "aten::bmm", bmm_batch_invariant, key, allow_override=True
+        )
+        torch.bmm = bmm_batch_invariant
 
     reduced_precision_val = (
         (False, False) if is_torch_equal_or_newer("2.10.0") else False
@@ -990,7 +1150,12 @@ def override_envs_for_invariance():
     os.environ["NCCL_MIN_NCHANNELS"] = "1"
     os.environ["NCCL_MAX_NCHANNELS"] = "1"
     os.environ["NCCL_PROTO"] = "Simple"
-    os.environ["NCCL_ALGO"] = "allreduce:tree"
+    # NCCL >= 2.31 zero-fills the algorithm table of every collective when
+    # NCCL_ALGO is set and re-enables only the named ones; together with the
+    # NCCL_PROTO above, collectives not named here end up with no algorithm
+    # and fail with ncclInvalidUsage. Re-enable Ring and Tree for all
+    # collectives, then pin AllReduce to Tree for determinism.
+    os.environ["NCCL_ALGO"] = "ring,tree;allreduce:tree"
     os.environ["NCCL_NTHREADS"] = "1"
     os.environ["NCCL_SOCKET_NTHREADS"] = "1"
 

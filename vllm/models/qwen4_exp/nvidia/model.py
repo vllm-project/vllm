@@ -8,7 +8,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -76,7 +75,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from ..config import Qwen4ExpConfig
+from ..config import ATTENTION_LAYER_TYPES, QSA_LAYER_TYPE, Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ple_layer import Qwen4ExpPLELayer
@@ -87,7 +86,6 @@ def without_modelopt_fp4(
     quant_config: QuantizationConfig | None,
 ) -> QuantizationConfig | None:
     """Return ``None`` for weights excluded from Qwen4Exp ModelOpt-FP4."""
-
     if quant_config is not None and quant_config.get_name() == "modelopt_fp4":
         return None
     return quant_config
@@ -103,7 +101,6 @@ def _remap_qsa_cache_scale_name(
     that cache directly, so only QSA layers need the final path component
     moved to the owner's persistent ``_k_scale``/``_v_scale`` buffers.
     """
-
     scale_suffixes = {
         "k_proj.k_scale": "_k_scale",
         "k_proj.output_scale": "_k_scale",
@@ -141,9 +138,9 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
     "_input_scale",
 ]
 
-# The checkpoint keeps down and injection projections separate; runtime packs
-# them into adjacent logical shards of one MergedColumnParallelLinear.
-_HC_WEIGHTS_MAPPER = WeightsMapper(
+# The checkpoint stores these projections separately; runtime packs each group
+# into adjacent logical shards of a MergedColumnParallelLinear.
+_EXTRA_WEIGHTS_MAPPER = WeightsMapper(
     orig_to_new_stacked={
         "hyper_connection.input_mix_weight_down.weight": (
             "hyper_connection.input_mix_weight_down_block_inject.weight",
@@ -153,6 +150,8 @@ _HC_WEIGHTS_MAPPER = WeightsMapper(
             "hyper_connection.input_mix_weight_down_block_inject.weight",
             1,
         ),
+        "ple.key_proj": ("ple.kv_proj", 0),
+        "ple.value_proj": ("ple.kv_proj", 1),
     }
 )
 
@@ -214,8 +213,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
             )
-        elif layer_type == "full_attention":
-            use_qsa = getattr(config, "indexer_n_heads", None) is not None
+        elif layer_type in ATTENTION_LAYER_TYPES:
+            use_qsa = (
+                layer_type == QSA_LAYER_TYPE
+                or getattr(config, "indexer_n_heads", None) is not None
+            )
             if not use_qsa:
                 self.self_attn = Qwen3NextAttention(
                     config,
@@ -282,11 +284,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if prev_block_output is None:
+            assert prev_injection is None
         attn_hc = self.attn_hyper_connection
         if self.ple is not None:
             # PLE adds directly to the multi-stream state, so pending HC state
             # must be materialized before the addition.
-            if prev_block_output is not None and prev_injection is not None:
+            if prev_block_output is not None:
                 hidden_states = attn_hc.combine(
                     hidden_states, prev_block_output, prev_injection
                 )
@@ -294,7 +298,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
             if input_ids is None or query_start_loc is None or ngram_context is None:
                 raise RuntimeError("PLE inputs were not prepared")
-            hidden_states = hidden_states + self.ple(
+            hidden_states = self.ple(
                 hidden_states,
                 input_ids,
                 query_start_loc,
@@ -302,7 +306,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
 
         # Fuse a pending combine with this HC module's mix when possible.
-        if prev_block_output is not None and prev_injection is not None:
+        if prev_block_output is not None:
             hidden_states, block_input, injection = attn_hc.combine_and_mix(
                 hidden_states, prev_block_output, prev_injection
             )
@@ -311,7 +315,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
-        elif self.layer_type == "full_attention":
+        elif self.layer_type in ATTENTION_LAYER_TYPES:
             attn_out = self.self_attn(
                 hidden_states=block_input,
                 positions=positions,
@@ -377,19 +381,8 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-        "query_start_loc": 0,
-        "ngram_context": 0,
-        "deepstack_input_embeds": 0,
-    }
-)
 class Qwen4ExpModel(nn.Module):
-    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _HC_WEIGHTS_MAPPER
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -402,8 +395,11 @@ class Qwen4ExpModel(nn.Module):
         self._qsa_layer_ids = frozenset(
             layer_idx
             for layer_idx, layer_type in enumerate(config.layer_types)
-            if layer_type == "full_attention"
-            and getattr(config, "indexer_n_heads", None) is not None
+            if layer_type == QSA_LAYER_TYPE
+            or (
+                layer_type == "full_attention"
+                and getattr(config, "indexer_n_heads", None) is not None
+            )
         )
         self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
@@ -469,6 +465,27 @@ class Qwen4ExpModel(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    @staticmethod
+    def _start_layer_ple_prefetch(
+        layer: nn.Module,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        query_start_loc: torch.Tensor | None,
+        ngram_context: torch.Tensor | None,
+    ) -> None:
+        """Start a layer's PLE prefetch when the required inputs exist."""
+        ple: Qwen4ExpPLELayer | None = getattr(layer, "ple", None)
+        if ple is None:
+            return
+        if input_ids is None or query_start_loc is None or ngram_context is None:
+            raise RuntimeError("PLE inputs were not prepared")
+        ple.start_prefetch(
+            hidden_states,
+            input_ids,
+            query_start_loc,
+            ngram_context,
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -495,10 +512,26 @@ class Qwen4ExpModel(nn.Module):
         block_output = None
         injection = None
         last_layer = None
+        if self.start_layer < self.end_layer:
+            self._start_layer_ple_prefetch(
+                self.layers[self.start_layer],
+                hidden_states,
+                input_ids,
+                query_start_loc,
+                ngram_context,
+            )
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
             last_layer = layer
+            if layer_idx + 1 < self.end_layer:
+                self._start_layer_ple_prefetch(
+                    self.layers[layer_idx + 1],
+                    hidden_states,
+                    input_ids,
+                    query_start_loc,
+                    ngram_context,
+                )
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,
                 prev_block_output=block_output,
@@ -612,6 +645,7 @@ class Qwen4ExpForCausalLM(
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
         "input_mix_weight_down_block_inject": [
@@ -848,11 +882,12 @@ class Qwen4ExpForConditionalGeneration(
     requires_raw_input_tokens = True
 
     packed_modules_mapping = Qwen3_5ForConditionalGeneration.packed_modules_mapping | {
+        "kv_proj": ["key_proj", "value_proj"],
         "input_mix_weight_down_block_inject": [
             "input_mix_weight_down",
             "block_inject_weight",
             "_input_mix_padding",
-        ]
+        ],
     }
 
     @staticmethod

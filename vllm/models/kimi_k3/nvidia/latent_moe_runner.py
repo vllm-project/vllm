@@ -132,7 +132,7 @@ class LatentMoERunner(MoERunner):
                     else 0
                 ),
                 dtype=norm.weight.dtype,
-                device=norm.weight.device,
+                device=current_platform.current_device(),
                 rms_eps=norm.variance_epsilon,
             )
             self._k3_latent_moe_tail_op = op
@@ -275,9 +275,7 @@ class LatentMoERunner(MoERunner):
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
-        """
-        Tier 2: column-parallel up-projection folded into the final reduce.
-        """
+        """Tier 2: column-parallel up-projection folded into the final reduce."""
         transform = self.routed_output_transform
         assert transform is not None
 
