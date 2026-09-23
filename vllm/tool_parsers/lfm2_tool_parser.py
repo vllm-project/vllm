@@ -42,8 +42,7 @@ TOOL_CALL_END = "<|tool_call_end|>"
 
 
 class Lfm2ToolParser(ToolParser):
-    """
-    Tool call parser for LiquidAI LFM2/LFM2.5 models that produce pythonic
+    """Tool call parser for LiquidAI LFM2/LFM2.5 models that produce pythonic
     tool calls wrapped in <|tool_call_start|> and <|tool_call_end|> tokens.
 
     Example model output:

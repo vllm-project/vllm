@@ -369,4 +369,51 @@ mod tests {
         assert_eq!(chat_top_logprobs_len(1), 1);
         assert_eq!(chat_top_logprobs_len(-1), 3);
     }
+
+    #[test]
+    fn chat_logprobs_clamps_nan_and_negative_infinity_for_json() {
+        let mut logprobs = sample_logprobs();
+        logprobs.positions[0].entries[0].logprob = f32::NAN;
+        logprobs.positions[0].entries[0].rank = 0;
+        logprobs.positions[0].entries[1].logprob = f32::NEG_INFINITY;
+
+        let response = decoded_logprobs_to_openai_chat(&logprobs, -1, false).unwrap();
+        let json = serde_json::to_string_pretty(&response).unwrap();
+        expect_test::expect![[r#"
+            {
+              "content": [
+                {
+                  "token": "A",
+                  "logprob": -9999.0,
+                  "bytes": [
+                    65
+                  ],
+                  "top_logprobs": [
+                    {
+                      "token": "A",
+                      "logprob": -9999.0,
+                      "bytes": [
+                        65
+                      ]
+                    },
+                    {
+                      "token": "B",
+                      "logprob": -9999.0,
+                      "bytes": [
+                        66
+                      ]
+                    },
+                    {
+                      "token": "C",
+                      "logprob": -2.0,
+                      "bytes": [
+                        67
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }"#]]
+        .assert_eq(&json);
+    }
 }

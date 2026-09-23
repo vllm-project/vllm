@@ -34,6 +34,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -99,6 +100,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         Raises:
             ValueError: If the dtype is not float32 or the shape is not
                 ``(num_heads,)``.
+
         """
         if sinks is None:
             return
@@ -134,6 +136,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         Raises:
             ValueError: If the sink and query head layouts disagree, or if they
                 live on different devices.
+
         """
         sinks = self.sinks
         if sinks is None:
@@ -218,6 +221,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         topk_indices: torch.Tensor,
         topk_length: torch.Tensor | None = None,
         actual_num_heads: int | None = None,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
@@ -248,7 +252,14 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             # Zero (not new_empty) the padded lanes: topk_indices is shared by
             # all heads, so the kernel reduces across the head group and NaNs
             # from uninitialized memory would leak into the real heads.
-            q_padded = q.new_zeros((q.shape[0], padded_num_heads, q.shape[2]))
+            if out is None:
+                q_padded = q.new_zeros((q.shape[0], padded_num_heads, q.shape[2]))
+            else:
+                *_, q_padded, _, _ = current_workspace_manager().get_simultaneous(
+                    *self.workspace_specs
+                )
+                q_padded = q_padded[:num_tokens]
+                q_padded[:, actual_num_heads:].zero_()
             q_padded[:, :actual_num_heads, :] = q
             q = q_padded
 
@@ -260,6 +271,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             self.softmax_scale,
             attn_sink=attn_sink,
             topk_length=topk_length,
+            out=out,
         )
 
         output = output[:, :actual_num_heads, :]
