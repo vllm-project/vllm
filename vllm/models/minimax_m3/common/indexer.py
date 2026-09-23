@@ -301,6 +301,18 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
             decode_query_len = int(query_lens_cpu[0].item())
+            if decode_query_len == 0 and num_decode_tokens % num_decodes == 0:
+                # CUDA-graph capture reuses the persistent query_start_loc buffer
+                # without staging real cumulative offsets into it: capture only
+                # needs shapes and addresses, not values. Every per-request diff
+                # taken from it is then zero, even though the batch descriptor is
+                # a well-formed uniform decode batch of num_decodes x
+                # (num_decode_tokens / num_decodes). Recover the uniform decode
+                # query length from the counts, which are staged, rather than
+                # from the offsets, which are not. Every invariant below is still
+                # enforced.
+                decode_query_len = num_decode_tokens // num_decodes
+                query_lens_cpu = torch.full_like(query_lens_cpu, decode_query_len)
             assert decode_query_len > 0
             assert torch.all(
                 (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
