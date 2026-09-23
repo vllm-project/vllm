@@ -17,7 +17,7 @@ class Mxfp8LinearLayerConfig:
     uint8 (E8M0) per-block scales at block size 32.
     """
 
-    pass
+    bmm_batch_size: int | None = None
 
 
 class Mxfp8LinearKernel(ABC):
@@ -26,6 +26,10 @@ class Mxfp8LinearKernel(ABC):
     Each subclass implements a specific GEMM backend (FlashInfer CUTLASS,
     Marlin, emulation).
     """
+
+    supports_pre_processed_weights: bool = False
+    """True if ``process_weights_after_loading`` only rewrites parameters, so
+    weights exported by the weight cache daemon can be used as-is."""
 
     def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
         assert self.can_implement(c)[0]
