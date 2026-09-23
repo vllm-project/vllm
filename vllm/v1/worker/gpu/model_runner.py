@@ -284,7 +284,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.use_aux_hidden_state_outputs = True
 
         # Draft tokens propagation - for spec-dec + struct outputs.
-        self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self.draft_tokens_handler = DraftTokensHandler(
+            self.device,
+            max_snapshots=max(8, vllm_config.max_concurrent_batches + 1),
+        )
 
         self.pcp_manager: pcp.PCPManager | None = None
 
@@ -1462,6 +1465,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else None
             ),
         )
+        if self.num_speculative_steps > 0:
+            # Snapshot the drafts that were just written into input_ids, tagged
+            # with this scheduler step. Proposal-time drafts (set later in
+            # sample_tokens) are for the next step and must not overwrite this.
+            self.draft_tokens_handler.snapshot_consumed_drafts(
+                scheduler_output.scheduler_step,
+                input_batch,
+                self.req_states.draft_tokens[input_batch.idx_mapping],
+            )
         input_batch = pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
@@ -2187,8 +2199,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return async_output
 
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.draft_tokens_handler.get_draft_tokens()
+    def take_draft_token_ids(self, step_id: int | None = None) -> DraftTokenIds | None:
+        return self.draft_tokens_handler.get_draft_tokens(step_id=step_id)
 
     @torch.inference_mode()
     @step_eplb_after()

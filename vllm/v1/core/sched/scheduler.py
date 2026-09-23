@@ -1468,6 +1468,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            scheduler_step=self.current_step,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

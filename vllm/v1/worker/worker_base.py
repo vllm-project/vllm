@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -24,16 +25,32 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
+    from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 else:
     SchedulerOutput = object
     GrammarOutput = object
     AsyncModelRunnerOutput = object
     ModelRunnerOutput = object
+    DraftTokenIds = object
 
 logger = init_logger(__name__)
 
 _R = TypeVar("_R")
+
+
+def _callable_accepts_kwarg(func: Callable[..., Any], name: str) -> bool:
+    """Return True if ``func`` can be called with ``name`` as a keyword."""
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    param = params.get(name)
+    if param is not None:
+        return param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 class CompilationTimes(NamedTuple):
@@ -338,6 +355,20 @@ class WorkerWrapperBase:
 
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)
+
+    def take_draft_token_ids(self, step_id: int | None = None) -> DraftTokenIds | None:
+        """Forward draft-token lookup, dropping ``step_id`` if unsupported.
+
+        Plugin workers are documented to implement no-argument
+        ``take_draft_token_ids()``. Passing ``step_id`` to those methods would
+        raise TypeError; fall back to the legacy call instead.
+        """
+        method = getattr(self.worker, "take_draft_token_ids", None)
+        if method is None:
+            return None
+        if step_id is not None and _callable_accepts_kwarg(method, "step_id"):
+            return method(step_id=step_id)
+        return method()
 
     def _apply_mm_cache(self, scheduler_output: SchedulerOutput) -> None:
         mm_cache = self.mm_receiver_cache

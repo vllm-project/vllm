@@ -767,7 +767,9 @@ class EngineCore:
             # When draft tokens are used with structured output, validate them
             # before computing the grammar bitmask for the deferred request.
             if self.check_for_draft_tokens:
-                draft_token_ids = self.model_executor.take_draft_token_ids()
+                draft_token_ids = self.model_executor.take_draft_token_ids(
+                    step_id=deferred_scheduler_output.scheduler_step
+                )
                 if draft_token_ids is not None:
                     # Update the draft token ids in the scheduler output to
                     # filter out the invalid spec tokens, which will be padded
