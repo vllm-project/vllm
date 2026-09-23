@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for Bailing V3 auxiliary hidden-state outputs."""
 
 import torch
 import torch.nn as nn
