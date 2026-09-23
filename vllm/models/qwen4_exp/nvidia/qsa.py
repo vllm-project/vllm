@@ -338,7 +338,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
 
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
-    """Merged Qwen full-attention owner with a QSA index side branch."""
+    """Merged Qwen full-attention owner with a QSA indexer branch."""
 
     supports_dcp = False
 
@@ -624,7 +624,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             metadata[self.indexer.raw_key_cache.prefix],
         )
         if indexer_metadata.num_actual_tokens != num_tokens:
-            raise RuntimeError("QSA main and side metadata token counts disagree")
+            raise RuntimeError("QSA main and indexer metadata token counts disagree")
         selected, main_outputs = self.indexer(
             projected_qk,
             positions,

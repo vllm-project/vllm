@@ -110,7 +110,7 @@ class QSAIndexer(nn.Module):
         )
         self.prefix = prefix
         # MTP step 0 selects the target-aligned rows; later steps reuse them
-        # while continuing to update the QSA side cache.
+        # while continuing to update the QSA indexer cache.
         self.skip_topk = False
 
         self.index_qk_proj = ReplicatedLinear(
@@ -211,11 +211,11 @@ class QSAIndexer(nn.Module):
             QSAIndexerMetadata, metadata[self.compressed_key_cache.prefix]
         )
         if raw.num_actual_tokens != compressed.num_actual_tokens:
-            raise RuntimeError("QSA side-cache metadata token counts disagree")
+            raise RuntimeError("QSA indexer cache metadata token counts disagree")
         if not raw.logical_positions.is_cuda and (
             not torch.equal(raw.logical_positions, compressed.logical_positions)
         ):
-            raise RuntimeError("QSA side-cache metadata positions disagree")
+            raise RuntimeError("QSA indexer cache metadata positions disagree")
         return raw, compressed
 
     def _update_and_compress(

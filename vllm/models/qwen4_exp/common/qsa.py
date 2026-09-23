@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Paged side-cache ownership and metadata for Qwen4Exp QSA.
+"""Paged indexer cache ownership and metadata for Qwen4Exp QSA.
 
 Each QSA layer keeps a fixed circular buffer of raw index keys (the
 compressor state) and one compressed key. MRoPE models pack exact three-axis
@@ -399,7 +399,7 @@ def build_qsa_metadata_triton(
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build QSA side-cache and optional pre-indexer work metadata."""
+    """Build QSA indexer cache and optional pre-indexer work metadata."""
     num_tokens = common_attn_metadata.num_actual_tokens
     num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
     token_to_req = token_to_req_buffer[:num_tokens]
@@ -574,7 +574,7 @@ build_qsa_metadata = (
 
 @dataclass
 class QSAIndexerMetadata(AttentionMetadata):
-    """Common per-forward metadata for one QSA side cache."""
+    """Common per-forward metadata for one QSA indexer cache."""
 
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
@@ -725,7 +725,7 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
 
 
 class QSAStateBackend(AttentionBackend):
-    """Key-only dummy backend for out-of-band QSA side-cache operations."""
+    """Key-only dummy backend for out-of-band QSA indexer cache operations."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     # fp8 entries allow the optional e4m3 compressed indexer cache.

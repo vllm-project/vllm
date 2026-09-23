@@ -248,7 +248,7 @@ def _qsa_sparse_paged_attention_reference(
 
 
 @requires_qsa_kernels
-def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
+def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
     device = torch.device("cuda")
     builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
     builder.compress_ratio = 1
@@ -508,7 +508,7 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
 def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
-    """Padded projected Q/K rows must not affect either side cache."""
+    """Padded projected Q/K rows must not affect either indexer cache."""
     from vllm.model_executor.layers.rotary_embedding import get_rope
 
     device = torch.device("cuda")
