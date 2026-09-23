@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 try:
@@ -95,6 +96,22 @@ def test_default_backend_is_triton():
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, TritonSSUBackend)
     assert backend.name == "triton"
+
+
+def test_default_backend_initializes_for_wrapped_mamba_specs():
+    config = _kv_cache_config_with_ssu()
+    spec = config.kv_cache_groups[0].kv_cache_spec
+    wrapped = UniformTypeKVCacheSpecs(
+        block_size=spec.block_size,
+        kv_cache_specs={"l0": spec},
+    )
+    config.kv_cache_groups[0] = KVCacheGroupSpec(
+        layer_names=["l0"], kv_cache_spec=wrapped
+    )
+
+    initialize_mamba_ssu_backend(MambaConfig(), config)
+
+    assert isinstance(get_mamba_ssu_backend(), TritonSSUBackend)
 
 
 def test_explicit_triton_backend():
