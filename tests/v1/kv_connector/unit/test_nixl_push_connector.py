@@ -370,6 +370,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.xfer_stats = NixlKVConnectorStats()
         w._reqs_to_process = set()
         w._reqs_to_send = {}
+        w.draft_tp_mappings = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.pcp_rank = 0
