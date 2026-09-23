@@ -7,9 +7,11 @@ from PIL import Image
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
+    MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalSharedField,
     PlaceholderRange,
+    nested_tensors_equal,
 )
 from vllm.multimodal.utils import (
     argsort_mm_positions,
@@ -256,3 +258,36 @@ def test_group_and_batch_mm_items_split_by_shared_data():
 
     res = group_and_batch_mm_items([item1, item2, item3, item4, item5])
     assert [num_items for num_items, _ in res] == [2, 1, 1, 1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize("num_items", [1, 3])
+def test_group_and_batch_mm_items_pinned_h2d(num_items):
+    """Staging through pinned memory must not change any batched value."""
+    items = [
+        MultiModalKwargsItem(
+            {
+                "stacked": MultiModalFieldElem(
+                    torch.randn(4, 8), MultiModalBatchedField()
+                ),
+                "ragged": MultiModalFieldElem(
+                    torch.randn(i + 1, 3).T, MultiModalBatchedField()
+                ),
+                "concat": MultiModalFieldElem(
+                    torch.randn(i + 2, 8),
+                    MultiModalFlatField(slices=[slice(0, i + 2)]),
+                ),
+                "padded": MultiModalFieldElem(
+                    torch.randn(2, i + 4),
+                    MultiModalFlatField(slices=[slice(0, 2)]),
+                ),
+            }
+        )
+        for i in range(num_items)
+    ]
+
+    [(_, pinned)] = group_and_batch_mm_items(items, device="cuda", pin_memory=True)
+    [(_, expected)] = group_and_batch_mm_items(items, device="cuda")
+    assert pinned.keys() == expected.keys()
+    for key, value in expected.items():
+        assert nested_tensors_equal(pinned[key], value), key
