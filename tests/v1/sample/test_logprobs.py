@@ -463,7 +463,7 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
     kv-sharing fast prefill would score rows the cross-decoder never ran."""
     processor = SimpleNamespace(
         model_config=SimpleNamespace(
-            return_sampling_mask=False, enable_trace_replay=False
+            return_sampling_mask=False, enable_trace_replay=False, is_diffusion=False
         ),
         vllm_config=SimpleNamespace(
             reasoning_config=None,
