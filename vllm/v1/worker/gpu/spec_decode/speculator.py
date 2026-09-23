@@ -58,6 +58,8 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 class BaseSpeculator(ABC):
     num_query_per_req: int = 1
+    # Extra query slots reserved per request outside the regular queries.
+    num_extra_query_per_req: int = 0
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:

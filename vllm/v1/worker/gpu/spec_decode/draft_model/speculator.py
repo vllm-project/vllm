@@ -34,6 +34,9 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
     slots) via a Triton kernel; steps 1..k-1 are single-token decode steps.
     """
 
+    # Plain draft model needs one extra slot per request for correction.
+    num_extra_query_per_req = 1
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
