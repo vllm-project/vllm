@@ -17,6 +17,9 @@
 //   v_scale_cache (fp32): [num_blocks, block_size, num_kv_heads]
 
 #include <cstdint>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -890,6 +893,35 @@ template void launch_paged_prefill_attn_v2_int8<bf16_t, 128>(
 // ---------------------------------------------------------------------------
 
 #if defined(USE_ROCM)
+// Persistent workspace for the phase handoff.
+//
+// This op is reached from captured CUDA graphs: the backend declares
+// AttentionCGSupport.ALWAYS and triton_attn routes continuation-decode and
+// mixed batches here, so a graph bakes in whatever pointer it sees at capture
+// time. A per-call at::empty is therefore wrong -- the block goes back to the
+// allocator when the call returns, and a later replay would write into whoever
+// owns it by then. That is the same footgun that produced the _pth_mid_o_buf
+// page fault, and triton_attn.py already states the rule: allocate ONCE and
+// never reassign.
+//
+// So: one buffer per device, grown only by allocating a new one, and every
+// buffer ever handed out is kept alive forever. Growth is geometric, so this
+// settles after a couple of steps, and a graph captured against an older
+// buffer stays valid for as long as it can be replayed.
+static float* prefill_int8_workspace(int64_t need,
+                                     const at::TensorOptions& opts) {
+  static std::mutex mtx;
+  static std::unordered_map<int, std::vector<at::Tensor>> kept;
+  std::lock_guard<std::mutex> lock(mtx);
+  std::vector<at::Tensor>& bufs = kept[opts.device().index()];
+  if (bufs.empty() || bufs.back().numel() < need) {
+    int64_t n = 8 << 20;  // 32 MiB floor: covers every shape seen in serving
+    while (n < need) n *= 2;
+    bufs.push_back(at::empty({n}, opts));
+  }
+  return (float*)bufs.back().data_ptr();
+}
+
 void paged_prefill_attn_rdna3_int8(
     torch::Tensor& out, torch::Tensor q, torch::Tensor k_chunk,
     torch::Tensor v_chunk, torch::Tensor k_cache, torch::Tensor v_cache,
@@ -915,13 +947,12 @@ void paged_prefill_attn_rdna3_int8(
   const int head_size = q.size(2);
 
   // Partial online-softmax state handed from the prefix phase to the chunk
-  // phase: 258 floats per (token, head), i.e. ~8.6 MB at 1072 tokens x 8 heads,
-  // written and read once. That is ~17 us against a ~8 ms kernel; the spill it
-  // removes costs far more. Not zeroed on purpose: both phases skip the same
-  // rows, so nothing is read before it is written.
-  auto ws = at::empty(
-      {(int64_t)q.size(0), (int64_t)q.size(1), (int64_t)q.size(2) + 2},
-      q.options().dtype(at::kFloat));
+  // phase: 258 floats per (token, head), written and read once. That is ~17 us
+  // against a ~8 ms kernel; the spill it removes costs far more. Not zeroed on
+  // purpose: both phases skip the same rows, so nothing is read before it is
+  // written.
+  const int64_t ws_need = (int64_t)q.size(0) * q.size(1) * (q.size(2) + 2);
+  float* ws = prefill_int8_workspace(ws_need, q.options().dtype(at::kFloat));
 
   // Macro to reduce boilerplate for head_size dispatch
   #define LAUNCH_INT8(T, HS)                                                  \
@@ -942,7 +973,7 @@ void paged_prefill_attn_rdna3_int8(
         k_scale_cache.stride(0), k_scale_cache.stride(1),                     \
         k_scale_cache.stride(2), v_scale_cache.stride(0),                     \
         v_scale_cache.stride(1), v_scale_cache.stride(2), out.stride(0),      \
-        out.stride(1), (float*)ws.data_ptr(), stream)
+        out.stride(1), ws, stream)
 
   if (q.dtype() == at::kHalf) {
     using T = half;
