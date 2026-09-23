@@ -6896,6 +6896,13 @@ def _diffusion_request(req_id: str, extra_args: dict) -> Request:
     return request
 
 
+@pytest.fixture
+def diffusion_model_runner(monkeypatch):
+    # These CPU tests only exercise scheduling, not Triton kernels.
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+
 def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
     scheduler = create_scheduler(
         async_scheduling=True,
@@ -6908,6 +6915,7 @@ def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
     config = create_scheduler(
         async_scheduling=async_scheduling, diffusion_canvas_length=8
@@ -6917,6 +6925,7 @@ def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
     )
 
 
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_narrows_the_canvas_per_request():
     scheduler = _diffusion_scheduler()
     wide = _diffusion_request("wide", {})
@@ -6934,6 +6943,7 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
 
 
 @pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
     """Padded worker drafts must be narrowed before scheduling or grammar validation."""
     scheduler = _diffusion_scheduler()
@@ -6964,6 +6974,7 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
         assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
 
 
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
     scheduler = _diffusion_scheduler()
     one = _diffusion_request(
@@ -6986,6 +6997,7 @@ def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
     assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
 
 
+@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     scheduler = _diffusion_scheduler(pipeline_parallel_size=3, use_v2_model_runner=True)
     read = _diffusion_request(
