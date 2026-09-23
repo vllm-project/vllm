@@ -60,15 +60,15 @@ use winnow::prelude::*;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
 use self::structural_tag::KIMI_K3_STRUCTURAL_TAG_BUILDER;
-use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
+use super::{AttributionMode, Result, UnifiedParser, UnifiedParserOutput, token_id};
 use crate::output_grammar::{
     self, BuiltOutputGrammar, OutputGrammarContext, visible_format_from_builder,
 };
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
-    Attributed, AttributionMode, Marker, MarkerScanState, attributed, parse_buffered_event,
-    safe_text_len_mul, take_until_marker,
+    Attributed, Marker, MarkerScanState, attributed, parse_buffered_event, safe_text_len_mul,
+    take_until_marker,
 };
 
 const OPEN: &str = "<|open|>";
@@ -102,7 +102,7 @@ struct TokenIds {
     open: u32,
     close: u32,
     sep: u32,
-    end_of_msg: Option<u32>,
+    end_of_msg: u32,
 }
 
 impl TokenIds {
@@ -111,7 +111,7 @@ impl TokenIds {
             open: token_id(tokenizer, OPEN)?,
             close: token_id(tokenizer, CLOSE)?,
             sep: token_id(tokenizer, SEP)?,
-            end_of_msg: tokenizer.token_to_id(END_OF_MSG),
+            end_of_msg: token_id(tokenizer, END_OF_MSG)?,
         })
     }
 }
@@ -151,12 +151,6 @@ impl Markers {
         let close = |tag: &str| {
             guarded(Marker::special(CLOSE, ids.close).then_text(tag).then_special(SEP, ids.sep))
         };
-        // `<|end_of_msg|>` is the stop token; tokenizers that do not expose it
-        // as a token fall back to its spelling.
-        let end_of_msg = match ids.end_of_msg {
-            Some(id) => guarded(Marker::special(END_OF_MSG, id)),
-            None => Marker::text(END_OF_MSG),
-        };
 
         Self {
             think_open: open("think"),
@@ -166,7 +160,7 @@ impl Markers {
             tools_open: open("tools"),
             tools_close: close("tools"),
             message_close: close("message"),
-            end_of_msg,
+            end_of_msg: guarded(Marker::special(END_OF_MSG, ids.end_of_msg)),
             call_open: guarded(Marker::special(OPEN, ids.open).then_text("call")),
             call_close: close("call"),
             sep: guarded(Marker::special(SEP, ids.sep)),
@@ -750,9 +744,8 @@ mod tests {
     };
     use crate::tool::ToolCallDelta;
     use crate::unified::{
-        UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
+        AttributionMode, UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
     };
-    use crate::utils::AttributionMode;
 
     const OPEN_ID: u32 = 256;
     const CLOSE_ID: u32 = 257;
