@@ -236,6 +236,54 @@ def test_mamba_checkpoint_admission_matches_allocation(
     assert admission_estimate == allocation_estimate == allocated
 
 
+@pytest.mark.parametrize(
+    ("num_external_blocks", "num_new_tokens"),
+    [(0, 144), (1, 16), (8, 1), (8, 16), (8, 0)],
+)
+def test_mamba_external_claim_admission_matches_allocation(
+    num_external_blocks, num_new_tokens
+):
+    """A KV-connector claim, with or without new tokens, is admitted exactly."""
+    block_size = 16
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=16)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request_id = "req"
+    num_external_tokens = num_external_blocks * block_size
+
+    def allocate(num_tokens, num_local_computed_tokens):
+        estimate = manager.get_num_blocks_to_allocate(
+            request_id=request_id,
+            num_tokens=num_tokens,
+            new_computed_blocks=[],
+            total_computed_tokens=num_external_tokens,
+            num_local_computed_tokens=num_local_computed_tokens,
+            num_tokens_main_model=num_tokens,
+        )
+        free_before = pool.get_num_free_blocks()
+        if num_local_computed_tokens < num_external_tokens:
+            manager.add_local_computed_blocks(request_id, [], 0, num_external_tokens)
+            manager.allocate_external_computed_blocks(
+                request_id, 0, num_external_tokens
+            )
+        manager.allocate_new_blocks(request_id, num_tokens, num_tokens)
+        assert estimate == free_before - pool.get_num_free_blocks()
+
+    allocate(num_external_tokens + num_new_tokens, 0)
+    allocate(num_external_tokens + num_new_tokens + block_size, num_external_tokens)
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,

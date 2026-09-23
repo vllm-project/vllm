@@ -2344,6 +2344,38 @@ def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
     manager.free(req0)
 
 
+def test_mamba_align_external_claim_admission_matches_allocation():
+    """A sync KV-connector load on a hybrid model is admitted exactly."""
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(block_size, 64, ["full", "mamba_align"])
+    manager = make_kv_cache_manager(
+        config, max_model_len=8192, enable_caching=True, hash_block_size=block_size
+    )
+    req = make_request("0", list(range(9 * block_size)), block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req)
+    num_external_tokens = 8 * block_size
+    estimate = manager.coordinator.get_num_blocks_to_allocate(
+        request_id=req.request_id,
+        num_tokens=9 * block_size,
+        new_computed_blocks=computed_blocks.blocks,
+        num_encoder_tokens=0,
+        total_computed_tokens=num_external_tokens,
+        num_local_computed_tokens=num_computed_tokens,
+        num_tokens_main_model=9 * block_size,
+    )
+    free_before = manager.block_pool.get_num_free_blocks()
+    blocks = manager.allocate_slots(
+        req,
+        block_size,
+        num_new_computed_tokens=num_computed_tokens,
+        new_computed_blocks=computed_blocks,
+        num_external_computed_tokens=num_external_tokens,
+        has_scheduled_reqs=False,
+    )
+    assert blocks is not None
+    assert free_before - manager.block_pool.get_num_free_blocks() == estimate
+
+
 def test_prefill_plp():
     """Test prefill with APC and some prompt logprobs (plp) requests.
 
