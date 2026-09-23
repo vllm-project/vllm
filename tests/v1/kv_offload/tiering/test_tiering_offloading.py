@@ -1557,7 +1557,7 @@ def test_tiering_manager_reports_one_config_info_series_for_each_tier():
     )
 
     assert manager.config_info() == [
-        {"tier": "0:primary", "cpu_num_chunks": 5},
+        {"tier": "0:primary"},
         {"tier": "1:test_metrics", "path": "/mnt/test_metrics"},
         {"tier": "2:test_metrics", "path": "/mnt/test_metrics"},
     ]
@@ -1575,7 +1575,7 @@ def test_tiering_manager_reports_the_primary_series_with_no_secondary_tier():
         secondary_tiers=[],
     )
 
-    assert manager.config_info() == [{"tier": "0:primary", "cpu_num_chunks": 5}]
+    assert manager.config_info() == [{"tier": "0:primary"}]
 
 
 def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():

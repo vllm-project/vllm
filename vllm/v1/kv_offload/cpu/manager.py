@@ -11,7 +11,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.kv_offload.base import (
-    ConfigInfoMapping,
     LoadStoreSpec,
     LookupResult,
     Medium,
@@ -107,7 +106,7 @@ def _build_config_info(
     num_chunks: int,
     kv_bytes_per_chunk: int | None,
     config: OffloadingConfig,
-) -> Mapping[str, str | int]:
+) -> Mapping[str, str | int | float | bool]:
     """Render the static facts of the CPU tier as info metric labels.
 
     Args:
@@ -164,7 +163,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_chunks: int = num_chunks
         # Rendered once: the facts are static, and the scheduler reads them on
         # its own path.
-        self._config_info: Mapping[str, str | int] = (
+        self._config_info: Mapping[str, str | int | float | bool] = (
             _build_config_info(num_chunks, kv_bytes_per_chunk, config)
             if config is not None
             else {}
