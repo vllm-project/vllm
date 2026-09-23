@@ -6,17 +6,17 @@ The source sentence is fed to the encoder as a single "text" modality via a
 ``EncDecMultiModalProcessor`` (the same pattern Whisper uses for audio), while
 the decoder runs as a normal V1 encoder-decoder.
 
-Differences from BART, all reflected below:
+Architecture notes:
   * Positional embeddings are sinusoidal-static (``static_position_embeddings``)
-    and stored in the checkpoint as ``embed_positions.weight``. There is **no**
-    ``+2`` padding offset (that is a BART-specific hack).
+    and stored in the checkpoint as ``embed_positions.weight``, looked up by
+    absolute position (no padding offset).
   * No ``layernorm_embedding`` (``normalize_embedding=False``) and no top-level
     ``layer_norm``.
   * Activation is ``swish`` (SiLU), from ``config.activation_function``.
   * Encoder and decoder share ``model.shared`` embeddings and the LM head is
     tied to them (``share_encoder_decoder_embeddings`` / ``tie_word_embeddings``).
   * HF checkpoint keys already carry the ``model.`` prefix, so the weights
-    mapper is an identity map (BART's mapper had to *add* ``model.``).
+    mapper is an identity map.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ class MarianSinusoidalPositionalEmbedding(VocabParallelEmbedding):
     """Static sinusoidal positional embeddings.
 
     Marian stores precomputed sinusoids in ``embed_positions.weight`` and looks
-    them up by absolute position. Unlike BART there is no ``+2`` offset.
+    them up by absolute position (no padding offset).
     """
 
     def forward(self, positions: torch.Tensor) -> torch.Tensor:
@@ -540,7 +540,7 @@ class MarianEncoder(nn.Module):
         if embed_tokens is not None:
             self.embed_tokens.weight = embed_tokens.weight
 
-        # Sinusoidal-static positions, no +2 offset (unlike BART).
+        # Static sinusoidal positions, looked up by absolute position.
         self.embed_positions = MarianSinusoidalPositionalEmbedding(
             config.max_position_embeddings,
             embed_dim,
@@ -556,7 +556,7 @@ class MarianEncoder(nn.Module):
                 for layer_idx in range(config.encoder_layers)
             ]
         )
-        # NOTE: Marian has no layernorm_embedding (normalize_embedding=False).
+        # Marian has no layernorm_embedding (normalize_embedding=False).
 
     def forward(
         self,
@@ -617,7 +617,7 @@ class MarianDecoder(nn.Module):
                 for layer_idx in range(config.decoder_layers)
             ]
         )
-        # NOTE: Marian has no layernorm_embedding (normalize_embedding=False).
+        # Marian has no layernorm_embedding (normalize_embedding=False).
 
     def forward(
         self,
@@ -774,12 +774,10 @@ class MarianProcessingInfo(BaseProcessingInfo):
         return TextDataParser()
 
     def get_default_tok_params(self):
-        # This governs the DECODER-prompt tokenization path: keep
-        # add_special_tokens=False so an empty decoder prompt stays empty and
-        # the runtime prepends only decoder_start_token_id (=pad=58100). The
-        # ENCODER source is tokenized separately in _apply_hf_processor_main /
-        # _get_prompt_updates with add_special_tokens=True (to append the eos
-        # Marian's encoder requires) -- those do NOT use these params.
+        # Decoder-prompt tokenization: add_special_tokens=False keeps an empty
+        # decoder prompt empty, so the runtime prepends only
+        # decoder_start_token_id (= pad). The encoder source is tokenized
+        # separately (add_special_tokens=True) and does not use these params.
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
 
@@ -860,13 +858,10 @@ class MarianMultiModalProcessor(EncDecMultiModalProcessor[MarianProcessingInfo])
         mm_items: MultiModalDataItems,
     ) -> str | list[int]:
         # MarianMT is bilingual: the target language is implied by the model, so
-        # there is no target-language conditioning to apply. A decoder-prompt
-        # *string* (e.g. the ``target_language`` forwarded by /v1/translations,
-        # or the empty profiling prompt) therefore carries no decoder tokens --
-        # return an empty prompt so the runtime prepends only
-        # decoder_start_token_id (= pad_token_id for Marian). An explicit list of
-        # token ids (e.g. teacher forcing) is a real decoder sequence and passes
-        # through unchanged.
+        # a decoder-prompt string (e.g. the target_language forwarded by
+        # /v1/translations) carries no decoder tokens -- return an empty prompt
+        # and let the runtime prepend only decoder_start_token_id. An explicit
+        # token-id list (teacher forcing) is a real sequence, passed unchanged.
         if isinstance(prompt, str):
             return []
         return prompt
@@ -876,20 +871,16 @@ class MarianMultiModalProcessor(EncDecMultiModalProcessor[MarianProcessingInfo])
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ):
-        """Marian has no HF Processor, only a tokenizer.
+        """Tokenize the source text directly.
 
-        NOTE (0.26.x checklist #3): vLLM >=0.26 renamed the encoder-side
-        override from ``_call_hf_processor(prompt, mm_data, ...)`` to
-        ``_apply_hf_processor_main(mm_items, hf_processor_mm_kwargs)`` and the
-        base path now requires a real ``ProcessorMixin`` (Marian only has a
-        tokenizer, so the base path raises ``TypeError``). We tokenize the
-        source text directly. The decoder prompt is built separately by
-        ``EncDecMultiModalProcessor`` via ``create_decoder_prompt``, so this
-        emits only ``encoder_input_ids``.
+        Marian has no HF Processor (only a tokenizer), so the base path -- which
+        requires a real ``ProcessorMixin`` -- cannot be used. The decoder prompt
+        is built separately via ``create_decoder_prompt``, so this emits only
+        ``encoder_input_ids``.
 
-        Tokenized with ``add_special_tokens=True`` so the trailing </s> (eos)
-        Marian's encoder requires is appended, matching HuggingFace. Stays
-        consistent with ``_get_prompt_updates``.
+        Uses ``add_special_tokens=True`` so the trailing </s> (eos) Marian's
+        encoder requires is appended, matching HuggingFace and consistent with
+        ``_get_prompt_updates``.
         """
         from transformers.feature_extraction_utils import BatchFeature
 
@@ -957,13 +948,11 @@ class MarianMTModel(nn.Module, SupportsQuant, SupportsMultiModal):
 
     The source sentence is fed as a "text" modality through
     ``MarianMultiModalProcessor`` (registered above). ``load_weights`` consumes a
-    real ``Helsinki-NLP/opus-mt-*`` checkpoint with zero missing or unexpected
-    keys. End-to-end generation is wired/verified in PR 1.4.
+    real ``Helsinki-NLP/opus-mt-*`` checkpoint with no missing or unexpected keys.
     """
 
     # HF Marian checkpoint keys already carry the ``model.`` prefix and use
-    # standard ``.weight``/``.bias``/``*_layer_norm`` names, so the mapper is an
-    # identity map (BART needed one to *add* ``model.`` and rename beta/gamma).
+    # standard names, so the weights mapper is an identity map.
     hf_to_vllm_mapper = WeightsMapper()
     keys_to_ignore_on_load_missing = ["final_logits_bias"]
 
