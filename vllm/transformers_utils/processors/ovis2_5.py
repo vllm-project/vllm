@@ -96,7 +96,6 @@ class Ovis2_5Processor(ProcessorMixin):
         # missing from the vocab. Re-add them to restore the expected ids.
         self.tokenizer.add_tokens(list(required_tokens.values()), special_tokens=True)
 
-
         # in TokenizerPool tokenizer.get_added_vocab() gets values from an instance
         # that was updated with tokenizer.add_tokens(), so it is favourable over
         # self.tokenizer.convert_tokens_to_ids(), which refers to a copy before
@@ -104,8 +103,7 @@ class Ovis2_5Processor(ProcessorMixin):
         added_vocab = self.tokenizer.get_added_vocab()
 
         return {
-            key: added_vocab[token_name]
-            for key, token_name in required_tokens.items()
+            key: added_vocab[token_name] for key, token_name in required_tokens.items()
         }
 
     def __call__(
