@@ -93,6 +93,17 @@ class _FakeSession:
         return _FakeResponse()
 
 
+class _FakeProfileSession:
+    def __init__(self) -> None:
+        self.url: str | None = None
+        self.headers: dict[str, str] | None = None
+
+    def post(self, *, url: str, headers: dict[str, str]):
+        self.url = url
+        self.headers = headers
+        return _FakeResponse()
+
+
 def test_asr_dataset_sample_handles_local_audio_paths(tmp_path: Path) -> None:
     audio_path = tmp_path / "earnings.wav"
     _write_wav(audio_path, duration_s=0.1)
@@ -215,6 +226,42 @@ def test_async_request_openai_audio_handles_decoded_audio_arrays(
     assert session.uploaded_bytes is not None
     assert output.success is True
     assert output.generated_text == "hello"
+
+
+def test_audio_request_rejects_profile_endpoint() -> None:
+    request_input = RequestFuncInput(
+        prompt="",
+        api_url="http://localhost:8000/start_profile",
+        prompt_len=1,
+        output_len=32,
+        model="openai/whisper-large-v3",
+    )
+
+    with pytest.raises(ValueError, match="OpenAI Audio API"):
+        asyncio.run(
+            request_func_module.async_request_openai_audio(
+                request_input, _FakeProfileSession()
+            )
+        )
+
+
+@pytest.mark.parametrize("endpoint", ["start_profile", "stop_profile"])
+def test_audio_benchmark_profile_request_has_no_inference_payload(
+    endpoint: str,
+) -> None:
+    session = _FakeProfileSession()
+
+    output = asyncio.run(
+        request_func_module.async_request_profile(
+            f"http://localhost:8000/{endpoint}",
+            session,
+            extra_headers={"X-Test-Header": "profile"},
+        )
+    )
+
+    assert output.success is True
+    assert session.url == f"http://localhost:8000/{endpoint}"
+    assert session.headers == {"X-Test-Header": "profile"}
 
 
 _COHERE_ASR_PROMPT = (
