@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser, human_readable_int
 from ..utils import flat_product
 
 
@@ -541,3 +541,45 @@ def test_group_description_is_summary_only():
     parser._search_keyword = "myconfig"
     assert "Summary line." in parser.format_help()
     assert "only belong in the docs" not in parser.format_help()
+
+# Tests for human_readable_int
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # Exact decimal results that the binary-float path truncated by one,
+        # e.g. int(4.1 * 10**6) == 4099999 rather than 4100000.
+        ("4.1m", 4_100_000),
+        ("8.2m", 8_200_000),
+        ("16.4g", 16_400_000_000),
+        ("32.8t", 32_800_000_000_000),
+        ("2.5k", 2_500),
+        ("25.6k", 25_600),
+        ("1k", 1_000),
+        ("1K", 1_024),
+        ("8M", 8 * 2**20),
+    ],
+)
+def test_human_readable_int_is_exact(value, expected):
+    assert human_readable_int(value) == expected
+
+
+def test_human_readable_int_matches_decimal_arithmetic():
+    """Every one-decimal input must equal exact decimal arithmetic; this is the
+    property the float path violated."""
+    from decimal import Decimal
+
+    units = {"k": 10**3, "m": 10**6, "g": 10**9, "t": 10**12}
+    for suffix, mult in units.items():
+        for tenth in range(1, 100):
+            text = "%.1f%s" % (tenth / 10, suffix)
+            assert human_readable_int(text) == int(
+                Decimal("%.1f" % (tenth / 10)) * mult
+            ), text
+
+
+def test_human_readable_int_still_truncates_fractional_parts():
+    """Regression guard: the fix must not start rounding."""
+    assert human_readable_int("10.212345k") == 10_212
+    assert human_readable_int("10.9k") == 10_900

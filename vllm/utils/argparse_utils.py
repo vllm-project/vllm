@@ -16,6 +16,7 @@ from argparse import (
     _ArgumentGroup,
 )
 from collections import defaultdict
+from decimal import Decimal
 from typing import Any, NoReturn
 
 import regex as re
@@ -56,7 +57,9 @@ def human_readable_int(value: str) -> int:
         number, suffix = match.groups()
         if suffix in decimal_multiplier:
             mult = decimal_multiplier[suffix]
-            return int(float(number) * mult)
+            # Decimal, not float: `int(4.1 * 10**6)` truncates to 4099999 because
+            # 4.1e6 is not exactly representable in binary floating point.
+            return int(Decimal(number) * mult)
         elif suffix in binary_multiplier:
             mult = binary_multiplier[suffix]
             # Do not allow decimals with binary multipliers
