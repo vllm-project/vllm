@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from inspect import signature
 from types import SimpleNamespace
 from typing import Any
@@ -44,7 +44,7 @@ def _make_runner(modules, *, max_tokens: int = 8192, linear_backend: str = "auto
         vllm_config=SimpleNamespace(
             kernel_config=SimpleNamespace(linear_backend=linear_backend),
             attention_config=SimpleNamespace(hisparse_config=None),
-            parallel_config=SimpleNamespace(enable_elastic_ep=False),
+            parallel_config=SimpleNamespace(enable_elastic_ep=False, nnodes=1),
         ),
         get_model=Mock(
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
@@ -135,9 +135,9 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
 
 
 @pytest.mark.parametrize(
-    "has_v2,elastic_ep",
-    [(False, False), (True, False), (True, True)],
-    ids=["v1", "v2", "elastic-v1"],
+    "has_v2,elastic_ep,node_count",
+    [(False, False, 1), (True, False, 1), (True, True, 1), (True, False, 2)],
+    ids=["v1", "v2", "elastic-v1", "multi-node-v1"],
 )
 @pytest.mark.parametrize("hisparse", [False, True])
 @pytest.mark.parametrize("world_size,rank", [(1, 0), (2, 0), (2, 1)])
@@ -148,13 +148,14 @@ def test_flashinfer_autotune_lifecycle(
     tmp_path,
     has_v2,
     elastic_ep,
+    node_count,
     hisparse,
     world_size,
     rank,
     skip_ops,
     failure,
 ):
-    use_v2 = has_v2 and not elastic_ep
+    use_v2 = has_v2 and not elastic_ep and node_count == 1
     runner = _make_runner([])
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.attention_config.hisparse_config = object() if hisparse else None
@@ -210,6 +211,9 @@ def test_flashinfer_autotune_lifecycle(
     )
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_world_group", lambda: world
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_node_count", lambda: node_count
     )
     monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: has_v2)
     monkeypatch.setattr(fi_utils, "autotune", events.autotune)
@@ -278,3 +282,95 @@ def test_flashinfer_autotune_lifecycle(
         elif not use_v2 and rank == 0:
             expected.append(call.tuner.save_configs(str(cache_path)))
     assert events.mock_calls == expected
+
+
+@pytest.mark.parametrize("node_count,elastic_ep", [(1, False), (2, False), (1, True)])
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("model_runner_v2,max_reqs", [(False, 2), (True, 1), (True, 2)])
+def test_sparse_autotune_respects_cache_selection(
+    monkeypatch, tmp_path, node_count, elastic_ep, rank, model_runner_v2, max_reqs
+):
+    import vllm.model_executor.warmup.flashinfer_sparse_mla_warmup as sparse
+
+    runner = _make_runner([])
+    runner.max_num_reqs = max_reqs
+    runner.vllm_config.use_v2_model_runner = model_runner_v2
+    runner.vllm_config.kernel_config.enable_flashinfer_autotune = True
+    runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
+    worker = SimpleNamespace(
+        model_runner=runner,
+        vllm_config=runner.vllm_config,
+        execute_model=Mock(),
+        sample_tokens=Mock(),
+    )
+    world = SimpleNamespace(
+        rank_in_group=rank,
+        world_size=2,
+        broadcast_object=Mock(return_value=b"cached"),
+        barrier=Mock(),
+    )
+    managed = Mock(return_value=nullcontext())
+    legacy = Mock(return_value=nullcontext())
+    reload = Mock()
+    tuner = Mock()
+    monkeypatch.setitem(
+        sys.modules,
+        "flashinfer",
+        SimpleNamespace(autotune_v2=managed, autotune_v2_reload=reload),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "flashinfer.autotuner",
+        SimpleNamespace(AutoTuner=SimpleNamespace(get=lambda: tuner)),
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_world_group", lambda: world
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_node_count", lambda: node_count
+    )
+    monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: True)
+    monkeypatch.setattr(sparse, "has_flashinfer", lambda: True)
+    monkeypatch.setattr(
+        sparse.current_platform, "is_device_capability_family", lambda _: True
+    )
+    monkeypatch.setattr(
+        sparse, "_flashinfer_sparse_mla_decode_label", lambda *_: "DSv3.2"
+    )
+    monkeypatch.setattr(sparse, "resolve_flashinfer_autotune_v2_root", lambda: tmp_path)
+    cache_path = tmp_path / "autotune.json"
+    cache_path.write_bytes(b"cached")
+    monkeypatch.setattr(
+        sparse, "resolve_flashinfer_autotune_file", lambda _: cache_path
+    )
+    monkeypatch.setattr(sparse, "flashinfer_autotune", legacy)
+
+    def mixed_warmup(*args, mixed_step_context=None, **kwargs):
+        context = (
+            mixed_step_context if mixed_step_context is not None else nullcontext()
+        )
+        with context:
+            assert torch.is_inference_mode_enabled()
+        return True
+
+    mixed = Mock(side_effect=mixed_warmup)
+    monkeypatch.setattr(sparse, "run_mixed_prefill_decode_warmup", mixed)
+    assert sparse._run_flashinfer_sparse_mla_decode_autotune(worker, 16, frozenset())
+
+    if node_count == 1 and not elastic_ep:
+        managed.assert_called_once_with(mode="tune", cache_root=tmp_path)
+        legacy.assert_not_called()
+        world.broadcast_object.assert_not_called()
+        tuner.load_configs.assert_not_called()
+        reload.assert_called_once_with()
+        assert world.barrier.call_count == 2
+    else:
+        managed.assert_not_called()
+        reload.assert_not_called()
+        assert legacy.call_count == (1 if rank == 0 else 0)
+        world.broadcast_object.assert_called_once_with(
+            b"cached" if rank == 0 else None, src=0
+        )
+        tuner.load_configs.assert_called_once_with(str(cache_path))
+    assert mixed.call_count == (1 if model_runner_v2 and max_reqs >= 2 else 0)
+    assert runner._dummy_run.call_count == (0 if mixed.called else 1)

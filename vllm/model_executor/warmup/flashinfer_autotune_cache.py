@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+logger = init_logger(__name__)
 
 
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
@@ -42,14 +45,26 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
+    from vllm.distributed.parallel_state import get_node_count
     from vllm.utils.flashinfer import has_flashinfer_autotune_v2
 
     # Elastic EP transfers tuning state to joining workers with v1
     # save_configs/load_configs, which do not export managed-store winners.
-    return (
-        not runner.vllm_config.parallel_config.enable_elastic_ep
-        and has_flashinfer_autotune_v2()
-    )
+    if runner.vllm_config.parallel_config.enable_elastic_ep:
+        return False
+    if not has_flashinfer_autotune_v2():
+        return False
+    # Use the initialized topology: Ray may span nodes with config.nnodes=1.
+    # A cache hit skips profiling collectives, so node-local stores with
+    # different contents cannot safely participate in synchronized tuning.
+    if get_node_count() != 1:
+        logger.info_once(
+            "Using legacy FlashInfer autotune cache synchronization for "
+            "multi-node deployments; managed-cache synchronization is "
+            "currently supported only within one node."
+        )
+        return False
+    return True
 
 
 def resolve_flashinfer_autotune_v2_root() -> Path | None:
