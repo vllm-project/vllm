@@ -48,20 +48,6 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
 
-_WNA16_DEBUG_LOGGED = False
-
-
-def _wna16_tensor_debug(name: str, tensor: torch.Tensor | None) -> str:
-    if tensor is None:
-        return f"{name}=None"
-
-    sample = tensor.detach().reshape(-1)[:8].cpu().tolist()
-    return (
-        f"{name}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
-        f"stride={tensor.stride()}, contiguous={tensor.is_contiguous()}, "
-        f"device={tensor.device}, first8={sample}"
-    )
-
 
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
@@ -365,30 +351,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        global _WNA16_DEBUG_LOGGED
-
-        debug_wna16 = not _WNA16_DEBUG_LOGGED
-        if debug_wna16:
-            logger.info(
-                "[WNA16 DEBUG] before conversion: layer=%s backend=%s "
-                "experts_cls=%s is_transposed=%s group_size=%s "
-                "symmetric=%s",
-                getattr(layer, "layer_name", "unknown"),
-                self.wna16_backend.value,
-                self.experts_cls.__name__ if self.experts_cls is not None else None,
-                getattr(layer.w13_weight_packed, "is_transposed", None),
-                self.group_size,
-                self.symmetric,
-            )
-            logger.info(
-                "[WNA16 DEBUG] %s; %s; %s; %s",
-                _wna16_tensor_debug("w13_weight", layer.w13_weight_packed),
-                _wna16_tensor_debug("w2_weight", layer.w2_weight_packed),
-                _wna16_tensor_debug("w13_scale", layer.w13_weight_scale),
-                _wna16_tensor_debug("w2_scale", layer.w2_weight_scale),
-            )
-            _WNA16_DEBUG_LOGGED = True
-
         # Process weights using the shared oracle infrastructure
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_backend,
@@ -419,17 +381,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             _,  # w13_bias
             _,  # w2_bias
         ) = converted
-
-        if debug_wna16:
-            logger.info(
-                "[WNA16 DEBUG] after conversion: %s; %s; %s; %s; %s; %s",
-                _wna16_tensor_debug("w13_weight", w13_qweight),
-                _wna16_tensor_debug("w2_weight", w2_qweight),
-                _wna16_tensor_debug("w13_scale", w13_scales),
-                _wna16_tensor_debug("w2_scale", w2_scales),
-                _wna16_tensor_debug("w13_zero_point", w13_qzeros),
-                _wna16_tensor_debug("w2_zero_point", w2_qzeros),
-            )
 
         # Replace common parameters
         replace_parameter(layer, "w13_weight_packed", w13_qweight)
