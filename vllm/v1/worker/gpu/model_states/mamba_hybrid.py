@@ -43,16 +43,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         return {"is_prefilling": self.is_prefilling[:num_reqs]}
 
     def get_extra_attn_kwargs(
-        self,
-        attn_metadata_builder: Any,
-        num_reqs: int,
+        self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
         if not isinstance(
             attn_metadata_builder,
@@ -338,9 +334,7 @@ class MambaHybridModelState(DefaultModelState):
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
-                attn_metadata,
-                attn_groups,
-                for_capture=for_capture,
+                attn_metadata, attn_groups, for_capture=for_capture
             )
         return attn_metadata
 
