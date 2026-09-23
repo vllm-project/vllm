@@ -218,7 +218,7 @@ steps:
   # way, but every trainer rank builds the model before sharding it, and the
   # default does not fit an L4.
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
+  - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rlhf/rlhf_sharded_rdt_small_ep.py
   mirror:
     amd:
       label: ":amd: (MI355) Distributed Torchrun + Examples"
@@ -232,7 +232,7 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - tests/distributed/test_torchrun_example.py
       - tests/distributed/test_torchrun_example_moe.py
-      - examples/rl/
+      - examples/rlhf/
       - examples/features/data_parallel/data_parallel_offline.py
       - .buildkite/scripts/install-kv-connectors.sh
       - requirements/kv_connectors_rocm.txt
@@ -250,10 +250,10 @@ steps:
       - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
       - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
       - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
-      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
-      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rlhf/rlhf_http_nccl.py
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rlhf/rlhf_http_ipc.py
       - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-      - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
+      - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rlhf/rlhf_sharded_rdt_small_ep.py
 
 - label: ":nvidia: (L4) Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
