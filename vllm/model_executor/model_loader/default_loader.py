@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import dataclasses
 import glob
 import os
 import time
 from collections.abc import Generator, Iterable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -28,16 +30,19 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_mm_encoder_only_safetensors_files,
     get_quant_config,
     instanttensor_weights_iterator,
-    resolve_mm_encoder_only_lm_prefixes,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
     multi_thread_safetensors_weights_iterator,
     np_cache_weights_iterator,
     pt_weights_iterator,
+    resolve_mm_encoder_only_lm_prefixes,
     safetensors_weights_iterator,
 )
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -78,7 +83,7 @@ class DefaultModelLoader(BaseModelLoader):
         self.local_expert_ids: set[int] | None = None
         # Set in load_weights when --mm-encoder-only; used to drop LM-only shards.
         self._encoder_only_lm_prefixes: tuple[str, ...] | None = None
-        self._encoder_only_weights_mapper: object | None = None
+        self._encoder_only_weights_mapper: WeightsMapper | None = None
 
         extra_config = load_config.model_loader_extra_config
         if not isinstance(extra_config, dict):
@@ -137,7 +142,7 @@ class DefaultModelLoader(BaseModelLoader):
         revision: str | None,
         fall_back_to_pt: bool,
         allow_patterns_overrides: list[str] | None,
-    ) -> tuple[str, list[str], bool]:
+    ) -> tuple[str, list[str], bool, str]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
@@ -247,7 +252,7 @@ class DefaultModelLoader(BaseModelLoader):
         return hf_folder, hf_weights_files, use_safetensors, index_file
 
     def _get_weights_iterator(
-        self, source: "Source"
+        self, source: Source
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         extra_config = self.load_config.model_loader_extra_config
@@ -385,7 +390,9 @@ class DefaultModelLoader(BaseModelLoader):
 
         # Derive from _language_model_names; fail-closed on shared HF roots
         # (Molmo/Phi-4-MM/Muse). Qwen nested/flat keys classified via mapper.
-        weights_mapper = getattr(model, "hf_to_vllm_mapper", None)
+        weights_mapper = cast(
+            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
+        )
         self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
             getattr(model, "_language_model_names", None),
             weights_mapper=weights_mapper,

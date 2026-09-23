@@ -16,7 +16,7 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, IO, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import filelock
 import huggingface_hub.constants
@@ -666,9 +666,7 @@ def _normalize_module_prefixes(
     return tuple(n if n.endswith(".") else f"{n}." for n in names)
 
 
-def _mapped_weight_name(
-    weights_mapper: "WeightsMapper | None", key: str
-) -> str | None:
+def _mapped_weight_name(weights_mapper: "WeightsMapper | None", key: str) -> str | None:
     """Apply ``WeightsMapper.map_name`` when present; else identity."""
     if weights_mapper is None:
         return key
@@ -787,9 +785,9 @@ def filter_mm_encoder_only_safetensors_files(
     with open(index_path) as f:
         weight_map: dict[str, str] = json.load(f)["weight_map"]
 
-    keys_by_file: dict[str, list[str]] = defaultdict(list)
+    keys_by_file: dict[str, list[str]] = {}
     for weight_name, weight_file in weight_map.items():
-        keys_by_file[weight_file].append(weight_name)
+        keys_by_file.setdefault(weight_file, []).append(weight_name)
 
     def _is_lm_key(key: str) -> bool:
         mapped = _mapped_weight_name(weights_mapper, key)
