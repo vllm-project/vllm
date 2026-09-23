@@ -25,13 +25,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
     copy_kv_cache_blocks_inplace,
 )
+from vllm.v1.worker.worker_base import WorkerBase
 
 
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
@@ -1390,3 +1393,38 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
     assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+
+
+def _full_attn_spec(block_size: int, num_kv_heads: int):
+    return FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+
+
+def _backend(*kernel_block_sizes):
+    return SimpleNamespace(get_supported_kernel_block_sizes=lambda: kernel_block_sizes)
+
+
+@pytest.mark.parametrize(
+    "num_kv_heads,kernel_block_sizes,expected",
+    [
+        # Mixed page sizes, manager block usable as a kernel block: pack.
+        ((2, 4), None, True),
+        # Uniform page size: nothing to pack.
+        ((2, 2), None, False),
+        # Manager block would have to be split into kernel blocks.
+        ((2, 4), (128,), False),
+    ],
+)
+def test_prefers_packed_kv_cache(num_kv_heads, kernel_block_sizes, expected):
+    block_size = 640
+    specs = {
+        f"layer.{i}": _full_attn_spec(block_size, heads)
+        for i, heads in enumerate(num_kv_heads)
+    }
+    worker = SimpleNamespace(get_kv_cache_spec=lambda: specs)
+    backends = [_backend(*(kernel_block_sizes or (MultipleOf(16),)))]
+    assert WorkerBase._prefers_packed_kv_cache(worker, backends) is expected
