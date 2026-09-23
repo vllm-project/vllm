@@ -300,6 +300,8 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def set_output_name(self, worker_name: str) -> None:
+        if self._active:
+            return
         self._worker_name = worker_name
         if self._custom_trace_handler:
             return
