@@ -1188,6 +1188,25 @@ steps:
 
 #-----------------------------------------------------------  mi300 · evals  -----------------------------------------------------------#
 
+- label: ":amd: (MI300) LM Eval Small Models" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  optional: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
+
 - label: ":amd: (MI300) DeepSeek V2-Lite Prefetch Offload Accuracy" # TBD
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1471,6 +1490,83 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-tp4.txt --tp-size=4
 
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
+
+- label: ":amd: (MI300) Core Operation Kernels Shard %N" # TBD
+  timeout_in_minutes: 40
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  parallelism: 3
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - tests/kernels/core
+  - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_concat_mla_q.py
+  - tests/kernels/test_rocm_fp32_router_gemm.py
+  - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+  - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
+  - vllm/model_executor/layers/rotary_embedding/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/test_fused_qk_norm_rope_gate.py
+  optional: true
+  commands:
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI300) Quantization Kernels Shard %N"
+  timeout_in_minutes: 120
+  parallelism: 6
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/quantization/
+  - csrc/rocm/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
+  - vllm/_aiter_ops.py
+  - vllm/kernels/aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/model_executor/kernels/
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/config/
+  - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  commands:
+  - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI300) MoE Kernels Shard %N" # TBD
+  timeout_in_minutes: 55
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  parallelism: 5
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - csrc/rocm/
+  - tests/kernels/moe
+  - tests/kernels/utils.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
+  - vllm/distributed/device_communicators/
+  - vllm/envs.py
+  - vllm/config
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) vLLM IR" # TBD
   timeout_in_minutes: 50
@@ -3287,25 +3383,6 @@ steps:
 
 #-----------------------------------------------------------  mi355 · evals  -----------------------------------------------------------#
 
-- label: ":amd: (MI355 DPX) LM Eval Small Models" # TBD
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  dind: false
-  agent_pool: mi355_dpx
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  optional: true
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
-
 - label: ":amd: (MI355 DPX) Multimodal Accuracy Eval (Small Models)" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3691,60 +3768,6 @@ steps:
 
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
-- label: ":amd: (MI355 DPX) MoE Kernels Shard %N" # TBD
-  timeout_in_minutes: 55
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  dind: false
-  agent_pool: mi355_dpx
-  optional: true
-  parallelism: 5
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
-  - csrc/moe/
-  - csrc/rocm/
-  - tests/kernels/moe
-  - tests/kernels/utils.py
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/model_executor/layers/quantization/mxfp4.py
-  - vllm/model_executor/layers/quantization/utils/quant_utils.py
-  - vllm/distributed/device_communicators/
-  - vllm/envs.py
-  - vllm/config
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
-- label: ":amd: (MI355 DPX) Quantization Kernels Shard %N"
-  timeout_in_minutes: 120
-  parallelism: 6
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  dind: false
-  agent_pool: mi355_dpx
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/quantization/
-  - csrc/rocm/
-  - vllm/model_executor/layers/quantization
-  - tests/kernels/quantization
-  - tests/kernels/quant_utils.py
-  - tests/kernels/utils.py
-  - vllm/_aiter_ops.py
-  - vllm/kernels/aiter_ops.py
-  - vllm/_custom_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
-  - vllm/model_executor/kernels/
-  - vllm/v1/attention/backends/rocm_aiter_fa.py
-  - vllm/config/
-  - tests/kernels/quantization/test_rocm_skinny_gemms.py
-  commands:
-  - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
 - label: ":amd: (MI355 DPX) Attention DiffKV Kernels"
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3761,29 +3784,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
-
-- label: ":amd: (MI355 DPX) Core Operation Kernels Shard %N" # TBD
-  timeout_in_minutes: 40
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  dind: false
-  agent_pool: mi355_dpx
-  parallelism: 3
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/
-  - tests/kernels/core
-  - tests/kernels/test_top_k_per_row.py
-  - tests/kernels/test_concat_mla_q.py
-  - tests/kernels/test_rocm_fp32_router_gemm.py
-  - vllm/model_executor/layers/fused_moe/router/gate_linear.py
-  - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
-  - vllm/model_executor/layers/rotary_embedding/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/kernels/test_fused_qk_norm_rope_gate.py
-  optional: true
-  commands:
-  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) MiniMax Reduce RMS Kernels" # TBD
   timeout_in_minutes: 45
