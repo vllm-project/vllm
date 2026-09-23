@@ -82,7 +82,10 @@ class SchedulerConfig:
     longer than this number of tokens. 0 disables the cap (default).
 
     The cap is not applied when the request is the only one in the batch,
-    since there is no other request for it to starve."""
+    since there is no other request for it to starve. Otherwise the
+    effective cap is never below a fair share of the token budget:
+    max_num_batched_tokens divided by the number of queued and running
+    requests."""
 
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)

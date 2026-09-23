@@ -32,12 +32,14 @@ FULL, SWA = 0, 1
 def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
+    max_num_batched_tokens: int = 8192,
     use_kv_connector: MockKVConfig | None = None,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
     base = create_scheduler(
         block_size=BLOCK_SIZE,
+        max_num_batched_tokens=max_num_batched_tokens,
         enable_prefix_caching=True,
         long_prefill_token_threshold=long_prefill_token_threshold,
         use_kv_connector=use_kv_connector,
@@ -157,7 +159,12 @@ def test_hit_replays_window_without_reallocating():
 def test_replay_only_chunks_make_progress():
     """A chunk cap smaller than the replay window schedules replay-only
     chunks; they advance the request instead of stalling it."""
-    scheduler = _replay_scheduler(long_prefill_token_threshold=BLOCK_SIZE)
+    # Cap the budget at 2 * the threshold: the fair-share floor
+    # (budget / num requests) otherwise lifts the cap above BLOCK_SIZE.
+    scheduler = _replay_scheduler(
+        long_prefill_token_threshold=BLOCK_SIZE,
+        max_num_batched_tokens=2 * BLOCK_SIZE,
+    )
     first, second = create_requests(
         num_requests=2,
         num_tokens=NUM_PROMPT_TOKENS,

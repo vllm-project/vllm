@@ -602,11 +602,21 @@ class Scheduler(SchedulerInterface):
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
         # request there is nobody to starve, so let it use the whole budget.
+        # Otherwise, the effective cap is floored at a fair share of the
+        # input budget so it never cuts a request below
+        # max_num_batched_tokens / num queued + running requests.
+        num_eligible_reqs = (
+            len(self.running) + len(self.waiting) + len(self.skipped_waiting)
+        )
         long_prefill_token_threshold = (
             self.scheduler_config.long_prefill_token_threshold
-            if len(self.running) + len(self.waiting) + len(self.skipped_waiting) > 1
+            if num_eligible_reqs > 1
             else 0
         )
+        if long_prefill_token_threshold > 0:
+            long_prefill_token_threshold = max(
+                long_prefill_token_threshold, input_budget // num_eligible_reqs
+            )
 
         # First, schedule the RUNNING requests.
         req_index = 0
