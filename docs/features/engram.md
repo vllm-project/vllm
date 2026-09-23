@@ -99,6 +99,42 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 or equivalently `VLLM_PLE_CPU_OFFLOAD=0`. CPU offload requires a GPU with UVA
 support; vLLM fails fast when it is unavailable.
 
+## Unified-memory systems: checkpoint-mapped tables (Qwen4Exp)
+
+On a unified-memory machine such as DGX Spark (GB10, 128 GB shared by CPU and
+GPU), neither storage above suits Qwen3.8-Flash-Next: the device-resident table
+does not fit next to the weights, and a 47.7 GiB host copy of its FP8 table is
+anonymous memory in the same physical pool as the weights and the KV cache. It
+cannot be cheaply dropped and recreated under memory pressure.
+
+`checkpoint_mapped` instead reads the table **in place from the checkpoint's
+safetensors files**. The files are mapped read-only and the lookup kernel reads
+the mapped rows directly, which requires a GPU that accesses pageable host
+memory through the host page tables (checked at startup through
+`CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES`). There is
+then no table-sized GPU or pinned allocation, no resident duplicate of the table
+and no CPU-gather/host-to-device staging path: the rows live in the page cache
+as clean, file-backed pages that the kernel can drop and re-read, shared by every
+process that maps the same files. Because GPU page faults on rows that are not yet resident
+are serviced one page at a time, CPU threads fault in each step's rows before
+the forward pass reads them.
+
+```bash
+vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
+  --engram-config '{"checkpoint_mapped": true}'
+```
+
+`checkpoint_mapped` overrides `cpu_offload`, is incompatible with
+`dp_shared_memory` (mapped pages are already shared between processes) and with
+`embedding_across_dp`, and requires a safetensors checkpoint whose PLE table is
+stored in the dtype the model uses (FP8 or BF16). Reloading weights from disk
+(`weights_path`) remaps the new checkpoint: every incoming PLE shard is compared
+with the newly mapped files, and the new mapping takes effect during reload
+processing or at the latest on the next lookup. PLE weights delivered from
+memory (e.g. weight sync) differ from the files and are rejected. It is implemented for Qwen4Exp only and has been
+validated only on DGX Spark; other GPUs that report the attribute (for example
+Grace Hopper or Grace Blackwell over NVLink-C2C) are accepted with a warning.
+
 ## Data-parallel topologies (DeepSeek V4.1)
 
 By default (`embedding_across_dp: false`), each DP replica keeps its own
@@ -118,7 +154,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` only.
+Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` and
+`checkpoint_mapped` only.
 
 ## Sharing host tables across DP replicas
 
@@ -146,3 +183,6 @@ IPC namespace across the co-located replicas.
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is
   unsupported with elastic expert parallelism.
+- `checkpoint_mapped` is Qwen4Exp-only, requires a GPU that reads pageable
+  host memory through the host page tables, and has been validated only on
+  DGX Spark.

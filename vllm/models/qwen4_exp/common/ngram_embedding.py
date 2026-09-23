@@ -216,6 +216,12 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
     def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)
 
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Let storage that is bound after loading (checkpoint-mapped) attach."""
+        bind = getattr(layer, "bind_storage_after_loading", None)
+        if bind is not None:
+            bind()
+
     @abstractmethod
     def dequantize(
         self,
@@ -305,6 +311,7 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale == sentinel):
             raise ValueError("FP8 PLE checkpoint is missing its global scale")
+        super().process_weights_after_loading(layer)
 
     def dequantize(
         self,
