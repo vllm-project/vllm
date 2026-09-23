@@ -114,10 +114,7 @@ class EPLBController:
         return True
 
     def maybe_register_model(
-        self,
-        model: nn.Module,
-        model_config: Any,
-        load_dummy_weights: bool,
+        self, model: nn.Module, model_config: Any, load_dummy_weights: bool
     ) -> bool:
         if not self.parallel_config.enable_eplb or load_dummy_weights:
             return False
@@ -138,11 +135,7 @@ class EPLBController:
         if eplb_models_added and self.state is not None and self.state.is_async:
             self.state.start_async_loop()
 
-    def step(
-        self,
-        is_dummy: bool = False,
-        is_profile: bool = False,
-    ) -> None:
+    def step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         if (
             not self.parallel_config.enable_eplb
             or self.suppressed
@@ -151,11 +144,8 @@ class EPLBController:
         ):
             return
 
-        self.state.step(
-            is_dummy,
-            is_profile,
-            log_stats=self.parallel_config.eplb_config.log_balancedness,
-        )
+        log_stats = self.parallel_config.eplb_config.log_balancedness
+        self.state.step(is_dummy, is_profile, log_stats=log_stats)
 
     def prepare_forward(
         self,
