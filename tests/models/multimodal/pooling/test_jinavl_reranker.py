@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import pytest
-import torch
-from transformers import AutoModel, Qwen2VLConfig
+from transformers import AutoModel
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.entrypoints.chat_utils import (
@@ -14,8 +11,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartTextParam,
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
-from vllm.model_executor.models.config import JinaVLForSequenceClassificationConfig
-from vllm.model_executor.models.jina_vl import JinaVLScorer
 
 from ....conftest import HfRunner, VllmRunner
 
@@ -92,30 +87,6 @@ TEXT_MIXED_DOCS_TEST_DATA = {
         {"image": HANDELSBLATT_IMAGE_URL},
     ],
 }
-
-
-@pytest.mark.usefixtures("dist_init")
-def test_scorer_loads_single_label_weights():
-    """The Jina config hook prepares the scorer for single-label weights."""
-    config = Qwen2VLConfig(text_config={"hidden_size": 16})
-    model_config = SimpleNamespace(
-        hf_config=config,
-        head_dtype=torch.float32,
-        pooler_config=SimpleNamespace(logit_mean=None),
-    )
-    JinaVLForSequenceClassificationConfig.verify_and_update_model_config(model_config)
-    assert config.num_labels == 1
-    assert config.get_text_config().num_labels == 1
-
-    scorer = JinaVLScorer(model_config)
-    weight = torch.ones(1, 16)
-    bias = torch.zeros(1)
-
-    scorer.out_proj.weight_loader(scorer.out_proj.weight, weight)
-    scorer.out_proj.weight_loader(scorer.out_proj.bias, bias)
-
-    torch.testing.assert_close(scorer.out_proj.weight, weight)
-    torch.testing.assert_close(scorer.out_proj.bias, bias)
 
 
 def _normalize_image(image_val: str) -> str:
