@@ -286,7 +286,6 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
 
         return inputs_embeds
 
-    # MTP requires target hidden states in addition to the pipeline inputs.
     def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,

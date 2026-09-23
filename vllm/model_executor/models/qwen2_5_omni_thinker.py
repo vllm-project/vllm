@@ -24,7 +24,7 @@
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import torch
@@ -753,9 +753,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        image_processor = cast(Qwen2VLProcessingInfo, self.info).get_image_processor(
-            **hf_processor_mm_kwargs
-        )
+        assert isinstance(self.info, Qwen2VLProcessingInfo)
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         vocab = tokenizer.get_vocab()
 
         audio_token = processor.audio_token

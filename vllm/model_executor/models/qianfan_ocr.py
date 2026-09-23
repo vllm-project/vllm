@@ -5,8 +5,6 @@
 # The model architecture and weights are fully compatible with InternVLChatModel,
 # only the config model_type / architectures strings differ.
 
-from typing import Any, cast
-
 from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -32,14 +30,14 @@ class QianfanOCRProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
-        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
-        kwargs.setdefault("image_size", vision_config.image_size)
-        kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
-        kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
-        kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
-        kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+        merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        merged_kwargs.setdefault("image_size", vision_config.image_size)
+        merged_kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
+        merged_kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
+        merged_kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
+        merged_kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        image_processor = InternVLImageProcessor(**cast(dict[str, Any], kwargs))
+        image_processor = InternVLImageProcessor(**merged_kwargs)
         image_size = image_processor.image_size
         patch_size = vision_config.patch_size
         downsample_ratio = config.downsample_ratio

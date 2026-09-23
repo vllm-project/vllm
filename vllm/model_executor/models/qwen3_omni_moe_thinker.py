@@ -24,7 +24,7 @@
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -47,7 +47,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -1416,9 +1416,8 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        image_processor = cast(Qwen2_5_VLProcessingInfo, self.info).get_image_processor(
-            **hf_processor_mm_kwargs
-        )
+        assert isinstance(self.info, Qwen2_5_VLProcessingInfo)
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         vocab = tokenizer.get_vocab()
 
         audio_token = processor.audio_token
@@ -2218,8 +2217,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         )
 
         audio_data = (audio, stt_config.sample_rate)
-        prompts_dict = {"multi_modal_data": {"audio": audio_data}, "prompt": prompt}
-        return cast(PromptType, prompts_dict)
+        prompts_dict: TextPrompt = {
+            "multi_modal_data": {"audio": audio_data},
+            "prompt": prompt,
+        }
+        return prompts_dict
 
     def get_mrope_input_positions(
         self,

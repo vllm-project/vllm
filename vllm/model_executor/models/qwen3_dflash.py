@@ -753,7 +753,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    # DFlash uses the drafter interface, without pipeline intermediate tensors.
     def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,

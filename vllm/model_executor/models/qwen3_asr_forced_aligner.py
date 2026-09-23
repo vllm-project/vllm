@@ -3,7 +3,6 @@
 """Inference-only Qwen3-ASR ForcedAligner model (token classification)."""
 
 from collections.abc import Iterable
-from typing import cast
 
 import torch
 import torch.nn as nn
@@ -73,7 +72,7 @@ class Qwen3ASRForcedAlignerForTokenClassification(
 
         # Remove the unused generation head created by the base class;
         # the forced aligner uses a classifier head instead.
-        language_model = cast(nn.Module, self.language_model)
+        language_model: nn.Module = self.language_model
         language_model.lm_head = None
         language_model.logits_processor = None
 

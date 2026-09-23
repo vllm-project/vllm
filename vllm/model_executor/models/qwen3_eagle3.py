@@ -101,7 +101,6 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
         hidden_states = self.hidden_norm(hidden_states)
         return hidden_states, residual
 
-    # EAGLE layers consume both token embeddings and the target's hidden states.
     def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
@@ -341,7 +340,6 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    # The drafter interface takes target hidden states instead of PP tensors.
     def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
