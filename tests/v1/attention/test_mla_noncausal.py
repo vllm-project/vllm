@@ -29,6 +29,11 @@ class _DraftMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     supports_non_causal_multi_token_decode = True
 
 
+class _DcpCapableMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    supports_non_causal_multi_token_decode = True
+    supports_non_causal_multi_token_dcp = True
+
+
 def _metadata(
     query_start_loc: list[int],
     num_tokens: int | None = None,
@@ -198,18 +203,29 @@ def test_mla_cache_marker_is_promoted_to_group_capability():
 
 
 def test_builder_scopes_noncausal_capability_to_its_layers():
+    merged_spec = _merged_mla_spec()
     static_forward_context = {
-        "target": SimpleNamespace(non_causal_multi_token_decode=False),
-        "draft": SimpleNamespace(non_causal_multi_token_decode=True),
+        "target": _mla_layer(non_causal=False),
+        "draft": _mla_layer(non_causal=True),
         # Indexer and compressor caches share an MLA group but predate the flag.
         "indexer": SimpleNamespace(),
     }
-    resolve = MLACommonMetadataBuilder._resolve_non_causal_multi_token_decode
+    vllm_config = _dspark_dcp_vllm_config(static_forward_context)
+    device = torch.device("cpu")
 
-    assert not resolve(["target"], static_forward_context)
-    assert resolve(["draft"], static_forward_context)
-    assert resolve(["target", "draft"], static_forward_context)
-    assert not resolve(["target", "indexer"], static_forward_context)
+    def _flag(layer_names: list[str]) -> bool:
+        return _DcpCapableMLAMetadataBuilder(
+            merged_spec,
+            layer_names,
+            vllm_config,
+            device,
+            supports_dcp_with_varlen=True,
+        ).non_causal_multi_token_decode
+
+    assert not _flag(["target"])
+    assert _flag(["draft"])
+    assert _flag(["target", "draft"])
+    assert not _flag(["target", "indexer"])
 
 
 def test_merged_group_spec_does_not_mark_a_target_only_builder():
