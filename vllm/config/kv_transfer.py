@@ -12,6 +12,14 @@ KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
 
+PD_CONNECTORS = (
+    "NixlConnector",
+    "NixlPullConnector",
+    "NixlPushConnector",
+    "MooncakeConnector",
+    "MoRIIOConnector",
+)
+
 
 def hisparse_host_pool_gib(
     kv_transfer_config: "KVTransferConfig | None",
@@ -149,6 +157,13 @@ class KVTransferConfig:
     @property
     def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and self.kv_role in get_args(KVConsumer)
+
+    @property
+    def is_pd_consumer(self) -> bool:
+        """Whether this is the decode instance of a P/D disaggregated setup."""
+        return self.kv_role == "kv_consumer" and any(
+            self.has_connector(name) for name in PD_CONNECTORS
+        )
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)

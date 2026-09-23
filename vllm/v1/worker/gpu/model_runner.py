@@ -199,9 +199,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
         kv_transfer_config = vllm_config.kv_transfer_config
-        self.is_kv_consumer = (
-            kv_transfer_config is not None
-            and kv_transfer_config.kv_role == "kv_consumer"
+        self.is_pd_consumer = (
+            kv_transfer_config is not None and kv_transfer_config.is_pd_consumer
         )
 
         self.device = device
@@ -1271,7 +1270,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         graph_has_prefill = batch_state.has_prefill
         if (
             graph_has_prefill
-            and self.is_kv_consumer
+            and self.is_pd_consumer
             and self.decode_query_len == 1
             and max_query_len == 1
             and self.pcp_manager is None
