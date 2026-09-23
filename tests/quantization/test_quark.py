@@ -855,7 +855,7 @@ def test_quant_method_dispatch_ignored(default_vllm_config):
         UnquantizedFusedMoEMethod,
     )
 
-    dynamic_mxfp4_config = _make_qtensor_config(
+    mxfp4_config = _make_qtensor_config(
         {
             "dtype": "fp4",
             "qscheme": "per_group",
@@ -866,24 +866,23 @@ def test_quant_method_dispatch_ignored(default_vllm_config):
         None,
         exclude=["self_attn.q_proj", "mlp.down_proj"],
     )
-    dynamic_mxfp4_config.dynamic_mxfp4_quant = True
-
-    assert dynamic_mxfp4_config.get_quant_method_target(
-        "self_attn.q_proj", LinearBase
-    ) == (kMxfp4Static, None, QuarkLinearMethod)
-    attention_proj = TestLinear()
-    assert isinstance(
-        dynamic_mxfp4_config.get_quant_method(attention_proj, "self_attn.q_proj"),
-        QuarkLinearMethod,
+    assert mxfp4_config.get_quant_method_target("self_attn.q_proj", LinearBase) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
     )
-    assert isinstance(attention_proj.scheme, QuarkOCP_MX)
-    assert attention_proj.scheme.dynamic_mxfp4_quant
-
-    assert dynamic_mxfp4_config.get_quant_method_target(
-        "mlp.down_proj", LinearBase
-    ) == (None, None, UnquantizedLinearMethod)
     assert isinstance(
-        dynamic_mxfp4_config.get_quant_method(TestLinear(), "mlp.down_proj"),
+        mxfp4_config.get_quant_method(TestLinear(), "self_attn.q_proj"),
+        UnquantizedLinearMethod,
+    )
+
+    assert mxfp4_config.get_quant_method_target("mlp.down_proj", LinearBase) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
+    )
+    assert isinstance(
+        mxfp4_config.get_quant_method(TestLinear(), "mlp.down_proj"),
         UnquantizedLinearMethod,
     )
 
