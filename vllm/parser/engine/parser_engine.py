@@ -871,6 +871,9 @@ class ParserEngine(Parser):
                 id_type=state.tool_call_id_type,
                 func_name=name,
                 idx=state.history_tool_call_cnt,
+                request_id=state.request_id,
+                choice_index=state.choice_index,
+                prompt_digest=state.prompt_digest,
             )
             state.history_tool_call_cnt += 1
 

@@ -53,6 +53,9 @@ class StreamState:
     history_tool_call_cnt: int = 0
     history_tool_call_cnt_initialized: bool = False
     tool_call_id_type: str = "random"
+    request_id: str | None = None
+    choice_index: int | None = None
+    prompt_digest: str | None = None
     # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
@@ -277,6 +280,9 @@ class DelegatingParser(Parser):
             id_type=state.tool_call_id_type,
             func_name=function_name,
             idx=state.history_tool_call_cnt,
+            request_id=state.request_id,
+            choice_index=state.choice_index,
+            prompt_digest=state.prompt_digest,
         )
         state.history_tool_call_cnt += 1
         return tool_call_id

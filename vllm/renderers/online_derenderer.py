@@ -61,6 +61,8 @@ class OnlineDerenderer:
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
         tool_strict_level: str = "auto",
+        enable_parser_cache: bool = False,
+        parser_cache_size: int = 100,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -88,6 +90,12 @@ class OnlineDerenderer:
             default_chat_template_kwargs or {}
         )
         self.trust_request_chat_template = trust_request_chat_template
+
+        if enable_parser_cache:
+            from vllm.parser.cache import ParserCacheManager
+            self.parser_cache = ParserCacheManager(max_size=parser_cache_size)
+        else:
+            self.parser_cache = None
 
         self.log_error_stack = log_error_stack
         self.supports_browsing = False
