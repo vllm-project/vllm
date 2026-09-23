@@ -10,6 +10,10 @@ import threading
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.policy import ExpertCachePolicy
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,7 @@ class BlockObjectStore:
         *,
         max_bytes: int,
         object_nbytes: int,
+        policy: ExpertCachePolicy | None = None,
     ) -> None:
         if object_nbytes <= 0:
             raise ValueError("auxiliary output object size must be positive")
@@ -114,6 +119,7 @@ class BlockObjectStore:
             raise ValueError("auxiliary output store must fit at least one object")
         self.object_nbytes = object_nbytes
         self.num_slots = max_bytes // object_nbytes
+        self._policy = policy
         self._lru: OrderedDict[str, int] = OrderedDict()
         self._references: dict[str, int] = {}
         self._free_slots: list[int] = []
@@ -126,13 +132,31 @@ class BlockObjectStore:
         excess = len(self._lru) - self.num_slots
         if excess <= 0:
             return
-        victims = []
-        for key in self._lru:
-            if key not in self._references and key not in protected:
-                victims.append(key)
-                if len(victims) == excess:
-                    break
-        if len(victims) != excess:
+        if self._policy is None:
+            victims = []
+            for key in self._lru:
+                if key not in self._references and key not in protected:
+                    victims.append(key)
+                    if len(victims) == excess:
+                        break
+        else:
+            candidates = (
+                key
+                for key in self._lru
+                if key not in self._references and key not in protected
+            )
+            selected = self._policy.select_victims(candidates, excess)
+            victims = list(selected) if selected is not None else []
+        if len(victims) != excess or (
+            self._policy is not None
+            and (
+                len(set(victims)) != excess
+                or any(
+                    key not in self._lru or key in self._references or key in protected
+                    for key in victims
+                )
+            )
+        ):
             raise BlockObjectStoreError(
                 "auxiliary output store cannot retain the requested batch: "
                 f"limit={self.num_slots} objects"
@@ -141,6 +165,8 @@ class BlockObjectStore:
             slot = self._lru.pop(victim)
             if slot != self._UNALLOCATED_SLOT:
                 self._free_slots.append(slot)
+        if self._policy is not None:
+            self._policy.on_remove(victims, reason="eviction")
 
     def _allocate_slot(self) -> int:
         if self._free_slots:
@@ -171,9 +197,13 @@ class BlockObjectStore:
         try:
             self._evict_to_fit(set(unique) - set(terminal_order))
         except BlockObjectStoreError:
+            removed = []
             for key in unique:
                 if self._lru.get(key) == self._UNALLOCATED_SLOT:
                     del self._lru[key]
+                    removed.append(key)
+            if self._policy is not None and removed:
+                self._policy.on_remove(removed, reason="rollback")
             raise
         for object_id, obj in unique.items():
             slot = self._lru.get(object_id)
@@ -190,6 +220,8 @@ class BlockObjectStore:
         for key in keys:
             references = self._references.get(key, 0)
             self._references[key] = references + 1
+            if self._policy is not None:
+                self._policy.on_reference_change(key, references, references + 1)
 
     def _release(self, keys: Iterable[str]) -> list[str]:
         terminal_order = []
@@ -197,9 +229,11 @@ class BlockObjectStore:
             references = self._references[key] - 1
             if references:
                 self._references[key] = references
-                continue
-            del self._references[key]
-            terminal_order.append(key)
+            else:
+                del self._references[key]
+                terminal_order.append(key)
+            if self._policy is not None:
+                self._policy.on_reference_change(key, references + 1, references)
         return terminal_order
 
     def get_concatenated(self, keys: list[str]) -> bytes:
