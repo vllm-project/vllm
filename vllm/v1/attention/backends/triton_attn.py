@@ -319,6 +319,12 @@ class TritonAttentionBackend(AttentionBackend):
     def supports_non_causal(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_mixed_causal(cls) -> bool:
+        # `unified_attention` takes `causal` as a per-sequence tensor and the
+        # kernel loads the flag for its own request.
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_ATTN"

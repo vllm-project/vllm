@@ -1296,24 +1296,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
-        if isinstance(causal, torch.Tensor):
-            # Models that mix attention modes in one batch (DiffusionGemma runs
-            # causal encoder requests alongside non-causal diffusion requests)
-            # supply per-request causal flags. The routing below is batch-wide, so
-            # collapse a uniform batch and reject a mixed one with a clear message
-            # rather than letting `causal or ...` raise on a multi-element tensor.
-            if causal.numel() == 0 or bool(causal.all()):
-                causal = True
-            elif not bool(causal.any()):
-                causal = False
-            else:
-                raise NotImplementedError(
-                    "FlashInfer cannot serve a batch that mixes causal and "
-                    "non-causal requests because its prefill/decode routing is "
-                    "batch-wide. Select an attention backend that supports "
-                    "per-request causality, for example "
-                    "--attention-backend TRITON_ATTN."
-                )
         route_decode = causal or self.use_xqa
         if route_decode:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
