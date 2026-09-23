@@ -17,7 +17,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.multimodal.media import LazyMedia
+from vllm.multimodal.media import MediaRef
 from vllm.multimodal.parse import MultiModalDataParser, ProcessorBatchItems
 from vllm.multimodal.processing.context import (
     InputProcessingContext,
@@ -1335,6 +1335,38 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
     assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
 
 
+def test_processor_inputs_hashes_ref_spec_replaces_media_io_kwargs():
+    """A ref's decode spec lives inside its key, so `media_io_kwargs` is not
+    hashed a second time for it. A client-supplied UUID replaces the item
+    entirely, so there the factor must stay -- the key is never consulted."""
+    from vllm.multimodal.media import ImageMediaIO
+
+    data = b"encoded-image-bytes"
+    keep_ref = ImageMediaIO(image_mode=None).load_bytes_ref(data)
+    rgb_ref = ImageMediaIO().load_bytes_ref(data)
+
+    def hash_of(ref, uuid_item, media_io_kwargs):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=MultiModalDataParser().parse_mm_data({"image": [ref]}),
+            mm_uuid_items={"image": [uuid_item]},
+            media_io_kwargs=media_io_kwargs,
+        ).get_mm_hashes("test-model", "blake3")["image"][0]
+
+    # Different decode settings still produce different identities...
+    assert keep_ref.key != rgb_ref.key
+    # ...but the request-level copy of those settings adds nothing on top.
+    assert hash_of(keep_ref, None, {}) == hash_of(
+        keep_ref, None, {"image": {"image_mode": None}}
+    )
+
+    # With a UUID the ref is not hashed, so media_io_kwargs is the only thing
+    # keeping two decode settings apart.
+    assert hash_of(keep_ref, "image-uuid", {}) != hash_of(
+        keep_ref, "image-uuid", {"image": {"image_mode": None}}
+    )
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     [
@@ -1373,8 +1405,8 @@ def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
 
 
 class _LazyTestProcessingInfo:
-    """Minimal ProcessingInfo for exercising the lazy-decode orchestration in
-    `_cached_apply_hf_processor` without a real HF model."""
+    """Minimal ProcessingInfo for exercising the deferred-decode orchestration
+    in `_cached_apply_hf_processor` without a real HF model."""
 
     model_id = "lazy-test-model"
 
@@ -1411,9 +1443,9 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
             dummy_inputs=None,  # type: ignore[arg-type]
         )
 
-        # Raw bytes visible to byte-consuming models (see dots3_note) at
-        # HF-processing time, one entry per lazy item.
-        self.seen_original_bytes = list[bytes]()
+        # Encoded bytes visible to byte-consuming models (see dots3_note) at
+        # HF-processing time, one entry per media ref.
+        self.seen_encoded_bytes = list[bytes]()
         self.fail_hf_processor = False
         self.hf_calls = 0
 
@@ -1423,8 +1455,8 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
                 continue
             for idx in range(items.get_count()):
                 raw = items.get_raw(idx)
-                if isinstance(raw, LazyMedia):
-                    self.seen_original_bytes.append(raw.original_bytes)
+                if isinstance(raw, MediaRef):
+                    self.seen_encoded_bytes.append(raw.data)
         return super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
     def _call_hf_processor(self, hf_data, hf_kwargs):
@@ -1493,20 +1525,20 @@ def test_lazy_cache_hit_skips_decode():
 
     # First request (miss): the item is decoded once and its bytes released.
     decoder_1 = _CountingDecoder(Image.new("RGB", (4, 4)))
-    lazy_1 = LazyMedia(decoder_1, data)
+    lazy_1 = MediaRef(decoder_1, data)
     timing_ctx = TimingContext(enabled=True)
     _lazy_apply(processor, [lazy_1], cache, timing_ctx)
     assert decoder_1.calls == 1
-    assert lazy_1.original_bytes == b""
+    assert lazy_1.data == b""
     assert "decode_mm_items" in timing_ctx.stage_secs
 
     # Second request with identical bytes (hit): no decode, bytes released
     # right after hashing.
     decoder_2 = _CountingDecoder(Image.new("RGB", (4, 4)))
-    lazy_2 = LazyMedia(decoder_2, data)
+    lazy_2 = MediaRef(decoder_2, data)
     _lazy_apply(processor, [lazy_2], cache)
     assert decoder_2.calls == 0
-    assert lazy_2.original_bytes == b""
+    assert lazy_2.data == b""
 
 
 def test_lazy_cache_miss_decodes_in_parallel():
@@ -1528,8 +1560,7 @@ def test_lazy_cache_miss_decodes_in_parallel():
     processor = _LazyTestProcessor()
     cache = _lazy_cache()
     lazy_items = [
-        LazyMedia(make_decoder(idx), f"image-{idx}".encode())
-        for idx in range(num_items)
+        MediaRef(make_decoder(idx), f"image-{idx}".encode()) for idx in range(num_items)
     ]
     _lazy_apply(processor, lazy_items, cache)
 
@@ -1555,42 +1586,43 @@ def test_lazy_decode_error_becomes_unprocessable():
     with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
         _lazy_apply(
             processor,
-            [LazyMedia(bad_decode, b"broken"), LazyMedia(slow_decode, b"good")],
+            [MediaRef(bad_decode, b"broken"), MediaRef(slow_decode, b"good")],
             cache,
         )
 
-    assert exc_info.value.parameter == "image_url"
+    assert exc_info.value.parameter is None
+    assert "image media at index 0" in str(exc_info.value)
     assert slow_completed.is_set()
 
 
 def test_lazy_miss_bytes_available_during_hf_processing():
-    """Byte-consuming models (e.g. dots3_note) must still see non-empty
-    original_bytes on the cached path; bytes are released afterwards."""
+    """A cache-miss ref still holds its encoded bytes while the HF processor
+    runs, and they are released afterwards."""
     processor = _LazyTestProcessor()
     cache = _lazy_cache()
-    lazy = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
+    lazy = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
 
     _lazy_apply(processor, [lazy], cache)
 
     # The HF-facing layer saw the raw bytes for the miss item...
-    assert processor.seen_original_bytes == [b"image-bytes"]
+    assert processor.seen_encoded_bytes == [b"image-bytes"]
     # ...and the bytes are released by the time processing returns.
-    assert lazy.original_bytes == b""
+    assert lazy.data == b""
 
 
 def test_lazy_miss_bytes_released_on_hf_processor_error():
-    """Bytes of cache-miss lazy items are released even if HF processing
-    raises (try/finally in `_cached_apply_hf_processor`)."""
+    """Bytes of cache-miss refs are released even if HF processing raises
+    (try/finally in `_cached_apply_hf_processor`)."""
     processor = _LazyTestProcessor()
     cache = _lazy_cache()
     processor.fail_hf_processor = True
-    lazy = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
+    lazy = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
 
     with pytest.raises(RuntimeError, match="boom"):
         _lazy_apply(processor, [lazy], cache)
 
-    assert processor.seen_original_bytes == [b"image-bytes"]
-    assert lazy.original_bytes == b""
+    assert processor.seen_encoded_bytes == [b"image-bytes"]
+    assert lazy.data == b""
 
 
 @pytest.mark.asyncio
@@ -1613,10 +1645,10 @@ async def test_lazy_phase1_does_not_block_mm_worker():
         release_decode.wait(timeout=30)
         return Image.new("RGB", (4, 4))
 
-    inputs_a = _lazy_inputs(processor, [LazyMedia(gated_decode, b"a-bytes")], cache)
+    inputs_a = _lazy_inputs(processor, [MediaRef(gated_decode, b"a-bytes")], cache)
     inputs_b = _lazy_inputs(
         processor,
-        [LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"b-bytes")],
+        [MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), b"b-bytes")],
         cache,
     )
 
@@ -1666,13 +1698,13 @@ def test_lazy_phase2_rederives_miss_to_hit():
     data = b"shared-bytes"
 
     # A starts first: its phase 1 sees a cache miss and submits the decode.
-    lazy_a = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    lazy_a = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), data)
     inputs_a = _lazy_inputs(processor, [lazy_a], cache)
     state_a = processor.apply_phase1(inputs_a, TimingContext(enabled=False))
     state_a.wait_decodes()
 
     # B's whole apply interleaves between A's phases and caches the content.
-    lazy_b = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    lazy_b = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), data)
     hf_before = processor.hf_calls
     processor.apply(
         _lazy_inputs(processor, [lazy_b], cache), TimingContext(enabled=False)
@@ -1693,25 +1725,28 @@ def test_lazy_phase2_handles_hit_eviction():
     cache = _lazy_cache()
     data = b"evict-me"
 
-    first = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    first = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), data)
     _lazy_apply(processor, [first], cache)
     assert processor.hf_calls == 1
 
-    lazy2 = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    lazy2 = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), data)
     inputs2 = _lazy_inputs(processor, [lazy2], cache)
     state = processor.apply_phase1(inputs2, TimingContext(enabled=False))
 
-    # Hit in phase 1: nothing to decode, bytes released after hashing.
+    # Hit in phase 1: nothing to decode, and the bytes are still held --
+    # releasing them here would leave the eviction fallback below with
+    # nothing to decode from.
     assert not state.decodes
-    assert lazy2.original_bytes == b""
+    assert lazy2.data == data
 
-    # The item is evicted between the phases; the decode closure still
-    # holds the bytes, so the phase-2 fallback can process it.
+    # The item is evicted between the phases, so phase 2 has to decode and
+    # process it after all.
     cache.clear_cache()
     result = processor.apply_phase2(state)
 
     assert processor.hf_calls == 2
     assert result["mm_kwargs"]["image"][0] is not None
+    assert lazy2.data == b""
 
 
 @pytest.mark.parametrize(

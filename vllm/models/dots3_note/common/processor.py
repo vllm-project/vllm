@@ -5,9 +5,11 @@
 import math
 from collections.abc import Mapping, Sequence
 from functools import cached_property
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import pybase64
 import torch
 from PIL import Image
 from transformers import BatchFeature
@@ -17,11 +19,10 @@ from vllm.config.multimodal import (
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.media import LazyMedia, MediaWithBytes
+from vllm.multimodal.media import DecodeSpec, MediaIO
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
-    VideoProcessorItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -455,6 +456,37 @@ class Dots3NoteProcessor:
         return BatchFeature(data=data)
 
 
+class Dots3NoteVideoMediaIO(MediaIO[bytes]):
+    """Hands the encoded video payload to the HF processor untouched.
+
+    Dots3Note samples frames and extracts the audio track itself (see
+    `preprocess_dots3_note_video`), so vLLM must not pre-decode. Declaring that
+    as the decoder -- rather than reaching for `MediaRef.data` while processing
+    -- keeps the choice inside the ref's `DecodeSpec`, and therefore inside its
+    cache key: a cache hit and a cache miss hand HF the same thing.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__()
+
+        # `kwargs` are the request's `media_io_kwargs["video"]`. This decoder
+        # ignores them, but they still belong in the spec: dropping them would
+        # let two requests that asked for different decodes share an entry.
+        self.kwargs = kwargs
+
+    def get_decode_spec(self) -> DecodeSpec:
+        return DecodeSpec({**self.kwargs, "video_decode": "raw_bytes"})
+
+    def load_bytes(self, data: bytes) -> bytes:
+        return data
+
+    def load_base64(self, media_type: str, data: str) -> bytes:
+        return pybase64.b64decode(data, validate=True)
+
+    def load_file(self, filepath: Path) -> bytes:
+        return filepath.read_bytes()
+
+
 class Dots3NoteProcessingInfo(BaseProcessingInfo):
     @cached_property
     def vision_config(self) -> dict[str, Any] | None:
@@ -521,6 +553,17 @@ class Dots3NoteProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self) -> MultiModalDataParser:
         sample_rate = int((self.audio_config or {}).get("sampling_rate", 16000))
         return MultiModalDataParser(target_sr=float(sample_rate), target_channels=1)
+
+    def get_media_io(
+        self,
+        modality: str,
+        media_io_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> MediaIO[Any]:
+        if modality == "video":
+            kwargs = dict((media_io_kwargs or {}).get("video") or {})
+            return Dots3NoteVideoMediaIO(**kwargs)
+
+        return super().get_media_io(modality, media_io_kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         limits: dict[str, int | None] = {}
@@ -639,25 +682,6 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
         hf_data = hf_inputs.hf_data
         if "audio" in hf_data:
             hf_data["audios"] = hf_data.pop("audio")
-
-        if "video" in mm_items:
-            videos = mm_items.get_items("video", VideoProcessorItems)
-
-            raw_videos: list[object] = []
-            for index, item in enumerate(videos.data):
-                # This model decodes video from raw bytes itself. Lazy items
-                # stay wrapped after the processor's in-place decode, and
-                # their bytes may already be released on the cached path;
-                # fall back to decoded frames in that case.
-                if (
-                    isinstance(item, (MediaWithBytes, LazyMedia))
-                    and item.original_bytes
-                ):
-                    raw_videos.append(item.original_bytes)
-                else:
-                    raw_videos.append(videos.get(index))
-
-            hf_data["videos"] = raw_videos
 
         return hf_inputs
 

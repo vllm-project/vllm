@@ -225,7 +225,7 @@ def test_validate_mm_uuids_does_not_decode_lazy_media():
     """UUID validation only checks None-ness, so it must not unwrap lazy
     items (unwrapping would decode every item on the single _mm_executor
     worker, defeating cache-hit-skips-decode)."""
-    from vllm.multimodal.media import LazyMedia
+    from vllm.multimodal.media import MediaRef
 
     renderer = _build_renderer()
 
@@ -236,7 +236,7 @@ def test_validate_mm_uuids_does_not_decode_lazy_media():
         decoder_calls += 1
         return baby_reading_np_ndarrays
 
-    mm_data = {"video": [LazyMedia(decode, b"video-bytes")]}
+    mm_data = {"video": [MediaRef(decode, b"video-bytes")]}
 
     mm_processor = renderer.get_mm_processor()
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
@@ -255,7 +255,7 @@ async def test_process_multimodal_async_does_not_block_mm_worker_on_decode():
     import asyncio
     import threading
 
-    from vllm.multimodal.media import LazyMedia
+    from vllm.multimodal.media import MediaRef
 
     renderer = _build_renderer()
     processor = renderer.get_mm_processor()
@@ -275,7 +275,7 @@ async def test_process_multimodal_async_does_not_block_mm_worker_on_decode():
     try:
         task_a = asyncio.create_task(
             renderer._process_multimodal_async(
-                prompt, {"image": [LazyMedia(gated_decode, b"a-bytes")]}, None, None
+                prompt, {"image": [MediaRef(gated_decode, b"a-bytes")]}, None, None
             )
         )
         await asyncio.to_thread(decode_entered.wait, 60)

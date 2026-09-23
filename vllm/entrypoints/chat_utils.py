@@ -65,14 +65,18 @@ from vllm.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
-from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, LazyMedia, MediaConnector
+from vllm.multimodal.media import (
+    MEDIA_CONNECTOR_REGISTRY,
+    MediaConnector,
+    MediaIO,
+    MediaRef,
+)
 from vllm.multimodal.media.connector import global_thread_pool
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )
-from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
 from vllm.utils.import_utils import LazyLoader
@@ -448,6 +452,28 @@ _T = TypeVar("_T")
 _AsyncMultiModalItem: TypeAlias = Callable[[], Awaitable[tuple[object, str | None]]]
 
 
+class _SharedFetch(Generic[_T]):
+    """One fetch awaited by several tracker entries.
+
+    `use_audio_in_video` registers a video item and an audio item for the same
+    URL, and both have to resolve from a single download. The task is created
+    on first await, so a request that fails before its items are resolved does
+    not leave an unawaited task behind.
+    """
+
+    def __init__(self, factory: Callable[[], Awaitable[_T]]) -> None:
+        super().__init__()
+
+        self._factory = factory
+        self._task: asyncio.Future[_T] | None = None
+
+    async def __call__(self) -> _T:
+        if self._task is None:
+            self._task = asyncio.ensure_future(self._factory())
+
+        return await self._task
+
+
 # Backward compatibility for single item input
 class _BatchedSingleItemField(MultiModalSharedField):
     pass
@@ -650,9 +676,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_processor(self):
         return self.mm_registry.create_processor(self.model_config)
 
-    @property
-    def video_processor_name(self) -> str | None:
-        return get_video_processor_cls_name(self.model_config)
+    def get_media_io(self, modality: str) -> MediaIO[Any]:
+        """The decoder the model's processor wants for `modality`.
+
+        The connector only transports bytes; which decoder they are paired
+        with -- and therefore the decode spec folded into the item's cache
+        key -- is the model's decision, made by its processing info.
+        """
+        return self.mm_processor.info.get_media_io(modality, self.media_io_kwargs)
 
     def add(self, modality: ModalityStr, item: _T) -> str | None:
         """Add a multi-modal item to the current prompt and returns the
@@ -728,13 +759,13 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         raise NotImplementedError
 
 
-def _decode_lazy_item(data: object, modality: str) -> None:
-    """Trigger decoding of a lazy media item.
+def _decode_media_ref(data: object, modality: str) -> None:
+    """Trigger decoding of a media ref.
 
     Decode failures are wrapped as VLLMUnprocessableEntityError so corrupt
     media surfaces as a client error (422) instead of a server error.
     """
-    if not isinstance(data, LazyMedia) or data.is_decoded:
+    if not isinstance(data, MediaRef) or data.is_decoded:
         return
     try:
         data.decode()
@@ -764,15 +795,14 @@ def _resolve_vision_chunk_items(
     for inner_modality, (data, uuid) in zip(
         vision_chunks_modality_order, vision_chunk_items
     ):
-        # Decode lazy items up front: decode failures must propagate instead
+        # Decode media refs up front: decode failures must propagate instead
         # of being swallowed by the split_video_chunks fallback below.
-        _decode_lazy_item(data, inner_modality)
+        _decode_media_ref(data, inner_modality)
         if inner_modality == "image":
-            # Cast data to proper type for image
-            # Use .media (PIL.Image) directly to avoid redundant
-            # bytes→PIL conversion in media_processor
-            if hasattr(data, "media"):
-                image_data = data.media  # type: ignore[union-attr]
+            # Pass the decoded PIL.Image on to avoid a redundant bytes->PIL
+            # conversion in media_processor.
+            if isinstance(data, MediaRef):
+                image_data = data.decode()
                 processed_chunks.append(
                     VisionChunkImage(type="image", image=image_data, uuid=uuid)
                 )
@@ -814,17 +844,17 @@ async def _predecode_vision_chunk_items(
     vision_chunk_items: list[tuple[object, str | None]],
     vision_chunks_modality_order: list[str],
 ) -> None:
-    """Decode lazy vision_chunk items concurrently on the media thread pool.
+    """Decode vision_chunk media refs concurrently on the media thread pool.
 
     Waits for every submitted decode to finish, then raises the first failure
-    (already wrapped as VLLMUnprocessableEntityError by `_decode_lazy_item`).
+    (already wrapped as VLLMUnprocessableEntityError by `_decode_media_ref`).
     """
     lazy_items = [
         (inner_modality, data)
         for inner_modality, (data, _uuid) in zip(
             vision_chunks_modality_order, vision_chunk_items
         )
-        if isinstance(data, LazyMedia) and not data.is_decoded
+        if isinstance(data, MediaRef) and not data.is_decoded
     ]
     if not lazy_items:
         return
@@ -833,7 +863,7 @@ async def _predecode_vision_chunk_items(
     results = await asyncio.gather(
         *(
             loop.run_in_executor(
-                global_thread_pool, _decode_lazy_item, data, inner_modality
+                global_thread_pool, _decode_media_ref, data, inner_modality
             )
             for inner_modality, data in lazy_items
         ),
@@ -1114,7 +1144,6 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         # actually contains media so text-only parsing never blocks on that I/O.
         return MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=self._tracker.media_io_kwargs,
             allowed_local_media_path=self._tracker.allowed_local_media_path,
             allowed_media_domains=self._tracker.allowed_media_domains,
         )
@@ -1141,7 +1170,11 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
-        image = self._connector.fetch_image(image_url) if image_url else None
+        image = (
+            self._connector.fetch_image(image_url, self._tracker.get_media_io("image"))
+            if image_url
+            else None
+        )
 
         placeholder = self._tracker.add("image", (image, uuid))
         self._add_placeholder("image", placeholder)
@@ -1207,7 +1240,11 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
-        audio = self._connector.fetch_audio(audio_url) if audio_url else None
+        audio = (
+            self._connector.fetch_audio(audio_url, self._tracker.get_media_io("audio"))
+            if audio_url
+            else None
+        )
 
         placeholder = self._tracker.add("audio", (audio, uuid))
         self._add_placeholder("audio", placeholder)
@@ -1229,25 +1266,26 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
-        video = (
-            self._connector.fetch_video(
-                video_url=video_url,
-                video_processor=self._tracker.video_processor_name,
-            )
-            if video_url
-            else None
-        )
+        video = None
+        audio = None
+        if video_url:
+            video_io = self._tracker.get_media_io("video")
+            if self._mm_processor_kwargs and self._mm_processor_kwargs.get(
+                "use_audio_in_video", False
+            ):
+                # The audio track lives in the video payload, so one download
+                # feeds both decoders instead of fetching the URL twice.
+                video, audio = self._connector.fetch_video_and_audio(
+                    video_url, video_io, self._tracker.get_media_io("audio")
+                )
+            else:
+                video = self._connector.fetch_video(video_url, video_io)
 
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
 
         # Extract audio from video if use_audio_in_video is True
-        if (
-            video_url
-            and self._mm_processor_kwargs
-            and self._mm_processor_kwargs.get("use_audio_in_video", False)
-        ):
-            audio = self._connector.fetch_audio(video_url) if video_url else None
+        if audio is not None:
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
 
@@ -1295,7 +1333,6 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         # actually contains media so text-only parsing never blocks on that I/O.
         return MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=self._tracker.media_io_kwargs,
             allowed_local_media_path=self._tracker.allowed_local_media_path,
             allowed_media_domains=self._tracker.allowed_media_domains,
         )
@@ -1335,7 +1372,11 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):
         image = (
-            await self._connector.fetch_image_async(image_url) if image_url else None
+            await self._connector.fetch_image_async(
+                image_url, self._tracker.get_media_io("image")
+            )
+            if image_url
+            else None
         )
         return image, uuid
 
@@ -1423,7 +1464,11 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _audio_with_uuid_async(self, audio_url: str | None, uuid: str | None):
         audio = (
-            await self._connector.fetch_audio_async(audio_url) if audio_url else None
+            await self._connector.fetch_audio_async(
+                audio_url, self._tracker.get_media_io("audio")
+            )
+            if audio_url
+            else None
         )
         return audio, uuid
 
@@ -1452,19 +1497,26 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
         video = (
             await self._connector.fetch_video_async(
-                video_url,
-                video_processor=self._tracker.video_processor_name,
+                video_url, self._tracker.get_media_io("video")
             )
             if video_url
             else None
         )
         return video, uuid
 
+    async def _shared_with_uuid_async(
+        self,
+        fetch: _SharedFetch[Any],
+        index: int,
+        uuid: str | None,
+    ):
+        return (await fetch())[index], uuid
+
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
-        placeholder = self._tracker.add(
-            "video", partial(self._video_with_uuid_async, video_url, uuid)
+        video: _AsyncMultiModalItem = partial(
+            self._video_with_uuid_async, video_url, uuid
         )
-        self._add_placeholder("video", placeholder)
+        audio: _AsyncMultiModalItem | None = None
 
         # Extract audio from video if use_audio_in_video is True
         if (
@@ -1472,9 +1524,24 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             and self._mm_processor_kwargs
             and self._mm_processor_kwargs.get("use_audio_in_video", False)
         ):
-            audio_placeholder = self._tracker.add(
-                "audio", partial(self._audio_with_uuid_async, video_url, uuid)
+            # The audio track lives in the video payload, so both entries await
+            # one download instead of registering two fetches of the same URL.
+            fetch = _SharedFetch(
+                partial(
+                    self._connector.fetch_video_and_audio_async,
+                    video_url,
+                    self._tracker.get_media_io("video"),
+                    self._tracker.get_media_io("audio"),
+                )
             )
+            video = partial(self._shared_with_uuid_async, fetch, 0, uuid)
+            audio = partial(self._shared_with_uuid_async, fetch, 1, uuid)
+
+        placeholder = self._tracker.add("video", video)
+        self._add_placeholder("video", placeholder)
+
+        if audio is not None:
+            audio_placeholder = self._tracker.add("audio", audio)
             self._add_placeholder("audio", audio_placeholder)
 
     def parse_video_embeds(

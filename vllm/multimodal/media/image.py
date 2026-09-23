@@ -4,7 +4,6 @@
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pybase64
@@ -18,8 +17,13 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from ..image import convert_image_mode, normalize_image, rgba_to_rgb
-from .base import LazyMedia, MediaIO, MediaWithBytes
+from ..image import (
+    convert_image_mode,
+    get_image_id_bytes,
+    normalize_image,
+    rgba_to_rgb,
+)
+from .base import DecodeSpec, MediaIO, MediaRef
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
 
@@ -63,12 +67,19 @@ class ImageMediaIO(MediaIO[Image.Image]):
             )
         self.rgba_background_color = rgba_bg
 
-    def _convert_image_mode(
-        self, image: Image.Image | MediaWithBytes[Image.Image]
-    ) -> Image.Image:
+    def get_decode_spec(self) -> DecodeSpec:
+        # The resolved values win: `rgba_background_color` also sits in
+        # `kwargs`, in whatever shape the caller supplied it.
+        return DecodeSpec(
+            {
+                **self.kwargs,
+                "image_mode": self.image_mode,
+                "rgba_background_color": self.rgba_background_color,
+            }
+        )
+
+    def _convert_image_mode(self, image: Image.Image) -> Image.Image:
         """Convert image mode with custom background color."""
-        if isinstance(image, MediaWithBytes):
-            image = image.media
         if self.image_mode is None or image.mode == self.image_mode:
             return image
         elif image.mode == "RGBA" and self.image_mode == "RGB":
@@ -78,13 +89,11 @@ class ImageMediaIO(MediaIO[Image.Image]):
                 image, self.image_mode, self.rgba_background_color
             )
 
-    def open_header(self, data: bytes) -> tuple[Image.Image, dict[str, Any] | None]:
+    def open_header(self, data: bytes) -> Image.Image:
         """Open only the image header, leaving the pixels undecoded.
 
-        Returns the header-opened image (mode/size/EXIF are readable without
-        decoding pixels) and the io_config of the decode that will follow:
-        conversion happens iff `image_mode` differs from the header mode,
-        matching the decode-time `converted is not image` check.
+        Mode, size and EXIF are readable from the header alone, so this is
+        also where the max-pixels guard and the cache key's EXIF probe run.
         """
         try:
             image = Image.open(BytesIO(data))
@@ -99,13 +108,21 @@ class ImageMediaIO(MediaIO[Image.Image]):
         except (OSError, Image.UnidentifiedImageError) as e:
             raise ValueError(f"Failed to load image: {e}") from e
 
-        io_config = None
-        if self.image_mode is not None and image.mode != self.image_mode:
-            io_config = {
-                "image_mode": self.image_mode,
-                "rgba_background_color": self.rgba_background_color,
-            }
-        return image, io_config
+        return image
+
+    def _exif_key(self, header_image: Image.Image) -> bytes | None:
+        """The EXIF `ImageID` cache key of a header-opened image, if it has one.
+
+        Key derivation must never rasterize pixels: `PngImageFile.getexif()`
+        calls `.load()` to scan for a trailing eXIf chunk when `info` has
+        none, and on Pillow >= 12 `getexif()` loads unconditionally. Per the
+        PNG spec eXIf must precede IDAT, so compliant PNGs carry their EXIF in
+        `info` at open time; a non-compliant trailing-eXIf PNG with an
+        `ImageID` is not recognized here and keys off its bytes instead.
+        """
+        if header_image.format == "PNG" and "exif" not in header_image.info:
+            return None
+        return get_image_id_bytes(header_image)
 
     def _decode_pixels(self, image: Image.Image) -> Image.Image:
         """Rasterize a header-opened image, then normalize and convert it."""
@@ -117,40 +134,39 @@ class ImageMediaIO(MediaIO[Image.Image]):
             raise ValueError(f"Failed to load image: {e}") from e
 
     def _decode_from_bytes(self, data: bytes) -> Image.Image:
-        header_image, _ = self.open_header(data)
-        return self._decode_pixels(header_image)
+        return self._decode_pixels(self.open_header(data))
 
-    def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
-        header_image, io_config = self.open_header(data)
-        return MediaWithBytes(self._decode_pixels(header_image), data, io_config)
+    def load_bytes(self, data: bytes) -> Image.Image:
+        return self._decode_from_bytes(data)
 
-    def load_bytes_lazy(self, data: bytes) -> LazyMedia[Image.Image]:
-        """Eager header-open + lazy pixel-decode.
+    def load_bytes_ref(self, data: bytes) -> MediaRef[Image.Image]:
+        """Eager header parse + lazy pixel decode.
 
-        The header (mode/size/EXIF) is parsed eagerly so io_config and the
-        hasher's EXIF branch match the eager path, and oversized images still
-        fail at fetch time. Unparsable headers and pixel decoding are
-        deferred to first access, where decode errors surface.
+        The header is parsed eagerly so oversized images still fail at fetch
+        time and so the cache key can carry the EXIF `ImageID` without
+        decoding. Unparsable headers and pixel decoding are deferred to first
+        access, where decode errors surface.
         """
+        spec = self.get_decode_spec()
         try:
-            header_image, io_config = self.open_header(data)
+            header_image = self.open_header(data)
         except ValueError as e:
             # The max-pixels ValueError has no __cause__ and stays eager;
             # header parse failures (wrapping OSError) are deferred.
             if e.__cause__ is None:
                 raise
-            return LazyMedia(partial(self._decode_from_bytes, data), data)
-        return LazyMedia(
+            return MediaRef(partial(self._decode_from_bytes, data), data, spec)
+        return MediaRef(
             partial(self._decode_pixels, header_image),
             data,
-            io_config,
-            header_image,
+            spec,
+            key=self._exif_key(header_image),
         )
 
-    def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
+    def load_base64(self, media_type: str, data: str) -> Image.Image:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
+    def load_file(self, filepath: Path) -> Image.Image:
         return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(

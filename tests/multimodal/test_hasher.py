@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.media.base import LazyMedia, MediaWithBytes
+from vllm.multimodal.media.base import DecodeSpec, MediaRef
 from vllm.multimodal.media.image import ImageMediaIO
 from vllm.multimodal.parse import MultiModalDataParser
 
@@ -121,17 +121,13 @@ def test_hash_collision_video_num_frames():
 
     def item_for_hash(num_frames: int):
         frames: np.ndarray = np.zeros((num_frames, 8, 8, 3), dtype=np.uint8)
-        metadata = {
-            "total_num_frames": 16,
-            "fps": 2.0,
-            "duration": 8.0,
-            "video_backend": "opencv",
-            "frames_indices": list(range(num_frames)),
-            "do_sample_frames": False,
-        }
-        video = MediaWithBytes((frames, metadata), source)
+        video = MediaRef(
+            lambda: (frames, {}), source, DecodeSpec({"num_frames": num_frames})
+        )
         items = MultiModalDataParser()._parse_video_data([video])
-        return items.get_all_items_for_hash()[0]
+        item = items.get_all_raw()[0]
+        assert not video.is_decoded
+        return item
 
     hasher = MultiModalHasher
     assert hasher.hash_kwargs("blake3", video=item_for_hash(2)) != hasher.hash_kwargs(
@@ -141,21 +137,17 @@ def test_hash_collision_video_num_frames():
 
 def test_hash_video_tensor_frames():
     """Videos holding tensor frames (e.g. NVDEC-decoded) hash like
-    array-framed ones, from the original bytes without a D2H copy."""
+    array-framed ones: the key comes from the encoded bytes and the decode
+    spec, so neither a D2H copy nor a decode is needed."""
     source = b"x" * 100
+    spec = DecodeSpec({"video_backend": "torchcodec"})
 
     def item_for_hash(frames):
-        metadata = {
-            "total_num_frames": 2,
-            "fps": 2.0,
-            "duration": 1.0,
-            "video_backend": "torchcodec",
-            "frames_indices": [0, 1],
-            "do_sample_frames": False,
-        }
-        video = MediaWithBytes((frames, metadata), source)
+        video = MediaRef(lambda: (frames, {}), source, spec)
         items = MultiModalDataParser()._parse_video_data([video])
-        return items.get_all_items_for_hash()[0]
+        item = items.get_all_raw()[0]
+        assert not video.is_decoded
+        return item
 
     np_frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)
     torch_frames = torch.zeros((2, 8, 8, 3), dtype=torch.uint8)
@@ -222,10 +214,12 @@ def test_hash_image_malformed_exif():
     hash_val = hasher.hash_kwargs("blake3", image=image)
     assert isinstance(hash_val, str) and len(hash_val) > 0
 
-    # Also verify MediaWithBytes wrapping the image with malformed EXIF
-    media_item = MediaWithBytes(image, data)
+    # Also verify a ref built from those bytes: the EXIF probe tolerates the
+    # malformed header instead of raising at fetch time.
+    media_item = ImageMediaIO().load_bytes_ref(data)
     hash_media = hasher.hash_kwargs("blake3", image=media_item)
     assert isinstance(hash_media, str) and len(hash_media) > 0
+    assert not media_item.is_decoded
 
 
 def _rgba_png_bytes() -> bytes:
@@ -236,11 +230,12 @@ def _rgba_png_bytes() -> bytes:
 
 
 def test_hash_collision_media_io_config():
+    """Decode settings that mutate the media are part of its cache identity."""
     data = _rgba_png_bytes()
-    white = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
-    black = ImageMediaIO(rgba_background_color=(0, 0, 0)).load_bytes(data)
-    white2 = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
-    keep = ImageMediaIO(image_mode=None).load_bytes(data)
+    white = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes_ref(data)
+    black = ImageMediaIO(rgba_background_color=(0, 0, 0)).load_bytes_ref(data)
+    white2 = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes_ref(data)
+    keep = ImageMediaIO(image_mode=None).load_bytes_ref(data)
 
     hasher = MultiModalHasher
     assert hasher.hash_kwargs("blake3", image=white) != hasher.hash_kwargs(
@@ -254,20 +249,22 @@ def test_hash_collision_media_io_config():
     )
 
 
-def test_hash_media_io_noop_config_preserves_hash():
+def test_hash_media_io_noop_config_still_scopes_key():
+    """A setting that happens not to change this payload still scopes the key.
+
+    `image_mode="RGB"` is a no-op for an already-RGB PNG, but the ref cannot
+    know that without decoding, so the two configurations stay distinct.
+    """
     image = Image.new("RGB", (8, 8), (0, 128, 255))
     buf = BytesIO()
     image.save(buf, format="PNG")
     data = buf.getvalue()
 
-    loaded = ImageMediaIO().load_bytes(data)
-    assert loaded.io_config is None
+    convert = ImageMediaIO().load_bytes_ref(data)
+    keep = ImageMediaIO(image_mode=None).load_bytes_ref(data)
 
-    plain = MediaWithBytes(loaded.media, data)
-    hasher = MultiModalHasher
-    assert hasher.hash_kwargs("blake3", image=loaded) == hasher.hash_kwargs(
-        "blake3", image=plain
-    )
+    assert convert.key != keep.key
+    assert np.array_equal(np.array(convert.decode()), np.array(keep.decode()))
 
 
 # The digest input is a concatenation of byte chunks, so it has to be uniquely
@@ -322,61 +319,25 @@ class _CountingDecoder:
         return self.value
 
 
-def test_hash_lazy_media_does_not_decode():
-    """Hashing a LazyMedia uses its original bytes and never decodes it."""
+def test_hash_media_ref_does_not_decode():
+    """Hashing a ref uses its precomputed key and never decodes it."""
     decoder = _CountingDecoder(np.zeros((4,), dtype=np.float32))
-    item = LazyMedia(decoder, b"audio-bytes")
+    item = MediaRef(decoder, b"audio-bytes")
 
     hasher = MultiModalHasher
-    hash_lazy = hasher.hash_kwargs("blake3", audio=item)
+    hash_ref = hasher.hash_kwargs("blake3", audio=item)
 
     assert decoder.calls == 0
-    assert hash_lazy == hasher.hash_kwargs("blake3", audio=b"audio-bytes")
+    assert hash_ref == hasher.hash_kwargs("blake3", audio=item.key)
 
 
-def test_hash_lazy_media_released_bytes_raises():
-    """Hashing after release_bytes() without decoding is a programming error."""
-    item = LazyMedia(lambda: np.zeros((4,), dtype=np.float32), b"raw")
-    item.release_bytes()
-
-    with pytest.raises(RuntimeError, match="released"):
-        MultiModalHasher.hash_kwargs("blake3", video=item)
-
-
-def test_hash_lazy_media_header_image_exif():
-    """With a header-only image, EXIF ImageID hashing needs no pixel decode."""
-    header = Image.new("RGB", (10, 20))
-    image_id = uuid.uuid4()
-    header.getexif()[Image.ExifTags.Base.ImageID] = image_id
-
-    decoder = _CountingDecoder(header)
-    item = LazyMedia(decoder, b"img-bytes", header_image=header)
-
+def test_hash_media_ref_survives_release():
+    """The key is derived up front, so hashing still works after release()."""
+    item = MediaRef(lambda: np.zeros((4,), dtype=np.float32), b"raw")
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs("blake3", image=item) == hasher.hash_kwargs(
-        "blake3", image=image_id.bytes
-    )
-    assert decoder.calls == 0
+    before = hasher.hash_kwargs("blake3", video=item)
 
+    item.release()
 
-def test_hash_lazy_media_header_image_io_config_matches_eager():
-    """A lazy image with header + io_config hashes exactly like the eager
-    MediaWithBytes produced by ImageMediaIO.load_bytes."""
-    data = _rgba_png_bytes()
-    io = ImageMediaIO(rgba_background_color=(0, 0, 0))
-    eager = io.load_bytes(data)
-    assert eager.io_config is not None
-
-    decoder = _CountingDecoder(eager.media)
-    lazy = LazyMedia(
-        decoder,
-        data,
-        io_config=eager.io_config,
-        header_image=Image.open(BytesIO(data)),
-    )
-
-    hasher = MultiModalHasher
-    assert hasher.hash_kwargs("blake3", image=lazy) == hasher.hash_kwargs(
-        "blake3", image=eager
-    )
-    assert decoder.calls == 0
+    assert item.data == b""
+    assert hasher.hash_kwargs("blake3", video=item) == before

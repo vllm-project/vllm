@@ -4,7 +4,6 @@
 import functools
 import hashlib
 import pickle
-import uuid
 from collections.abc import Callable, Iterable
 
 import numpy as np
@@ -14,7 +13,8 @@ from PIL import Image
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.logger import init_logger
 
-from .media import LazyMedia, MediaWithBytes
+from .image import get_image_id_bytes
+from .media import MediaRef
 
 logger = init_logger(__name__)
 
@@ -69,19 +69,6 @@ def _get_hasher_factory(
         raise ValueError(f"Unsupported hash algorithm: {algorithm}")
 
 
-def _get_image_id_bytes(image: Image.Image) -> bytes | None:
-    try:
-        exif = image.getexif()
-        image_id = exif.get(Image.ExifTags.Base.ImageID)
-        if isinstance(image_id, uuid.UUID):
-            return image_id.bytes
-    except Exception:
-        # Tolerate malformed EXIF metadata (e.g. invalid TIFF header)
-        # and fall back to serializing raw image data or bytes.
-        pass
-    return None
-
-
 class MultiModalHasher:
     """Derives multi-modal cache keys.
 
@@ -92,6 +79,11 @@ class MultiModalHasher:
 
     @classmethod
     def serialize_item(cls, obj: object) -> Iterable[bytes | memoryview]:
+        # Fetched media: the key was derived from the encoded bytes and the
+        # decode spec when the ref was built, so hashing it never decodes.
+        if isinstance(obj, MediaRef):
+            return _framed(obj.key)
+
         # Simple cases
         if isinstance(obj, (bytes, memoryview)):
             return _framed(obj)
@@ -100,8 +92,9 @@ class MultiModalHasher:
         if isinstance(obj, (int, float)):
             return _framed(np.array(obj).tobytes())
 
+        # Offline user code can hand us an already-decoded object.
         if isinstance(obj, Image.Image):
-            image_id = _get_image_id_bytes(obj)
+            image_id = get_image_id_bytes(obj)
             if image_id is not None:
                 return _framed(image_id)
 
@@ -113,59 +106,6 @@ class MultiModalHasher:
                     data["palette_rawmode"] = palette.rawmode
 
             return cls.iter_item_to_bytes("image", data)
-
-        if isinstance(obj, LazyMedia):
-            if (header_image := obj.header_image) is not None:
-                # Never let hashing decode pixels: PngImageFile.getexif()
-                # calls .load() to scan for a trailing eXIf chunk when info
-                # has none. Per the PNG spec eXIf must precede IDAT, so
-                # compliant PNGs parse EXIF into info at open time and hash
-                # identically to the eager path; a non-compliant
-                # trailing-eXIf PNG with an ImageID would hash differently.
-                image_id = None
-                if header_image.format != "PNG" or "exif" in header_image.info:
-                    image_id = _get_image_id_bytes(header_image)
-                if image_id is not None:
-                    return _framed(image_id)
-
-                if obj.io_config:
-                    return cls.iter_item_to_bytes(
-                        "image",
-                        {"io_config": obj.io_config, "data": obj.original_bytes},
-                    )
-
-                # Match the eager MediaWithBytes image branch, which prefixes
-                # the raw bytes with the b"image" key.
-                return cls.iter_item_to_bytes("image", obj.original_bytes)
-
-            original_bytes = obj.original_bytes
-            if not original_bytes and not obj.is_decoded:
-                raise RuntimeError(
-                    "Cannot hash a LazyMedia whose original bytes were released "
-                    "before decoding; hashing must precede release_bytes()."
-                )
-            return _framed(original_bytes)
-
-        if isinstance(obj, MediaWithBytes) and isinstance(obj.media, Image.Image):
-            image_id = _get_image_id_bytes(obj.media)
-            if image_id is not None:
-                return _framed(image_id)
-
-            if obj.io_config:
-                return cls.iter_item_to_bytes(
-                    "image",
-                    {"io_config": obj.io_config, "data": obj.original_bytes},
-                )
-            return cls.iter_item_to_bytes("image", obj.original_bytes)
-
-        if isinstance(obj, MediaWithBytes) and isinstance(
-            obj.media, (np.ndarray, torch.Tensor)
-        ):
-            frames = obj.media
-            # Both np.ndarray and torch.Tensor expose .nbytes.
-            if frames.nbytes < len(obj.original_bytes):
-                return cls.iter_item_to_bytes("video", frames)
-            return cls.iter_item_to_bytes("video", obj.original_bytes)
 
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()

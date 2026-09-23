@@ -13,14 +13,24 @@ from typing_extensions import TypeVar
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.multimodal.media import (
+    AudioMediaIO,
+    ImageMediaIO,
+    MediaIO,
+    VideoMediaIO,
+)
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     EmbeddingItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
+from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.transformers_utils.processor import (
+    cached_processor_from_config,
+    get_video_processor_cls_name,
+)
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -434,6 +444,53 @@ class BaseProcessingInfo:
     @cached_property
     def data_parser(self) -> MultiModalDataParser:
         return self.get_data_parser()
+
+    def get_media_io(
+        self,
+        modality: str,
+        media_io_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> MediaIO[Any]:
+        """Resolve the decoder for one modality's fetched media.
+
+        Media fetching is transport-only: the connector hands back the encoded
+        bytes and pairs them with whatever decoder the processor supplies.
+        Resolution lives here because this is the layer that has the model
+        config, so a decode choice that depends on the model stays a
+        model-side decision instead of being threaded up through the request
+        parser.
+
+        Args:
+            modality: The modality to decode (`"image"`, `"video"`, `"audio"`).
+            media_io_kwargs: Per-modality media I/O options, already merged
+                from `--media-io-kwargs` and the request's `media_io_kwargs`.
+
+        Returns:
+            The [`MediaIO`][vllm.multimodal.media.base.MediaIO] that decodes
+            this modality's bytes. Its `get_decode_spec()` is the spec folded
+            into the fetched item's cache key.
+
+        """
+        all_kwargs = media_io_kwargs or {}
+
+        if modality == "image":
+            return ImageMediaIO(**dict(all_kwargs.get("image") or {}))
+        if modality == "audio":
+            return AudioMediaIO(**dict(all_kwargs.get("audio") or {}))
+        if modality == "video":
+            kwargs = dict(all_kwargs.get("video") or {})
+            # Backends that reproduce a specific HF video processor's frame
+            # sampling are bound to it in `VIDEO_LOADER_REGISTRY`; an explicit
+            # `video_backend` from `--media-io-kwargs` or the request wins.
+            if "video_backend" not in kwargs:
+                backend = get_video_loader_backend_for_processor(
+                    get_video_processor_cls_name(self.ctx.model_config)
+                )
+                if backend is not None:
+                    kwargs["video_backend"] = backend
+            image_io = ImageMediaIO(**dict(all_kwargs.get("image") or {}))
+            return VideoMediaIO(image_io, **kwargs)
+
+        raise ValueError(f"Unsupported media modality: {modality!r}")
 
     @property
     def skip_prompt_length_check(self) -> bool:

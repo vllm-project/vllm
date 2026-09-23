@@ -8,6 +8,7 @@ import hashlib
 import os
 import tempfile
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar
@@ -29,17 +30,18 @@ from vllm.connections import (
 )
 from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.logger import init_logger
-from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
-from .base import LazyMedia, MediaIO, MediaWithBytes
+from .base import MediaIO, MediaRef
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoEmbeddingMediaIO, VideoMediaIO
 
 logger = init_logger(__name__)
 
 _M = TypeVar("_M")
+_V = TypeVar("_V")
+_A = TypeVar("_A")
 
 global_thread_pool = ThreadPoolExecutor(
     max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT
@@ -148,26 +150,68 @@ def merge_media_io_kwargs(
     return merged or None
 
 
+def _is_data_url(url: str) -> bool:
+    return url[:5].lower() == "data:"
+
+
+def _parse_data_url(url: str) -> tuple[str, str]:
+    """Split a `data:` URL into its media type and base64 payload."""
+    # Format per RFC 2397:
+    # data:[<mediatype>][;<param>=<value>]*[;base64],<data>
+    data_spec, sep, data = url[5:].partition(",")
+    if not sep:
+        msg = f"Invalid data URL {url[:32]!r}: missing ',' separator."
+        raise ValueError(msg)
+
+    media_type, sep, encoding = data_spec.rpartition(";")
+    if not sep or encoding != "base64":
+        msg = "Only base64 data URLs are supported for now."
+        raise NotImplementedError(msg)
+
+    return media_type.partition(";")[0], data
+
+
+def _strictest_max_bytes(media_ios: Sequence[MediaIO[Any]]) -> int | None:
+    """The encoded-size cap of one download feeding several decoders.
+
+    Each decoder would have enforced its own cap on a download of its own, so
+    a shared download keeps the strictest of them.
+    """
+    caps = [
+        cap
+        for cap in (media_io.get_max_bytes() for media_io in media_ios)
+        if cap is not None
+    ]
+    return min(caps) if caps else None
+
+
+def _pair_bytes(
+    media_ios: Sequence[MediaIO[Any]],
+    data: bytes,
+) -> list[MediaRef[Any]]:
+    return [media_io.load_bytes_ref(data) for media_io in media_ios]
+
+
 @MEDIA_CONNECTOR_REGISTRY.register("http")
 class MediaConnector:
-    """Configuration values can be user-provided either by --media-io-kwargs or
-    by the runtime API field "media_io_kwargs". Ensure proper validation and
-    error handling.
+    """Fetches media URLs down to their encoded bytes.
+
+    Transport only: scheme dispatch (`data:` / `http(s):` / `file:`), the
+    domain allow-list, the encoded-size cap, the on-disk download cache, the
+    redirect policy and error normalization. How bytes decode -- and therefore
+    what identifies the resulting item in the processor cache -- is decided by
+    the caller-supplied [`MediaIO`][vllm.multimodal.media.base.MediaIO], which
+    the multi-modal processor's `info` resolves from the model config.
     """
 
     def __init__(
         self,
-        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
         allowed_media_domains: list[str] | None = None,
     ) -> None:
         """Args:
-        media_io_kwargs: Additional args passed to process media
-                         inputs, keyed by modalities. For example,
-                         to set num_frames for video, set
-                         `--media-io-kwargs '{"video":{"num_frames":40}}'`
         connection: HTTP connection client to download media contents.
         allowed_local_media_path: A local directory to load media files from.
         allowed_media_domains: If set, only media URLs that belong to this
@@ -176,9 +220,6 @@ class MediaConnector:
         """
         super().__init__()
 
-        self.media_io_kwargs: dict[str, dict[str, Any]] = (
-            media_io_kwargs if media_io_kwargs else {}
-        )
         self.connection = connection
 
         if allowed_local_media_path:
@@ -311,31 +352,8 @@ class MediaConnector:
         ext = Path(url.split("?", 1)[0]).suffix or ""
         return Path(self._media_cache_dir) / f"{url_hash}{ext}"  # type: ignore[arg-type]
 
-    def _load_data_url(
-        self,
-        url: str,
-        media_io: MediaIO[_M],
-    ) -> LazyMedia[_M]:
-        # Format per RFC 2397:
-        # data:[<mediatype>][;<param>=<value>]*[;base64],<data>
-        data_spec, sep, data = url[5:].partition(",")
-        if not sep:
-            msg = f"Invalid data URL {url[:32]!r}: missing ',' separator."
-            raise ValueError(msg)
-
-        media_type, sep, encoding = data_spec.rpartition(";")
-        if not sep or encoding != "base64":
-            msg = "Only base64 data URLs are supported for now."
-            raise NotImplementedError(msg)
-
-        media_type = media_type.partition(";")[0]
-        return media_io.load_base64_lazy(media_type, data)
-
-    def _load_file_url(
-        self,
-        url_spec: Url,
-        media_io: MediaIO[_M],
-    ) -> LazyMedia[_M]:
+    def _resolve_allowed_file(self, url_spec: Url) -> Path:
+        """Resolve a `file:` URL, checking it against the allowed media path."""
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
             raise RuntimeError(
@@ -351,7 +369,7 @@ class MediaConnector:
                 f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
 
-        return media_io.load_file_lazy(filepath)
+        return filepath
 
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (
@@ -364,48 +382,160 @@ class MediaConnector:
                 f"{url_spec.hostname}"
             )
 
+    def _fetch_url_bytes(
+        self,
+        url: str,
+        url_spec: Url,
+        *,
+        max_bytes: int | None = None,
+        fetch_timeout: int | None = None,
+    ) -> bytes:
+        """Download an HTTP(S) URL down to its encoded bytes."""
+        self._assert_url_in_allowed_media_domains(url_spec)
+
+        cached = self._get_cached_bytes(url)
+        if cached is not None:
+            return cached
+
+        try:
+            data = self.connection.get_bytes(
+                url_spec.url,
+                timeout=fetch_timeout,
+                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                max_bytes=max_bytes,
+            )
+        except Exception as e:
+            wrapped = _wrap_media_fetch_error(url, e)
+            if isinstance(wrapped, VLLMUnprocessableEntityError):
+                raise wrapped from e
+            raise
+
+        self._put_cached_bytes(url, data)
+        return data
+
+    async def _fetch_url_bytes_async(
+        self,
+        url: str,
+        url_spec: Url,
+        *,
+        max_bytes: int | None = None,
+        fetch_timeout: int | None = None,
+    ) -> bytes:
+        """Asynchronous `_fetch_url_bytes`."""
+        loop = asyncio.get_running_loop()
+
+        self._assert_url_in_allowed_media_domains(url_spec)
+
+        cached = await loop.run_in_executor(
+            global_thread_pool, self._get_cached_bytes, url
+        )
+        if cached is not None:
+            return cached
+
+        try:
+            data = await self.connection.async_get_bytes(
+                url_spec.url,
+                timeout=fetch_timeout,
+                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                max_bytes=max_bytes,
+            )
+        except Exception as e:
+            wrapped = _wrap_media_fetch_error(url, e)
+            if isinstance(wrapped, VLLMUnprocessableEntityError):
+                raise wrapped from e
+            raise
+
+        await loop.run_in_executor(
+            global_thread_pool, self._put_cached_bytes, url, data
+        )
+        return data
+
+    def _load_refs(
+        self,
+        url: str,
+        media_ios: Sequence[MediaIO[Any]],
+        *,
+        fetch_timeout: int | None = None,
+    ) -> list[MediaRef[Any]]:
+        """Fetch `url` once and pair the payload with each of `media_ios`.
+
+        One payload can legitimately feed several decoders -- reading the audio
+        track out of a video file needs the same bytes as its frames -- and
+        fetching once per decoder would repeat the download.
+        """
+        if _is_data_url(url):
+            media_type, encoded = _parse_data_url(url)
+            return [
+                media_io.load_base64_ref(media_type, encoded) for media_io in media_ios
+            ]
+
+        url_spec = parse_url(url)
+
+        if url_spec.scheme == "file":
+            filepath = self._resolve_allowed_file(url_spec)
+            return [media_io.load_file_ref(filepath) for media_io in media_ios]
+
+        if url_spec.scheme and url_spec.scheme.startswith("http"):
+            data = self._fetch_url_bytes(
+                url,
+                url_spec,
+                max_bytes=_strictest_max_bytes(media_ios),
+                fetch_timeout=fetch_timeout,
+            )
+            return _pair_bytes(media_ios, data)
+
+        msg = "The URL must be either a HTTP, data or file URL."
+        raise ValueError(msg)
+
+    async def _load_refs_async(
+        self,
+        url: str,
+        media_ios: Sequence[MediaIO[Any]],
+        *,
+        fetch_timeout: int | None = None,
+    ) -> list[MediaRef[Any]]:
+        """Asynchronous `_load_refs`."""
+        loop = asyncio.get_running_loop()
+        url_spec = None if _is_data_url(url) else parse_url(url)
+
+        if (
+            url_spec is not None
+            and url_spec.scheme
+            and url_spec.scheme.startswith("http")
+        ):
+            data = await self._fetch_url_bytes_async(
+                url,
+                url_spec,
+                max_bytes=_strictest_max_bytes(media_ios),
+                fetch_timeout=fetch_timeout,
+            )
+            # Building the refs digests the payload for their cache keys (and
+            # parses an image header), so keep it off the event loop.
+            return await loop.run_in_executor(
+                global_thread_pool, _pair_bytes, media_ios, data
+            )
+
+        # `data:` and `file:` URLs never touch the network, but splitting the
+        # payload, reading the file and building the refs are all linear in it.
+        return await loop.run_in_executor(
+            global_thread_pool, self._load_refs, url, media_ios
+        )
+
     def load_from_url(
         self,
         url: str,
         media_io: MediaIO[_M],
         *,
         fetch_timeout: int | None = None,
-    ) -> LazyMedia[_M]:
-        if url[:5].lower() == "data:":
-            return self._load_data_url(url, media_io)
+    ) -> MediaRef[_M]:
+        """Fetch `url` and pair it with a caller-supplied decoder.
 
-        url_spec = parse_url(url)
-
-        if url_spec.scheme and url_spec.scheme.startswith("http"):
-            self._assert_url_in_allowed_media_domains(url_spec)
-            max_bytes = media_io.get_max_bytes()
-
-            cached = self._get_cached_bytes(url)
-            if cached is not None:
-                return media_io.load_bytes_lazy(cached)
-
-            connection = self.connection
-            try:
-                data = connection.get_bytes(
-                    url_spec.url,
-                    timeout=fetch_timeout,
-                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-                    max_bytes=max_bytes,
-                )
-            except Exception as e:
-                wrapped = _wrap_media_fetch_error(url, e)
-                if isinstance(wrapped, VLLMUnprocessableEntityError):
-                    raise wrapped from e
-                raise
-
-            self._put_cached_bytes(url, data)
-            return media_io.load_bytes_lazy(data)
-
-        if url_spec.scheme == "file":
-            return self._load_file_url(url_spec, media_io)
-
-        msg = "The URL must be either a HTTP, data or file URL."
-        raise ValueError(msg)
+        Returns a lazy handle: decoding happens on first access (inside the
+        multi-modal processor), so decode errors surface there rather than at
+        the fetch site.
+        """
+        (ref,) = self._load_refs(url, [media_io], fetch_timeout=fetch_timeout)
+        return ref
 
     async def load_from_url_async(
         self,
@@ -413,191 +543,131 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: int | None = None,
-    ) -> LazyMedia[_M]:
-        loop = asyncio.get_running_loop()
-
-        if url[:5].lower() == "data:":
-            future = loop.run_in_executor(
-                global_thread_pool, self._load_data_url, url, media_io
-            )
-            return await future
-
-        url_spec = parse_url(url)
-
-        if url_spec.scheme and url_spec.scheme.startswith("http"):
-            self._assert_url_in_allowed_media_domains(url_spec)
-            max_bytes = media_io.get_max_bytes()
-
-            cached = await loop.run_in_executor(
-                global_thread_pool, self._get_cached_bytes, url
-            )
-            if cached is not None:
-                # Constructing a LazyMedia is O(1), so no offload is needed.
-                return media_io.load_bytes_lazy(cached)
-
-            connection = self.connection
-            try:
-                data = await connection.async_get_bytes(
-                    url_spec.url,
-                    timeout=fetch_timeout,
-                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-                    max_bytes=max_bytes,
-                )
-            except Exception as e:
-                wrapped = _wrap_media_fetch_error(url, e)
-                if isinstance(wrapped, VLLMUnprocessableEntityError):
-                    raise wrapped from e
-                raise
-
-            await loop.run_in_executor(
-                global_thread_pool, self._put_cached_bytes, url, data
-            )
-            return media_io.load_bytes_lazy(data)
-
-        if url_spec.scheme == "file":
-            future = loop.run_in_executor(
-                global_thread_pool, self._load_file_url, url_spec, media_io
-            )
-            return await future
-        msg = "The URL must be either a HTTP, data or file URL."
-        raise ValueError(msg)
+    ) -> MediaRef[_M]:
+        """Asynchronously fetch `url` and pair it with a caller-supplied decoder."""
+        (ref,) = await self._load_refs_async(
+            url, [media_io], fetch_timeout=fetch_timeout
+        )
+        return ref
 
     def fetch_audio(
         self,
         audio_url: str,
-    ) -> LazyMedia[tuple[np.ndarray, int | float]]:
-        """Load audio from a URL.
+        media_io: MediaIO[tuple[np.ndarray, int | float]],
+    ) -> MediaRef[tuple[np.ndarray, int | float]]:
+        """Fetch audio and pair it with a caller-supplied decoder.
 
         Returns a lazy handle: decoding happens on first access (inside the
-        multi-modal processor), so decode errors surface there rather than
-        at the fetch site.
+        multi-modal processor), so decode errors surface there rather than at
+        the fetch site.
         """
-        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
-
         return self.load_from_url(
             audio_url,
-            audio_io,
+            media_io,
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
         )
 
     async def fetch_audio_async(
         self,
         audio_url: str,
-    ) -> LazyMedia[tuple[np.ndarray, int | float]]:
-        """Asynchronously fetch audio from a URL."""
-        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
-
+        media_io: MediaIO[tuple[np.ndarray, int | float]],
+    ) -> MediaRef[tuple[np.ndarray, int | float]]:
+        """Asynchronously fetch audio and pair it with a caller-supplied decoder."""
         return await self.load_from_url_async(
             audio_url,
-            audio_io,
+            media_io,
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
         )
 
     def fetch_image(
         self,
         image_url: str,
-        *,
-        image_mode: str | None = "RGB",
-    ) -> LazyMedia[Image.Image]:
-        """Load a PIL image from an HTTP or base64 data URL.
-
-        By default, the image is converted into RGB format. Set
-        `media_io_kwargs={"image": {"image_mode": None}}` to keep the
-        original image mode (e.g. preserving the alpha channel).
+        media_io: MediaIO[Image.Image],
+    ) -> MediaRef[Image.Image]:
+        """Fetch an image and pair it with a caller-supplied decoder.
 
         Returns a lazy handle: decoding happens on first access (inside the
-        multi-modal processor), so decode errors surface there rather than
-        at the fetch site.
+        multi-modal processor), so decode errors surface there rather than at
+        the fetch site.
         """
-        image_io = ImageMediaIO(
-            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
-        )
-
         return self.load_from_url(
             image_url,
-            image_io,
+            media_io,
             fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
         )
 
     async def fetch_image_async(
         self,
         image_url: str,
-        *,
-        image_mode: str | None = "RGB",
-    ) -> LazyMedia[Image.Image]:
-        """Asynchronously load a PIL image from an HTTP or base64 data URL.
-
-        By default, the image is converted into RGB format. Set
-        `media_io_kwargs={"image": {"image_mode": None}}` to keep the
-        original image mode (e.g. preserving the alpha channel).
-        """
-        image_io = ImageMediaIO(
-            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
-        )
-
+        media_io: MediaIO[Image.Image],
+    ) -> MediaRef[Image.Image]:
+        """Asynchronously fetch an image and pair it with a supplied decoder."""
         return await self.load_from_url_async(
             image_url,
-            image_io,
+            media_io,
             fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
         )
 
     def fetch_video(
         self,
         video_url: str,
-        *,
-        image_mode: str | None = "RGB",
-        video_processor: str | None = None,
-    ) -> LazyMedia[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]:
-        """Load video from an HTTP or base64 data URL.
+        media_io: MediaIO[tuple[npt.NDArray, dict[str, Any]]],
+    ) -> MediaRef[tuple[npt.NDArray, dict[str, Any]]]:
+        """Fetch a video and pair it with a caller-supplied decoder.
 
         Returns a lazy handle: decoding happens on first access (inside the
-        multi-modal processor), so decode errors surface there rather than
-        at the fetch site.
+        multi-modal processor), so decode errors surface there rather than at
+        the fetch site.
         """
-        image_io = ImageMediaIO(
-            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
-        )
-        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
-        if "video_backend" not in video_io_kwargs and (
-            video_backend := get_video_loader_backend_for_processor(video_processor)
-        ):
-            video_io_kwargs["video_backend"] = video_backend
-        video_io = VideoMediaIO(image_io, **video_io_kwargs)
-
         return self.load_from_url(
             video_url,
-            video_io,
+            media_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
 
     async def fetch_video_async(
         self,
         video_url: str,
-        *,
-        image_mode: str | None = "RGB",
-        video_processor: str | None = None,
-    ) -> LazyMedia[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]:
-        """Asynchronously load video from an HTTP or base64 data URL.
-
-        By default, the image is converted into RGB format. Set
-        `media_io_kwargs={"image": {"image_mode": None}}` to keep the
-        original image mode (e.g. preserving the alpha channel).
-        """
-        image_io = ImageMediaIO(
-            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
-        )
-        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
-        if "video_backend" not in video_io_kwargs and (
-            video_backend := get_video_loader_backend_for_processor(video_processor)
-        ):
-            video_io_kwargs["video_backend"] = video_backend
-        video_io = VideoMediaIO(image_io, **video_io_kwargs)
-
+        media_io: MediaIO[tuple[npt.NDArray, dict[str, Any]]],
+    ) -> MediaRef[tuple[npt.NDArray, dict[str, Any]]]:
+        """Asynchronously fetch a video and pair it with a supplied decoder."""
         return await self.load_from_url_async(
             video_url,
-            video_io,
+            media_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
+
+    def fetch_video_and_audio(
+        self,
+        video_url: str,
+        video_io: MediaIO[_V],
+        audio_io: MediaIO[_A],
+    ) -> tuple[MediaRef[_V], MediaRef[_A]]:
+        """Fetch `video_url` once and decode it as both video and audio.
+
+        `use_audio_in_video` reads the audio track out of the video payload, so
+        both refs are built from one download instead of two.
+        """
+        video, audio = self._load_refs(
+            video_url,
+            [video_io, audio_io],
+            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
+        return video, audio
+
+    async def fetch_video_and_audio_async(
+        self,
+        video_url: str,
+        video_io: MediaIO[_V],
+        audio_io: MediaIO[_A],
+    ) -> tuple[MediaRef[_V], MediaRef[_A]]:
+        """Asynchronous `fetch_video_and_audio`."""
+        video, audio = await self._load_refs_async(
+            video_url,
+            [video_io, audio_io],
+            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
+        return video, audio
 
     def fetch_image_embedding(
         self,

@@ -8,6 +8,7 @@ from vllm.inputs import MultiModalHashes
 
 from ..cache import BaseMultiModalProcessorCache
 from ..hasher import MultiModalHasher
+from ..media import MediaRef
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
 
 _HF_MODALITY_PROCESSOR_KWARGS = {
@@ -72,7 +73,6 @@ class ProcessorInputs:
                 "mm_processor_kwargs": mm_processor_kwargs,
             }
             hash_factors = {key: value for key, value in hash_factors.items() if value}
-            has_hash_factors = bool(hash_factors)
 
             uuid_items = (
                 mm_uuid_items[modality]
@@ -82,13 +82,25 @@ class ProcessorInputs:
 
             # For None entries, compute a hash; otherwise, use provided ID.
             hashes: list[str] = []
-            for i, item in enumerate(data_items.get_all_items_for_hash()):
+            for i, item in enumerate(data_items.get_all_raw()):
                 uuid_item = uuid_items[i]
+
+                # A MediaRef's decode spec is already folded into its key, so
+                # media_io_kwargs must not be counted twice for it. When the
+                # client supplies a UUID the key is not consulted at all, so
+                # every factor still has to be hashed in.
+                item_factors = hash_factors
+                if uuid_item is None and isinstance(item, MediaRef):
+                    item_factors = {
+                        key: value
+                        for key, value in hash_factors.items()
+                        if key != "media_io_kwargs"
+                    }
 
                 # NOTE: Even if a uuid_item is provided, model output depends
                 # on the current modality's hash factors, so they are taken
                 # into account.
-                if uuid_item is None or has_hash_factors:
+                if uuid_item is None or item_factors:
                     # NOTE: use provided hash string to hash with kwargs
                     # if available for better performance.
                     item = uuid_item if uuid_item is not None else item
@@ -97,7 +109,7 @@ class ProcessorInputs:
                             hash_algorithm,
                             model_id=model_id,
                             **{modality: item},
-                            **hash_factors,
+                            **item_factors,
                         )
                     )
                 else:

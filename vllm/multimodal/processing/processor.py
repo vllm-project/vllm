@@ -40,7 +40,7 @@ from ..inputs import (
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
 )
-from ..media import LazyMedia
+from ..media import MediaRef
 from ..media.connector import global_thread_pool
 from ..parse import MultiModalDataItems, MultiModalUUIDItems, ProcessorBatchItems
 from .context import BaseProcessingInfo, TimingContext
@@ -1033,44 +1033,54 @@ class MultiModalProcessingResult(NamedTuple):
     prompt_updates: MultiModalPromptUpdates
 
 
-def _decode_error(modality: str, cause: Exception) -> VLLMUnprocessableEntityError:
+def _decode_error(
+    modality: str,
+    index: int,
+    cause: Exception,
+) -> VLLMUnprocessableEntityError:
+    """Wrap a decode failure as a client error (422).
+
+    No `parameter` is reported: the processor cannot see which request field
+    the media arrived in, and `audio_url` and `input_audio` both reach it as
+    modality `"audio"`, so any field name would be a guess. The index within
+    the modality is what actually locates the item for the client.
+    """
     return VLLMUnprocessableEntityError(
-        f"Failed to decode {modality} media: {cause}",
-        parameter=f"{modality}_url",
+        f"Failed to decode {modality} media at index {index}: {cause}",
     )
 
 
-def _submit_lazy_decodes(
+def _submit_ref_decodes(
     mm_data_items: MultiModalDataItems,
-) -> list[tuple[str, Future]]:
-    """Submit decodes of all not-yet-decoded lazy items to the media
-    thread pool, without waiting for them."""
-    decodes = list[tuple[str, Future]]()
+) -> list[tuple[str, int, Future]]:
+    """Submit decodes of all not-yet-decoded media refs to the media thread
+    pool, without waiting for them."""
+    decodes = list[tuple[str, int, Future]]()
     for modality, items in mm_data_items.items():
         if not isinstance(items, ProcessorBatchItems):
             continue
         for idx in range(items.get_count()):
             item = items.get_raw(idx)
-            if isinstance(item, LazyMedia) and not item.is_decoded:
-                decodes.append((modality, global_thread_pool.submit(item.decode)))
+            if isinstance(item, MediaRef) and not item.is_decoded:
+                decodes.append((modality, idx, global_thread_pool.submit(item.decode)))
     return decodes
 
 
-def _collect_lazy_decodes(decodes: list[tuple[str, Future]]) -> None:
+def _collect_ref_decodes(decodes: list[tuple[str, int, Future]]) -> None:
     """Join all submitted decodes (in-flight work is never abandoned), then
     raise the first failure as VLLMUnprocessableEntityError so corrupt media
     surfaces as a client error (422) instead of a server error."""
-    first_error: tuple[str, Exception] | None = None
-    for modality, future in decodes:
+    first_error: tuple[str, int, Exception] | None = None
+    for modality, idx, future in decodes:
         try:
             future.result()
         except Exception as error:
             if first_error is None:
-                first_error = (modality, error)
+                first_error = (modality, idx, error)
 
     if first_error is not None:
-        modality, cause = first_error
-        raise _decode_error(modality, cause) from cause
+        modality, idx, cause = first_error
+        raise _decode_error(modality, idx, cause) from cause
 
 
 @dataclass
@@ -1089,8 +1099,8 @@ class MultiModalApplyState:
     mm_hashes: MultiModalHashes | None
     """None on the no-cache path, where hashes are computed in phase 2."""
 
-    decodes: list[tuple[str, Future]]
-    """(modality, future) pairs for each lazy item whose decode was
+    decodes: list[tuple[str, int, Future]]
+    """(modality, index, future) triples for each media ref whose decode was
     submitted to the media thread pool."""
 
     def wait_decodes(self) -> None:
@@ -1102,7 +1112,7 @@ class MultiModalApplyState:
         if not self.decodes:
             return
         with self.timing_ctx.record("decode_mm_items"):
-            _collect_lazy_decodes(self.decodes)
+            _collect_ref_decodes(self.decodes)
 
     async def wait_decodes_async(self) -> None:
         """Await all submitted decodes without blocking the event loop.
@@ -1113,12 +1123,12 @@ class MultiModalApplyState:
             return
         with self.timing_ctx.record("decode_mm_items"):
             results = await asyncio.gather(
-                *(asyncio.wrap_future(future) for _, future in self.decodes),
+                *(asyncio.wrap_future(future) for _, _, future in self.decodes),
                 return_exceptions=True,
             )
-        for (modality, _), result in zip(self.decodes, results):
+        for (modality, idx, _), result in zip(self.decodes, results):
             if isinstance(result, Exception):
-                raise _decode_error(modality, result) from result
+                raise _decode_error(modality, idx, result) from result
             if isinstance(result, BaseException):
                 raise result
 
@@ -1462,7 +1472,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             missing_modality_data = []
             for idx in idxs:
-                # Use the raw item so that selecting a lazy item here does
+                # Use the raw item so that selecting a media ref here does
                 # not trigger its decode ahead of the batch decode below.
                 items = mm_data_items[modality]
                 if isinstance(items, ProcessorBatchItems):
@@ -1483,40 +1493,39 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return mm_is_cached, mm_missing_items
 
-    def _decode_lazy_items(
+    def _decode_ref_items(
         self,
         mm_data_items: MultiModalDataItems,
     ) -> None:
-        """Decode all lazy media items in parallel on the media thread pool.
+        """Decode all undecoded media refs in parallel on the media thread
+        pool.
 
         Uses no instance state; wraps the first decode failure as
         VLLMUnprocessableEntityError so corrupt media surfaces as a client
         error (422) instead of a server error.
         """
-        _collect_lazy_decodes(_submit_lazy_decodes(mm_data_items))
+        _collect_ref_decodes(_submit_ref_decodes(mm_data_items))
 
-    def _release_lazy_item_bytes(
+    def _release_ref_bytes(
         self,
         mm_data_items: MultiModalDataItems,
-        is_cached: MultiModalIsCached | None = None,
     ) -> None:
-        """Release the original bytes of lazy items once hashing is done and
-        their bytes are no longer needed.
+        """Release the encoded bytes of media refs that are done being used.
 
-        With `is_cached` (from `_get_cache_missing_items`), only cache-hit
-        items are released: they never reach the HF processor. Cache-miss
-        items must keep their bytes until after `_apply_hf_processor_main`,
-        since byte-consuming models read `original_bytes` there.
+        This must run only once an item can no longer flip from a cache hit to
+        a miss. A released ref cannot be decoded, and phase 2 re-derives the
+        cache state: a hit whose entry was evicted between the phases is
+        reprocessed from its bytes. Releasing earlier -- e.g. right after
+        hashing, when the bytes are last needed for a hit -- would turn that
+        eviction race into a request failure.
         """
         for modality, items in mm_data_items.items():
             if not isinstance(items, ProcessorBatchItems):
                 continue
             for idx in range(items.get_count()):
-                if is_cached is not None and not is_cached[modality][idx]:
-                    continue
                 item = items.get_raw(idx)
-                if isinstance(item, LazyMedia):
-                    item.release_bytes()
+                if isinstance(item, MediaRef):
+                    item.release()
 
     def _recompute_cached_prompt_update(
         self,
@@ -1596,7 +1605,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         *,
         use_cache: bool,
     ) -> MultiModalApplyState:
-        """Phase 1: hashing, cache lookup, and submission of lazy decodes.
+        """Phase 1: hashing, cache lookup, and submission of media decodes.
 
         Runs on the single mm worker and never blocks on decoding, so the
         worker stays free for other requests while the media thread pool
@@ -1605,7 +1614,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         if not use_cache:
             with timing_ctx.record("decode_mm_items"):
-                decodes = _submit_lazy_decodes(inputs.mm_data_items)
+                decodes = _submit_ref_decodes(inputs.mm_data_items)
             return MultiModalApplyState(inputs, timing_ctx, None, decodes)
 
         cache = inputs.cache
@@ -1618,7 +1627,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             )
 
         with timing_ctx.record("get_cache_missing_items"):
-            mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
+            _, mm_missing_data_items = self._get_cache_missing_items(
                 cache=cache,
                 mm_data_items=inputs.mm_data_items,
                 mm_hashes=mm_hashes,
@@ -1628,10 +1637,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # Submit miss-item decodes without joining; the join happens off
             # the mm worker (see MultiModalApplyState.wait_decodes*). The
             # lookup is re-done in phase 2, so a stale miss set here only
-            # wastes a redundant decode. Cache-hit items are never decoded
-            # and their bytes can be released right after hashing.
-            decodes = _submit_lazy_decodes(mm_missing_data_items)
-            self._release_lazy_item_bytes(inputs.mm_data_items, mm_is_cached)
+            # wastes a redundant decode. Nothing is released here: a hit can
+            # still be evicted before phase 2, which then has to reprocess it
+            # from the very bytes a release would drop.
+            decodes = _submit_ref_decodes(mm_missing_data_items)
 
         return MultiModalApplyState(inputs, timing_ctx, mm_hashes, decodes)
 
@@ -1650,8 +1659,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalProcessingResult:
-        # Hashes are computed after the HF processor ran on this path, so the
-        # original bytes must stay alive (no release here).
+        # Hashes are computed after the HF processor ran on this path; that is
+        # safe because a ref's key was derived when it was built.
         with timing_ctx.record("apply_hf_processor"):
             mm_processed_data = self._apply_hf_processor_main(
                 mm_items=inputs.mm_data_items,
@@ -1733,9 +1742,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         with timing_ctx.record("decode_mm_items"):
             # Normally a no-op: phase-1 decodes were drained before phase 2.
             # Only items that flipped hit->miss (evicted between the phases)
-            # decode here. Their original bytes may already be released;
-            # the decode closures still hold the data.
-            self._decode_lazy_items(mm_missing_data_items)
+            # decode here, from the bytes phase 1 deliberately kept.
+            self._decode_ref_items(mm_missing_data_items)
 
         # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
@@ -1747,11 +1755,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     hf_kwargs=inputs.hf_processor_mm_kwargs,
                 )
         finally:
-            # Hashing and HF processing are done; the miss items' bytes are
-            # released even if the HF processor raises. (Hit items were
-            # released in phase 1; this is idempotent.)
-            self._release_lazy_item_bytes(mm_missing_data_items)
-            self._release_lazy_item_bytes(inputs.mm_data_items)
+            # Hashing and HF processing are done, and the miss set can no
+            # longer change, so every ref's bytes go -- even if the HF
+            # processor raises. Releasing earlier would leave the hit->miss
+            # fallback above with nothing to decode from.
+            self._release_ref_bytes(mm_missing_data_items)
+            self._release_ref_bytes(inputs.mm_data_items)
 
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_missing_processed_data,

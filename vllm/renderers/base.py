@@ -794,7 +794,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
                 for i in range(len(data_items)):
                     # Only None-ness is checked here; use the raw item so that
-                    # unwrapping a LazyMedia does not trigger its decode.
+                    # reading a MediaRef does not trigger its decode.
                     if isinstance(data_items, ProcessorBatchItems):
                         item = data_items.get_raw(i)
                     else:

@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import pickle
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import numpy as np
 import pytest
-from PIL import Image
 
-from vllm.multimodal.media import LazyMedia, MediaWithBytes
+from vllm.multimodal.media import DecodeSpec, MediaIO, MediaRef
+from vllm.multimodal.media.base import derive_media_key
 
 pytestmark = pytest.mark.cpu_test
 
@@ -30,57 +31,74 @@ class _CountingDecoder:
         return self.value
 
 
-def test_media_with_bytes_pickle_roundtrip():
-    """Regression test for pickle/unpickle of MediaWithBytes.
+class _StubMediaIO(MediaIO[str]):
+    """MediaIO whose refs are built exactly like the production ones."""
 
-    Verifies that MediaWithBytes can be pickled and unpickled without
-    RecursionError. See: https://github.com/vllm-project/vllm/issues/30818
+    def load_bytes(self, data: bytes) -> str:
+        return data.decode()
+
+    def load_base64(self, media_type: str, data: str) -> str:
+        raise NotImplementedError
+
+    def load_file(self, filepath: Path) -> str:
+        return self.load_bytes(filepath.read_bytes())
+
+
+class _RawBytesMediaIO(MediaIO[bytes]):
+    """MediaIO that hands the encoded payload straight to the processor.
+
+    This is the shape a model uses when it decodes the media itself (e.g.
+    Dots3Note reads frames *and* the audio track out of the video container).
     """
-    original_image = Image.open(ASSETS_DIR / "image1.png").convert("RGB")
-    original_bytes = b"test_bytes_data"
 
-    wrapper = MediaWithBytes(media=original_image, original_bytes=original_bytes)
+    def load_bytes(self, data: bytes) -> bytes:
+        return data
 
-    # Verify attribute delegation works before pickling
-    assert wrapper.width == original_image.width
-    assert wrapper.height == original_image.height
-    assert wrapper.mode == original_image.mode
+    def load_base64(self, media_type: str, data: str) -> bytes:
+        raise NotImplementedError
 
-    # Pickle and unpickle (this would cause RecursionError before the fix)
-    pickled = pickle.dumps(wrapper)
-    unpickled = pickle.loads(pickled)
-
-    # Verify the unpickled object works correctly
-    assert unpickled.original_bytes == original_bytes
-    assert unpickled.media.width == original_image.width
-    assert unpickled.media.height == original_image.height
-
-    # Verify attribute delegation works after unpickling
-    assert unpickled.width == original_image.width
-    assert unpickled.height == original_image.height
-    assert unpickled.mode == original_image.mode
+    def load_file(self, filepath: Path) -> bytes:
+        return self.load_bytes(filepath.read_bytes())
 
 
-def test_lazy_media_decodes_on_first_access():
-    """LazyMedia must not decode on construction, repr, or bytes access."""
+def test_decoded_bytes_survive_release():
+    """A decoder that yields the payload must not depend on `MediaRef.data`.
+
+    `release()` drops the encoded bytes once hashing is done, so a model that
+    needs them has to receive them as the *decoded* value. Reading `ref.data`
+    instead makes the result depend on when release ran -- i.e. on cache
+    eviction timing -- which is why it is not a supported way to get bytes.
+    """
+    payload = b"encoded-video-container"
+    ref = _RawBytesMediaIO().load_bytes_ref(payload)
+
+    assert ref.decode() == payload
+
+    ref.release()
+    assert ref.data == b""
+    assert ref.decode() == payload
+
+
+def test_media_ref_decodes_on_first_access():
+    """A ref must not decode on construction, repr, or bytes access."""
     decoder = _CountingDecoder("decoded")
-    item = LazyMedia(decoder, b"raw-bytes")
+    ref = MediaRef(decoder, b"raw-bytes")
 
-    assert not item.is_decoded
-    assert repr(item) == "<LazyMedia undecoded, 9 bytes>"
-    assert item.original_bytes == b"raw-bytes"
+    assert not ref.is_decoded
+    assert repr(ref) == "<MediaRef undecoded, 9 bytes>"
+    assert ref.data == b"raw-bytes"
     assert decoder.calls == 0
 
-    assert item.media == "decoded"
-    assert item.is_decoded
-    assert repr(item) == "<LazyMedia decoded, 9 bytes>"
+    assert ref.decode() == "decoded"
+    assert ref.is_decoded
+    assert repr(ref) == "<MediaRef decoded, 9 bytes>"
 
     # Decoding is idempotent: the result is cached.
-    assert item.media == "decoded"
+    assert ref.decode() == "decoded"
     assert decoder.calls == 1
 
 
-def test_lazy_media_concurrent_decode_runs_once():
+def test_media_ref_concurrent_decode_runs_once():
     """Concurrent access from multiple threads decodes exactly once."""
     start = threading.Barrier(8)
     decoder_calls = 0
@@ -94,11 +112,11 @@ def test_lazy_media_concurrent_decode_runs_once():
             decoder_calls += 1
         return "decoded"
 
-    item = LazyMedia(decode, b"raw")
+    ref = MediaRef(decode, b"raw")
 
     def concurrent_decode():
         start.wait(timeout=10)
-        return item.decode()
+        return ref.decode()
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: concurrent_decode(), range(8)))
@@ -107,63 +125,132 @@ def test_lazy_media_concurrent_decode_runs_once():
     assert decoder_calls == 1
 
 
-def test_lazy_media_map_stacks_transform_and_shares_bytes():
-    """map() defers the transform until decode and shares original_bytes."""
+def test_media_ref_map_stacks_transform_and_shares_bytes():
+    """map() defers the transform until decode and shares the encoded bytes."""
     decoder = _CountingDecoder(2)
-    item = LazyMedia(decoder, b"raw")
-    mapped = item.map(lambda x: x * 10)
+    ref = MediaRef(decoder, b"raw")
+    mapped = ref.map(lambda x: x * 10)
 
-    assert mapped.original_bytes is item.original_bytes
+    assert mapped.data is ref.data
+    assert mapped.key == ref.key  # no new decode settings, so no new identity
     assert decoder.calls == 0
 
-    assert mapped.media == 20
-    # The mapped item decodes the underlying item exactly once.
+    assert mapped.decode() == 20
+    # The mapped ref decodes the underlying one exactly once.
     assert decoder.calls == 1
-    assert item.is_decoded
-    assert item.media == 2
+    assert ref.is_decoded
+    assert ref.decode() == 2
 
 
-def test_lazy_media_release_bytes():
-    item = LazyMedia(_CountingDecoder("decoded"), b"raw-bytes")
+def test_media_ref_map_extends_the_key():
+    """Settings passed to map() join the spec, so the transform's parameters
+    are part of the cache identity -- deterministically, and without
+    re-digesting the payload."""
+    ref = MediaRef(_CountingDecoder(1), b"raw", DecodeSpec({"a": 1}))
+    mapped = ref.map(lambda x: x, b=2)
 
-    item.release_bytes()
-    assert item.original_bytes == b""
+    assert mapped.spec.settings == {"a": 1, "b": 2}
+    assert mapped.key != ref.key
 
-    # Decode still works after the bytes are released.
-    assert item.media == "decoded"
-
-
-def test_lazy_media_delegates_attributes():
-    """Attribute access and __array__ delegate to the decoded media."""
-    image = Image.new("RGB", (4, 2))
-    item = LazyMedia(lambda: image, b"raw")
-
-    assert item.size == (4, 2)
-    assert np.array(item).shape == (2, 4, 3)
+    same = MediaRef(_CountingDecoder(1), b"raw", DecodeSpec({"a": 1}))
+    assert same.map(lambda x: x, b=2).key == mapped.key
+    assert same.map(lambda x: x, b=3).key != mapped.key
 
 
-def test_lazy_media_pickle_becomes_eager():
-    """Pickling materializes a LazyMedia into an eager MediaWithBytes."""
-    image = Image.open(ASSETS_DIR / "image1.png").convert("RGB")
-    item = LazyMedia(lambda: image, b"raw-bytes")
+def test_media_ref_release_frees_the_encoded_bytes():
+    """release() must drop every pin on the payload, not just one of them.
 
-    unpickled = pickle.loads(pickle.dumps(item))
+    The decode closure holds the bytes as well as the ref does, so clearing
+    only the ref's own slot would leave the payload resident.
+    """
+    data = b"payload" * 64
+    baseline = sys.getrefcount(data)
 
-    assert type(unpickled) is MediaWithBytes
-    assert np.array_equal(np.asarray(unpickled.media), np.asarray(image))
-    assert unpickled.original_bytes == b"raw-bytes"
+    ref = _StubMediaIO().load_bytes_ref(data)
+    assert sys.getrefcount(data) > baseline
+
+    ref.decode()
+    ref.release()
+    gc.collect()
+
+    assert ref.data == b""
+    assert sys.getrefcount(data) == baseline
+    # The decoded value survives the release.
+    assert ref.decode() == data.decode()
 
 
-def test_lazy_media_pickle_flattens_media_with_bytes():
-    """A decoder returning MediaWithBytes must not nest after pickling."""
-    image = Image.new("RGB", (4, 2))
-    inner = MediaWithBytes(image, b"raw-bytes", {"image_mode": "RGB"})
-    item = LazyMedia(lambda: inner, b"")
+def test_media_ref_release_before_decode_is_final():
+    """A released ref can no longer be decoded, and says so."""
+    ref = MediaRef(_CountingDecoder("decoded"), b"raw-bytes")
 
-    unpickled = pickle.loads(pickle.dumps(item))
+    ref.release()
+    assert ref.data == b""
 
-    assert type(unpickled) is MediaWithBytes
-    assert unpickled.media.size == image.size
-    assert unpickled.media.mode == image.mode
-    assert unpickled.original_bytes == b"raw-bytes"
-    assert unpickled.io_config == {"image_mode": "RGB"}
+    with pytest.raises(RuntimeError, match="released"):
+        ref.decode()
+
+
+def test_media_ref_key_is_stable_and_spec_scoped():
+    data = b"encoded-payload"
+    spec = DecodeSpec({"backend": "pyav"})
+
+    def key(payload=data, decode_spec=None):
+        return MediaRef(lambda: None, payload, decode_spec).key
+
+    assert key() == key()
+    assert key(decode_spec=spec) == key(decode_spec=DecodeSpec({"backend": "pyav"}))
+    assert key(decode_spec=spec) != key(decode_spec=DecodeSpec({"backend": "av"}))
+    assert key(decode_spec=spec) != key(payload=b"other-payload", decode_spec=spec)
+
+
+def test_media_ref_key_setting_order_does_not_matter():
+    spec_a = DecodeSpec({"fps": 2, "backend": "opencv"})
+    spec_b = DecodeSpec({"backend": "opencv", "fps": 2})
+
+    assert (
+        MediaRef(lambda: None, b"x", spec_a).key
+        == MediaRef(lambda: None, b"x", spec_b).key
+    )
+
+
+def test_derive_media_key_frames_its_inputs():
+    """A spec change can never be offset by a bytes change."""
+    spec = DecodeSpec({"a": "b"})
+    shifted = DecodeSpec({"a": "bc"})
+
+    assert derive_media_key(b"x", spec) != derive_media_key(b"xy", shifted)
+
+
+def test_media_ref_pickle_roundtrip_materializes():
+    """The decode closure cannot cross a process boundary, so pickling
+    materializes the media and the restored ref keeps the key and spec that
+    identify it."""
+    ref = _StubMediaIO().load_bytes_ref(b"payload")
+
+    restored = pickle.loads(pickle.dumps(ref))
+
+    assert restored.decode() == "payload"
+    assert restored.is_decoded
+    assert restored.key == ref.key
+    assert restored.spec == ref.spec
+    assert restored.data == b""
+
+
+def test_media_ref_pickle_does_not_redecode():
+    decoder = _CountingDecoder("value")
+    ref = MediaRef(decoder, b"payload")
+    ref.decode()
+
+    restored = pickle.loads(pickle.dumps(ref))
+
+    assert decoder.calls == 1
+    assert restored.decode() == "value"
+    assert decoder.calls == 1
+
+
+def test_media_ref_pickle_after_release_before_decode_raises():
+    ref = MediaRef(lambda: "value", b"payload")
+    ref.release()
+
+    with pytest.raises(RuntimeError, match="released"):
+        pickle.dumps(ref)

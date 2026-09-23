@@ -22,13 +22,13 @@ from vllm.utils.sparse_utils import (
 
 from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
 from ..video_decoders import incompatible_backend_options
-from .base import LazyMedia, MediaIO, MediaWithBytes
+from .base import DecodeSpec, MediaIO, MediaRef
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
 
 
-class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]):
+class VideoMediaIO(MediaIO[tuple[DecodedFrames, dict[str, Any]]]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
     error handling.
@@ -115,15 +115,22 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
             kwargs.pop("video_backend", None) or envs.VLLM_VIDEO_LOADER_BACKEND
         )
         self.kwargs = kwargs
+        self.video_loader_backend = video_loader_backend
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(
-        self, data: bytes
-    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
-        video = self.video_loader.load_bytes(
+    def get_decode_spec(self) -> DecodeSpec:
+        return DecodeSpec(
+            {
+                **self.kwargs,
+                "num_frames": self.num_frames,
+                "video_backend": self.video_loader_backend,
+            }
+        )
+
+    def load_bytes(self, data: bytes) -> tuple[DecodedFrames, dict[str, Any]]:
+        return self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
-        return MediaWithBytes(video, data)
 
     def _prepare_jpeg_sequence(
         self, data: str
@@ -200,32 +207,27 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
 
     def load_base64(
         self, media_type: str, data: str
-    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
+    ) -> tuple[DecodedFrames, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
             decode_frames, metadata = self._prepare_jpeg_sequence(data)
-            return MediaWithBytes((decode_frames(), metadata), data.encode())
+            return decode_frames(), metadata
 
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_base64_lazy(
+    def load_base64_ref(
         self, media_type: str, data: str
-    ) -> LazyMedia[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]:
+    ) -> MediaRef[tuple[DecodedFrames, dict[str, Any]]]:
         if media_type.lower() == "video/jpeg":
             decode_frames, metadata = self._prepare_jpeg_sequence(data)
-            original_bytes = data.encode()
-            return LazyMedia(
-                lambda: MediaWithBytes((decode_frames(), metadata), original_bytes),
-                original_bytes,
+            return MediaRef(
+                lambda: (decode_frames(), metadata),
+                data.encode(),
+                self.get_decode_spec(),
             )
-        return super().load_base64_lazy(media_type, data)
+        return super().load_base64_ref(media_type, data)
 
-    def load_file(
-        self, filepath: Path
-    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
-        with filepath.open("rb") as f:
-            data = f.read()
-
-        return self.load_bytes(data)
+    def load_file(self, filepath: Path) -> tuple[DecodedFrames, dict[str, Any]]:
+        return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(
         self,

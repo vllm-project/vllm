@@ -142,14 +142,14 @@ class _CountingDecoder:
 def test_parse_audio_lazy_item_resamples_on_decode():
     """A lazy audio item parses without decoding; resampling and channel
     normalization are stacked onto the decode."""
-    from vllm.multimodal.media import LazyMedia
+    from vllm.multimodal.media import MediaRef
 
     waveform = np.arange(16, dtype=np.float32)
     parser = MultiModalDataParser(
         target_sr=16000, target_channels=1, audio_resample_method="scipy"
     )
     decoder = _CountingDecoder((waveform, 8000))
-    items = parser.parse_mm_data({"audio": [LazyMedia(decoder, b"audio-bytes")]})[
+    items = parser.parse_mm_data({"audio": [MediaRef(decoder, b"audio-bytes")]})[
         "audio"
     ]
 
@@ -159,17 +159,37 @@ def test_parse_audio_lazy_item_resamples_on_decode():
     assert len(audio) == 32
 
 
+def test_parse_audio_lazy_item_key_covers_resample_settings():
+    """The resampling settings join the item's cache key, so a different
+    target rate cannot reuse a stale processor cache entry."""
+    from vllm.multimodal.media import MediaRef
+
+    def parsed_key(target_sr, target_channels=None):
+        parser = MultiModalDataParser(
+            target_sr=target_sr,
+            target_channels=target_channels,
+            audio_resample_method="scipy",
+        )
+        items = parser.parse_mm_data(
+            {"audio": [MediaRef(lambda: None, b"audio-bytes")]}
+        )["audio"]
+        return items.get_raw(0).key
+
+    assert parsed_key(16000) == parsed_key(16000)
+    assert parsed_key(16000) != parsed_key(8000)
+    assert parsed_key(16000) != parsed_key(16000, target_channels=1)
+
+
 def test_parse_video_lazy_item_unpacks_frames_on_decode():
     """A lazy video item parses without decoding; the frames/metadata tuple
     is unpacked when the decode runs."""
-    from vllm.multimodal.media import LazyMedia, MediaWithBytes
+    from vllm.multimodal.media import MediaRef
 
     frames = np.zeros((2, H, W, 3), dtype=np.uint8)
     metadata = {"total_num_frames": 2, "fps": 2.0, "duration": 1.0}
-    inner = MediaWithBytes((frames, metadata), b"video-bytes")
 
-    decoder = _CountingDecoder(inner)
-    lazy = LazyMedia(decoder, b"video-bytes")
+    decoder = _CountingDecoder((frames, metadata))
+    lazy = MediaRef(decoder, b"video-bytes")
     items = MultiModalDataParser().parse_mm_data({"video": [lazy]})["video"]
 
     assert decoder.calls == 0
@@ -179,8 +199,8 @@ def test_parse_video_lazy_item_unpacks_frames_on_decode():
     # video_needs_metadata defers its validation to decode time and yields
     # the (frames, metadata) tuple once decoded.
     parser = MultiModalDataParser(video_needs_metadata=True)
-    decoder = _CountingDecoder(inner)
-    lazy = LazyMedia(decoder, b"video-bytes")
+    decoder = _CountingDecoder((frames, metadata))
+    lazy = MediaRef(decoder, b"video-bytes")
     items = parser.parse_mm_data({"video": [lazy]})["video"]  # no error yet
     assert decoder.calls == 0
     video, out_metadata = items.get(0)
@@ -191,11 +211,11 @@ def test_parse_video_lazy_item_unpacks_frames_on_decode():
 def test_parse_video_lazy_missing_metadata_raises_on_decode():
     """With video_needs_metadata, a lazy video whose decode yields no
     metadata fails at decode time, not at parse time."""
-    from vllm.multimodal.media import LazyMedia
+    from vllm.multimodal.media import MediaRef
 
     frames = np.zeros((2, H, W, 3), dtype=np.uint8)
     parser = MultiModalDataParser(video_needs_metadata=True)
-    lazy = LazyMedia(lambda: frames, b"video-bytes")
+    lazy = MediaRef(lambda: frames, b"video-bytes")
     items = parser.parse_mm_data({"video": [lazy]})["video"]
 
     with pytest.raises(ValueError, match="metadata is required"):

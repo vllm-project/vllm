@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Callable
-from functools import partial
 from io import BytesIO
 from pathlib import Path
 
@@ -23,7 +22,7 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from .base import LazyMedia, MediaIO
+from .base import DecodeSpec, MediaIO, MediaRef
 
 logger = init_logger(__name__)
 
@@ -550,6 +549,9 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
                 value=size / MiB_bytes,
             )
 
+    def get_decode_spec(self) -> DecodeSpec:
+        return DecodeSpec({**self.kwargs, "audio_backend": self.audio_backend})
+
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
         self._validate_encoded_size(len(data))
         return load_audio(
@@ -560,11 +562,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             backend=self.audio_backend,
         )
 
-    def load_bytes_lazy(self, data: bytes) -> LazyMedia[tuple[npt.NDArray, float]]:
+    def load_bytes_ref(self, data: bytes) -> MediaRef[tuple[npt.NDArray, float]]:
         # The size guard stays eager so oversize errors surface at fetch time;
         # only the decode is deferred.
         self._validate_encoded_size(len(data))
-        return LazyMedia(partial(self.load_bytes, data), data)
+        return super().load_bytes_ref(data)
 
     def _validate_base64_size(self, data: str) -> None:
         max_encoded_chars = 4 * ((self.get_max_bytes() + 2) // 3)
@@ -583,13 +585,13 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         self._validate_base64_size(data)
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_base64_lazy(
+    def load_base64_ref(
         self,
         media_type: str,
         data: str,
-    ) -> LazyMedia[tuple[npt.NDArray, float]]:
+    ) -> MediaRef[tuple[npt.NDArray, float]]:
         self._validate_base64_size(data)
-        return super().load_base64_lazy(media_type, data)
+        return super().load_base64_ref(media_type, data)
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
         self._validate_encoded_size(filepath.stat().st_size)
@@ -601,9 +603,9 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             backend=self.audio_backend,
         )
 
-    def load_file_lazy(self, filepath: Path) -> LazyMedia[tuple[npt.NDArray, float]]:
+    def load_file_ref(self, filepath: Path) -> MediaRef[tuple[npt.NDArray, float]]:
         self._validate_encoded_size(filepath.stat().st_size)
-        return super().load_file_lazy(filepath)
+        return super().load_file_ref(filepath)
 
     def encode_base64(
         self,

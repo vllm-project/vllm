@@ -29,7 +29,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
-from vllm.multimodal.media import LazyMedia
+from vllm.multimodal.media import MediaConnector, MediaRef
 from vllm.multimodal.utils import (
     encode_audio_url,
     encode_image_url,
@@ -3084,7 +3084,7 @@ async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop():
         decode_thread_names.append(threading.current_thread().name)
         return "decoded-image"
 
-    lazy_item = LazyMedia(_decode, b"fake-image-bytes")
+    lazy_item = MediaRef(_decode, b"fake-image-bytes")
 
     async def _fetch():
         return lazy_item, "uuid-0"
@@ -3110,13 +3110,13 @@ async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop():
 
 @pytest.mark.asyncio
 async def test_resolve_items_lazy_vision_chunk_decode_error_propagates_async():
-    """A LazyMedia decode failure in a vision_chunk item must raise
+    """A MediaRef decode failure in a vision_chunk item must raise
     VLLMUnprocessableEntityError, not be logged and swallowed."""
 
     def _decode():
         raise ValueError("corrupt media")
 
-    lazy_item = LazyMedia(_decode, b"corrupt-video-bytes")
+    lazy_item = MediaRef(_decode, b"corrupt-video-bytes")
 
     async def _fetch():
         return lazy_item, None
@@ -3133,14 +3133,14 @@ async def test_resolve_items_lazy_vision_chunk_decode_error_propagates_async():
 
 
 def test_resolve_items_lazy_vision_chunk_decode_error_propagates_sync(caplog):
-    """Sync path: a LazyMedia decode failure in a vision_chunk item must
+    """Sync path: a MediaRef decode failure in a vision_chunk item must
     propagate as VLLMUnprocessableEntityError instead of hitting the
     "Failed to split video chunks" log-and-append fallback."""
 
     def _decode():
         raise ValueError("corrupt media")
 
-    lazy_item = LazyMedia(_decode, b"corrupt-video-bytes")
+    lazy_item = MediaRef(_decode, b"corrupt-video-bytes")
 
     tracker = MultiModalItemTracker(MagicMock())
     tracker._model_config.is_multimodal_model = True
@@ -3277,3 +3277,85 @@ def test_validate_chat_template_rejects_invalid_type():
     ) as exc_info:
         validate_chat_template(123)  # type: ignore[arg-type]
     assert exc_info.value.parameter == "chat_template"
+
+
+_STUB_VIDEO_URL = "https://example.com/video.mp4"
+
+
+@pytest.fixture
+def downloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every URL the connector downloads, in order.
+
+    The bytes are never decoded by these tests, so a stub payload is enough to
+    count how many times one URL is fetched.
+    """
+    fetched: list[str] = []
+    payload = b"stub-video-container"
+
+    def fetch_url_bytes(self, url, url_spec, **kwargs):
+        fetched.append(url)
+        return payload
+
+    async def fetch_url_bytes_async(self, url, url_spec, **kwargs):
+        fetched.append(url)
+        return payload
+
+    monkeypatch.setattr(MediaConnector, "_fetch_url_bytes", fetch_url_bytes)
+    monkeypatch.setattr(MediaConnector, "_fetch_url_bytes_async", fetch_url_bytes_async)
+    return fetched
+
+
+def _video_conversation(url: str):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": url}},
+                {"type": "text", "text": "What's in this video?"},
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("use_audio_in_video", [False, True])
+def test_use_audio_in_video_downloads_the_video_once(
+    qwen25omni_model_config_mm_interleaved,
+    downloads: list[str],
+    use_audio_in_video: bool,
+):
+    """`use_audio_in_video` reads the audio track out of the video payload, so
+    it must feed two decoders from one download, not fetch the URL twice."""
+    _, mm_data, _ = parse_chat_messages(
+        _video_conversation(_STUB_VIDEO_URL),
+        qwen25omni_model_config_mm_interleaved,
+        content_format="string",
+        mm_processor_kwargs={"use_audio_in_video": use_audio_in_video},
+    )
+
+    assert downloads == [_STUB_VIDEO_URL]
+    expected: MultiModalDataCounts = (
+        {"video": 1, "audio": 1} if use_audio_in_video else {"video": 1}
+    )
+    _assert_mm_data_inputs(mm_data, expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_audio_in_video", [False, True])
+async def test_use_audio_in_video_downloads_the_video_once_async(
+    qwen25omni_model_config_mm_interleaved,
+    downloads: list[str],
+    use_audio_in_video: bool,
+):
+    """Same for the async parser: both tracker entries await one download."""
+    _, mm_data, _ = await parse_chat_messages_async(
+        _video_conversation(_STUB_VIDEO_URL),
+        qwen25omni_model_config_mm_interleaved,
+        content_format="string",
+        mm_processor_kwargs={"use_audio_in_video": use_audio_in_video},
+    )
+
+    assert downloads == [_STUB_VIDEO_URL]
+    expected: MultiModalDataCounts = (
+        {"video": 1, "audio": 1} if use_audio_in_video else {"video": 1}
+    )
+    _assert_mm_data_inputs(mm_data, expected)

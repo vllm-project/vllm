@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Microbenchmark: lazy media decode vs eager decode frontend cost.
+"""Microbenchmark: deferred media decode vs eager decode frontend cost.
 
-Quantifies the per-request frontend savings of the lazy media decode change
-(`LazyMedia` in vllm/multimodal/media/base.py): media bytes are hashed for
-the mm cache without decoding, and only cache misses pay the decode cost.
+Quantifies the per-request frontend savings of `MediaRef`
+(vllm/multimodal/media/base.py): a ref's cache key is derived from the
+encoded bytes and the decode spec, so hashing never decodes and only cache
+misses pay the decode cost.
 
 Three paths are measured with the same code the connector/processor use:
 
 - eager (old behavior): MediaIO.load_bytes + MultiModalHasher.hash_kwargs
-- lazy cache hit:       MediaIO.load_bytes_lazy + hash_kwargs (no decode)
-- lazy cache miss:      load_bytes_lazy + hash_kwargs + decode()
+- ref cache hit:        MediaIO.load_bytes_ref + hash_kwargs (no decode)
+- ref cache miss:       load_bytes_ref + hash_kwargs + decode()
 
 Run from the repo root:
     python benchmarks/benchmark_lazy_decode.py
@@ -35,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.media.audio import AudioMediaIO
-from vllm.multimodal.media.base import LazyMedia
+from vllm.multimodal.media.base import MediaRef
 from vllm.multimodal.media.connector import global_thread_pool
 from vllm.multimodal.media.image import ImageMediaIO
 
@@ -100,45 +101,29 @@ def eager_image_path(image_io: ImageMediaIO, data: bytes) -> None:
     MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=media)
 
 
-def hit_image_path(image_io: ImageMediaIO, data: bytes) -> bool:
-    """Return True if hashing secretly rasterized the header image.
-
-    PngImageFile.getexif() calls self.load() when the PNG carries no "exif"
-    chunk (a trailing eXIf chunk can only be found by reading to EOF), so the
-    hasher's EXIF probe decodes the pixels even though LazyMedia.is_decoded
-    stays False.
-    """
-    lazy = image_io.load_bytes_lazy(data)
-    MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=lazy)
-    assert not lazy.is_decoded
-    header = lazy.header_image
-    # Image.im raises when unloaded in Pillow 12; probe the private attribute.
-    hidden_decode = header is not None and getattr(header, "_im", None) is not None
-    lazy.release_bytes()
-    return hidden_decode
+def hit_image_path(image_io: ImageMediaIO, data: bytes) -> None:
+    """Build a ref and hash it: the whole cost of a cache hit."""
+    ref = image_io.load_bytes_ref(data)
+    MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=ref)
+    assert not ref.is_decoded
+    ref.release()
 
 
 def miss_image_path(image_io: ImageMediaIO, data: bytes) -> None:
-    lazy = image_io.load_bytes_lazy(data)
-    MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=lazy)
-    lazy.decode()
-    lazy.release_bytes()
+    ref = image_io.load_bytes_ref(data)
+    MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=ref)
+    ref.decode()
+    ref.release()
 
 
 def bench_image_paths(
     image_io: ImageMediaIO, data: bytes, warmup: int, repeat: int
-) -> tuple[float, float, float, float, float, float, bool]:
-    """Time the eager / lazy-hit / lazy-miss paths for one image payload."""
+) -> tuple[float, float, float, float, float, float]:
+    """Time the eager / ref-hit / ref-miss paths for one image payload."""
     t_eager, s_eager = bench(lambda: eager_image_path(image_io, data), warmup, repeat)
-    hidden_decode = False
-
-    def hit():
-        nonlocal hidden_decode
-        hidden_decode = hit_image_path(image_io, data) or hidden_decode
-
-    t_hit, s_hit = bench(hit, warmup, repeat)
+    t_hit, s_hit = bench(lambda: hit_image_path(image_io, data), warmup, repeat)
     t_miss, s_miss = bench(lambda: miss_image_path(image_io, data), warmup, repeat)
-    return t_eager, s_eager, t_hit, s_hit, t_miss, s_miss, hidden_decode
+    return t_eager, s_eager, t_hit, s_hit, t_miss, s_miss
 
 
 def bench_images() -> dict[tuple, dict[str, float]]:
@@ -147,7 +132,7 @@ def bench_images() -> dict[tuple, dict[str, float]]:
     print("=" * 88)
     header = (
         f"{'size':>11} {'fmt':>5} {'bytes':>9} {'eager(old)':>18} "
-        f"{'lazy hit':>14} {'lazy miss':>14} {'hit speedup':>11}"
+        f"{'ref hit':>14} {'ref miss':>14} {'hit speedup':>11}"
     )
     print(header)
     print("-" * len(header))
@@ -161,19 +146,21 @@ def bench_images() -> dict[tuple, dict[str, float]]:
             )
             warmup, repeat = repeats_for(width * height)
 
-            # Correctness: eager and lazy hashing must agree.
-            eager_hash = MultiModalHasher.hash_kwargs(
-                HASHER_ALGORITHM, image=image_io.load_bytes(data)
-            )
-            lazy = image_io.load_bytes_lazy(data)
-            lazy_hash = MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=lazy)
-            assert eager_hash == lazy_hash, f"hash mismatch {width}x{height} {fmt}"
+            # Correctness: a ref's key is stable across requests and hashing
+            # it decodes nothing. (The eager path hashes decoded pixels, so
+            # the two digests differ by design.)
+            ref = image_io.load_bytes_ref(data)
+            ref_hash = MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=ref)
+            assert ref_hash == MultiModalHasher.hash_kwargs(
+                HASHER_ALGORITHM, image=image_io.load_bytes_ref(data)
+            ), f"unstable key {width}x{height} {fmt}"
+            assert not ref.is_decoded
 
-            t_eager, s_eager, t_hit, s_hit, t_miss, s_miss, hidden = bench_image_paths(
+            t_eager, s_eager, t_hit, s_hit, t_miss, s_miss = bench_image_paths(
                 image_io, data, warmup, repeat
             )
 
-            decoded = np.asarray(image_io.load_bytes(data).media)
+            decoded = np.asarray(image_io.load_bytes(data))
             key = (width, height, fmt)
             results[key] = dict(
                 eager=t_eager,
@@ -182,24 +169,13 @@ def bench_images() -> dict[tuple, dict[str, float]]:
                 encoded_bytes=len(data),
                 decoded_nbytes=decoded.nbytes,
             )
-            note = " *" if hidden else ""
             print(
                 f"{f'{width}x{height}':>11} {fmt:>5} {len(data) / 1e6:>8.2f}M "
                 f"{t_eager:>9.2f} +/-{s_eager:>5.2f} "
                 f"{t_hit:>7.2f} +/-{s_hit:>5.2f} "
                 f"{t_miss:>7.2f} +/-{s_miss:>5.2f} "
-                f"{t_eager / t_hit:>9.1f}x{note}"
+                f"{t_eager / t_hit:>9.1f}x"
             )
-    if any(
-        hit_image_path(ImageMediaIO(), make_image_bytes(w, h, f, image_seed(w, h, f)))
-        for (w, h, f) in [(512, 512, fmt) for fmt in IMAGE_FORMATS]
-    ):
-        print(
-            " * = hashing the lazy item triggered a hidden pixel decode: "
-            "PngImageFile.getexif() calls load() when the PNG has no 'exif' "
-            "chunk (a trailing eXIf is only findable by reading to EOF). The "
-            "PNG hit-path numbers above therefore include a full decode."
-        )
 
     print()
     print("Blended per-request cost at cache hit rate p:  new = p*hit + (1-p)*miss")
@@ -249,16 +225,16 @@ def bench_audio_paths(
         MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, audio=media)
 
     def hit():
-        lazy = audio_io.load_bytes_lazy(data)
-        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, audio=lazy)
-        assert not lazy.is_decoded
-        lazy.release_bytes()
+        ref = audio_io.load_bytes_ref(data)
+        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, audio=ref)
+        assert not ref.is_decoded
+        ref.release()
 
     def miss():
-        lazy = audio_io.load_bytes_lazy(data)
-        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, audio=lazy)
-        lazy.decode()
-        lazy.release_bytes()
+        ref = audio_io.load_bytes_ref(data)
+        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, audio=ref)
+        ref.decode()
+        ref.release()
 
     t_eager, s_eager = bench(eager, warmup, repeat)
     t_hit, s_hit = bench(hit, warmup, repeat)
@@ -272,7 +248,7 @@ def bench_audio() -> None:
     print("=" * 88)
     header = (
         f"{'duration':>9} {'bytes':>9} {'eager(old)':>18} "
-        f"{'lazy hit':>14} {'lazy miss':>14} {'hit speedup':>11}"
+        f"{'ref hit':>14} {'ref miss':>14} {'hit speedup':>11}"
     )
     print(header)
     print("-" * len(header))
@@ -285,12 +261,13 @@ def bench_audio() -> None:
         eager_hash = MultiModalHasher.hash_kwargs(
             HASHER_ALGORITHM, audio=audio_io.load_bytes(data)
         )
-        lazy_hash = MultiModalHasher.hash_kwargs(
-            HASHER_ALGORITHM, audio=audio_io.load_bytes_lazy(data)
+        ref_hash = MultiModalHasher.hash_kwargs(
+            HASHER_ALGORITHM, audio=audio_io.load_bytes_ref(data)
         )
-        # Eager hashes the decoded float32 waveform, lazy hashes the encoded
-        # WAV bytes; the digests differ by design (both are stable per input).
-        del eager_hash, lazy_hash
+        # Eager hashes the decoded float32 waveform, a ref hashes the encoded
+        # WAV bytes plus the decode spec; the digests differ by design (both
+        # are stable per input).
+        del eager_hash, ref_hash
 
         t_eager, s_eager, t_hit, s_hit, t_miss, s_miss = bench_audio_paths(
             audio_io, data, warmup, repeat
@@ -303,9 +280,9 @@ def bench_audio() -> None:
             f"{t_eager / t_hit:>10.1f}x"
         )
     print(
-        "\nNote: eager hashes the decoded float32 PCM (4 B/sample) while lazy\n"
-        "hashes the encoded WAV (2 B/sample), so the hit path also halves the\n"
-        "bytes fed to the hasher."
+        "\nNote: eager hashes the decoded float32 PCM (4 B/sample) while a\n"
+        "ref hashes the encoded WAV (2 B/sample), so the hit path also halves\n"
+        "the bytes fed to the hasher -- and no longer resamples to get them."
     )
     print()
 
@@ -325,16 +302,8 @@ def bench_video() -> None:
         print("SKIP: opencv (cv2) not available\n")
         return
 
-    # The eager video item is MediaWithBytes wrapping a (frames, metadata)
-    # tuple, which the hasher cannot serialize structurally, so it falls back
-    # to pickling the decoded frames (pre-existing behavior). Silence the
-    # per-call warning and note it once here.
-    import logging
-
-    logging.getLogger("vllm.multimodal.hasher").setLevel(logging.ERROR)
-    print("note: eager-path video hashing falls back to pickling the decoded")
-    print("      frames (hasher has no serializer for MediaWithBytes[tuple]);")
-    print("      the lazy path hashes the encoded bytes instead.")
+    print("note: the eager path hashes the decoded frames and metadata;")
+    print("      a ref hashes the encoded bytes and its decode spec.")
 
     rng = np.random.default_rng(0)
     path = "/tmp/vllm_bench_lazy_decode.mp4"
@@ -358,24 +327,24 @@ def bench_video() -> None:
         MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, video=media)
 
     def hit():
-        lazy = video_io.load_bytes_lazy(data)
-        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, video=lazy)
-        assert not lazy.is_decoded
-        lazy.release_bytes()
+        ref = video_io.load_bytes_ref(data)
+        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, video=ref)
+        assert not ref.is_decoded
+        ref.release()
 
     def miss():
-        lazy = video_io.load_bytes_lazy(data)
-        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, video=lazy)
-        lazy.decode()
-        lazy.release_bytes()
+        ref = video_io.load_bytes_ref(data)
+        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, video=ref)
+        ref.decode()
+        ref.release()
 
     t_eager, s_eager = bench(eager, warmup, repeat)
     t_hit, s_hit = bench(hit, warmup, repeat)
     t_miss, s_miss = bench(miss, warmup, repeat)
     print(f"encoded size: {len(data) / 1e6:.2f} MB")
     print(f"eager(old) : {t_eager:8.2f} +/- {s_eager:5.2f}")
-    print(f"lazy hit   : {t_hit:8.2f} +/- {s_hit:5.2f}  ({t_eager / t_hit:.1f}x)")
-    print(f"lazy miss  : {t_miss:8.2f} +/- {s_miss:5.2f}")
+    print(f"ref hit    : {t_hit:8.2f} +/- {s_hit:5.2f}  ({t_eager / t_hit:.1f}x)")
+    print(f"ref miss   : {t_miss:8.2f} +/- {s_miss:5.2f}")
     print()
 
 
@@ -412,13 +381,13 @@ def bench_hash_throughput(image_results: dict[tuple, dict[str, float]]) -> None:
     image_io = ImageMediaIO()
     for (width, height, fmt), r in image_results.items():
         data = make_image_bytes(width, height, fmt, seed=image_seed(width, height, fmt))
-        lazy = image_io.load_bytes_lazy(data)
+        ref = image_io.load_bytes_ref(data)
 
-        def hash_lazy(lazy=lazy):
-            MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=lazy)
+        def hash_ref(ref=ref):
+            MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=ref)
 
         warmup, repeat = repeats_for(width * height)
-        t_hash, _ = bench(hash_lazy, warmup, repeat)
+        t_hash, _ = bench(hash_ref, warmup, repeat)
         t_decode = r["eager"] - t_hash  # eager = header + decode + ~same hash
         print(
             f"{f'{width}x{height}':>11} {fmt:>5} {len(data) / 1e6:>8.2f}M "
@@ -444,11 +413,11 @@ def bench_parallel_decode() -> None:
 
     def serial():
         for data in payloads:
-            image_io.load_bytes_lazy(data).decode()
+            image_io.load_bytes_ref(data).decode()
 
     def parallel(pool):
-        lazies = [image_io.load_bytes_lazy(data) for data in payloads]
-        list(pool.map(LazyMedia.decode, lazies))
+        refs = [image_io.load_bytes_ref(data) for data in payloads]
+        list(pool.map(MediaRef.decode, refs))
 
     t_serial, _ = bench(serial, 1, 5)
     t_pool, _ = bench(lambda: parallel(global_thread_pool), 1, 5)
@@ -480,11 +449,12 @@ def bench_memory(image_results: dict[tuple, dict[str, float]]) -> None:
             f"{dec / 1e6:>11.2f}M {dec / enc:>6.1f}x"
         )
     print(
-        "\nOn a cache hit a LazyMedia keeps only the encoded bytes (released\n"
-        "after hashing); the eager path keeps encoded bytes + decoded pixels.\n"
+        "\nOn a cache hit a MediaRef keeps only the encoded bytes, and\n"
+        "release() drops those too; the eager path keeps decoded pixels for\n"
+        "the whole request.\n"
     )
 
-    # Measured: process RSS for 100 retained cache-hit items, eager vs lazy.
+    # Measured: process RSS for 100 retained cache-hit items, eager vs ref.
     n = 100
     image_io = ImageMediaIO()
     data = make_image_bytes(1024, 1024, "JPEG", seed=7)
@@ -502,23 +472,23 @@ def bench_memory(image_results: dict[tuple, dict[str, float]]) -> None:
     gc.collect()
 
     rss1 = get_rss_mb()
-    lazy_items = []
+    ref_items = []
     for _ in range(n):
-        lazy = image_io.load_bytes_lazy(data)
-        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=lazy)
-        lazy.release_bytes()
-        lazy_items.append(lazy)
+        ref = image_io.load_bytes_ref(data)
+        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=ref)
+        ref.release()
+        ref_items.append(ref)
     gc.collect()
-    rss_lazy = get_rss_mb()
-    del lazy_items
+    rss_ref = get_rss_mb()
+    del ref_items
     gc.collect()
 
     print(
         f"RSS for {n} retained 1024x1024 JPEG cache-hit items "
         f"({len(data) / 1e3:.0f} KB encoded each):"
     )
-    print(f"  eager (MediaWithBytes kept): +{rss_eager - rss0:8.1f} MB")
-    print(f"  lazy  (bytes released)     : +{rss_lazy - rss1:8.1f} MB")
+    print(f"  eager (decoded image kept): +{rss_eager - rss0:8.1f} MB")
+    print(f"  ref   (bytes released)    : +{rss_ref - rss1:8.1f} MB")
     print()
 
 
