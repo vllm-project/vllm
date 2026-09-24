@@ -33,6 +33,79 @@ FP8_DTYPE = torch.float8_e4m3fn
 EPS = 1e-10
 
 
+@pytest.mark.parametrize("tokens", [1, 3, 6, 8, 12, 16, 18, 32])
+@pytest.mark.parametrize("padded,zero", [(False, False), (True, False), (True, True)])
+def test_dsv41_fused_wo_a_matches_deepgemm(tokens, padded, zero):
+    """Preserve per-32 WO-A math and WO-B scales, including graph replay."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("Requires SM100/SM103")
+    pytest.importorskip("cutlass")
+    from flashinfer import mxfp8_quantize
+
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        deepgemm_post_process_fp8_weight_block,
+    )
+    from vllm.models.deepseek_v41.nvidia.ops.fused_wo_a import _FUSED_WO_A_KERNEL
+    from vllm.utils.deep_gemm import fp8_einsum
+
+    torch.manual_seed(42)
+    x = torch.randn(
+        tokens, 64 if padded else 16, 512, device="cuda", dtype=torch.bfloat16
+    )[:, :16]
+    x.mul_(torch.exp2(torch.arange(16, device="cuda") - 8)[None, :, None])
+    if zero:
+        x.zero_()
+    positions = torch.randint(0, 128, (tokens,), device="cuda")
+    rope = make_cos_sin_cache(128, device="cuda")
+    w = torch.randn(2048, 4096, device="cuda", dtype=torch.bfloat16)
+    wb = w.float().view(2048, 128, 32)
+    scale = torch.exp2(torch.ceil(torch.log2(wb.abs().amax(-1) / 448)))
+    wq = (wb / scale[..., None]).to(FP8_DTYPE).view(2048, 4096)
+    wq, ws = deepgemm_post_process_fp8_weight_block(wq, scale, (1, 32), False, True, 2)
+    inputs = dict(x=x, positions=positions, rope=rope, weight=wq, weight_scale=ws)
+    _FUSED_WO_A_KERNEL(**inputs)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        q, sf = _FUSED_WO_A_KERNEL(**inputs)
+    for _ in range(2):
+        positions.add_(1).remainder_(128)
+        graph.replay()
+        a, sa = fused_inv_rope_fp8_quant(
+            x,
+            positions,
+            rope,
+            n_groups=2,
+            heads_per_group=8,
+            nope_dim=448,
+            rope_dim=64,
+            quant_group_size=32,
+            tma_aligned_scales=True,
+        )
+        y = torch.empty(tokens, 2, 1024, device="cuda", dtype=torch.bfloat16)
+        fp8_einsum("bhr,hdr->bhd", (a, sa), (wq, ws), y, recipe=(1, 1, 32))
+        ref, ref_sf = mxfp8_quantize(y.flatten(1), backend="cute-dsl")
+
+        def dequant(data, scales):
+            scales = scales.reshape(16, 32, 4, 4).permute(1, 2, 0, 3)
+            scales = scales.reshape(128, 64)[:tokens].float()
+            return data.float().reshape(tokens, 64, 32) * torch.exp2(
+                scales[..., None] - 127
+            )
+
+        actual, expected = dequant(q, sf), dequant(ref, ref_sf)
+        assert torch.isfinite(actual).all()
+        if zero:
+            assert torch.count_nonzero(q.float()) == 0
+        else:
+            error = (actual - expected).norm() / expected.norm()
+            assert error < 0.003, error.item()
+        rows = torch.arange(512, device="cuda")
+        rows = rows // 16 + (rows % 16 // 4) * 32
+        assert torch.count_nonzero(sf.view(16, 512)[:, rows >= tokens]) == 0
+
+
 # =========================================================================
 # Helpers
 # =========================================================================

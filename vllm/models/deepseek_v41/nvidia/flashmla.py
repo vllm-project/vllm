@@ -6,15 +6,16 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import torch
 
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
-    compute_fp8_einsum_recipe,
-    deep_gemm_fp8_o_proj,
-)
+from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+)
+from vllm.models.deepseek_v41.nvidia.ops.o_proj import (
+    dsv41_o_proj,
+    register_dsv41_o_proj_warmup,
 )
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLABackend,
@@ -57,15 +58,17 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe(
             self._o_proj_block_size
         )
+        register_dsv41_o_proj_warmup(self)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         o = attn_out[:, : self.n_local_heads, :]
-        return deep_gemm_fp8_o_proj(
+        return dsv41_o_proj(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
             self.wo_a,
             self._wo_b_proj,
+            wo_b_layer=self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
