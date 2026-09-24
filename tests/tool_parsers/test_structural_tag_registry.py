@@ -1035,18 +1035,7 @@ def test_tool_strict_level_from_name():
 
 
 @pytest.mark.parametrize("policy", ["auto", "required", "named"])
-@pytest.mark.parametrize("native", [False, True])
-def test_mimo_strict_compact_xml(policy, native, monkeypatch):
-    if not native:
-
-        def unavailable(*args, **kwargs):
-            raise ValueError("Unknown format type: mimo, supported types: []")
-
-        monkeypatch.setattr(
-            "vllm.tool_parsers.mimo_tool_parser.get_xgrammar_structural_tag",
-            unavailable,
-        )
-
+def test_mimo_strict_compact_xml(policy):
     tools = [
         ChatCompletionToolsParam(
             type="function",
