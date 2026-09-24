@@ -13,15 +13,15 @@ from transformers import BatchFeature
 from transformers.activations import ACT2FN
 from transformers.models.lfm2_vl import Lfm2VlProcessor
 from transformers.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfig
-from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
-    Lfm2VlImageProcessorFast,
+from transformers.models.lfm2_vl.image_processing_lfm2_vl import (
+    Lfm2VlImageProcessor,
     find_closest_aspect_ratio,
     round_by_factor,
 )
 from typing_extensions import Buffer
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -104,7 +104,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs):
         return self.ctx.get_hf_processor(Lfm2VlProcessor, **kwargs)
 
-    def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessorFast:
+    def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -213,7 +213,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         processor: Lfm2VlProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int, int]:
-        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+        image_processor: Lfm2VlImageProcessor = processor.image_processor
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
@@ -336,7 +336,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         processor: Lfm2VlProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int]:
-        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+        image_processor: Lfm2VlImageProcessor = processor.image_processor
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
@@ -387,20 +387,16 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 
