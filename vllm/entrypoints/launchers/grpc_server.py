@@ -89,10 +89,18 @@ async def serve_grpc(args: argparse.Namespace):
         options=[
             ("grpc.max_send_message_length", -1),
             ("grpc.max_receive_message_length", -1),
-            # Tolerate client keepalive pings every 10s (default 300s is too
-            # strict for non-streaming requests where no DATA frames flow
-            # during generation)
-            ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
+            # A non-streaming Generate writes nothing while the engine
+            # decodes, so client keepalive and BDP-probe PINGs arriving in
+            # that window are strikes and eventually earn a
+            # GOAWAY(ENHANCE_YOUR_CALM, "too_many_pings") that fails every
+            # in-flight RPC. Disable the strike count to tolerate them.
+            ("grpc.http2.max_ping_strikes", 0),
+            # GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS expands to
+            # a string with no "recv", and gRPC Core silently ignores unknown
+            # keys, so the misspelt form left the 300s default in force.
+            ("grpc.http2.min_ping_interval_without_data_ms", 10000),
+            # Without this, gRPC Core widens the floor to a fixed two hours
+            # once no streams are open, striking keepalives between requests.
             ("grpc.keepalive_permit_without_calls", True),
         ],
     )
