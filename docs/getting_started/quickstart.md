@@ -29,6 +29,9 @@ This guide will help you quickly get started with vLLM to perform:
 
     `uv` can [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`).
 
+    !!! note
+        Options such as `--torch-backend` and `--index-strategy` are specific to `uv pip install`. If you use `pip install` directly, omit these options and use the `pip` command from the [CUDA installation guide](installation/gpu.md#pre-built-wheels).
+
     Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating any permanent environment:
 
     ```bash
