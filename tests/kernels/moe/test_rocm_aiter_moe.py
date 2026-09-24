@@ -649,12 +649,15 @@ def test_aiter_moe_padding_env_var(
 # Dispatch-policy forwarding test ------------------------------------------
 
 
+@pytest.mark.parametrize("dispatch_policy", [0, 1, 2])
 def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
+    dispatch_policy: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """VLLM_ROCM_AITER_MOE_DISPATCH_POLICY should reach rocm_aiter_ops.fused_moe
     unchanged, the same forwarding AiterExperts.apply does via
-    rocm_aiter_fused_experts. See vllm-project/vllm#54966.
+    rocm_aiter_fused_experts, for every documented policy value (0=auto,
+    1=always single-pass, 2=always multi-pass). See vllm-project/vllm#54966.
     """
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm._aiter_ops import rocm_aiter_ops
@@ -682,9 +685,13 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
     )
 
     with monkeypatch.context() as mp:
-        mp.setenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", "1")
+        mp.setenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", str(dispatch_policy))
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
+
+        assert rocm_aiter_ops.get_moe_dispatch_policy() == dispatch_policy, (
+            "rocm_aiter_ops cached a stale dispatch policy after the env var changed."
+        )
 
         with mock.patch.object(
             rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
@@ -700,7 +707,10 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
                 moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             )
 
-        assert fused_moe_mock.call_args.kwargs["moe_sorting_dispatch_policy"] == 1, (
+        assert (
+            fused_moe_mock.call_args.kwargs["moe_sorting_dispatch_policy"]
+            == dispatch_policy
+        ), (
             "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY was not forwarded to "
             "rocm_aiter_ops.fused_moe."
         )
