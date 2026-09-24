@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.kernels.moe.utils import (
+    check_deferred_moe_finalize,
+    make_dummy_moe_config,
+    make_test_weights,
+)
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -32,6 +37,11 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    convert_to_fp8_moe_kernel_format,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
@@ -767,3 +777,80 @@ def test_trtllm_fp8_swiglu_clamp_support(
     assert supported == expected, reason
     if not expected:
         assert "SwiGLU" in reason
+
+
+@pytest.mark.parametrize("m", [1, 16])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
+def test_trtllm_fp8_block_moe_deferred_finalize(m: int, workspace_init):
+    """TRTLLM-Gen block-FP8 modular experts can leave the top-k finalize open."""
+    e, topk, n, k = 32, 4, 1024, 1024
+    block_shape = [128, 128]
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        (_, w1, w1_scale, _), (_, w2, w2_scale, _) = make_test_weights(
+            e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
+        )
+        w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            SimpleNamespace(
+                weight_block_size=block_shape,
+                moe_config=SimpleNamespace(
+                    is_act_and_mul=True, intermediate_size_per_partition=n
+                ),
+                activation=MoEActivation.SILU,
+            ),
+            w1,
+            w2,
+            w1_scale,
+            w2_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape
+        )
+        # One rank of a TP group: the only topology that defers.
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=2 * n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=replace(
+                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
+            ),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config, quant_config=quant_config, allow_new_interface=True
+            ),
+            TrtLlmFp8ExpertsModular(moe_config=moe_config, quant_config=quant_config),
+        )
+
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+        check_deferred_moe_finalize(
+            moe_config,
+            lambda: kernel.apply(
+                hidden_states=a,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            ),
+            topk_weights,
+        )
