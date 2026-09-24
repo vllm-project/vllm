@@ -73,7 +73,17 @@ def run_radio_test(
         **hf_config.args,
     )
     vllm_model = RadioModel(vllm_config)
-    vllm_model.load_weights(hf_model.state_dict())
+    loaded = vllm_model.load_weights(hf_model.state_dict())
+    # Guard the remote-code -> vLLM key remap: every parameter must be loaded
+    # from the checkpoint, except the identity LayerScale gains (ls1/ls2, which
+    # are intentionally not loaded for C-RADIO).
+    expected = {
+        name
+        for name, _ in vllm_model.named_parameters()
+        if not name.endswith((".ls1", ".ls2"))
+    }
+    missing = expected - loaded
+    assert not missing, f"parameters not loaded from checkpoint: {sorted(missing)}"
     vllm_model = vllm_model.to(DEVICE_TYPE, torch_dtype)
 
     vllm_outputs_per_image = [
@@ -104,3 +114,33 @@ def test_radio(
         model_id,
         dtype=dtype,
     )
+
+
+def _radio_summary(*, teachers, cls_token_per_teacher):
+    """Summary tensor from a tiny RadioModel with no encoder layers, so it
+    builds no parallel layers and needs neither a GPU nor a checkpoint."""
+    config = RadioConfig(
+        model_name="vit_small_patch16_224",
+        teachers=teachers,
+        cls_token_per_teacher=cls_token_per_teacher,
+    )
+    model = RadioModel(config, num_hidden_layers_override=0)
+    # Synthetic encoder output: [batch, num_skip + num_patches, hidden].
+    y = torch.randn(2, model.embeddings.num_skip + 4, config.hidden_size)
+    summary, _ = model._extract_final(y)
+    return summary
+
+
+def test_summary_idxs_no_teachers_keeps_class_tokens():
+    # No teachers -> summary_idxs is None -> keep the class-token summary.
+    summary = _radio_summary(teachers=[], cls_token_per_teacher=False)
+    assert summary.shape[1] > 0
+
+
+def test_summary_idxs_all_use_summary_false_is_empty():
+    # Teachers present but none flagged use_summary -> empty selection.
+    summary = _radio_summary(
+        teachers=[{"name": "a", "use_summary": False}],
+        cls_token_per_teacher=True,
+    )
+    assert summary.shape[1] == 0

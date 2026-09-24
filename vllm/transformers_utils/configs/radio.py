@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Radio vision model configuration."""
+"""Radio vision model configuration"""
 
 from typing import Any
 
@@ -54,6 +54,11 @@ class RadioConfig(PreTrainedConfig):
             dedicated video patch embedder (3*T*P*P -> hidden) separate from the
             image embedder (3*P*P -> hidden). When False, a single embedder with
             input size 3*T*P*P is used for both (images are duplicated T times).
+        num_channels: Number of input image channels (RGB -> 3).
+
+    ``num_cls_tokens``, ``num_registers``, ``summary_idxs`` and ``max_img_size``
+    are derived from the fields above so the model reads a single canonical
+    schema (these were previously computed inside the model).
 
     """
 
@@ -78,6 +83,7 @@ class RadioConfig(PreTrainedConfig):
         cls_token_per_teacher: bool = False,
         video_temporal_patch_size: int = 1,
         separate_video_embedder: bool = True,
+        num_channels: int = 3,
         **kwargs,
     ):
         self.model_name = model_name
@@ -107,4 +113,26 @@ class RadioConfig(PreTrainedConfig):
         self.cls_token_per_teacher = cls_token_per_teacher
         self.video_temporal_patch_size = video_temporal_patch_size
         self.separate_video_embedder = separate_video_embedder
+        self.num_channels = num_channels
+
+        # Fields derived from the fields above (previously computed inside the
+        # model), so the model consumes a single canonical schema.
+        unique_teachers = {t["name"] for t in self.teachers}
+        self.num_cls_tokens = len(unique_teachers) if self.cls_token_per_teacher else 1
+        if self.register_multiple:
+            self.num_registers = self.register_multiple - (
+                self.num_cls_tokens % self.register_multiple
+            )
+        else:
+            self.num_registers = 0
+        # None (no teachers) means no explicit selection -> keep all class
+        # tokens; a list (possibly empty) gathers exactly those indices.
+        self.summary_idxs = (
+            [i for i, t in enumerate(self.teachers) if t.get("use_summary", True)]
+            if self.teachers
+            else None
+        )
+        self.max_img_size = int(
+            round(self.cpe_max_size / self.patch_size) * self.patch_size
+        )
         super().__init__(**kwargs)
