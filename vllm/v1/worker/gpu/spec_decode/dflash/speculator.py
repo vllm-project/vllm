@@ -353,7 +353,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_reqs = input_batch.num_reqs
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
-        max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        # `seq_lens_cpu_upper_bound` is already a CPU tensor, so reduce it
+        # through a zero-copy numpy view rather than a slice/max/item chain of
+        # torch dispatches -- at concurrency 1 that reduces a single element.
+        max_seq_len = int(input_batch.seq_lens_cpu_upper_bound.numpy()[:num_reqs].max())
         self.draft_max_seq_len = min(
             max_seq_len + self.num_query_per_req, self.max_model_len
         )

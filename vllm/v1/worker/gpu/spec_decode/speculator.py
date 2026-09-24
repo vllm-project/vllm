@@ -301,6 +301,7 @@ class DraftModelSpeculator(BaseSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        max_query_len: int | None = None,
     ) -> dict[str, Any] | None:
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # A FULL graph replays a captured shape whose padded requests each hold
@@ -318,7 +319,10 @@ class DraftModelSpeculator(BaseSpeculator):
             query_start_loc_np[: num_reqs + 1]
         )
         query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
-        max_query_len = int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max())
+        if max_query_len is None:
+            max_query_len = int(
+                (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max()
+            )
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
@@ -522,6 +526,11 @@ class DraftModelSpeculator(BaseSpeculator):
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         query_start_loc_np = self.arange_np[: num_reqs + 1] * num_query_per_req
+        # This path builds query_start_loc as a ramp of constant stride
+        # `num_query_per_req`, and the padded tail is filled with a constant, so
+        # consecutive differences are `num_query_per_req` for real requests and
+        # 0 for padding. The max is therefore known here and does not need to be
+        # recovered from the tensor.
         return self._build_attn_metadata(
             num_reqs=num_reqs,
             batch_desc=batch_desc,
@@ -530,4 +539,5 @@ class DraftModelSpeculator(BaseSpeculator):
             step=step,
             causal=causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            max_query_len=num_query_per_req if num_reqs >= 1 else 0,
         )
