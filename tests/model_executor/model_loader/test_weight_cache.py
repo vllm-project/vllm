@@ -21,9 +21,6 @@ from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
 
-DAEMON_TIMEOUT_S = 600
-
-
 class WeightCacheDaemon:
     """Context manager running the real weight cache daemon as a subprocess."""
 
@@ -89,13 +86,10 @@ def generate(
     case: ModelCase,
     socket_dir: str | None,
     fallback: bool,
-    daemon_startup_timeout_s: float = 0.0,
 ):
     extra_config = (
         {} if socket_dir is None else {"socket_dir": socket_dir, "fallback": fallback}
     )
-    if daemon_startup_timeout_s:
-        extra_config["daemon_startup_timeout_s"] = daemon_startup_timeout_s
     with vllm_runner(
         case.model,
         load_format="auto" if socket_dir is None else "ipc_cache",
@@ -203,21 +197,9 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
         tp_size=1,
         extra_args=case.daemon_args,
     ) as d:
-        warm_outputs = generate(
-            vllm_runner,
-            case,
-            d.socket_dir,
-            fallback=False,
-            daemon_startup_timeout_s=DAEMON_TIMEOUT_S,
-        )
+        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         # Warm restart: a second engine lifetime against the same daemon.
-        restart_outputs = generate(
-            vllm_runner,
-            case,
-            d.socket_dir,
-            fallback=False,
-            daemon_startup_timeout_s=DAEMON_TIMEOUT_S,
-        )
+        restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
 
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs
