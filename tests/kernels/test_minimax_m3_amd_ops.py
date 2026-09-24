@@ -482,7 +482,9 @@ def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
         layer.weight_scale = torch.nn.Parameter(w_scale.clone(), requires_grad=False)
         return layer
 
-    kernel = rocm_native.RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig())
+    kernel = rocm_native.RocmDotScaledMxfp8LinearKernel(
+        Mxfp8LinearLayerConfig(weight_shape=(N, K))
+    )
     layer = make_layer()
     kernel.process_weights_after_loading(layer)
     assert (layer.weight.element_size() >= 2) is not aligned
