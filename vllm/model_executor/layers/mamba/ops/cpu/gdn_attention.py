@@ -27,6 +27,104 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 _CPU_GDN_ATTENTION_OPS_REGISTERED = False
 
 
+def _stage_ds_conv_states(
+    conv_states: torch.Tensor, state_indices: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    storage = conv_states.transpose(1, 2).index_select(0, state_indices)
+    scratch = storage.transpose(1, 2)
+    identity_indices = torch.arange(
+        state_indices.numel(), dtype=torch.int32, device=state_indices.device
+    )
+    return scratch, identity_indices
+
+
+def _scatter_ds_conv_states(
+    conv_states: torch.Tensor,
+    state_indices: torch.Tensor,
+    scratch: torch.Tensor,
+) -> None:
+    conv_states.index_copy_(0, state_indices.to(torch.int64), scratch)
+
+
+def _causal_conv1d_fwd_cpu(
+    *,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    silu_activation: bool,
+    is_vnni: bool,
+) -> torch.Tensor:
+    if not is_conv_state_dim_first():
+        return ops.causal_conv1d_fwd_cpu(
+            x=x,
+            weight=weight,
+            bias=bias,
+            conv_states=conv_states,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            silu_activation=silu_activation,
+            is_vnni=is_vnni,
+        )
+
+    scratch, identity_indices = _stage_ds_conv_states(conv_states, cache_indices)
+    out = ops.causal_conv1d_fwd_cpu(
+        x=x,
+        weight=weight,
+        bias=bias,
+        conv_states=scratch,
+        query_start_loc=query_start_loc,
+        cache_indices=identity_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=silu_activation,
+        is_vnni=is_vnni,
+    )
+    _scatter_ds_conv_states(conv_states, cache_indices, scratch)
+    return out
+
+
+def _causal_conv1d_update_cpu(
+    *,
+    x: torch.Tensor,
+    conv_states: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    silu_activation: bool,
+    conv_state_indices: torch.Tensor,
+    is_vnni: bool,
+    num_accepted_tokens: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if not is_conv_state_dim_first():
+        return ops.causal_conv1d_update_cpu(
+            x=x,
+            conv_states=conv_states,
+            weight=weight,
+            bias=bias,
+            silu_activation=silu_activation,
+            conv_state_indices=conv_state_indices,
+            is_vnni=is_vnni,
+            num_accepted_tokens=num_accepted_tokens,
+        )
+
+    scratch, identity_indices = _stage_ds_conv_states(conv_states, conv_state_indices)
+    out = ops.causal_conv1d_update_cpu(
+        x=x,
+        conv_states=scratch,
+        weight=weight,
+        bias=bias,
+        silu_activation=silu_activation,
+        conv_state_indices=identity_indices,
+        is_vnni=is_vnni,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+    _scatter_ds_conv_states(conv_states, conv_state_indices, scratch)
+    return out
+
+
 def cpu_gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
@@ -109,10 +207,8 @@ def _cpu_gdn_attention_nonspec(
 
     conv_state = layer.kv_cache[0]
     if use_cpp_conv:
-        # C++ conv requires [num_allocated_slots, kernel - 1, conv_dim] (SD).
-        if is_conv_state_dim_first():
-            raise RuntimeError("C++ CPU GDN attention requires `SD` conv_state layout.")
-        conv_state = conv_state.transpose(1, 2)
+        if not is_conv_state_dim_first():
+            conv_state = conv_state.transpose(1, 2)
     else:
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
@@ -141,7 +237,7 @@ def _cpu_gdn_attention_nonspec(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         if use_cpp_conv:
-            decode_mixed_qkv = ops.causal_conv1d_update_cpu(
+            decode_mixed_qkv = _causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
                 conv_states=conv_state,
                 weight=layer.conv1d.weight,
@@ -210,7 +306,7 @@ def _cpu_gdn_attention_nonspec(
         ]
 
         if use_cpp_conv:
-            prefill_mixed_qkv = ops.causal_conv1d_fwd_cpu(
+            prefill_mixed_qkv = _causal_conv1d_fwd_cpu(
                 x=prefill_mixed_qkv.transpose(0, 1),
                 weight=layer.conv1d.weight,
                 bias=layer.conv1d.bias,
@@ -416,7 +512,6 @@ def _spec_forward(
 
     can_use_native_conv = (
         torch.cpu._is_amx_tile_supported()
-        and not is_conv_state_dim_first()
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
@@ -424,7 +519,7 @@ def _spec_forward(
     )
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
-        conv_out = ops.causal_conv1d_update_cpu(
+        conv_out = _causal_conv1d_update_cpu(
             x=mixed_qkv_spec.view(num_spec_decodes, q_i, dim),
             conv_states=conv_buf,
             weight=layer.conv1d.weight,
@@ -509,8 +604,6 @@ def _spec_aware_nonspec(
     state_indices_tensor = state_indices_tensor.contiguous()
 
     is_amx = torch.cpu._is_amx_tile_supported()
-    if is_amx and is_conv_state_dim_first():
-        raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
 
     if not is_amx:
         conv_weights = _unpacked_conv_weight(layer)
@@ -526,7 +619,7 @@ def _spec_aware_nonspec(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         if is_amx:
-            decode_mixed_qkv = ops.causal_conv1d_update_cpu(
+            decode_mixed_qkv = _causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
                 conv_states=conv_buf,
                 weight=layer.conv1d.weight,
@@ -593,7 +686,7 @@ def _spec_aware_nonspec(
             num_decodes : num_decodes + num_prefills
         ]
         if is_amx:
-            prefill_mixed_qkv = ops.causal_conv1d_fwd_cpu(
+            prefill_mixed_qkv = _causal_conv1d_fwd_cpu(
                 x=prefill_mixed_qkv.transpose(0, 1),
                 weight=layer.conv1d.weight,
                 bias=layer.conv1d.bias,
@@ -664,11 +757,9 @@ def _spec_aware_nonspec_subset(
     prefill_state_indices = prefill_state_indices.contiguous()
 
     is_amx = torch.cpu._is_amx_tile_supported()
-    if is_amx and is_conv_state_dim_first():
-        raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
 
     if is_amx:
-        conv_out = ops.causal_conv1d_fwd_cpu(
+        conv_out = _causal_conv1d_fwd_cpu(
             x=mixed_qkv.transpose(0, 1),
             weight=layer.conv1d.weight,
             bias=layer.conv1d.bias,
