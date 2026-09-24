@@ -13,6 +13,7 @@ Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
 import json
+import logging
 from argparse import Namespace
 from http import HTTPStatus
 from typing import Annotated
@@ -1062,6 +1063,23 @@ class TestMessageStreamConverterToolUseContentBuffering:
     can carry both the final tool_call argument fragment and trailing
     content.
     """
+
+    @pytest.mark.asyncio
+    async def test_converter_error_log_uses_response_id(self, caplog):
+        async def sse_input():
+            raise RuntimeError("stream failed")
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        with caplog.at_level(logging.ERROR):
+            _ = [
+                event
+                async for event in converter.message_stream_converter(
+                    sse_input(), request_id="chatcmpl-external"
+                )
+            ]
+
+        assert caplog.records[-1].request_id == "chatcmpl-external"
 
     @pytest.mark.asyncio
     async def test_tool_use_args_not_dropped_when_content_in_same_chunk(

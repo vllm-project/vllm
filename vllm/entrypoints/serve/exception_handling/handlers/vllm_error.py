@@ -5,8 +5,9 @@ from fastapi import Request
 from starlette.responses import JSONResponse
 
 from vllm.entrypoints.launchers.launcher import terminate_if_errored
+from vllm.entrypoints.serve.utils.request_id import get_external_request_id
 from vllm.exceptions import GenerationError, VLLMError
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 from ..error_response import create_error_response
@@ -51,11 +52,10 @@ async def engine_error_handler(
     background task for check for errored state.
     """
     if req.app.state.args.log_error_stack:
-        logger.exception(
+        request_id = get_external_request_id(req)
+        bind_external_request_id(logger, request_id).exception(
             "Engine Exception caught. Request id: %s",
-            req.state.request_metadata.request_id
-            if hasattr(req.state, "request_metadata")
-            else None,
+            request_id,
         )
 
     terminate_if_errored(

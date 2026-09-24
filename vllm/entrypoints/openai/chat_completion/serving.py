@@ -56,7 +56,7 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 )
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
@@ -501,7 +501,9 @@ class OpenAIServingChat(GenerateBaseServing):
             else:
                 parsers = [None] * num_choices
         except Exception as e:
-            logger.exception("Error in parser creation.")
+            bind_external_request_id(logger, request_id).exception(
+                "Error in parser creation."
+            )
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
             yield "data: [DONE]\n\n"
@@ -908,7 +910,9 @@ class OpenAIServingChat(GenerateBaseServing):
         except GenerationError as e:
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
-            logger.exception("Error in chat completion stream generator.")
+            bind_external_request_id(logger, request_id).exception(
+                "Error in chat completion stream generator."
+            )
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
@@ -1054,7 +1058,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
             # undetermined case that is still important to handle
             else:
-                logger.error(
+                bind_external_request_id(logger, request_id).error(
                     "Error in chat_completion_full_generator - cannot determine"
                     " if tools should be extracted. Returning a standard chat "
                     "completion."

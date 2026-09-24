@@ -28,7 +28,7 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import get_audio_duration, split_audio
@@ -838,7 +838,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
 
         except Exception as e:
-            logger.exception("Error in %s stream generator.", self.task_type)
+            bind_external_request_id(logger, request_id).exception(
+                "Error in %s stream generator.", self.task_type
+            )
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished

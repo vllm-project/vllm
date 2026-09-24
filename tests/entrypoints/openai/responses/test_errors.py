@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import logging
 from http import HTTPStatus
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Request
 
 import vllm.envs as envs
 from vllm.entrypoints.generate.base.serving import GenerateBaseServing
@@ -13,7 +17,7 @@ from vllm.exceptions import GenerationError
 
 
 @pytest.mark.asyncio
-async def test_raise_if_error_raises_generation_error():
+async def test_raise_if_error_raises_generation_error(caplog):
     """Test _raise_if_error raises GenerationError."""
     # create a minimal GenerateBaseServing instance
     mock_engine = MagicMock()
@@ -28,16 +32,59 @@ async def test_raise_if_error_raises_generation_error():
     )
 
     # test that error finish_reason raises GenerationError
-    with pytest.raises(GenerationError) as exc_info:
+    with caplog.at_level(logging.ERROR), pytest.raises(GenerationError) as exc_info:
         serving._raise_if_error("error", "test-request-id")
 
     assert str(exc_info.value) == "Internal server error"
     assert exc_info.value.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert caplog.records[-1].request_id == "test-request-id"
 
     # test that other finish_reasons don't raise
     serving._raise_if_error("stop", "test-request-id")  # should not raise
     serving._raise_if_error("length", "test-request-id")  # should not raise
     serving._raise_if_error(None, "test-request-id")  # should not raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("external_id", "has_raw_request"),
+    [("cmpl-external", True), (None, True), (None, False)],
+)
+async def test_kv_rejection_warning_uses_assigned_external_id(
+    caplog, external_id, has_raw_request
+):
+    serving = object.__new__(GenerateBaseServing)
+    serving.has_kv_connector = True
+    serving.engine_client = SimpleNamespace(
+        notify_kv_transfer_request_rejected=AsyncMock(
+            side_effect=RuntimeError("notification failed")
+        )
+    )
+    request = SimpleNamespace(
+        request_id="internal-id", kv_transfer_params={"do_remote_prefill": True}
+    )
+    raw_request = (
+        Request({"type": "http", "method": "POST", "headers": []})
+        if has_raw_request
+        else None
+    )
+    if external_id is not None:
+        assert raw_request is not None
+        raw_request.state.request_metadata = SimpleNamespace(request_id=external_id)
+
+    with caplog.at_level(logging.WARNING):
+        await serving._with_kv_transfer_rejection_cleanup(
+            asyncio.sleep(0, result=serving.create_error_response("rejected")),
+            request,
+            raw_request,
+        )
+
+    record = caplog.records[-1]
+    assert "internal-id" in record.getMessage()
+    if external_id is None:
+        assert not hasattr(record, "request_id")
+    else:
+        assert record.request_id == external_id
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ state machine.
 """
 
 import json
+import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -858,7 +859,7 @@ class TestChatCompletionStreamToV2:
         assert "error" in error_end["delta"]
 
     @pytest.mark.asyncio
-    async def test_error_message_end_is_sanitized(self):
+    async def test_error_message_end_is_sanitized(self, caplog):
         # The client-visible ``error`` field on the terminal message-end
         # must be routed through ``sanitize_message`` so tracebacks,
         # host filesystem paths, and Python object memory addresses
@@ -876,12 +877,14 @@ class TestChatCompletionStreamToV2:
             messages=[{"role": "user", "content": "hi"}],
             stream=True,
         )
-        frames = [
-            f
-            async for f in serving._chat_completion_stream_to_v2(
-                _raises_mid_stream(), request
-            )
-        ]
+        with caplog.at_level(logging.ERROR):
+            frames = [
+                f
+                async for f in serving._chat_completion_stream_to_v2(
+                    _raises_mid_stream(), request, request_id="chatcmpl-external"
+                )
+            ]
+        assert caplog.records[-1].request_id == "chatcmpl-external"
         assert frames[-1] == _DONE_FRAME
         error_end = _parse_event(frames[-2])
         assert error_end["delta"]["finish_reason"] == "ERROR"

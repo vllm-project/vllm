@@ -6,7 +6,8 @@ from fastapi import HTTPException, Request
 from starlette.responses import JSONResponse
 
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.logger import init_logger
+from vllm.entrypoints.serve.utils.request_id import get_external_request_id
+from vllm.logger import bind_external_request_id, init_logger
 
 from ..utils import sanitize_message
 
@@ -15,11 +16,10 @@ logger = init_logger(__name__)
 
 async def http_exception_handler(req: Request, exc: HTTPException):
     if req.app.state.args.log_error_stack:
-        logger.exception(
+        request_id = get_external_request_id(req)
+        bind_external_request_id(logger, request_id).exception(
             "HTTPException caught. Request id: %s",
-            req.state.request_metadata.request_id
-            if hasattr(req.state, "request_metadata")
-            else None,
+            request_id,
         )
     err = ErrorResponse(
         error=ErrorInfo(

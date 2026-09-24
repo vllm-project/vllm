@@ -36,7 +36,7 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_includ
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
@@ -551,7 +551,9 @@ class ServingTokens(GenerateBaseServing):
                 f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
             )
         except Exception as e:
-            logger.exception("Error in token generation stream.")
+            bind_external_request_id(logger, request_id).exception(
+                "Error in token generation stream."
+            )
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"

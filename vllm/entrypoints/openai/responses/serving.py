@@ -75,7 +75,7 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
-from vllm.logger import init_logger
+from vllm.logger import bind_external_request_id, init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
@@ -1166,7 +1166,9 @@ class OpenAIServingResponses(GenerateBaseServing):
             try:
                 await task
             except asyncio.CancelledError:
-                logger.exception("Background task for %s was cancelled", response_id)
+                bind_external_request_id(logger, response_id).exception(
+                    "Background task for %s was cancelled", response_id
+                )
         return response
 
     def _make_not_found_error(self, response_id: str) -> ErrorResponse:

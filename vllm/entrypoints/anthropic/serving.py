@@ -46,7 +46,9 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
+from vllm.entrypoints.serve.utils.request_id import get_external_request_id
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.logger import bind_external_request_id
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
@@ -616,7 +618,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         elif isinstance(generator, ChatCompletionResponse):
             return self.messages_full_converter(generator)
 
-        return self.message_stream_converter(generator)
+        request_id = get_external_request_id(raw_request)
+        return self.message_stream_converter(generator, request_id=request_id)
 
     def messages_full_converter(
         self,
@@ -683,6 +686,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     async def message_stream_converter(
         self,
         generator: AsyncGenerator[str, None],
+        request_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
         try:
 
@@ -1009,7 +1013,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                     yield wrap_data_with_event(data, "error")
 
         except Exception as e:
-            logger.exception("Error in message stream converter.")
+            bind_external_request_id(logger, request_id).exception(
+                "Error in message stream converter."
+            )
             error_response = AnthropicStreamEvent(
                 type="error",
                 error=AnthropicError(
