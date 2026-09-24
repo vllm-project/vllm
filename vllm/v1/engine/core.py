@@ -876,7 +876,9 @@ class EngineCore:
 
     def _finish_pause(self, clear_cache: bool) -> None:
         # A completed pause promises an idle device: nothing else waits on
-        # the last dummy batch an idle DP rank launches.
+        # the last dummy batch an idle DP rank launches. Post deferred PP
+        # receives before synchronizing so the matching sender can complete.
+        self.model_executor.collective_rpc("flush_pending_collectives")
         self.model_executor.collective_rpc("synchronize_device")
         if clear_cache:
             self._reset_caches()

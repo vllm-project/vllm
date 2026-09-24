@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Which rows the PP sampled-token broadcast must carry."""
 
-from unittest.mock import Mock
+from collections import deque
+from contextlib import nullcontext
+from unittest.mock import Mock, call
 
 import numpy as np
+import torch
 
 from vllm.v1.worker.gpu import pp_utils
+from vllm.v1.worker.gpu.pp_utils import PPHandler
 
 
 def _batch(num_computed, prefill_len, num_scheduled):
@@ -81,3 +85,52 @@ def test_decode_row_ahead_of_a_prefill_chunk():
 
     assert mask is not None
     assert mask.tolist() == [True, False]
+
+
+def test_deferred_receive_cadence_fifo_and_flush():
+    handler = PPHandler.__new__(PPHandler)
+    slots = [Mock(launched=False) for _ in range(3)]
+    handler.queue = deque([None, slots[0], slots[1], slots[2]])
+    handler.recv_launch_delay = 3
+    handler.pending_post_model_receive = None
+    handler.is_last_rank = False
+    handler._launch_receive = Mock(
+        side_effect=lambda slot: setattr(slot, "launched", True)
+    )
+
+    handler._advance_receive_queue()
+    handler._advance_receive_queue()  # Launches the older pending slot first.
+    handler.launch_post_model_receive()
+    handler.flush_pending_collectives()
+    handler.flush_pending_collectives()
+
+    assert handler._launch_receive.call_args_list == [
+        call(slots[0]),
+        call(slots[1]),
+        call(slots[2]),
+    ]
+
+
+def test_receive_launch_is_idempotent_when_cpu_event_is_none(monkeypatch):
+    handler = PPHandler.__new__(PPHandler)
+    handler.main_stream, handler.broadcast_stream = Mock(), Mock()
+    handler.broadcast_stream.record_event.return_value = None
+    handler.last_rank, handler.broadcast_group = 3, Mock()
+    tensors = [Mock(), Mock(), Mock()]
+    slot = Mock(
+        launched=False,
+        event=None,
+        sampled_tokens=tensors[0],
+        combined=tensors[1],
+        draft_tokens=tensors[2],
+    )
+    broadcast = Mock()
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+
+    handler._launch_receive(slot)
+    handler._launch_receive(slot)
+
+    assert slot.launched
+    handler.broadcast_stream.wait_stream.assert_called_once_with(handler.main_stream)
+    assert [item.args[0] for item in broadcast.call_args_list] == tensors

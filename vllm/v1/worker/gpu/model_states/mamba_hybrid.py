@@ -399,6 +399,28 @@ class MambaHybridModelState(DefaultModelState):
                 idx_mapping,
             )
 
+    def warmup_postprocess_state(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        """Compile PP state-update kernels without mutating request state."""
+        _scatter_num_accepted_kernel[(idx_mapping.shape[0],)](
+            idx_mapping,
+            num_sampled,
+            self.num_accepted_tokens_gpu,
+        )
+        if self._align_mode:
+            assert self._mamba_ctx is not None
+            self._mamba_ctx.run_fused_postprocess_align(
+                idx_mapping.shape[0],
+                self.num_accepted_tokens_gpu,
+                self._mamba_state_idx_gpu,
+                num_computed_tokens,
+                idx_mapping,
+            )
+
 
 @triton.jit
 def _scatter_num_accepted_kernel(
