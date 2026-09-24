@@ -13,10 +13,6 @@ from vllm.distributed import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule,
-    fused_recurrent_gated_delta_rule,
-)
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -37,6 +33,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops import (
+    chunk_gated_delta_rule,
+    fused_recurrent_gated_delta_rule,
+)
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -45,8 +45,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 @PluggableLayer.register("olmo_hybrid_gated_delta_net_attention")
 class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
-    """
-    Gated DeltaNet linear attention layer for OLMo Hybrid.
+    """Gated DeltaNet linear attention layer for OLMo Hybrid.
 
     This implements the linear attention mechanism that replaces sliding window
     attention in the hybrid architecture.
@@ -294,9 +293,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
     ):
-        """
-        Core attention computation (called by custom op).
-        """
+        """Core attention computation (called by custom op)."""
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 
@@ -305,7 +302,10 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]  # type: ignore[assignment]
+        attn_metadata = attn_metadata.get(self.prefix)  # type: ignore[assignment]
+        if attn_metadata is None:
+            # Profile/warmup dummy runs skip mamba-family metadata.
+            return
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -543,20 +543,10 @@ def olmo_hybrid_gdn_full_forward(
     )
 
 
-def olmo_hybrid_gdn_full_forward_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Fake implementation for torch.compile."""
-    return
-
-
 direct_register_custom_op(
     op_name="olmo_hybrid_gdn_full_forward",
     op_func=olmo_hybrid_gdn_full_forward,
     mutates_args=["output"],
-    fake_impl=olmo_hybrid_gdn_full_forward_fake,
 )
 
 

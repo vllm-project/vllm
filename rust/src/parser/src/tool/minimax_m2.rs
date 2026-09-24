@@ -1,15 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
+use xgrammar_structural_tag::format::Format;
 
 use super::parameters::ToolSchemas;
-use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
-use crate::tool::{StructuralTagModel, Tool};
+use crate::output_grammar::{self, OutputGrammarContext, OutputGrammarError};
+use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALL_START: &str = "<minimax:tool_call>";
+const FRAMED_TOOL_CALL_START: &str = "\n<minimax:tool_call>";
 const TOOL_CALL_END: &str = "</minimax:tool_call>";
 const INVOKE_START: &str = "<invoke";
 const INVOKE_END: &str = "</invoke>";
@@ -112,8 +118,40 @@ impl ToolParser for MinimaxM2ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Minimax)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Minimax.builder())
+    }
+
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let Some(format) =
+            output_grammar::visible_format_from_builder(self.structural_tag_builder(), ctx)?
+        else {
+            return Ok(None);
+        };
+
+        // The MiniMax builder's reasoning=false form retains the empty
+        // thinking close and separator used by its chat template. Strip that
+        // fixed prefix so the initialized reasoning parser can supply the
+        // actual reasoning phase.
+        let Format::Sequence(sequence) = format else {
+            return Err(OutputGrammarError::UnexpectedBuilderFormat { builder: "minimax" });
+        };
+        let [
+            Format::ConstString(empty_think),
+            Format::ConstString(separator),
+            visible,
+        ] = sequence.elements.as_slice()
+        else {
+            return Err(OutputGrammarError::UnexpectedBuilderFormat { builder: "minimax" });
+        };
+        if empty_think.value != "\n</think>\n\n" || separator.value != "\n\n" {
+            return Err(OutputGrammarError::UnexpectedBuilderFormat { builder: "minimax" });
+        }
+
+        Ok(Some(visible.clone()))
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -170,12 +208,15 @@ fn parse_text_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Even
 
 /// Parse a MiniMax M2 tool-block start marker.
 fn tool_block_start_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
-    literal(TOOL_CALL_START).value(MinimaxM2Event::ToolBlockStart).parse_next(input)
+    alt((literal(FRAMED_TOOL_CALL_START), literal(TOOL_CALL_START)))
+        .value(MinimaxM2Event::ToolBlockStart)
+        .parse_next(input)
 }
 
 /// Parse a safe text run before the next MiniMax M2 marker.
 fn safe_text_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
-    safe_text_len(input, TOOL_CALL_START).map(|len| MinimaxM2Event::Text { len })
+    safe_text_len_mul(input, &[FRAMED_TOOL_CALL_START, TOOL_CALL_START])
+        .map(|len| MinimaxM2Event::Text { len })
 }
 
 /// Parse one event inside a MiniMax M2 tool block.
@@ -274,6 +315,7 @@ mod tests {
     use super::{MinimaxM2ToolParser, TOOL_CALL_END, TOOL_CALL_START, ToolParser};
     use crate::tool::ToolParserTestExt as _;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
 
     fn build_tool_block(invokes: &[(&str, Vec<(&str, &str)>)]) -> String {
         let invokes = invokes
@@ -540,7 +582,7 @@ mod tests {
         let mut parser = MinimaxM2ToolParser::new(&test_tools());
         let result = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text(), "I will call the tools.\n");
+        assert_eq!(result.normal_text(), "I will call the tools.");
         assert_eq!(result.calls().len(), 2);
         assert_eq!(result.calls()[0].tool_index, 0);
         assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
@@ -595,5 +637,13 @@ mod tests {
 
         expect![[r#"tool parser parsing failed: near "<bad></minimax:tool_call>": "#]]
             .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<MinimaxM2ToolParser>(
+            "\n",
+            "<minimax:tool_call><invoke name=\"get_weather\"></invoke></minimax:tool_call>",
+        );
     }
 }

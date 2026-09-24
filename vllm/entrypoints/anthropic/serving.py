@@ -3,7 +3,7 @@
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/chat_completion/serving.py
 
-"""Anthropic Messages API serving handler"""
+"""Anthropic Messages API serving handler."""
 
 import json
 import logging
@@ -30,6 +30,11 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.base.protocol import (
+    JsonSchemaResponseFormat,
+    ResponseFormat,
+    StreamOptions,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -38,62 +43,52 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    JsonSchemaResponseFormat,
-    ResponseFormat,
-    StreamOptions,
-    UsageInfo,
-)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.utils.api_utils import sanitize_message
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
 
 
-def _get_cached_tokens(usage: UsageInfo | None) -> int | None:
-    """Extract cached token count from OpenAI UsageInfo."""
-    if usage is None or usage.prompt_tokens_details is None:
-        return None
-    return usage.prompt_tokens_details.cached_tokens
-
-
 def _build_anthropic_usage(
-    prompt_tokens: int,
-    completion_tokens: int | None,
     usage: UsageInfo | None,
 ) -> AnthropicUsage:
-    """Build an AnthropicUsage from OpenAI-style token counts.
+    """Build an AnthropicUsage from UsageInfo.
 
     Anthropic defines ``total_input == input_tokens + cache_read +
     cache_creation``.  vLLM's ``prompt_tokens`` is the total, so
-    ``input_tokens = prompt_tokens - cached_tokens``.
+    ``input_tokens = prompt_tokens - cache_read - cache_creation``.
 
-    OpenAI usage only exposes ``cached_tokens`` (hits); there is no
-    cache-creation analog, so ``cache_creation_input_tokens`` is ``0``
-    when cache info is present.  When cache info is absent (e.g.
-    ``--enable-prompt-tokens-details`` off, or a streaming chunk that
-    hasn't carried it yet), cache fields are left **unset** so
-    ``exclude_unset=True`` serialization omits them entirely.
+    Cache fields are taken from ``UsageInfo.prompt_tokens_details``.
+    When cache info is absent (e.g. ``--enable-prompt-tokens-details``
+    off, or a streaming chunk that hasn't carried it yet), cache fields
+    are left **unset** so ``exclude_unset=True`` serialization omits them
+    entirely.
 
     ``completion_tokens`` follows ``UsageInfo`` and may be ``None`` on
     intermediate stream chunks; we coerce to ``0`` for the wire format.
     """
-    output_tokens = completion_tokens or 0
-    cached = _get_cached_tokens(usage)
-    if cached is not None:
-        return AnthropicUsage(
-            input_tokens=prompt_tokens - cached,
-            output_tokens=output_tokens,
-            cache_read_input_tokens=cached,
-            cache_creation_input_tokens=0,
-        )
-    return AnthropicUsage(
-        input_tokens=prompt_tokens,
-        output_tokens=output_tokens,
-    )
+    kwargs = {}
+    if usage is None:
+        kwargs["input_tokens"] = 0
+        kwargs["output_tokens"] = 0
+    else:
+        kwargs["output_tokens"] = usage.completion_tokens or 0
+        input_tokens = usage.prompt_tokens
+
+        if (details := usage.prompt_tokens_details) is not None:
+            if (cache_read := details.cached_tokens) is not None:
+                input_tokens -= cache_read
+                kwargs["cache_read_input_tokens"] = cache_read
+
+            if (cache_creation := details.created_cache_tokens) is not None:
+                input_tokens -= cache_creation
+                kwargs["cache_creation_input_tokens"] = cache_creation
+
+        kwargs["input_tokens"] = max(0, input_tokens)
+    return AnthropicUsage(**kwargs)
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -101,7 +96,7 @@ def wrap_data_with_event(data: str, event: str):
 
 
 class AnthropicServingMessages(OpenAIServingChat):
-    """Handler for Anthropic Messages API requests"""
+    """Handler for Anthropic Messages API requests."""
 
     def __init__(
         self,
@@ -117,6 +112,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
+        tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -132,6 +128,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             reasoning_parser=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
@@ -195,13 +192,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         return f"data:{media_type};base64,{data}"
 
     @classmethod
-    def _convert_anthropic_to_openai_request(
+    def to_chat_completion_request(
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         *,
         merge_inline_system: bool = False,
     ) -> ChatCompletionRequest:
-        """Convert Anthropic message format to OpenAI format"""
+        """Convert Anthropic message format to OpenAI format."""
         openai_messages: list[dict[str, Any]] = []
 
         cls._convert_system_message(
@@ -229,7 +226,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
     ) -> None:
-        """Convert Anthropic system message to OpenAI format"""
+        """Convert Anthropic system message to OpenAI format."""
         system_parts: list[str] = []
 
         # Top-level system field
@@ -283,7 +280,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
     ) -> None:
-        """Convert Anthropic messages to OpenAI format"""
+        """Convert Anthropic messages to OpenAI format."""
         for msg in messages:
             # Handle system messages in-place: extract text, strip billing
             # headers, and only emit if there is real content.  This avoids
@@ -315,7 +312,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_msg: dict[str, Any],
         openai_messages: list[dict[str, Any]],
     ) -> None:
-        """Convert complex message content blocks"""
+        """Convert complex message content blocks."""
         content_parts: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
         reasoning_parts: list[str] = []
@@ -354,7 +351,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         reasoning_parts: list[str],
         openai_messages: list[dict[str, Any]],
     ) -> None:
-        """Convert individual content block"""
+        """Convert individual content block."""
         if block.type == "text" and block.text:
             content_parts.append({"type": "text", "text": block.text})
         elif block.type == "image" and block.source:
@@ -379,7 +376,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
-        """Convert tool_use block to OpenAI function call format"""
+        """Convert tool_use block to OpenAI function call format."""
         tool_call = {
             "id": block.id or f"call_{int(time.time())}",
             "type": "function",
@@ -398,7 +395,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_messages: list[dict[str, Any]],
         content_parts: list[dict[str, Any]],
     ) -> None:
-        """Convert tool_result block to OpenAI format"""
+        """Convert tool_result block to OpenAI format."""
         if role == "user":
             cls._convert_user_tool_result(block, openai_messages)
         else:
@@ -411,7 +408,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     def _convert_user_tool_result(
         cls, block, openai_messages: list[dict[str, Any]]
     ) -> None:
-        """Convert user tool_result with text and image support"""
+        """Convert user tool_result with text and image support."""
         tool_text = ""
         tool_image_urls: list[str] = []
         tool_reference: list[dict[str, Any]] = []
@@ -473,7 +470,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         openai_messages: list[dict[str, Any]],
     ) -> ChatCompletionRequest:
-        """Build base ChatCompletionRequest"""
+        """Build base ChatCompletionRequest."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return ChatCompletionRequest(
                 model=anthropic_request.model,
@@ -490,7 +487,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
+            ec_transfer_params=anthropic_request.ec_transfer_params,
+            vllm_xargs=anthropic_request.vllm_xargs,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 
@@ -500,7 +500,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req: ChatCompletionRequest,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
-        """Handle output configuration such as output format and effort"""
+        """Handle output configuration such as output format and effort."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return
         output_config: AnthropicOutputConfig | None = anthropic_request.output_config
@@ -521,7 +521,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req: ChatCompletionRequest,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
-        """Handle streaming configuration"""
+        """Handle streaming configuration."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return
         if anthropic_request.stream:
@@ -536,11 +536,14 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
-        """Convert Anthropic tool_choice to OpenAI format"""
+        """Convert Anthropic tool_choice to OpenAI format."""
         if anthropic_request.tool_choice is None:
             req.tool_choice = None
             return
 
+        req.parallel_tool_calls = (
+            not anthropic_request.tool_choice.disable_parallel_tool_use
+        )
         tool_choice_type = anthropic_request.tool_choice.type
         if tool_choice_type == "auto":
             req.tool_choice = "auto"
@@ -562,7 +565,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
-        """Convert Anthropic tools to OpenAI format"""
+        """Convert Anthropic tools to OpenAI format."""
         if anthropic_request.tools is None:
             return
 
@@ -592,15 +595,14 @@ class AnthropicServingMessages(OpenAIServingChat):
         request: AnthropicMessagesRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | AnthropicMessagesResponse | ErrorResponse:
-        """
-        Messages API similar to Anthropic's API.
+        """Messages API similar to Anthropic's API.
 
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
-        chat_req = self._convert_anthropic_to_openai_request(
+        chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
         )
@@ -624,16 +626,19 @@ class AnthropicServingMessages(OpenAIServingChat):
             id=generator.id,
             content=[],
             model=generator.model,
-            usage=_build_anthropic_usage(
-                generator.usage.prompt_tokens,
-                generator.usage.completion_tokens,
-                generator.usage,
-            ),
+            usage=_build_anthropic_usage(generator.usage),
             kv_transfer_params=generator.kv_transfer_params,
+            ec_transfer_params=generator.ec_transfer_params,
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":
-            result.stop_reason = "end_turn"
+            # vLLM reports the matched stop string in stop_reason (a str);
+            # an int stop-token-id or None (natural EOS) maps to end_turn.
+            if isinstance(choice.stop_reason, str):
+                result.stop_reason = "stop_sequence"
+                result.stop_sequence = choice.stop_reason
+            else:
+                result.stop_reason = "end_turn"
         elif choice.finish_reason == "length":
             result.stop_reason = "max_tokens"
         elif choice.finish_reason == "tool_calls":
@@ -717,6 +722,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             first_item = True
             finish_reason = None
+            # Matched stop string, when generation stopped on one (a str);
+            # int stop-token-id / None are not stop sequences.
+            stop_sequence: int | str | None = None
             state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
@@ -814,13 +822,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     model=origin_chunk.model,
                                     stop_reason=None,
                                     stop_sequence=None,
-                                    usage=_build_anthropic_usage(
-                                        origin_chunk.usage.prompt_tokens
-                                        if origin_chunk.usage
-                                        else 0,
-                                        0,
-                                        origin_chunk.usage,
-                                    ),
+                                    usage=_build_anthropic_usage(origin_chunk.usage),
                                 ),
                             )
                             first_item = False
@@ -832,21 +834,23 @@ class AnthropicServingMessages(OpenAIServingChat):
                         if len(origin_chunk.choices) == 0:
                             for event in stop_and_flush():
                                 yield event
-                            stop_reason = self.stop_reason_map.get(
-                                finish_reason or "stop"
-                            )
+                            if isinstance(stop_sequence, str):
+                                stop_delta = AnthropicDelta(
+                                    stop_reason="stop_sequence",
+                                    stop_sequence=stop_sequence,
+                                )
+                            else:
+                                stop_delta = AnthropicDelta(
+                                    stop_reason=self.stop_reason_map.get(
+                                        finish_reason or "stop"
+                                    ),
+                                    # Set explicitly so exclude_unset=True keeps it.
+                                    stop_sequence=None,
+                                )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
-                                delta=AnthropicDelta(stop_reason=stop_reason),
-                                usage=_build_anthropic_usage(
-                                    origin_chunk.usage.prompt_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    origin_chunk.usage.completion_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    origin_chunk.usage,
-                                ),
+                                delta=stop_delta,
+                                usage=_build_anthropic_usage(origin_chunk.usage),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
                             yield wrap_data_with_event(data, "message_delta")
@@ -854,6 +858,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
                         if origin_chunk.choices[0].finish_reason is not None:
                             finish_reason = origin_chunk.choices[0].finish_reason
+                            stop_sequence = origin_chunk.choices[0].stop_reason
                             # continue
 
                         # thinking / text content
@@ -1020,7 +1025,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        chat_req = self._convert_anthropic_to_openai_request(
+        chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
         )

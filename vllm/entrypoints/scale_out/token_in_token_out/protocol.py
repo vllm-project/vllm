@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -11,12 +11,21 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    StreamOptions,
+    validate_cache_salt,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
+    ChatCompletionStreamResponse,
 )
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionRequest,
+    CompletionStreamResponse,
+)
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -28,15 +37,23 @@ from vllm.utils import random_uuid
 class PlaceholderRangeInfo(BaseModel):
     """Serializable placeholder location for a single multi-modal item."""
 
-    offset: int
+    offset: int = Field(ge=0)
     """Start index of the placeholder tokens in the prompt."""
 
-    length: int
+    length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
     # TODO: add ``is_embed: list[bool] | None`` once the /generate side
     # consumes features — some models (e.g. Qwen-VL) use sparse
     # placeholder masks that cannot be recomputed from offset+length alone.
+
+
+def _has_serialized_mm_items(
+    payload: dict[str, list[str | None]] | None,
+) -> bool:
+    if not payload:
+        return False
+    return any(item is not None for items in payload.values() for item in items)
 
 
 class MultiModalFeatures(BaseModel):
@@ -62,6 +79,68 @@ class MultiModalFeatures(BaseModel):
     ``None`` for metadata-only (cache-hit) responses.
     """
 
+    mm_metadata: dict[str, list[str | None]] | None = None
+    """Per-modality serialized metadata for disaggregated prefill.
+
+    Each value is a list parallel to ``mm_hashes[modality]``. A ``str``
+    entry is a base64-encoded ``MultiModalKwargsItem`` containing only
+    placeholder-metadata and ``keep_on_cpu`` fields. ``None`` means that
+    the metadata is unavailable for that item. Prefill can use this
+    instead of ``kwargs_data`` only when ``ec_transfer_params`` is also
+    set, so embeddings arrive through the EC connector rather than from
+    ``pixel_values``.
+    """
+
+    @model_validator(mode="after")
+    def _validate_parallel_fields(self) -> "MultiModalFeatures":
+        modalities = set(self.mm_hashes)
+        if set(self.mm_placeholders) != modalities:
+            raise ValueError(
+                "mm_hashes and mm_placeholders must use the same modalities"
+            )
+        if self.kwargs_data is not None and set(self.kwargs_data) != modalities:
+            raise ValueError("kwargs_data must use the same modalities as mm_hashes")
+        if self.mm_metadata is not None and set(self.mm_metadata) != modalities:
+            raise ValueError("mm_metadata must use the same modalities as mm_hashes")
+
+        flattened_ranges: list[tuple[int, int]] = []
+        for modality in modalities:
+            num_hashes = len(self.mm_hashes[modality])
+            num_placeholders = len(self.mm_placeholders[modality])
+            if num_hashes != num_placeholders:
+                raise ValueError(
+                    f"{modality} mm_hashes and mm_placeholders must have "
+                    "the same length"
+                )
+            if (
+                self.kwargs_data is not None
+                and len(self.kwargs_data[modality]) != num_hashes
+            ):
+                raise ValueError(
+                    f"{modality} kwargs_data and mm_hashes must have the same length"
+                )
+            if (
+                self.mm_metadata is not None
+                and len(self.mm_metadata[modality]) != num_hashes
+            ):
+                raise ValueError(
+                    f"{modality} mm_metadata and mm_hashes must have the same length"
+                )
+            flattened_ranges.extend(
+                (placeholder.offset, placeholder.offset + placeholder.length)
+                for placeholder in self.mm_placeholders[modality]
+            )
+
+        flattened_ranges.sort()
+        for (offset, end), (next_offset, _) in zip(
+            flattened_ranges, flattened_ranges[1:]
+        ):
+            if next_offset < end:
+                raise ValueError(
+                    "mm_placeholders must be globally non-overlapping and sorted"
+                )
+        return self
+
 
 class GenerateRequest(BaseModel):
     request_id: str = Field(
@@ -74,14 +153,6 @@ class GenerateRequest(BaseModel):
     )
     token_ids: list[int] = Field(min_length=1)
     """The token ids to generate text from."""
-
-    assistant_tokens_mask: list[int] | None = None
-    """Per-token mask (1 = assistant-generated, 0 = not).
-
-    Only populated when the render request sets ``return_assistant_tokens_mask=True``
-    and the chat template supports ``{% generation %}``.
-    ``None`` when the mask was not requested or could not be computed.
-    """
 
     @field_validator("token_ids")
     @classmethod
@@ -100,15 +171,57 @@ class GenerateRequest(BaseModel):
     features: MultiModalFeatures | None = None
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
+    content_parts: list[dict[str, Any]] | None = None
+    """Raw multimodal input; server resolves media. Mutually exclusive
+    with ``features``."""
+
+    @model_validator(mode="after")
+    def _check_mm_fields_exclusive(self) -> "GenerateRequest":
+        if self.content_parts and self.features:
+            raise ValueError("content_parts and features are mutually exclusive")
+        return self
+
+    @model_validator(mode="after")
+    def _require_ec_for_metadata_only(self) -> "GenerateRequest":
+        features = self.features
+        if features is None:
+            return self
+        if not _has_serialized_mm_items(features.mm_metadata):
+            return self
+        if self.ec_transfer_params:
+            return self
+        kwargs_data = features.kwargs_data or {}
+        for modality, metadata_items in (features.mm_metadata or {}).items():
+            kwargs_items = kwargs_data.get(modality, [None] * len(metadata_items))
+            if any(
+                metadata is not None and kwargs is None
+                for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
+            ):
+                raise ValueError(
+                    "metadata-only multimodal items require ec_transfer_params"
+                )
+        return self
+
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
 
     model: str | None = None
 
+    return_token_ids: bool | None = Field(
+        default=None,
+        description=(
+            "If true, return the final prompt token IDs after multimodal "
+            "placeholder expansion, together with multimodal placeholder ranges. "
+            "In streaming mode, this metadata is included only in the first chunk."
+        ),
+    )
+
     stream: bool | None = False
     stream_options: StreamOptions | None = None
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -132,6 +245,12 @@ class GenerateRequest(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
 
     # Tracks which keys the caller explicitly set inside ``sampling_params``
     # when the request was parsed from a JSON body. Lets the server tell
@@ -141,6 +260,9 @@ class GenerateRequest(BaseModel):
     # ``SamplingParams`` instance (e.g. from internal callers that have
     # already resolved values), in which case all fields are considered set.
     _sampling_params_provided_keys: set[str] | None = PrivateAttr(default=None)
+    _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
+        PrivateAttr(default=None)
+    )
 
     @model_validator(mode="wrap")
     @classmethod
@@ -153,6 +275,27 @@ class GenerateRequest(BaseModel):
         instance = handler(data)
         instance._sampling_params_provided_keys = provided
         return instance
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_cache_salt(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            validate_cache_salt(data.get("cache_salt"))
+        return data
+
+    @model_validator(mode="after")
+    def _validate_multimodal_feature_bounds(self) -> "GenerateRequest":
+        if self.features is None:
+            return self
+
+        prompt_len = len(self.token_ids)
+        for ranges in self.features.mm_placeholders.values():
+            for placeholder in ranges:
+                if placeholder.offset + placeholder.length > prompt_len:
+                    raise ValueError(
+                        "mm_placeholders must remain within the token_ids sequence"
+                    )
+        return self
 
     def is_sampling_param_provided(self, name: str) -> bool:
         """Whether the caller explicitly set ``sampling_params.<name>``.
@@ -181,7 +324,7 @@ class GenerateResponseChoice(BaseModel):
     token_ids: list[int] | None = None
     # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
     # (numpy serialization). Shape after decode:
-    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    #   (num_tokens - 1, num_layers, num_experts_per_tok) dtype uint8/uint16/int32
     # ``num_tokens - 1`` because the last sampled token has not been
     # forwarded yet and therefore has no routing data.
     # Decode:
@@ -189,6 +332,7 @@ class GenerateResponseChoice(BaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    sampling_mask: list[list[int]] | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -204,6 +348,7 @@ class GenerateResponseStreamChoice(BaseModel):
     finish_reason: str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
+    sampling_mask: list[list[int]] | None = None
 
 
 class GenerateStreamResponse(BaseModel):
@@ -217,6 +362,9 @@ class GenerateStreamResponse(BaseModel):
     )
     choices: list[GenerateResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    prompt_token_ids: list[int] | None = None
+    mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -233,29 +381,38 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_token_ids: list[int] | None = None
+    mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
-
-
-####### Derender (postprocessing) #######
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
 
 
 class DerenderChatRequest(BaseModel):
     """Request for the /v1/chat/completions/derender endpoint (non-streaming).
 
-    Wraps a complete GenerateResponse and caller-supplied metadata needed to
-    produce a fully-formed ChatCompletionResponse without a GPU.
-
-    Streaming derender would require a separate endpoint design with
-    incremental token delivery, ``OutputProcessor``-based detokenization,
-    and ``parser.parse_delta()`` instead of ``parser.parse()``.
+    Wraps a complete GenerateResponse and caller supplied metadata needed to
+    produce a fully formed ChatCompletionResponse without a GPU.
     """
 
-    model: str
+    # --8<-- [start:derender-chat-request]
+    stream: Literal[False] = False
+
+    model: str | None = None
+    """Served model name. Defaults to the server's served model name."""
+
     generate_response: GenerateResponse
+    """The complete token-in / token-out engine response to derender."""
+
     prompt_tokens: int | None = None
     """Prompt token count for usage; defaults to 0 if omitted.
 
@@ -268,8 +425,9 @@ class DerenderChatRequest(BaseModel):
 
     Required by the parsing so that tool/reasoning parsers can receive the full
     request context they expect (request.tools, request.tool_choice,
-    request._grammar_from_tool_parser, etc.).
+    request._grammar_from_parser, etc.).
     """
+    # --8<-- [end:derender-chat-request]
 
 
 class DerenderCompletionRequest(BaseModel):
@@ -280,8 +438,16 @@ class DerenderCompletionRequest(BaseModel):
     returned by /v1/completions/render.
     """
 
-    model: str
+    # --8<-- [start:derender-completion-request]
+    stream: Literal[False] = False
+
+    model: str | None = None
+    """Served model name. Defaults to the server's served model name."""
+
     generate_responses: list[GenerateResponse]
+    """One response per prompt, parallel to the list[GenerateRequest]
+    returned by /v1/completions/render."""
+
     prompt_tokens: list[int] | None = None
     """One prompt token count per response; each defaults to 0 if omitted.
 
@@ -294,6 +460,7 @@ class DerenderCompletionRequest(BaseModel):
     Mirrors chat_request on DerenderChatRequest. Required by the parsing
     so parsers receive the full request context.
     """
+    # --8<-- [end:derender-completion-request]
 
     @model_validator(mode="after")
     def _validate_prompt_tokens_length(self) -> "DerenderCompletionRequest":
@@ -305,3 +472,219 @@ class DerenderCompletionRequest(BaseModel):
                 f"generate_responses length ({len(self.generate_responses)})"
             )
         return self
+
+
+class DerenderStreamState(BaseModel):
+    """Per sequence state for stateless streaming derender.
+
+    The client carries this between successive per chunk HTTP calls to the
+    streaming derender endpoint. All fields are plain JSON serializable data.
+    No opaque tokenizer or parser internals are stored here.
+
+    Two separate sets of fields support two different streaming modes:
+
+    - For plain streaming (no parser configured including the completions path):
+      `prev_tokens`, `prefix_offset` and `read_offset` maintain a bounded incremental
+      decoding window. This requires O(window) transport and O(delta) computation
+      per chunk.
+    - For parser enabled chat streaming: `output_token_ids`, `output_chunk_lens`,
+      `tools_streamed` and `last_tool_call_ids` are used to replay `parse_delta()`
+      from scratch on every chunk because parser state cannot be serialized. This
+      incurs O(n) transport per chunk (O(n²) per generation) and O(n²)
+      `parse_delta()` calls per generation. Since many parsers re-scan the
+      entire accumulated text on each invocation, `parse_delta()` itself is
+      O(n) yielding a true worst case compute cost of O(n³) per generation.
+      No caching is performed. Work is bounded by `max_model_len`.
+      See `OnlineDerenderer._derender_chat_stream_parsed`.
+
+    The detokenization strategy carries the incremental decode offsets
+    directly rather than re-sending the whole token history each chunk.
+    `detokenize_incrementally` only ever reads the trailing token window
+    `prev_tokens[prefix_offset:]`, so we carry just that tail plus the two
+    offsets. Each chunk resumes exactly where the last one stopped, including
+    any partially processed multi-byte character (tracked by `read_offset`),
+    then trims and rebases the window so it never grows with generation length.
+
+    Performance:
+    - Compute per chunk is O(delta). One `detokenize_incrementally` call per
+      new token, independent of how many tokens preceded it.
+    - Transport per chunk is O(window). The carried tail is bounded by the
+      incremental detokenization offset, so cumulative bytes over the wire are
+      O(n) rather than the O(n^2) a full history round trip would incur.
+    """
+
+    prev_tokens: list[str] = Field(default_factory=list)
+    """Trailing decode window. Token strings from `prefix_offset` onward.
+
+    Bounded, trimmed and rebased each chunk to the tail
+    `detokenize_incrementally` still reads, so it does not grow with the
+    number of chunks.
+    """
+
+    prefix_offset: int = Field(default=0, ge=0)
+    """Prefix offset into `prev_tokens` for incremental detokenization."""
+
+    read_offset: int = Field(default=0, ge=0)
+    """Read offset into `prev_tokens` for incremental detokenization."""
+
+    @field_validator("prev_tokens")
+    @classmethod
+    def _bound_prev_tokens(cls, v: list[str]) -> list[str]:
+        # INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET is small (5) and the trimmed
+        # window is O(offset). A generous limit rejects unusually large or malformed
+        # payloads without restricting legitimate multi-byte sequences.
+        limit = 1024
+        if len(v) > limit:
+            raise ValueError(f"prev_tokens length ({len(v)}) exceeds maximum ({limit})")
+        return v
+
+    role_sent: bool = False
+    """True once the initial `role: "assistant"` delta has been emitted.
+
+    Prevents re-emitting the role on subsequent chunks even when the detok
+    window is transiently empty (e.g. usage only final chunk).
+    """
+
+    output_token_ids: list[int] = Field(default_factory=list)
+    """All output tokens seen so far. Parser path only.
+
+    Replay buffer: each chunk rebuilds a fresh parser and replays every
+    token in here through `parse_delta` (discarding the result) before
+    processing the current chunk's tokens since parser internal state
+    cannot be serialized into this stateless model. Unavoidably O(n)
+    bounded by ``max_model_len`` (enforced server side, not by a field
+    validator here since the bound is model dependent).
+    """
+
+    output_chunk_lens: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list)
+    """Token count of each chunk in `output_token_ids`. Parser path only.
+
+    Replay uses these to reproduce the original `parse_delta` call
+    boundaries. Must sum to `len(output_token_ids)`.
+    """
+
+    @model_validator(mode="after")
+    def _validate_output_chunk_lens(self) -> "DerenderStreamState":
+        total = sum(self.output_chunk_lens)
+        if total != len(self.output_token_ids):
+            raise ValueError(
+                f"output_chunk_lens must sum to len(output_token_ids) "
+                f"(got sum={total}, len(output_token_ids)="
+                f"{len(self.output_token_ids)})"
+            )
+        return self
+
+    tools_streamed: bool = False
+    """True once a tool call delta has been emitted. Parser path only.
+
+    Drives the `finish_reason` -> `"tool_calls"` rewrite on the final
+    chunk mirroring the generate streaming path.
+    """
+
+    last_tool_call_ids: list[str] = Field(default_factory=list)
+    """Stable tool call IDs, assigned once when each call first appears.
+
+    Indexed by tool call index. Parser path only. Prevents ID regeneration
+    when replay reprocesses a tool call that already has a pinned ID.
+    """
+
+
+class DerenderChatStreamRequest(BaseModel):
+    """One chunk streaming derender request for /v1/chat/completions/derender.
+
+    The client sends one request per SSE chunk received from
+    ``/inference/v1/generate``.  Each request carries the generate chunk
+    plus the ``stream_state`` returned by the previous call (``None`` on the
+    first call).  The response contains the derendered chunk and the updated
+    state to be passed to the next call.
+
+    This implements stateless no server side session. All mutable state lives in
+    the client carried ``stream_state``.
+    """
+
+    # --8<-- [start:derender-chat-stream-request]
+    stream: Literal[True]
+
+    model: str | None = None
+    generate_chunk: GenerateStreamResponse
+    """One SSE chunk from ``/inference/v1/generate`` (``stream=True``)."""
+
+    stream_state: DerenderStreamState | None = None
+    """Client carried detok state from the previous call. ``None`` on first."""
+
+    prompt_tokens: int | None = None
+    """Prompt token count for usage. Forwarded from the render step."""
+
+    prompt_token_ids: list[int] | None = None
+    """Prompt token IDs. Required by the parser path's `parse_delta` to
+    settle its initial reasoning state (e.g. chat templates that pre-open
+    ``<think>``). `prompt_tokens` is a usage count and cannot serve this
+    purpose. Sourced from `GenerateRequest.token_ids` at the render step.
+
+    Rejected with a 400 (by `ServingDerender`) when a tool or reasoning
+    parser is configured and this is omitted. Without it, `parse_delta`
+    cannot tell whether the prompt left reasoning open and would silently
+    misclassify reasoning content as plain content. Unused on the plain
+    detokenization path.
+    """
+
+    chat_request: ChatCompletionRequest | None = None
+    """The original (post adjust_request) ChatCompletionRequest from /render."""
+    # --8<-- [end:derender-chat-stream-request]
+
+
+class DerenderCompletionStreamRequest(BaseModel):
+    """One chunk streaming derender request for /v1/completions/derender.
+
+    Parallel to ``DerenderChatStreamRequest`` for the completions endpoint.
+    Each call processes one SSE chunk (one output sequence's delta) and
+    returns the derendered chunk plus updated state.
+    """
+
+    # --8<-- [start:derender-completion-stream-request]
+    stream: Literal[True]
+
+    model: str | None = None
+    generate_chunk: GenerateStreamResponse
+    """One SSE chunk from ``/inference/v1/generate``."""
+
+    stream_state: DerenderStreamState | None = None
+    """Client-carried detok state. ``None`` on the first call."""
+
+    prompt_tokens: int | None = None
+    """Prompt token count for usage."""
+
+    completion_request: CompletionRequest | None = None
+    """The original (post adjust_request) CompletionRequest from /render."""
+    # --8<-- [end:derender-completion-stream-request]
+
+
+class DerenderChatStreamResponse(BaseModel):
+    """Response for one streaming chat derender chunk.
+
+    Pairs the derendered SSE chunk with the updated client carried state to
+    pass to the next call.
+    """
+
+    chunk: ChatCompletionStreamResponse
+    stream_state: DerenderStreamState
+
+
+class DerenderCompletionStreamResponse(BaseModel):
+    """Response for one streaming completions derender chunk.
+
+    Parallel to ``DerenderChatStreamResponse`` for the completions endpoint.
+    """
+
+    chunk: CompletionStreamResponse
+    stream_state: DerenderStreamState
+
+
+# Determines the type by checking the ``stream`` field's literal value. A body without
+# ``stream`` validates as the non-streaming member
+# (``stream`` defaults to ``False`` there), so FastAPI can validate and dispatch both
+# shapes on a single path.
+DerenderChatRequestUnion: TypeAlias = DerenderChatRequest | DerenderChatStreamRequest
+DerenderCompletionRequestUnion: TypeAlias = (
+    DerenderCompletionRequest | DerenderCompletionStreamRequest
+)

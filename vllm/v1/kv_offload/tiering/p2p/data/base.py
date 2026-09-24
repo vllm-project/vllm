@@ -87,6 +87,7 @@ class PollResult(NamedTuple):
     Attributes:
         done: Transfer IDs that completed successfully.
         failed: Transfer IDs that failed (error, timeout, etc.).
+
     """
 
     done: Sequence[int]
@@ -174,6 +175,7 @@ class DataTransport(ABC):
             base_addr: Base address of the peer's block memory region.
             num_blocks: Number of blocks in the peer's region.
             block_len: Size of each block (must match local block_len).
+
         """
         ...
 
@@ -203,18 +205,29 @@ class DataTransport(ABC):
         Returns:
             A unique transfer_id (int) to track this transfer, or
             None if the peer is not registered or submission failed.
+
         """
         ...
 
     @abstractmethod
-    def poll(self) -> PollResult:
-        """Poll all inflight transfers for completion.
+    def poll(self, peer_id: str | None = None) -> PollResult:
+        """Poll inflight transfers for completion.
+
+        Args:
+            peer_id: If given, only poll (and drain) transfers submitted for
+                this peer_id — the value passed to ``write_blocks``. This is
+                required when a single transport is shared across multiple
+                peer sessions: ``poll()`` pops completed handles, so an
+                unscoped poll by one session would consume and discard the
+                completions of its siblings, starving them. ``None`` polls
+                every peer's transfers (used only for the shutdown drain).
 
         Returns:
             PollResult with lists of completed and failed transfer_ids.
             Completed/failed transfers are removed from the inflight set.
 
         Must be called periodically to drive progress checking.
+
         """
         ...
 
@@ -246,6 +259,7 @@ class DataTransport(ABC):
             For mode="wait", the subset of *transfer_ids* still
             tracked as inflight after the cancel attempt. For
             mode="immediate", always [].
+
         """
         ...
 

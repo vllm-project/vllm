@@ -52,6 +52,8 @@ _FP8_DTYPES = (
 def _gqa_sparse_fwd_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
     kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
+    k_scale_ptr,
+    v_scale_ptr,
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # [total_q, num_heads, head_dim]
     block_table_ptr,  # [num_reqs, max_blocks]
@@ -72,6 +74,10 @@ def _gqa_sparse_fwd_kernel(
     stride_kv_h,
     stride_kv_pos,
     stride_kv_d,
+    stride_ks_h,
+    stride_ks_t,
+    stride_vs_h,
+    stride_vs_t,
     stride_th,
     stride_tn,
     stride_tk,
@@ -85,6 +91,7 @@ def _gqa_sparse_fwd_kernel(
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_QH: tl.constexpr,
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
+    KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
     pid_q = tl.program_id(0)
@@ -148,6 +155,17 @@ def _gqa_sparse_fwd_kernel(
             )
             if USE_FP8:
                 k = k.to(q.dtype)
+                if KV_SCALE_MODE == 1:
+                    k = (k * tl.load(k_scale_ptr)).to(q.dtype)
+                elif KV_SCALE_MODE == 2:
+                    k_scale = tl.load(
+                        k_scale_ptr
+                        + pid_kh * stride_ks_h
+                        + (page * BLOCK_SIZE_K + off_n) * stride_ks_t,
+                        mask=pos_mask,
+                        other=1.0,
+                    )
+                    k = (k * k_scale[None, :]).to(q.dtype)
             qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_K), dtype=tl.float32)
             # causal: q_abs_pos - k_off >= block_start (c)
             qk += tl.where(off_q[:, None, :] >= c, 0, float("-inf"))
@@ -169,6 +187,17 @@ def _gqa_sparse_fwd_kernel(
             )
             if USE_FP8:
                 v = v.to(q.dtype)
+                if KV_SCALE_MODE == 1:
+                    v = (v * tl.load(v_scale_ptr)).to(q.dtype)
+                elif KV_SCALE_MODE == 2:
+                    v_scale = tl.load(
+                        v_scale_ptr
+                        + pid_kh * stride_vs_h
+                        + (page * BLOCK_SIZE_K + off_n) * stride_vs_t,
+                        mask=pos_mask,
+                        other=1.0,
+                    )
+                    v = (v * v_scale[:, None]).to(q.dtype)
             acc_o += tl.dot(p.to(v.dtype), v)
             m_i = m_ij
             lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
@@ -205,6 +234,8 @@ def _gqa_sparse_fwd_kernel(
 def _gqa_sparse_decode_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
     kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
+    k_scale_ptr,
+    v_scale_ptr,
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # partial out: [NUM_TOPK_CHUNKS, total_q, num_heads, head_dim]
     lse_ptr,  # partial lse (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
@@ -223,6 +254,10 @@ def _gqa_sparse_decode_kernel(
     stride_kv_h,
     stride_kv_pos,
     stride_kv_d,
+    stride_ks_h,
+    stride_ks_t,
+    stride_vs_h,
+    stride_vs_t,
     stride_th,
     stride_tn,
     stride_tk,
@@ -239,6 +274,7 @@ def _gqa_sparse_decode_kernel(
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
+    KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
     USE_PDL: tl.constexpr,
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
@@ -305,6 +341,17 @@ def _gqa_sparse_decode_kernel(
         )
         if USE_FP8:
             k = k.to(q.dtype)
+            if KV_SCALE_MODE == 1:
+                k = (k * tl.load(k_scale_ptr)).to(q.dtype)
+            elif KV_SCALE_MODE == 2:
+                k_scale = tl.load(
+                    k_scale_ptr
+                    + pid_kh * stride_ks_h
+                    + (page * BLOCK_SIZE_K + off_n) * stride_ks_t,
+                    mask=pos_mask,
+                    other=1.0,
+                )
+                k = (k * k_scale[None, :]).to(q.dtype)
         qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_K), dtype=tl.float32)
         qk += tl.where(pos_mask[None, :], 0, float("-inf"))
         qk += tl.dot(q, k) * sm_scale_log2e
@@ -323,6 +370,17 @@ def _gqa_sparse_decode_kernel(
         )
         if USE_FP8:
             v = v.to(q.dtype)
+            if KV_SCALE_MODE == 1:
+                v = (v * tl.load(v_scale_ptr)).to(q.dtype)
+            elif KV_SCALE_MODE == 2:
+                v_scale = tl.load(
+                    v_scale_ptr
+                    + pid_kh * stride_vs_h
+                    + (page * BLOCK_SIZE_K + off_n) * stride_vs_t,
+                    mask=pos_mask,
+                    other=1.0,
+                )
+                v = (v * v_scale[:, None]).to(q.dtype)
         acc_o += tl.dot(p.to(v.dtype), v)
         m_i = m_ij
         lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
@@ -410,6 +468,48 @@ def _merge_topk_attn_out_kernel(
 # ---------------------------------------------------------------------------
 # Python wrappers
 # ---------------------------------------------------------------------------
+_KV_SCALE_NONE = 0
+_KV_SCALE_SCALAR = 1
+_KV_SCALE_PER_TOKEN_HEAD = 2
+
+
+def _kv_scale_args(
+    output: torch.Tensor,
+    num_kv_heads: int,
+    k_scale: torch.Tensor | None,
+    v_scale: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, int, int, int, int, int]:
+    if k_scale is None and v_scale is None:
+        return output, output, 0, 0, 0, 0, _KV_SCALE_NONE
+    if k_scale is None or v_scale is None:
+        raise ValueError("k_scale and v_scale must be both provided or both None")
+    if k_scale.device != output.device or v_scale.device != output.device:
+        raise ValueError("k_scale and v_scale must be on the same device as output")
+    if k_scale.numel() == 1 and v_scale.numel() == 1:
+        return k_scale, v_scale, 0, 0, 0, 0, _KV_SCALE_SCALAR
+    if k_scale.dim() == 2 and v_scale.dim() == 2:
+        if k_scale.shape[0] != num_kv_heads or v_scale.shape[0] != num_kv_heads:
+            raise ValueError(
+                "per-token/head KV scales must have shape "
+                f"[{num_kv_heads}, max_kv_tokens]"
+            )
+        if k_scale.shape != v_scale.shape:
+            raise ValueError("k_scale and v_scale must have matching shapes")
+        return (
+            k_scale,
+            v_scale,
+            k_scale.stride(0),
+            k_scale.stride(1),
+            v_scale.stride(0),
+            v_scale.stride(1),
+            _KV_SCALE_PER_TOKEN_HEAD,
+        )
+    raise ValueError(
+        "MiniMax-M3 sparse attention supports scalar KV scales or "
+        "[num_kv_heads, max_kv_tokens] per-token/head scales"
+    )
+
+
 @torch.no_grad()
 def minimax_m3_sparse_attn(
     q: torch.Tensor,  # [total_q, num_heads, head_dim]
@@ -423,6 +523,8 @@ def minimax_m3_sparse_attn(
     num_kv_heads: int,
     sm_scale: float,
     output: torch.Tensor,  # [total_q, num_heads, head_dim]
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> None:
     """GQA block-sparse attention over the selected blocks. block_size_q == 1."""
     total_q, num_heads, head_dim = q.shape
@@ -430,10 +532,33 @@ def minimax_m3_sparse_attn(
     topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
     use_fp8 = kv_cache.dtype in _FP8_DTYPES
+    (
+        k_scale_arg,
+        v_scale_arg,
+        stride_ks_h,
+        stride_ks_t,
+        stride_vs_h,
+        stride_vs_t,
+        kv_scale_mode,
+    ) = (
+        _kv_scale_args(output, num_kv_heads, k_scale, v_scale)
+        if use_fp8
+        else (
+            output,
+            output,
+            0,
+            0,
+            0,
+            0,
+            _KV_SCALE_NONE,
+        )
+    )
     grid = (max_query_len, num_kv_heads, batch)
     _gqa_sparse_fwd_kernel[grid](
         q,
         kv_cache,
+        k_scale_arg,
+        v_scale_arg,
         topk_idx,
         output,
         block_table,
@@ -454,6 +579,10 @@ def minimax_m3_sparse_attn(
         kv_cache.stride(1),
         kv_cache.stride(2),
         kv_cache.stride(3),
+        stride_ks_h,
+        stride_ks_t,
+        stride_vs_h,
+        stride_vs_t,
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
@@ -464,6 +593,7 @@ def minimax_m3_sparse_attn(
         BLOCK_SIZE_Q=1,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         USE_FP8=use_fp8,
+        KV_SCALE_MODE=kv_scale_mode,
     )
 
 
@@ -478,6 +608,8 @@ def minimax_m3_sparse_attn_decode(
     sm_scale: float,
     output: torch.Tensor,  # [total_q, num_heads, head_dim]
     decode_query_len: int,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> None:
     """GQA block-sparse attention for decode (split-K over the top-k blocks)."""
     total_q, num_heads, head_dim = q.shape
@@ -485,6 +617,27 @@ def minimax_m3_sparse_attn_decode(
     max_topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
     use_fp8 = kv_cache.dtype in _FP8_DTYPES
+    (
+        k_scale_arg,
+        v_scale_arg,
+        stride_ks_h,
+        stride_ks_t,
+        stride_vs_h,
+        stride_vs_t,
+        kv_scale_mode,
+    ) = (
+        _kv_scale_args(output, num_kv_heads, k_scale, v_scale)
+        if use_fp8
+        else (
+            output,
+            output,
+            0,
+            0,
+            0,
+            0,
+            _KV_SCALE_NONE,
+        )
+    )
     use_pdl = current_platform.is_arch_support_pdl()
     # `launch_pdl` is a Triton runtime kwarg only some backends accept (CUDA
     # SM9+); this ROCm Triton rejects it even when False ("Keyword argument
@@ -505,6 +658,8 @@ def minimax_m3_sparse_attn_decode(
     _gqa_sparse_decode_kernel[grid](
         q,
         kv_cache,
+        k_scale_arg,
+        v_scale_arg,
         topk_idx,
         o_partial,
         lse_partial,
@@ -523,6 +678,10 @@ def minimax_m3_sparse_attn_decode(
         kv_cache.stride(1),
         kv_cache.stride(2),
         kv_cache.stride(3),
+        stride_ks_h,
+        stride_ks_t,
+        stride_vs_h,
+        stride_vs_t,
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
@@ -537,6 +696,7 @@ def minimax_m3_sparse_attn_decode(
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         NUM_TOPK_CHUNKS=num_topk_chunks,
         USE_FP8=use_fp8,
+        KV_SCALE_MODE=kv_scale_mode,
         USE_PDL=use_pdl,
         **pdl_launch,
     )

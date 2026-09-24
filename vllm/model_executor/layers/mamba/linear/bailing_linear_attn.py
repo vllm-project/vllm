@@ -4,7 +4,7 @@ import copy
 
 import torch
 import torch.nn.functional as F
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.config import (
     VllmConfig,
@@ -16,10 +16,6 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.fla.ops.layernorm_guard import (
-    RMSNormGated,
-    layernorm_fn,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -33,11 +29,15 @@ from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     linear_attention_decode,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+    RMSNormGated,
+    layernorm_fn,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 
-def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
+def _build_rope_parameters(config: PreTrainedConfig) -> dict | None:
     rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
     if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
         rope_parameters["rope_theta"] = config.rope_theta
@@ -385,7 +385,7 @@ class BailingMoELinearAttention(LinearAttention):
     # --8<-- [end:bailing_moe_linear_attention]
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vllm_config: VllmConfig,
         prefix: str = "linear_attn",
     ):
@@ -523,7 +523,7 @@ class BailingMoELinearAttention(LinearAttention):
         output: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        """Forward method called by torch.ops.vllm.linear_attention"""
+        """Forward method called by torch.ops.vllm.linear_attention."""
         torch.ops.vllm.linear_attention(
             hidden_states,
             output,
@@ -542,7 +542,8 @@ class BailingMoELinearAttention(LinearAttention):
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]  # type: ignore
+            attn_metadata = attn_metadata.get(self.prefix)  # type: ignore
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, LinearAttentionMetadata)
             num_actual_tokens = (
                 attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens

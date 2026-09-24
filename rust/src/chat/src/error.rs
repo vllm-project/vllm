@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use thiserror::Error;
 use thiserror_ext::{AsReport as _, Macro};
 
@@ -14,12 +17,22 @@ pub enum Error {
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    #[error("{0}")]
+    InvalidReasoningEffort(String),
+    #[error("{message}")]
+    InvalidReasoningControl { message: String },
+    #[error("chat role `{role}` is not supported by this chat renderer")]
+    UnsupportedChatRole { role: String },
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
     UnsupportedMultimodalContent(&'static str),
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
+    #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
+    MmLimitExceeded { modality: String, limit: usize },
+    #[error("invalid inline multimodal features: {message}")]
+    InvalidPreprocessedMultimodal { message: String },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
@@ -29,6 +42,10 @@ pub enum Error {
     },
     #[error("{kind} parsing is disabled by frontend configuration")]
     ParserDisabled { kind: &'static str },
+    #[error(
+        "unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool={tool}, reasoning={reasoning}"
+    )]
+    IncompatibleParserSelections { tool: String, reasoning: String },
     #[error(
         "{kind} parser `{name}` is not registered{}",
         available_parser_hint(.available_names)
@@ -42,6 +59,11 @@ pub enum Error {
     ParserInitialization {
         kind: &'static str,
         name: String,
+        #[source]
+        error: BoxedError,
+    },
+    #[error("failed to initialize request output parser")]
+    OutputParserInitialization {
         #[source]
         error: BoxedError,
     },
@@ -66,8 +88,17 @@ pub enum Error {
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
     ToolCallStreamInvariant { message: String },
-    #[error("failed to build structural tag: {message}")]
-    StructuralTag { message: String },
+    #[error("duplicate tool name `{name}`")]
+    DuplicateToolName { name: String },
+    #[error("tool_choice requires at least one available tool")]
+    ToolChoiceRequiresTools,
+    #[error("tool_choice function `{name}` was not found in the available tools")]
+    ToolChoiceFunctionNotFound { name: String },
+    #[error("failed to build output grammar")]
+    OutputGrammar {
+        #[source]
+        error: BoxedError,
+    },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
@@ -80,11 +111,19 @@ impl Error {
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {
-            Self::PromptTooLong { .. } => true,
+            Self::PromptTooLong { .. }
+            | Self::InvalidReasoningEffort(_)
+            | Self::InvalidReasoningControl { .. }
+            | Self::DuplicateToolName { .. }
+            | Self::ToolChoiceRequiresTools
+            | Self::ToolChoiceFunctionNotFound { .. }
+            | Self::UnsupportedChatRole { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
-            | Self::UnsupportedModality { .. } => true,
+            | Self::UnsupportedModality { .. }
+            | Self::InvalidPreprocessedMultimodal { .. }
+            | Self::MmLimitExceeded { .. } => true,
 
             _ => false,
         }

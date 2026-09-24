@@ -22,6 +22,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 try:
@@ -130,9 +131,16 @@ class StandaloneCompiledArtifacts:
             compilation_counter.num_compiled_artifacts_loaded += 1
             return AOTCompiledArtifact.deserialize(entry)
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            entries = list(self.submodule_bytes_store.values())
-            loaded_entries = list(executor.map(_load_entry, entries))
+        entries = list(self.submodule_bytes_store.values())
+        if current_platform.is_rocm():
+            # Deserializing an artifact loads its compiled Triton kernels, which
+            # on ROCm ends up in hipModuleLoad. Loading modules concurrently
+            # deadlocks on the dynamic linker lock, since rocprofiler-sdk calls
+            # dl_iterate_phdr from inside the load, so load one at a time.
+            loaded_entries = [_load_entry(entry) for entry in entries]
+        else:
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                loaded_entries = list(executor.map(_load_entry, entries))
 
         for i, k in enumerate(self.submodule_bytes_store.keys()):
             self.loaded_submodule_store[k] = loaded_entries[i]
@@ -164,8 +172,7 @@ def patch_pytree_map_over_slice():
 
 
 class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
-    """
-    A wrapper around a compiled function by vllm. It will forward the tensor
+    """A wrapper around a compiled function by vllm. It will forward the tensor
     inputs to the compiled function and return the result.
     It also implements a serialization interface to support PyTorch's precompile
     with custom backend, so that we can save and load the compiled function on
@@ -402,9 +409,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
     @property
     def co_name(self) -> Literal["VllmSerializableFunction"]:
-        """
-        Used for depyf debugging.
-        """
+        """Used for depyf debugging."""
         return "VllmSerializableFunction"
 
 
@@ -437,6 +442,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     If modifying the backend creation/wrapping logic, consider updating both.
 
     Args:
+        fake_mode: FakeTensorMode used to unpickle the cached graph.
         state: Deserialized state dict containing graph_module, example_inputs,
             prefix, sym_tensor_indices, is_encoder, etc.
         standalone_compile_artifacts: The StandaloneCompiledArtifacts containing
@@ -447,6 +453,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
 
     Returns:
         A VllmSerializableFunction that can be called directly.
+
     """
     from vllm.compilation.backends import (
         VllmBackend,

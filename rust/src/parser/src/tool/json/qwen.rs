@@ -1,9 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 const QWEN_XML_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Qwen XML",
     start_marker: "<tool_call>",
+    framed_start_marker: Some("\n<tool_call>"),
     end_marker: "</tool_call>",
     marker_whitespace: JsonToolCallWhitespace::Exact("\n"),
     delimiter: None,
@@ -47,8 +51,8 @@ impl ToolParser for Qwen3XmlToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Qwen3)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Qwen3.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -71,6 +75,7 @@ mod tests {
 
     use super::Qwen3XmlToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, arguments: &str) -> String {
@@ -99,7 +104,7 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(output.normal_text(), "Let me check.\n");
+        assert_eq!(output.normal_text(), "Let me check.");
         assert_eq!(output.calls().len(), 1);
         assert_eq!(output.calls()[0].tool_index, 0);
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
@@ -283,5 +288,13 @@ mod tests {
             tool parser parsing failed: near "{\"arguments\":{},\"name\":\"get_weather\"}\n</tool_call>": invalid Qwen XML
             expected `name`"#]]
         .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<Qwen3XmlToolParser>(
+            "\n",
+            "<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{}}\n</tool_call>",
+        );
     }
 }

@@ -13,10 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEExpertsModular,
-    FusedMoEPrepareAndFinalizeModular,
-)
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
@@ -62,8 +59,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
     def uses_weight_scale_2_pattern(self) -> bool:
-        """
-        Returns True if this quantization method uses 'weight_scale_2' pattern
+        """Returns True if this quantization method uses 'weight_scale_2' pattern
         for per-tensor weight scales (e.g., FP4 variants), False otherwise.
 
         This method should be overridden by subclasses that use the
@@ -78,8 +74,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         act_dtype: torch.dtype,
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> tuple[int, int]:
-        """
-        Given layer hidden size and intermediate size per partition and MoE
+        """Given layer hidden size and intermediate size per partition and MoE
         configurations, round up hidden_size and intermediate_size_per_partition
         if necessary.
 
@@ -96,36 +91,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 - rounded_hidden_size is the possibly rounded up hidden size.
                 - rounded_intermediate_size_per_partition is the possibly rounded
                   up intermediate size per partition.
+
         """
         from .all2all_utils import maybe_roundup_layer_hidden_size
 
         return maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype, moe_parallel_config
         ), intermediate_size_per_partition
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalizeModular | None:
-        from .all2all_utils import maybe_make_prepare_finalize
-
-        pf = maybe_make_prepare_finalize(
-            self.moe, self.moe_quant_config, routing_tables
-        )
-        assert pf is None or isinstance(pf, FusedMoEPrepareAndFinalizeModular)
-        return pf
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: "RoutedExperts",
-    ) -> FusedMoEExpertsModular:
-        # based on the all2all implementation, select the appropriate
-        # gemm implementation
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
 
     @abstractmethod
     def get_fused_moe_quant_config(
@@ -146,8 +118,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def has_unpadded_output(self) -> bool:
-        """
-        Indicates that the hidden_states output might be the unpadded
+        """Indicates that the hidden_states output might be the unpadded
         hidden_states shape rather than the full padded shape.
         """
         return False
@@ -178,8 +149,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        """
-        Apply the MoE operation using modular kernels.
+        """Apply the MoE operation using modular kernels.
 
         Args:
             layer: RoutedExperts instance containing weight parameters
@@ -187,9 +157,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             topk_weights: Expert weights from router
             topk_ids: Selected expert IDs from router
             shared_experts_input: Input for shared experts (if any)
+            shared_experts: The shared experts module, if any
 
         Returns:
-            Output tensor from routed experts
+            Output tensor from routed experts.
+
         """
         raise NotImplementedError
 
@@ -199,16 +171,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """
-        Apply the MoE operation using monolithic kernels.
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Apply the MoE operation using monolithic kernels.
 
         Args:
             layer: RoutedExperts instance containing weight parameters
             x: Input tensor
             router_logits: Router logits (routing done internally)
+            input_ids: Token ids, for routers that condition on them
 
         Returns:
-            Output tensor from routed experts
+            Finalized routed states or a deferred-finalize output.
+
         """
         raise NotImplementedError

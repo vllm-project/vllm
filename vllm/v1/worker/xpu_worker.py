@@ -8,7 +8,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
@@ -47,26 +46,73 @@ class XPUWorker(Worker):
             parallel_config.distributed_executor_backend
             not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
-            and parallel_config.nnodes_within_dp == 1
+            and (
+                parallel_config.data_parallel_external_lb
+                or parallel_config.nnodes_within_dp == 1
+            )
         ):
             dp_local_rank = parallel_config.data_parallel_rank_local
             if dp_local_rank is None:
                 dp_local_rank = parallel_config.data_parallel_index
-            tp_pp_world_size = (
-                parallel_config.pipeline_parallel_size
-                * parallel_config.tensor_parallel_size
-            )
-            self.local_rank += dp_local_rank * tp_pp_world_size
-
+            replica_world_size = parallel_config.world_size
             visible_device_count = torch.accelerator.device_count()
-            assert self.local_rank < visible_device_count, (
-                f"DP adjusted local rank {self.local_rank} is out of bounds. "
-            )
-            assert parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({parallel_config.local_world_size}) must "
-                f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
-            )
+
+            if parallel_config.data_parallel_external_lb:
+                if parallel_config.nnodes_within_dp > 1:
+                    # The replica spans nodes, so use its node-local shard.
+                    replica_world_size = parallel_config.local_world_size
+                    if replica_world_size > visible_device_count:
+                        raise ValueError(
+                            f"Local TP/PP/PCP replica size ({replica_world_size}) "
+                            "exceeds the number of visible XPU devices "
+                            f"({visible_device_count})."
+                        )
+                    local_dp_capacity = visible_device_count // replica_world_size
+                elif replica_world_size < visible_device_count:
+                    # A node can host multiple complete TP/PP/PCP replicas.
+                    local_dp_capacity = visible_device_count // replica_world_size
+                    if visible_device_count % replica_world_size != 0:
+                        logger.warning_once(
+                            "XPU external LB cannot evenly divide "
+                            "%d visible devices into TP/PP/PCP replicas of "
+                            "size %d. This node can host %d complete DP "
+                            "replicas, leaving %d visible devices unused.",
+                            visible_device_count,
+                            replica_world_size,
+                            local_dp_capacity,
+                            visible_device_count % replica_world_size,
+                        )
+                elif replica_world_size == visible_device_count:
+                    # A node hosts exactly one complete TP/PP/PCP replica.
+                    local_dp_capacity = 1
+                    logger.warning_once(
+                        "XPU external LB sees exactly enough devices for one "
+                        "TP/PP/PCP replica. This may be the intended "
+                        "configuration, but it may also indicate that device "
+                        "visibility is misconfigured. Every DP rank must see "
+                        "all XPU devices on its node; consider removing "
+                        "ZE_AFFINITY_MASK or setting it to expose the complete "
+                        "device set."
+                    )
+                else:
+                    # The topology says single-node, but the replica does not fit.
+                    raise ValueError(
+                        f"TP/PP/PCP replica size ({replica_world_size}) exceeds "
+                        f"the number of visible XPU devices ({visible_device_count}), "
+                        "but nnodes_within_dp is 1. Configure the multi-node "
+                        "topology, or ensure every DP rank can see all devices "
+                        "on its node."
+                    )
+                # Strip the node component off the global DP index to get this
+                # engine's slot on its own node. Assumes the launcher assigns
+                # DP ranks to nodes in contiguous blocks (node 0 gets ranks
+                # 0..capacity-1, and so on), which is what the usual sequential
+                # and one-pod-per-rank deployments do. A round-robin or
+                # unbalanced assignment would silently map two engines onto the
+                # same device.
+                dp_local_rank = parallel_config.data_parallel_index % local_dp_capacity
+
+            self.local_rank += dp_local_rank * replica_world_size
 
         device = self.device_config.device
         if (
@@ -74,12 +120,49 @@ class XPUWorker(Worker):
             and device.type == "xpu"
             and current_platform.is_xpu()
         ):
-            self.device = torch.device(f"xpu:{self.local_rank}")
+            assigned_physical_gpu_ids = self.parallel_config.assigned_physical_gpu_ids
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+                assert self.local_rank < len(assigned_physical_gpu_ids), (
+                    f"local_rank {self.local_rank} is out of bounds for "
+                    f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
+                )
+                # NOTE: local_world_size is derived from parallel_config.nnodes,
+                # which is only set for the "mp" multi-node backend. With the
+                # "ray"/"external_launcher" backends nnodes stays 1, so
+                # local_world_size collapses to the full world_size and this
+                # check wrongly fires on cross-node deployments.
+                # assigned_physical_gpu_ids is already per-node and the
+                # local_rank bound above fully validates the mapping for
+                # these backends, so skip the check for them.
+                if parallel_config.distributed_executor_backend not in (
+                    "ray",
+                    "external_launcher",
+                ):
+                    assert parallel_config.local_world_size <= len(
+                        assigned_physical_gpu_ids
+                    ), (
+                        f"local_world_size ({parallel_config.local_world_size})"
+                        " exceeds assigned_physical_gpu_ids count "
+                        f"({len(assigned_physical_gpu_ids)})"
+                    )
+            else:
+                assert self.local_rank < torch.accelerator.device_count(), (
+                    f"DP adjusted local rank {self.local_rank} is out of "
+                    f"bounds for {torch.accelerator.device_count()} devices."
+                )
+
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+            )
+            self.device = torch.device(f"xpu:{visible_device_index}")
             torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
-                self.local_rank
+                visible_device_index
             ).total_memory
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
@@ -100,8 +183,13 @@ class XPUWorker(Worker):
             current_platform.dist_backend,
         )
 
-        # global all_reduce needed for overall oneccl warm up
-        if torch.distributed.is_xccl_available():
+        # oneCCL warm-up; only meaningful for multi-device runs. Requiring it
+        # with a single worker breaks platforms where oneCCL cannot enumerate
+        # device topology (e.g. paravirtualized GPUs).
+        if (
+            self.parallel_config.world_size > 1
+            and torch.distributed.is_xccl_available()
+        ):
             torch.distributed.all_reduce(torch.zeros(1).xpu())
 
         if self.use_v2_model_runner:
@@ -135,33 +223,6 @@ class XPUWorker(Worker):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
-
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        if self.profiler_config is None or self.profiler_config.profiler is None:
-            raise RuntimeError(
-                "Profiling is not enabled. Please set --profiler-config to enable "
-                "profiling. Example: "
-                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
-                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
-            )
-
-        if is_start and self.profiler is None:
-            from vllm.distributed.utils import get_worker_rank_suffix
-
-            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
-            trace_name = (
-                f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
-            )
-
-            self.profiler = TorchProfilerWrapper(
-                self.profiler_config,
-                worker_name=trace_name,
-                local_rank=self.local_rank,
-                activities=["CPU", "XPU"],
-            )
-            logger.debug("Starting torch profiler with trace name: %s", trace_name)
-
-        super().profile(is_start=is_start, profile_prefix=profile_prefix)
 
     def shutdown(self) -> None:
         logger.info(

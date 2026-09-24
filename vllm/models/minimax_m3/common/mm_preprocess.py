@@ -3,16 +3,15 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Any, cast
 
+import numpy.typing as npt
 import torch
 from transformers import BatchFeature
 from transformers.video_utils import VideoMetadata
 
 from vllm.config.multimodal import (
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
+    MultiModalDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import (
@@ -22,7 +21,6 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
-    MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -32,9 +30,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     VideoBackend,
+    VideoDecoderBackend,
     VideoSourceMetadata,
     VideoTargetMetadata,
 )
@@ -281,7 +281,7 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
         video_size = self.info.get_video_size_with_most_features()
@@ -291,14 +291,14 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
                 width=size.width,
                 height=size.height,
                 num_images=mm_counts.get("image", 0),
-                overrides=cast(ImageDummyOptions | None, mm_options.get("image")),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=video_size.width,
                 height=video_size.height,
                 num_frames=num_frames,
                 num_videos=mm_counts.get("video", 0),
-                overrides=cast(VideoDummyOptions | None, mm_options.get("video")),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -306,26 +306,21 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
 class MiniMaxM3VLMultiModalProcessor(
     BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        # Request video metadata (fps + sampled frame indices) so the HF
-        # processor can emit per-frame ``]<]X.X seconds[>[`` timestamp markers,
-        # matching MiniMax's reference video token stream. ``_get_prompt_updates``
-        # reconstructs the same markers from the metadata to keep the prompt
-        # replacement aligned with the processor output.
-        return MultiModalDataParser(video_needs_metadata=True)
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _call_hf_processor(
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_data = dict(mm_data)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
+
         # With ``video_needs_metadata=True`` each video arrives as a
         # ``(frames, metadata)`` tuple. Split the frames back out and forward the
         # metadata as ``VideoMetadata`` so the processor emits timestamps.
-        videos = cast(list | None, mm_data.get("videos"))
+        videos = cast(list | None, hf_data.get("videos"))
         video_metadata: list[VideoMetadata] | None = None
         if videos:
             frames_only = []
@@ -345,17 +340,23 @@ class MiniMaxM3VLMultiModalProcessor(
                 # stays consistent with _get_prompt_updates.
                 meta.setdefault("total_num_frames", len(frames))
                 video_metadata.append(VideoMetadata(**meta))
-            mm_data["videos"] = frames_only
+            hf_data["videos"] = frames_only
 
-        # Override the video processor's default do_resize=False (set for a
-        # pre-resized pipeline) to True for vLLM's raw-frame inputs.
-        merged = dict(do_resize=True, **mm_kwargs, **tok_kwargs)
-        data = dict(text=prompt, **mm_data)
         if video_metadata is not None:
-            data["video_metadata"] = video_metadata
+            hf_data["video_metadata"] = video_metadata
+
+        return hf_inputs
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override the video processor's default for vLLM's raw-frame inputs.
+        merged = dict(do_resize=True, **hf_kwargs)
         return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            data,
+            self.info.get_hf_processor(**hf_kwargs),
+            hf_data,
             merged,
         )
 
@@ -469,10 +470,33 @@ class MiniMaxM3VLMultiModalProcessor(
         ]
 
 
-# TODO(Isotr0py): Tie with MinimaxVideoProcessor
-# after https://github.com/vllm-project/vllm/pull/44126
-@VIDEO_LOADER_REGISTRY.register("minimax_m3_vl")
+@VIDEO_LOADER_REGISTRY.register(
+    name="minimax_m3_vl",
+    video_processor="MiniMaxM3VLVideoProcessor",
+)
 class MiniMaxM3VideoBackend(VideoBackend):
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: VideoDecoderBackend = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -483,7 +507,6 @@ class MiniMaxM3VideoBackend(VideoBackend):
         total_frames = source.total_frames_num
         video_fps = source.original_fps
         fps = target.fps
-
         if total_frames <= 0 or video_fps <= 0 or fps <= 0:
             return [0] if total_frames > 0 else []
 
@@ -503,12 +526,6 @@ class MiniMaxM3VideoBackend(VideoBackend):
                 break
             indices.append(target_frame)
             prev_kept_ts = target_frame / video_fps
-
-        last_frame_idx = total_frames - 1
-        last_ts = last_frame_idx / video_fps
-        if indices and indices[-1] != last_frame_idx and last_ts - prev_kept_ts > eps:
-            indices.append(last_frame_idx)
-
         if not indices:
             indices = [0]
         return indices

@@ -64,9 +64,7 @@ inline void copy_mul_stub(scalar_t* __restrict__ out, const input_t* __restrict_
 #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
     auto [x0, x1] = load_float_vec2(input + d);
-    x0 = x0 * weight_vec;
-    x1 = x1 * weight_vec;
-    bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
+    bVec out_vec = convert_from_float_ext<scalar_t>(x0 * weight_vec, x1 * weight_vec);
     out_vec.store(out + d);
   }
   for (; d < size; ++d) {
@@ -91,10 +89,7 @@ inline void sum_stub(scalar_t* __restrict__ out, const scalar_t* __restrict__ in
       fVec sum_fvec0 = fVec(0.f);
       fVec sum_fvec1 = fVec(0.f);
       for (int t = 0; t < topk; ++t) {
-        bVec x_bvec = bVec::loadu(input + t * K + d);
-        fVec x_fvec0, x_fvec1;
-        std::tie(x_fvec0, x_fvec1) = at::vec::convert_to_float(x_bvec);
-
+        auto [x_fvec0, x_fvec1] = load_float_vec2(input + t * K + d);
         sum_fvec0 += x_fvec0;
         sum_fvec1 += x_fvec1;
       }
@@ -137,11 +132,7 @@ inline void add_mul_stub(
 #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
     auto [x0, x1] = load_float_vec2(input + d);
-
-    bVec y_bvec = bVec::loadu(input2 + d);
-    fVec y0, y1;
-    std::tie(y0, y1) = at::vec::convert_to_float(y_bvec);
-
+    auto [y0, y1] = load_float_vec2(input2 + d);
     x0 = x0 + y0 * s_vec;
     x1 = x1 + y1 * s_vec;
     bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
@@ -152,28 +143,49 @@ inline void add_mul_stub(
   }
 }
 
-template <typename scalar_t>
+template <typename scalar_t, typename input_t>
 inline void silu_and_mul_stub(
-    scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const scalar_t* __restrict__ input2, int64_t size) {
+    scalar_t* __restrict__ out, const input_t* __restrict__ input, const input_t* __restrict__ input2, int64_t size) {
+  static_assert(
+      std::is_same_v<input_t, float> || std::is_same_v<input_t, scalar_t>,
+      "silu_and_mul_stub only supports input_t == float or input_t == scalar_t");
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
-  const fVec one = fVec(1.f);
 
   // no remainder
 #pragma GCC unroll 4
   for (int64_t d = 0; d < size; d += bVec::size()) {
-    bVec x = bVec::loadu(input + d);
-    fVec x0, x1;
-    std::tie(x0, x1) = at::vec::convert_to_float(x);
-    bVec y = bVec::loadu(input2 + d);
-    fVec y0, y1;
-    std::tie(y0, y1) = at::vec::convert_to_float(y);
-    x0 = x0 / (one + x0.neg().exp_u20());
-    x1 = x1 / (one + x1.neg().exp_u20());
-    x0 = x0 * y0;
-    x1 = x1 * y1;
+    auto [x0, x1] = load_float_vec2(input + d);
+    auto [y0, y1] = load_float_vec2(input2 + d);
+    x0 = fast_silu(x0) * y0;
+    x1 = fast_silu(x1) * y1;
     bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
     out_vec.store(out + d);
+  }
+}
+
+template <typename scalar_t, typename input_t>
+inline void clamp_sigmoid_and_mul_stub(
+    scalar_t* __restrict__ out, const input_t* __restrict__ input, int64_t size, const float alpha, const float limit) {
+  static_assert(
+      std::is_same_v<input_t, float> || std::is_same_v<input_t, scalar_t>,
+      "clamp_sigmoid_and_mul_stub only supports input_t == float or input_t == scalar_t");
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  const fVec one = fVec(1.f);
+  const fVec limit_v = fVec(limit);
+  const fVec nlimit_v = fVec(-limit);
+  const fVec alpha_v = fVec(alpha);
+
+#pragma GCC unroll 4
+  for (int64_t d = 0; d < 2 * size; d += bVec::size()) {
+    auto [x0_, y0_] = load_float_vec2(input + d);
+    auto [x0, y0] = at::vec::deinterleave2<float>(x0_, y0_);
+
+    x0 = at::vec::minimum(x0, limit_v);
+    y0 = at::vec::minimum(limit_v, at::vec::maximum(nlimit_v, y0));
+    x0 = fast_sigmoid_glu(x0, alpha_v) * (y0 + one);
+    store_from_float_ext(out + d / 2, x0);
   }
 }
 
@@ -186,9 +198,8 @@ inline void copy_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ 
   int64_t d;
 #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
-    fVec data0 = fVec::loadu(input + d) * weight_vec;
-    fVec data1 = fVec::loadu(input + d + fVec::size()) * weight_vec;
-    bVec out_vec = convert_from_float_ext<scalar_t>(data0, data1);
+    auto [x0, x1] = load_float_vec2(input + d);
+    bVec out_vec = convert_from_float_ext<scalar_t>(x0 * weight_vec, x1 * weight_vec);
     out_vec.store(out + d);
   }
   for (; d < size; ++d) {
@@ -222,63 +233,11 @@ inline void copy_mul_stub(scalar_t* __restrict__ out, const scalar_t* __restrict
   int64_t d;
 #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
-    bVec x = bVec::loadu(input + d);
-    fVec x0, x1;
-    std::tie(x0, x1) = at::vec::convert_to_float(x);
-    x0 = x0 * weight_vec;
-    x1 = x1 * weight_vec;
-    bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
+    auto [x0, x1] = load_float_vec2(input + d);
+    bVec out_vec = convert_from_float_ext<scalar_t>(x0 * weight_vec, x1 * weight_vec);
     out_vec.store(out + d);
   }
   for (; d < size; ++d) {
     out[d] = static_cast<scalar_t>(input[d] * weight);
-  }
-}
-
-template <typename scalar_t>
-inline void clamp_sigmoid_and_mul_stub(
-    scalar_t* __restrict__ out,
-    const scalar_t* __restrict__ input,
-    int64_t size,
-    const float alpha,
-    const float limit) {
-  using bVec = at::vec::Vectorized<scalar_t>;
-  using fVec = at::vec::Vectorized<float>;
-  const fVec one = fVec(1.f);
-  const fVec zero = fVec(0.f);
-  const fVec limit_v = fVec(limit);
-  const fVec nlimit_v = fVec(-limit);
-  const fVec alpha_v = fVec(alpha);
-
-  // no remainder
-#pragma GCC unroll 4
-  for (int64_t d = 0; d < size; d += bVec::size()) {
-    bVec x = bVec::loadu(input + d);
-    fVec x0_, y0_;
-    std::tie(x0_, y0_) = at::vec::convert_to_float(x);
-    float tmp_buffer[fVec::size() * 2];  // 32
-    float tmp_glu[fVec::size()];         // 16
-    float tmp_linear[fVec::size()];      // 16
-    x0_.store(tmp_buffer);
-    y0_.store(tmp_buffer + fVec::size());
-    // interleaved: x[2i] = glu, x[2i+1] = linear
-    for (int j = 0; j < fVec::size(); ++j) {
-      // x0 [0,2,..30]
-      tmp_glu[j] = tmp_buffer[j * 2];
-      // y0 [1,3,...31]
-      tmp_linear[j] = tmp_buffer[j * 2 + 1];
-    }
-    fVec x0 = fVec::loadu(tmp_glu);
-    fVec y0 = fVec::loadu(tmp_linear);
-
-    // clamp
-    x0 = at::vec::minimum(x0, limit_v);
-    y0 = at::vec::minimum(limit_v, at::vec::maximum(nlimit_v, y0));
-    // x * sigmoid(x * alpha)
-    x0 = x0 / (one + (x0 * alpha_v).neg().exp_u20());
-    // (y + 1) * x
-    y0 = y0 + one;
-    x0 = x0 * y0;
-    convert_from_float_and_store<scalar_t>(out + d / 2, x0);
   }
 }

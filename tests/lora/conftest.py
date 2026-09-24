@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 import torch.nn as nn
-from huggingface_hub import snapshot_download
 
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -25,6 +24,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 
 @pytest.fixture()
@@ -33,7 +33,6 @@ def should_do_global_cleanup_after_test(request) -> bool:
     This can provide a ~10x speedup for non-GPU unit tests since they don't need
     to initialize torch.
     """
-
     return not request.node.get_closest_marker("skip_global_cleanup")
 
 
@@ -170,43 +169,43 @@ def dummy_model_gate_up(default_vllm_config) -> nn.Module:
 def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
-    return snapshot_download(repo_id="SangBinCho/mixtral-lora")
+    return hf_api().snapshot_download(repo_id="SangBinCho/mixtral-lora")
 
 
 @pytest.fixture(scope="session")
 def chatglm3_lora_files():
-    return snapshot_download(repo_id="jeeejeee/chatglm3-text2sql-spider")
+    return hf_api().snapshot_download(repo_id="jeeejeee/chatglm3-text2sql-spider")
 
 
 @pytest.fixture(scope="session")
 def baichuan_lora_files():
-    return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
+    return hf_api().snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
 
 
 @pytest.fixture(scope="session")
 def baichuan_zero_lora_files():
     # all the lora_B weights are initialized to zero.
-    return snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init")
+    return hf_api().snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init")
 
 
 @pytest.fixture(scope="session")
 def baichuan_regex_lora_files():
-    return snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex")
+    return hf_api().snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex")
 
 
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
+    return hf_api().snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
 
 
 @pytest.fixture(scope="session")
 def minicpmv_lora_files():
-    return snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
+    return hf_api().snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
 
 
 @pytest.fixture(scope="session")
 def qwen2vl_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen2-vl-lora-pokemon")
+    return hf_api().snapshot_download(repo_id="jeeejeee/qwen2-vl-lora-pokemon")
 
 
 @pytest.fixture(scope="session")
@@ -217,74 +216,108 @@ def qwen25vl_base_huggingface_id():
 
 @pytest.fixture(scope="session")
 def qwen25vl_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen25-vl-lora-pokemon")
+    return hf_api().snapshot_download(repo_id="jeeejeee/qwen25-vl-lora-pokemon")
 
 
 @pytest.fixture(scope="session")
 def qwen2vl_language_lora_files():
-    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-language")
+    return hf_api().snapshot_download(
+        repo_id="prashanth058/qwen2vl-flickr-lora-language"
+    )
 
 
 @pytest.fixture(scope="session")
 def qwen2vl_vision_tower_connector_lora_files():
-    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-tower-connector")
+    return hf_api().snapshot_download(
+        repo_id="prashanth058/qwen2vl-flickr-lora-tower-connector"
+    )
 
 
 @pytest.fixture(scope="session")
 def qwen2vl_vision_tower_lora_files():
-    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-tower")
+    return hf_api().snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-tower")
 
 
 @pytest.fixture(scope="session")
 def qwen25vl_vision_lora_files():
-    return snapshot_download(repo_id="EpochEcho/qwen2.5-3b-vl-lora-vision-connector")
+    return hf_api().snapshot_download(
+        repo_id="EpochEcho/qwen2.5-3b-vl-lora-vision-connector"
+    )
 
 
 @pytest.fixture(scope="session")
 def qwen3vl_vision_lora_files():
-    return snapshot_download(repo_id="EpochEcho/qwen3-4b-vl-lora-vision-connector")
+    return hf_api().snapshot_download(
+        repo_id="EpochEcho/qwen3-4b-vl-lora-vision-connector"
+    )
+
+
+@pytest.fixture(scope="session")
+def gemma4_vision_lora_files():
+    return hf_api().snapshot_download(repo_id="EpochEcho/gemma4-e2b-it-lora-pokemon")
 
 
 @pytest.fixture(scope="session")
 def qwen3_meowing_lora_files():
     """Download Qwen3 Meow LoRA files once per test session."""
-    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
+    return hf_api().snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
 
 
 @pytest.fixture(scope="session")
 def qwen3_woofing_lora_files():
     """Download Qwen3 Woof LoRA files once per test session."""
-    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Woof-LoRA")
+    return hf_api().snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Woof-LoRA")
 
 
 @pytest.fixture(scope="session")
-def tinyllama_lora_files():
-    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+def qwen3_guard_star_trek_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="geoffmunn/Qwen3Guard-StarTrek-Classification-0.6B",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
+
+
+@pytest.fixture(scope="session")
+def qwen3_guard_new_zealand_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="geoffmunn/Qwen3Guard-NewZealand-Classification-0.6B",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
+
+
+@pytest.fixture(scope="session")
+def skywork_qwen3_reward_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="AmirMohseni/skywork-qwen3-0.6b-reward-lora",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
 
 
 @pytest.fixture(scope="session")
 def deepseekv2_lora_files():
-    return snapshot_download(repo_id="wuchen01/DeepSeek-V2-Lite-Chat-All-LoRA")
+    return hf_api().snapshot_download(repo_id="wuchen01/DeepSeek-V2-Lite-Chat-All-LoRA")
 
 
 @pytest.fixture(scope="session")
 def gptoss20b_lora_files():
-    return snapshot_download(repo_id="jeeejeee/gpt-oss-20b-lora-adapter-text2sql")
+    return hf_api().snapshot_download(
+        repo_id="jeeejeee/gpt-oss-20b-lora-adapter-text2sql"
+    )
 
 
 @pytest.fixture(scope="session")
 def qwen3moe_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
+    return hf_api().snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
 
 
 @pytest.fixture(scope="session")
 def olmoe_lora_files():
-    return snapshot_download(repo_id="jeeejeee/olmoe-instruct-text2sql-spider")
+    return hf_api().snapshot_download(repo_id="jeeejeee/olmoe-instruct-text2sql-spider")
 
 
 @pytest.fixture(scope="session")
 def qwen3_lora_files():
-    return snapshot_download(repo_id="charent/self_cognition_Alice")
+    return hf_api().snapshot_download(repo_id="charent/self_cognition_Alice")
 
 
 @pytest.fixture(scope="session")
@@ -295,38 +328,45 @@ def llama32_lora_huggingface_id():
 
 @pytest.fixture(scope="session")
 def llama32_lora_files(llama32_lora_huggingface_id):
-    return snapshot_download(repo_id=llama32_lora_huggingface_id)
+    return hf_api().snapshot_download(repo_id=llama32_lora_huggingface_id)
 
 
 @pytest.fixture(scope="session")
 def whisper_lora_files():
-    return snapshot_download(repo_id="chengyili2005/whisper-small-mandarin-lora")
+    return hf_api().snapshot_download(
+        repo_id="chengyili2005/whisper-small-mandarin-lora"
+    )
 
 
 @pytest.fixture(scope="session")
 def qwen35_text_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen35-4b-text-only-sql-lora")
+    return hf_api().snapshot_download(repo_id="jeeejeee/qwen35-4b-text-only-sql-lora")
 
 
 @pytest.fixture(scope="session")
 def qwen35_vl_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora")
+    return hf_api().snapshot_download(
+        repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora"
+    )
 
 
 @pytest.fixture(scope="session")
 def qwen36_moe_2d_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen36-35ba3b-2d-weights-poken-lora")
+    return hf_api().snapshot_download(
+        repo_id="jeeejeee/qwen36-35ba3b-2d-weights-poken-lora"
+    )
 
 
 @pytest.fixture(scope="session")
 def qwen36_moe_3d_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora")
+    return hf_api().snapshot_download(
+        repo_id="jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora"
+    )
 
 
 @pytest.fixture
 def reset_default_device():
-    """
-    Some tests, such as `test_punica_ops.py`, explicitly set the
+    """Some tests, such as `test_punica_ops.py`, explicitly set the
     default device, which can affect subsequent tests. Adding this fixture
     helps avoid this problem.
     """
