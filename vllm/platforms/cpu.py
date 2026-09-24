@@ -548,6 +548,8 @@ class CpuPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.config.cache import maybe_apply_hybrid_eagle_retention_default
+
         model_config = vllm_config.model_config
         if model_config is None:
             return
@@ -562,13 +564,22 @@ class CpuPlatform(Platform):
             cache_config.block_size = cls._preferred_block_size_for_backends(
                 backend_classes, 128, vllm_config
             )
-        if not model_config.is_hybrid:
-            return
-
         # reconcile attention and mamba page sizes
-        pre_block_size = cache_config.block_size
-        cls._align_hybrid_block_size(vllm_config, backend_classes[0])
-        cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
+        if model_config.is_hybrid:
+            pre_block_size = cache_config.block_size
+            cls._align_hybrid_block_size(vllm_config, backend_classes[0])
+            cls._check_aligned_block_size(
+                vllm_config, backend_classes, pre_block_size
+            )
+
+        maybe_apply_hybrid_eagle_retention_default(
+            vllm_config.cache_config,
+            is_hybrid=model_config.is_hybrid,
+            use_eagle=(
+                vllm_config.speculative_config is not None
+                and vllm_config.speculative_config.use_eagle()
+            ),
+        )
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
