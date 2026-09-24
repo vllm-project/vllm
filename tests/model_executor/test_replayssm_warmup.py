@@ -41,7 +41,7 @@ def _autotune_runner(
     extensible_kv_cache = None
     if committable_blocks is not None:
         extensible_kv_cache = SimpleNamespace(
-            committable_blocks=lambda: committable_blocks, commit=Mock()
+            warmup_committable_blocks=committable_blocks, commit=Mock()
         )
     return SimpleNamespace(
         extensible_kv_cache=extensible_kv_cache,

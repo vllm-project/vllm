@@ -193,18 +193,9 @@ def test_mixed_warmup_reserves_lookahead_blocks():
 
 
 class _StubExtensibleCache:
-    """Stands in for `ExtensibleKVCache`: the engine-agreed cap wins over
-    what this rank alone could commit."""
-
-    def __init__(self, local_committable_blocks: int, cap: int | None) -> None:
-        self.local_committable_blocks = local_committable_blocks
-        self.committable_blocks_cap = cap
+    def __init__(self, warmup_committable_blocks: int) -> None:
+        self.warmup_committable_blocks = warmup_committable_blocks
         self.commits: list[int] = []
-
-    def committable_blocks(self) -> int:
-        if self.committable_blocks_cap is not None:
-            return self.committable_blocks_cap
-        return self.local_committable_blocks
 
     def commit(self, num_blocks: int) -> None:
         self.commits.append(num_blocks)
@@ -212,13 +203,13 @@ class _StubExtensibleCache:
 
 def test_warmup_sizes_batches_by_the_rank_agreed_committable_count():
     """Each rank measures its own free memory; the warmup batch and what it
-    commits must follow the smallest count across ranks (the engine's cap), or
-    ranks run different shapes and can skip steps the others wait on."""
-    # Locally 1024 blocks could be committed, the engine agreed on 3.
+    commits must follow the smallest count across ranks, or ranks run
+    different shapes and can skip steps the others wait on."""
     runner = _make_runner(
         [_attention_group()], num_lookahead_tokens=0, num_spec_steps=0
     )
-    cache = _StubExtensibleCache(1024, cap=3)
+    # The engine agreed on 3 blocks, whatever this rank alone could commit.
+    cache = _StubExtensibleCache(3)
     runner.extensible_kv_cache = cache
     recorder = _StepRecorder()
 
@@ -232,7 +223,7 @@ def test_warmup_sizes_batches_by_the_rank_agreed_committable_count():
 
 def test_mixed_warmup_skips_when_ranks_agree_too_few_blocks():
     runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
-    cache = _StubExtensibleCache(1024, cap=9)
+    cache = _StubExtensibleCache(9)
     runner.extensible_kv_cache = cache
     recorder = _StepRecorder()
 
