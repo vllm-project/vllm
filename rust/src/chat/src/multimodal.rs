@@ -599,7 +599,8 @@ fn extract_media_parts(
                 ChatMessage::System { content }
                 | ChatMessage::Developer { content, .. }
                 | ChatMessage::User { content }
-                | ChatMessage::ToolResponse { content, .. } => content,
+                | ChatMessage::ToolResponse { content, .. }
+                | ChatMessage::Custom { content, .. } => content,
                 ChatMessage::Assistant { .. } => {
                     bail_multimodal!("renderer reported multimodal assistant content")
                 }
@@ -622,7 +623,8 @@ fn extract_media_parts(
                 ChatMessage::System { content }
                 | ChatMessage::Developer { content, .. }
                 | ChatMessage::User { content }
-                | ChatMessage::ToolResponse { content, .. } => Some(content),
+                | ChatMessage::ToolResponse { content, .. }
+                | ChatMessage::Custom { content, .. } => Some(content),
                 ChatMessage::Assistant { .. } => None,
             };
             match content {
