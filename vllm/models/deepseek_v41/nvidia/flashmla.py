@@ -65,7 +65,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             positions,
             self.rotary_emb.cos_sin_cache,
             self.wo_a,
-            self.wo_b,
+            self._wo_b_proj,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
