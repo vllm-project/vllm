@@ -107,6 +107,8 @@ def _builder(
         _dcp_verify_buffers=None,
         _graph_seq_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
+        # Unsized as during profiling, so the Gluon KV bound stays out of the way.
+        _kv_cache_bytes=None,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
         paged_kv_indptr=torch.empty(max_decode_rows + 1, dtype=torch.int32),
@@ -585,7 +587,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
             get_num_attention_heads=lambda parallel_config: num_heads,
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=2),
-        cache_config=SimpleNamespace(cache_dtype="fp8_e4m3"),
+        cache_config=SimpleNamespace(cache_dtype="fp8_e4m3", num_gpu_blocks=None),
         compilation_config=SimpleNamespace(
             cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
             # Empty: the per-layer head-count probe finds no attention layer and
