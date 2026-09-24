@@ -966,12 +966,7 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.utils.jit_monitor import activate as activate_jit_monitor
-
-        activate_jit_monitor(
-            mode=self.observability_config.jit_monitor_mode,
-            verbose=self.observability_config.jit_monitor_verbose,
-        )
+        self._maybe_activate_jit_monitor()
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
@@ -985,6 +980,20 @@ class Worker(WorkerBase):
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
+        )
+
+    def _maybe_activate_jit_monitor(self) -> None:
+        # When JIT warmup is disabled (e.g. enforce_eager), runtime JIT
+        # compilation is expected, so monitoring would only produce noise
+        # (or spurious errors in "error" mode).
+        if not self.vllm_config.kernel_config.enable_jit_warmup:
+            return
+
+        from vllm.utils.jit_monitor import activate as activate_jit_monitor
+
+        activate_jit_monitor(
+            mode=self.observability_config.jit_monitor_mode,
+            verbose=self.observability_config.jit_monitor_verbose,
         )
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
