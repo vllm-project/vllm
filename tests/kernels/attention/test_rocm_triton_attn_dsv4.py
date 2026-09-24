@@ -64,6 +64,37 @@ def enable_aiter_mqa(monkeypatch):
     rocm_aiter_ops.refresh_env_variables()
 
 
+def test_paged_mqa_capability_probe_accepts_explicit_or_kwargs():
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    def explicit(*, Preshuffle, KVBlockSize, ChunkK, WavePerEU):
+        pass
+
+    def variadic(**kwargs):
+        pass
+
+    required = {"Preshuffle", "KVBlockSize", "ChunkK", "WavePerEU"}
+    assert mod._accepts_parameters(explicit, required)
+    assert mod._accepts_parameters(variadic, required)
+    assert not mod._accepts_parameters(lambda: None, required)
+
+
+def test_paged_mqa_module_rejects_incompatible_api(monkeypatch):
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    incompatible = SimpleNamespace(
+        deepgemm_fp8_paged_mqa_logits=lambda q, kv: None,
+    )
+    monkeypatch.setattr(mod, "_ON_GFX950", True)
+    monkeypatch.setattr(mod, "find_spec", lambda _name: object())
+    monkeypatch.setattr(mod.importlib, "import_module", lambda _name: incompatible)
+    mod.paged_mqa_logits_module.cache_clear()
+    try:
+        assert mod.paged_mqa_logits_module() is None
+    finally:
+        mod.paged_mqa_logits_module.cache_clear()
+
+
 @requires_gfx950
 @pytest.mark.parametrize("column_scales", [False, True], ids=["vector", "column"])
 @torch.inference_mode()

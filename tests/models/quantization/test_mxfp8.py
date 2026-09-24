@@ -92,7 +92,7 @@ def test_mxfp8_logprobs(
     reason="AITER MXFP8 MoE backend is ROCm-only.",
 )
 @pytest.mark.quant_model
-def test_mxfp8_aiter_requires_swigluoai_activation(
+def test_mxfp8_aiter_accepts_silu_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -127,8 +127,12 @@ def test_mxfp8_aiter_requires_swigluoai_activation(
         moe_backend="aiter",
     )
 
-    with pytest.raises(ValueError, match="requires activation=swigluoai_uninterleave"):
-        select_mxfp8_moe_backend(config)
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+
+    backend, experts_cls = select_mxfp8_moe_backend(config)
+
+    assert backend == Fp8MoeBackend.AITER_MXFP8
+    assert experts_cls is aiter_mxfp8_moe.AiterMxfp8Experts
 
 
 @pytest.mark.skipif(
