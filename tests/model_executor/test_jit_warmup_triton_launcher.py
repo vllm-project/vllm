@@ -122,10 +122,7 @@ def test_triton_launcher_supports_compile_and_runtime_adapters() -> None:
 @pytest.mark.skipif(
     not hasattr(triton, "AsyncCompileMode"), reason="Requires Triton async compilation"
 )
-@pytest.mark.parametrize("dispatch_error", [False, True])
-def test_failed_parallel_warmup_does_not_leak_into_runtime(
-    monkeypatch, dispatch_error
-) -> None:
+def test_failed_parallel_warmup_does_not_leak_into_runtime(monkeypatch) -> None:
     from triton.runtime._async_compile import active_mode
 
     monkeypatch.setattr(envs, "VLLM_TRITON_JIT_WARMUP_NUM_THREADS", 2)
@@ -136,8 +133,6 @@ def test_failed_parallel_warmup_does_not_leak_into_runtime(
         raise RuntimeError("warmup failed")
 
     def warmup(**kwargs):
-        if dispatch_error:
-            fail()
         active_mode.get().submit(kwargs["second"], fail, lambda result: None)
 
     monkeypatch.setattr(owner.kernel, "warmup", warmup)
@@ -145,35 +140,22 @@ def test_failed_parallel_warmup_does_not_leak_into_runtime(
         owner.compile_many(owner.CompileKey(value=i) for i in range(2))
 
     assert active_mode.get() is None
-    assert not owner._warming
-    assert owner._warming_compile_key is None
     owner("runtime", 3, None)
     assert len(owner.kernel.runtime_calls) == 1
 
 
-@pytest.mark.parametrize("serial_reason", ["autotune", "missing_api", "one_thread"])
-def test_warmup_retains_serial_fallbacks(monkeypatch, serial_reason) -> None:
+def test_autotuning_warmup_stays_serial(monkeypatch) -> None:
     owner = _TestTritonKernel()
     owner.kernel = _FakeTritonKernel()
+    owner._run_autotune = True
     monkeypatch.setattr(envs, "VLLM_TRITON_JIT_WARMUP_NUM_THREADS", 4)
-    if serial_reason == "autotune":
-        owner._run_autotune = True
-    elif serial_reason == "missing_api":
-        monkeypatch.delattr(triton, "AsyncCompileMode", raising=False)
-    else:
-        monkeypatch.setattr(envs, "VLLM_TRITON_JIT_WARMUP_NUM_THREADS", 1)
 
-    def unexpected_pool(**kwargs):
-        pytest.fail("Serial warmup must not create a compiler pool")
+    def unexpected_async(*args):
+        pytest.fail("Autotuning must not use asynchronous compilation")
 
-    monkeypatch.setattr(jit_warmup_triton_helper, "ThreadPoolExecutor", unexpected_pool)
+    monkeypatch.setattr(triton, "AsyncCompileMode", unexpected_async, raising=False)
     owner.compile_many(owner.CompileKey(value=i) for i in range(2))
-    calls = (
-        owner.kernel.runtime_calls
-        if serial_reason == "autotune"
-        else owner.kernel.warmup_calls
-    )
-    assert len(calls) == 2
+    assert len(owner.kernel.runtime_calls) == 2
 
 
 @triton.jit

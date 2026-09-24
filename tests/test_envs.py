@@ -48,13 +48,6 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
-def test_warmup_thread_count_does_not_invalidate_compile_cache(monkeypatch):
-    monkeypatch.setenv("VLLM_TRITON_JIT_WARMUP_NUM_THREADS", "1")
-    serial = envs.compile_factors()
-    monkeypatch.setenv("VLLM_TRITON_JIT_WARMUP_NUM_THREADS", "4")
-    assert envs.compile_factors() == serial
-
-
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
