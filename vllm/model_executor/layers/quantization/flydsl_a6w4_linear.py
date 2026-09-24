@@ -441,6 +441,14 @@ def _flydsl_a6w4_linear_impl(
     k = x.shape[1]
     n = weight.shape[0]
     device = x.device
+    # The kernel emits bf16 or fp16 only. Mapping "anything else" to fp16 is not
+    # safe: an fp32 out_dtype (what torch.get_default_dtype() returns if vLLM has
+    # not set the model dtype yet) would have the kernel write fp16 elements into
+    # an fp32 tensor and return silent garbage rather than raising.
+    if out_dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError(
+            f"[W4A6] out_dtype must be bfloat16 or float16; got {out_dtype}"
+        )
     out_str = "bf16" if out_dtype == torch.bfloat16 else "fp16"
     is_launch = _dense_gemm_kind == "launch"
 

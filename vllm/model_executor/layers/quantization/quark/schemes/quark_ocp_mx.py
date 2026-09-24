@@ -11,6 +11,13 @@ import torch.nn.functional as F
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.aiter_a6w4_linear import (
+    aiter_a6w4_linear,
+    is_aiter_a6w4_supported,
+)
+from vllm.model_executor.layers.quantization.aiter_a6w4_linear import (
+    prepare_weight as prepare_aiter_a6w4_weight,
+)
 from vllm.model_executor.layers.quantization.flydsl_a6w4_linear import (
     flydsl_a6w4_linear,
     is_flydsl_a6w4_eligible,
@@ -230,12 +237,35 @@ class QuarkOCP_MX(QuarkScheme):
             and self.weight_dtype == "mxfp4"
             and self.input_dtype == "mxfp6_e2m3"
         )
+        # Two kernels can serve this scheme. FlyDSL consumes the checkpoint's
+        # MXFP4 codes directly, so it reproduces the checkpoint's numerics
+        # exactly, but it needs an AITER carrying the FlyDSL a6w4 kernel and its
+        # fp6 activation quantizer. AITER's ASM a6w4 is in released AITER and is
+        # far faster on a stock install, but its operands are Hadamard-rotated,
+        # so a static MXFP4 checkpoint must be requantized -- ~1.45x the error
+        # (see aiter_a6w4_linear). Prefer the exact kernel when it is there.
         self.use_flydsl_a6w4 = self.is_a6w4 and is_flydsl_a6w4_supported()
+        self.use_aiter_a6w4 = (
+            self.is_a6w4
+            and not self.use_flydsl_a6w4
+            and is_aiter_a6w4_supported()
+            and self.out_dtype == torch.bfloat16  # the ASM kernel is bf16-only
+        )
         if self.is_a6w4:
             if self.use_flydsl_a6w4:
                 logger.info_once(
                     "QuarkOCP_MX: routing W4A6 (mxfp6_e2m3 act / mxfp4 weight) "
                     "linears through the FlyDSL a6w4 kernel.",
+                    scope="local",
+                )
+            elif self.use_aiter_a6w4:
+                logger.info_once(
+                    "QuarkOCP_MX: routing W4A6 (mxfp6_e2m3 act / mxfp4 weight) "
+                    "linears through AITER's ASM a6w4 kernel. Its operands are "
+                    "Hadamard-rotated, so the checkpoint's MXFP4 weights are "
+                    "requantized at load; expect ~1.45x the quantization error "
+                    "of the checkpoint itself in exchange for a much faster "
+                    "kernel.",
                     scope="local",
                 )
             else:
@@ -315,6 +345,23 @@ class QuarkOCP_MX(QuarkScheme):
         # is packed uint8 [N, K//2] at this point -- EXCEPT for dynamically
         # quantized layers (bf16 in the checkpoint, e.g. DeepSeek MLA attention),
         # which must be packed to mxfp4 here before preshuffle.
+        # AITER ASM a6w4: no N/K divisibility constraint, so every W4A6 layer
+        # is eligible. The requantization happens once, here.
+        if self.use_aiter_a6w4:
+            if self.dynamic_mxfp4_quant and layer.weight.dtype != torch.uint8:
+                w_q, w_s = dynamic_mxfp4_quant(layer.weight)
+                layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+                layer.weight_scale = torch.nn.Parameter(w_s, requires_grad=False)
+            layer._a6w4_n = layer.weight.shape[0]
+            layer._a6w4_k = layer.weight.shape[1] * 2
+            b_packed, b_scale = prepare_aiter_a6w4_weight(
+                layer.weight.data, layer.weight_scale.data
+            )
+            layer.weight = torch.nn.Parameter(b_packed, requires_grad=False)
+            layer.weight_scale = torch.nn.Parameter(b_scale, requires_grad=False)
+            layer._aiter_a6w4 = True
+            return
+
         if self.use_flydsl_a6w4:
             if self.dynamic_mxfp4_quant and layer.weight.dtype != torch.uint8:
                 w_q, w_s = dynamic_mxfp4_quant(layer.weight)  # [N,K//2], [N,K//32]
@@ -436,6 +483,20 @@ class QuarkOCP_MX(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # AITER ASM W4A6 fast path (set in process_weights_after_loading).
+        if getattr(layer, "_aiter_a6w4", False):
+            n, k = layer._a6w4_n, layer._a6w4_k
+            w4a6_vlog(
+                ("dense-dispatch-asm", n, k),
+                f"dense Linear -> W4A6 AITER ASM a6w4 path  N={n} K={k} "
+                f"(weight_dtype={self.weight_dtype} input_dtype={self.input_dtype})",
+            )
+            x2d = x.reshape(-1, x.shape[-1])
+            y2d = aiter_a6w4_linear(x2d, layer.weight, layer.weight_scale, n, k)
+            if bias is not None:
+                y2d = y2d + bias
+            return y2d.reshape(*x.shape[:-1], y2d.shape[-1])
+
         # FlyDSL W4A6 fast path (set per-layer in process_weights_after_loading).
         if getattr(layer, "_flydsl_a6w4", False):
             n, k = layer.weight.shape[0], layer.weight.shape[1] * 2
