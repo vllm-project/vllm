@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 import torch
 
 from vllm.multimodal.inputs import (
@@ -9,7 +10,10 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.multimodal.utils import (
+    strip_covered_mm_data,
+    strip_covered_mm_data_incremental,
+)
 from vllm.v1.core.sched.output import NewRequestData
 
 
@@ -144,3 +148,78 @@ def test_strip_covered_mm_data_shm_address_item() -> None:
     stripped = strip_covered_mm_data([feature], num_computed_tokens=250)
 
     assert stripped[0].data is address_item
+
+
+def _incremental_request(
+    features: list[MultiModalFeatureSpec], num_computed_tokens: int
+) -> SimpleNamespace:
+    """Stand-in for Request exposing the incremental strip state."""
+    return SimpleNamespace(
+        mm_features=features,
+        num_computed_tokens=num_computed_tokens,
+        _mm_stripped_mm_features=[],
+        _mm_strip_cursor=0,
+    )
+
+
+def test_strip_covered_incremental_matches_pure() -> None:
+    """Repeated incremental calls at growing prefixes produce the same result
+    as the pure strip_covered_mm_data at every step."""
+    from dataclasses import replace
+
+    covered_none = replace(_mm_feature(100, 50), data=None)
+    features = [
+        _mm_feature(0, 50),
+        covered_none,
+        _mm_feature(150, 50),
+        _mm_feature(300, 50),
+    ]
+
+    for computed in range(0, 401, 25):
+        req = _incremental_request(features, computed)
+        incremental = strip_covered_mm_data_incremental(req)
+        pure = strip_covered_mm_data(features, computed)
+        assert [f.data for f in incremental] == [f.data for f in pure]
+        assert len(incremental) == len(pure)
+
+
+def test_strip_covered_incremental_advances_only() -> None:
+    """Each call only strips features appended since the previous one; the
+    stripped objects are reused instead of being rebuilt."""
+    features = [_mm_feature(0, 50), _mm_feature(100, 50), _mm_feature(200, 50)]
+    req = _incremental_request(features, num_computed_tokens=60)
+
+    out1 = strip_covered_mm_data_incremental(req)
+    assert req._mm_strip_cursor == 1
+    assert out1[0].data is None
+    assert out1[1].data is not None
+
+    req.num_computed_tokens = 160
+    out2 = strip_covered_mm_data_incremental(req)
+    assert req._mm_strip_cursor == 2
+    # Previously stripped object is reused, not rebuilt
+    assert out2[0] is out1[0]
+    assert out2[1].data is None
+    assert out2[2].data is not None
+
+
+def test_strip_covered_incremental_appended_features() -> None:
+    """Simulates a realtime session: features are appended between calls, and
+    only the newly appended ones are inspected."""
+    features = [_mm_feature(0, 50)]
+    req = _incremental_request(features, num_computed_tokens=50)
+
+    out1 = strip_covered_mm_data_incremental(req)
+    assert req._mm_strip_cursor == 1
+    assert out1[0].data is None
+
+    # New audio chunk arrives at offset 50.
+    features.append(_mm_feature(50, 50))
+    features.append(_mm_feature(100, 50))
+    req.num_computed_tokens = 110
+
+    out2 = strip_covered_mm_data_incremental(req)
+    assert req._mm_strip_cursor == 2
+    assert out2[0] is out1[0]
+    assert out2[1].data is None
+    assert out2[2].data is not None
