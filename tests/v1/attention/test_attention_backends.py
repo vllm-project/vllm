@@ -1237,6 +1237,74 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
     )
 
 
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    (
+        "adaptive",
+        "fa_version",
+        "dcp_size",
+        "use_non_causal",
+        "head_size",
+        "is_sm100",
+        "expected_always",
+    ),
+    [
+        (True, 4, 1, False, 128, True, True),
+        (False, 4, 1, False, 128, True, False),
+        (True, 2, 1, False, 128, True, False),
+        (True, 4, 2, False, 128, True, False),
+        (True, 4, 1, True, 128, True, False),
+        (True, 4, 1, False, 256, True, False),
+        (True, 4, 1, False, 128, False, False),
+    ],
+)
+def test_flash_attn_adaptive_varlen_cudagraph_support(
+    monkeypatch: pytest.MonkeyPatch,
+    adaptive: bool,
+    fa_version: int,
+    dcp_size: int,
+    use_non_causal: bool,
+    head_size: int,
+    is_sm100: bool,
+    expected_always: bool,
+):
+    from vllm.v1.attention.backends import flash_attn as flash_attn_backend
+
+    monkeypatch.setattr(
+        flash_attn_backend.current_platform,
+        "is_device_capability_family",
+        lambda capability: is_sm100 and capability == 100,
+    )
+    monkeypatch.setattr(
+        flash_attn_backend, "get_flash_attn_version", lambda **_kwargs: fa_version
+    )
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
+        attention_config=SimpleNamespace(use_non_causal=use_non_causal),
+        model_config=SimpleNamespace(uses_alibi=False),
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=head_size,
+        dtype=torch.bfloat16,
+    )
+
+    support = flash_attn_backend.FlashAttentionMetadataBuilder.get_cudagraph_support(
+        config, kv_cache_spec
+    )
+    if expected_always:
+        assert support == AttentionCGSupport.ALWAYS
+    else:
+        assert (
+            support
+            == flash_attn_backend.FlashAttentionMetadataBuilder._cudagraph_support
+        )
+
+
 if current_platform.is_rocm():
     # FLASH_ATTN is not supported on ROCm
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
