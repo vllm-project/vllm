@@ -474,8 +474,8 @@ class TestTruncatedArgsFlush:
 
     The converter returns the args span verbatim, so the flush extends the
     streamed prefix with a span that was cut off mid-value. A span with no
-    completion (a key, a comma, a partial literal or escape) is dropped, and the
-    prefix already streamed is closed instead.
+    completion (a key, a comma, a partial literal or escape) is closed after its
+    last complete value, which the streamed prefix may not have reached.
     """
 
     @pytest.mark.parametrize(
@@ -490,6 +490,9 @@ class TestTruncatedArgsFlush:
             ('{"s": "hello", "ok": tr', {"s": "hello"}),
             ('{"s": "hello", "n": -', {"s": "hello"}),
             ('{"s": "hello \\u00e', {"s": "hello "}),
+            ('{"n": 42, ', {"n": 42}),
+            ('{"n": 42, "ok": tr', {"n": 42}),
+            ('{"n": 42, "s": "hello", "ok": tr', {"n": 42, "s": "hello"}),
         ],
         ids=[
             "number",
@@ -501,6 +504,9 @@ class TestTruncatedArgsFlush:
             "literal",
             "sign",
             "unicode_escape",
+            "comma_after_number",
+            "literal_after_number",
+            "literal_after_string_after_number",
         ],
     )
     @pytest.mark.parametrize("end", ["", END_MESSAGE], ids=["eos", "end_message"])

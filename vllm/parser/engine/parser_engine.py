@@ -1125,9 +1125,16 @@ class ParserEngine(Parser):
                 # A converter that returns its input span verbatim (inkling)
                 # can extend the prefix with a value that EOS cut off. If that
                 # span has no completion (a key, a comma, a partial literal or
-                # escape), drop it and close what was already streamed.
+                # escape), close it after its last complete value instead. The
+                # streamed prefix can stop short of that value, on the
+                # ``"key": `` of a middle field _safe_arg_prefix withheld.
                 suffix = self._json_prefix_terminator(final_json)
                 if not suffix:
+                    cut = self._safe_arg_prefix(final_json)
+                    tail = self._json_prefix_terminator(cut) if cut else ""
+                    if tail and len(cut) > len(prev) and cut.startswith(prev):
+                        slot.streamed_json = cut + tail
+                        return cut[len(prev) :] + tail
                     return self._close_streamed_json(slot, prev)
                 diff += suffix
             slot.streamed_json = prev + diff
