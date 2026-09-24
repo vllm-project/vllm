@@ -113,10 +113,13 @@ PY
 # finished and none of the eventual 152 hard failures visible, and HUD recorded
 # that nightly as green.
 #
-# Polling rather than `depends_on`: Buildkite groups carry no key, so a
-# dependency barrier means naming all ~250 step keys, which silently rots when a
+# Polling rather than a full `depends_on` barrier: Buildkite groups carry no
+# key, so a barrier means naming all ~250 step keys, which silently rots when a
 # step is added and fails the pipeline upload when one is removed or excluded
-# from this lane (AMD, retired A100).
+# from this lane (AMD, retired A100). The pipeline does gate this step on the
+# long pole so it is scheduled near the end of the build -- that keeps the agent
+# from idling for hours, but it is only a hint, and this loop is what actually
+# guarantees the snapshot is complete.
 POLL_INTERVAL_S="${CRCR_POLL_INTERVAL_S:-60}"
 # Under the step's own timeout, so a stuck build still gets a partial report
 # rather than the job being killed with nothing sent.
