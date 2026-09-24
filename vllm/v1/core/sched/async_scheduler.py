@@ -61,14 +61,26 @@ class AsyncScheduler(Scheduler):
             # continuation: drop it rather than appending garbage to the
             # response and driving num_output_placeholders negative, which trips
             # the invariant below and kills EngineCore.
+            #
+            # Dropping is a correctness fix, not only crash protection: without
+            # it these tokens are appended to the request's output and streamed
+            # to the client as if they were valid continuations of the prompt.
             num_reserved = request.num_output_placeholders
-            logger.warning(
+            logger.warning_once(
+                "Model runner returned more tokens than there were reserved output "
+                "placeholders; dropping the extra token(s). A token sampled while "
+                "the request is still prefilling is not a valid continuation of the "
+                "prompt, so it must not be appended to the response or streamed to "
+                "the client. Run with debug logging to see which requests are "
+                "affected.",
+            )
+            logger.debug(
                 "Request %s: model runner returned %d token(s) but only %d output "
-                "placeholder(s) were reserved; dropping the extra token(s). This "
-                "means a token was sampled while the request was still prefilling.",
+                "placeholder(s) were reserved; dropping %d token(s).",
                 request.request_id,
                 len(new_token_ids),
                 num_reserved,
+                len(new_token_ids) - num_reserved,
             )
             new_token_ids = new_token_ids[:num_reserved]
 
