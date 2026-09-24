@@ -60,7 +60,6 @@ taskset -c 0-7 .venv/bin/python -m vllm.entrypoints.launchers.render.entry \
     --mm-processor-num-workers 1 \
     --mm-processor-kwargs '{"max_pixels":3145728}' \
     --limit-mm-per-prompt '{"image":1,"video":0,"audio":0}' \
-    --no-enable-prefix-caching \
     --disable-uvicorn-access-log
 ```
 
@@ -93,6 +92,14 @@ the requested page dimensions before PNG encoding. They are not the original
 issue's document images. The processor cache must stay disabled when these
 images repeat. The JSON records compressed PNG size, full response size,
 versions, affinities, and individual trials.
+
+There is no inference engine or KV-prefix-cache reuse in this experiment.
+At this revision the render launcher constructs `VllmConfig` from the model
+configuration only, leaving `CacheConfig.enable_prefix_caching=True` for renderer
+hashing. Passing `--no-enable-prefix-caching` to that launcher does not change
+this behavior. Do not mistake an accepted engine CLI flag for an effective
+render-server setting. The inference recipe below uses `vllm serve`, where
+the flag is propagated.
 
 Interpret the metrics carefully:
 
