@@ -657,7 +657,11 @@ class MoERunner(MoERunnerInterface):
         """
         ctx = get_forward_context()
         return (
-            ctx.dp_metadata.sp_local_sizes(self.moe_config.sp_size)
+            ctx.dp_metadata.sp_local_sizes(
+                self.moe_config.sp_size,
+                pcp_size=self.moe_config.pcp_size,
+                use_ep=self.moe_config.use_ep,
+            )
             if ctx.dp_metadata
             else nullcontext()
         )

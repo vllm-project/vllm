@@ -172,22 +172,24 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) Spec Decode Draft Model"
+- label: ":nvidia: (H200 MIG 18GB) Spec Decode Draft Model Shard %N"
   key: spec-decode-draft-model
   timeout_in_minutes: 60
   device: h200_18gb
+  parallelism: 4
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/draft_model/
+    - pytest -v -s v1/e2e/spec_decode/draft_model/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Draft Model"
+      label: ":amd: (MI300) Spec Decode Draft Model Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 60
+      parallelism: 2
       depends_on:
       - image-build-amd
       source_file_dependencies:

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -170,37 +169,55 @@ def test_graph_padding_cannot_be_smaller_than_largest_pcp_rank(monkeypatch):
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs GPU kernels")
 @pytest.mark.parametrize(
     ("cg_mode", "num_reqs", "expected_tokens", "expected_reqs"),
     [
-        (CUDAGraphMode.NONE, 4, None, None),
-        (CUDAGraphMode.PIECEWISE, None, 8, None),
+        (CUDAGraphMode.NONE, 4, 2, 2),
+        (CUDAGraphMode.PIECEWISE, None, 8, 2),
         (CUDAGraphMode.FULL, 4, 8, 4),
     ],
 )
 def test_partition_padding_is_derived_from_batch_descriptor(
     cg_mode, num_reqs, expected_tokens, expected_reqs
 ):
-    manager = MagicMock()
-    input_batch = MagicMock()
-    manager.partition_batch.return_value = input_batch
-    batch_desc = BatchExecutionDescriptor(
-        cg_mode=cg_mode,
-        num_tokens=8,
-        num_reqs=num_reqs,
+    """partition_batch derives graph padding from the batch descriptor: no
+    padding without graphs, token padding only for PIECEWISE, and request
+    padding on top for FULL."""
+    device = torch.device("cuda:0")
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=device,
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    global_batch = _make_global_decode_batch(
+        [16, 24], InputBuffers(4, 8, device), device
     )
 
-    result = pcp_manager_module.maybe_partition_pcp_batch(
-        manager,
-        input_batch,
-        batch_desc,
+    local_batch = manager.partition_batch(
+        global_batch,
+        BatchExecutionDescriptor(
+            cg_mode=cg_mode,
+            num_tokens=8,
+            num_reqs=num_reqs,
+        ),
     )
 
-    assert result is input_batch
-    manager.partition_batch.assert_called_once_with(
-        input_batch,
-        padded_num_tokens=expected_tokens,
-        padded_num_reqs=expected_reqs,
+    assert local_batch.num_tokens_after_padding == expected_tokens
+    assert local_batch.num_reqs_after_padding == expected_reqs
+
+
+def test_dummy_draft_does_not_reuse_previous_graph_batch():
+    manager, _ = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
+    dummy_batch = InputBatch.make_dummy(1, 4, manager.input_buffers)
+    manager.draft_prefill_batch = replace(dummy_batch)
+
+    manager.prepare_draft_prefill(dummy_batch, dummy_batch.input_ids)
+
+    assert (
+        manager.get_draft_input_buffers(manager.input_buffers) is manager.input_buffers
     )
 
 
@@ -472,8 +489,11 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
 
     local_batch = manager.partition_batch(
         global_batch,
-        padded_num_tokens=4,
-        padded_num_reqs=4,
+        BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL,
+            num_tokens=4,
+            num_reqs=4,
+        ),
     )
 
     assert local_batch.dcp_local_seq_lens is None
@@ -489,7 +509,7 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
 
     # What execute_model does next: derive DCP metadata from the final batch
     # on the PCP-owned buffers.
-    local_batch.dcp_local_seq_lens = gpu_cp_utils.maybe_prepare_dcp_local_seq_lens(
+    local_batch.dcp_local_seq_lens = gpu_cp_utils.prepare_dcp_local_seq_lens(
         manager.input_buffers.dcp_local_seq_lens,
         local_batch.seq_lens,
         local_batch.num_reqs,
