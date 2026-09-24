@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
+    is_flashinfer_bf16_gemm_supported,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
@@ -148,7 +149,31 @@ def _can_use_flashinfer_cutedsl_bf16(
     )
 
 
+def _can_use_flashinfer_tgv_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    return (
+        current_platform.is_device_capability(100)
+        and bias is None
+        and tuple(weight.shape) == (5120, 6144)
+        and _can_use_flashinfer_cutedsl_bf16(x, weight, bias)
+        and x.numel() // x.shape[-1] in (1, 2, 4, 8)
+    )
+
+
 _FLASHINFER_BF16_BACKENDS = {
+    "auto": _FlashInferBf16Backend(
+        flashinfer_backend="tgv",
+        is_supported=lambda: (
+            not envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_device_capability(100)
+            and is_flashinfer_cutedsl_bf16_gemm_supported()
+            and is_flashinfer_bf16_gemm_supported("tgv")
+        ),
+        can_implement=_can_use_flashinfer_tgv_bf16,
+    ),
     "flashinfer_cutedsl": _FlashInferBf16Backend(
         flashinfer_backend="cute-dsl",
         is_supported=is_flashinfer_cutedsl_bf16_gemm_supported,
@@ -211,6 +236,14 @@ def cuda_flashinfer_bf16_gemm(
     vllm_backend: str,
     pdl: bool,
 ) -> torch.Tensor:
+    if vllm_backend == "auto" and (
+        not x.is_cuda
+        or x.dtype != torch.bfloat16
+        or weight.dtype != torch.bfloat16
+        or tuple(weight.shape) != (5120, 6144)
+        or bias is not None
+    ):
+        return torch.nn.functional.linear(x, weight, bias)
     return torch.ops.vllm.cuda_flashinfer_bf16_gemm(
         x,
         weight,
@@ -605,6 +638,8 @@ def dispatch_unquantized_gemm(
         return default_unquantized_gemm
 
     if not backend_spec.is_supported():
+        if linear_backend == "auto":
+            return default_unquantized_gemm
         logger.warning_once(
             "--linear-backend=%s requested FlashInfer mm_bf16 backend %r, "
             "but it is unavailable on the current hardware or environment; "
