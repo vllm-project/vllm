@@ -457,3 +457,81 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     torch.testing.assert_close(actual_k, expected_k)
     torch.testing.assert_close(actual_v, expected_v)
     assert [projection.calls for projection in projections] == [1, 1]
+
+
+def _stub_prepare_inputs_speculator(monkeypatch, speculative_config):
+    from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
+
+    calls = []
+    monkeypatch.setattr(
+        dflash_speculator,
+        "prepare_dflash_inputs",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    speculator = object.__new__(DFlashSpeculator)
+    speculator.speculative_config = speculative_config
+    speculator.num_query_per_req = 6
+    speculator.num_speculative_steps = 5
+    speculator.max_num_reqs = 4
+    speculator.max_num_tokens = 4096
+    speculator.max_model_len = 8192
+    speculator.parallel_drafting_token_id = 3
+    speculator.sample_from_anchor = False
+    speculator.input_buffers = SimpleNamespace(
+        input_ids=torch.zeros(4096, dtype=torch.int32)
+    )
+    speculator.block_tables = SimpleNamespace(
+        slot_mappings={0: torch.zeros(4096, dtype=torch.int64)},
+        input_block_tables={0: torch.zeros(4, 32, dtype=torch.int32)},
+        kernel_block_sizes={0: 256},
+        cp_rank=0,
+        cp_size=1,
+        cp_interleave=1,
+    )
+    speculator.context_positions = torch.zeros(4096, dtype=torch.int64)
+    speculator._context_slot_mappings = [torch.zeros(4096, dtype=torch.int64)]
+    speculator.sample_indices = torch.zeros(20, dtype=torch.int64)
+    speculator.sample_pos = torch.zeros(20, dtype=torch.int64)
+    speculator.sample_idx_mapping = torch.zeros(20, dtype=torch.int32)
+    speculator.temperature = torch.zeros(4, dtype=torch.float32)
+    speculator.seeds = torch.zeros(4, dtype=torch.int64)
+    speculator.draft_kv_cache_group_ids = [0]
+    return speculator, calls
+
+
+def _warmup_buckets(calls, num_query_per_req):
+    buckets = set()
+    for args, _ in calls:
+        span = int(args[9].num_scheduled_tokens.max())
+        max_tokens_per_req = span + num_query_per_req
+        buckets.add(min(256, 1 << (max_tokens_per_req - 1).bit_length()))
+    return buckets
+
+
+def test_dflash_warmup_covers_reachable_block_size_buckets(monkeypatch):
+    """BLOCK_SIZE follows the largest per-request span in the batch, which the
+    worker warmup's tiny synthetic steps never grow; every bucket the wrapper
+    can pick must be compiled here or the first large prefill chunk JITs live.
+    """
+    speculator, calls = _stub_prepare_inputs_speculator(monkeypatch, SimpleNamespace())
+
+    speculator.warmup_prepare_inputs()
+
+    # num_query_per_req=6 queries are appended per request, so the smallest
+    # reachable span+query is 7 and buckets below 8 cannot occur.
+    assert _warmup_buckets(calls, 6) == {8, 16, 32, 64, 128, 256}
+    assert all("context_only" not in kwargs for _, kwargs in calls)
+
+
+def test_dflash_warmup_covers_prefill_only_buckets(monkeypatch):
+    """A prefill-only producer (#56957) launches with context_only=True and no
+    appended query tokens, making every bucket from 1 up reachable."""
+    speculator, calls = _stub_prepare_inputs_speculator(
+        monkeypatch,
+        SimpleNamespace(is_dspark_prefill_only=lambda: True),
+    )
+
+    speculator.warmup_prepare_inputs()
+
+    assert _warmup_buckets(calls, 0) == {1, 2, 4, 8, 16, 32, 64, 128, 256}
+    assert all(kwargs.get("context_only") is True for _, kwargs in calls)

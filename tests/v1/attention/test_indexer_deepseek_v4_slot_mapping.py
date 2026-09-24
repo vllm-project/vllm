@@ -251,6 +251,47 @@ def test_compressed_slot_mapping_warmup_includes_index_kpool():
     assert {(key.compress_ratio, key.block_size) for key in keys} == {(32, 2)}
 
 
+def test_topk_lens_warmup_uses_physical_c128a_buffer_stride():
+    """C128A prefill rows are views into the `c128a_max_compressed`-wide
+    persistent buffer while their logical width follows the batch. The warmup
+    key must carry that physical row stride; assuming stride == width leaves
+    the padded variants to JIT-compile at the first real prefill."""
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        ComputeGlobalTopkIndicesAndLensKernel,
+    )
+
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
+        model_config=SimpleNamespace(
+            max_model_len=65536,
+            hf_config=SimpleNamespace(index_topk=512, compress_ratios=[4, 128]),
+        ),
+    )
+
+    keys = ComputeGlobalTopkIndicesAndLensKernel().get_warmup_keys(config)
+    shapes = {
+        (
+            key.topk,
+            key.topk_indices_stride,
+            key.global_topk_indices_stride,
+            key.block_table_stride,
+            key.block_size,
+        )
+        for key in keys
+    }
+    # C4 rows are full-width slices of the index_topk-wide buffer.
+    assert (512, 512, 512, 256, 64) in shapes
+    # C128A rows: logical width 128/256/512, physical stride always 512.
+    assert (128, 512, 128, 256, 2) in shapes
+    assert (256, 512, 256, 256, 2) in shapes
+    assert (512, 512, 512, 256, 2) in shapes
+    # No compact-width c128a key (stride == width < 512): serving never
+    # produces one, and warming it would not cover the padded variants.
+    assert not any(
+        key.block_size == 2 and key.topk_indices_stride != 512 for key in keys
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_compressed_slot_mapping_inherits_padded_token_slots():
     """A token whose own slot is padded (SWA bounded replay) closes no

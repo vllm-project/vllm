@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -172,6 +173,92 @@ class DFlashSpeculator(DraftModelSpeculator):
         target_attn_layer_names: set[str],
     ) -> nn.Module:
         return load_dflash_model(target_model, self.vllm_config)
+
+    @torch.inference_mode()
+    def warmup_prepare_inputs(self) -> None:
+        """Compile every reachable BLOCK_SIZE variant of the input-prep kernel.
+
+        ``prepare_dflash_inputs`` picks ``BLOCK_SIZE = min(256,
+        next_power_of_2(max_tokens_per_req))`` from the largest per-request
+        span in the batch, so the worker warmup's tiny synthetic steps only
+        cover the smallest buckets and the first large prefill chunk pays a
+        mid-inference JIT compile. Launch the kernel once per bucket with a
+        synthetic one-request batch over the speculator's real buffers.
+        """
+        # Prefill-only producers (#56957) launch with context_only=True; plain
+        # aggregated serving always uses the default False. The config method
+        # and the wrapper parameter are added by the same change, so keying one
+        # off the other keeps this correct on trees without that mode.
+        extra_kwargs: dict[str, Any] = {}
+        is_prefill_only = getattr(
+            self.speculative_config, "is_dspark_prefill_only", None
+        )
+        if is_prefill_only is not None and is_prefill_only():
+            extra_kwargs["context_only"] = True
+        num_query = 0 if extra_kwargs else self.num_query_per_req
+        device = self.input_buffers.input_ids.device
+
+        bucket = 1
+        while bucket <= 256:
+            span = bucket - num_query
+            # The span must exist, fit the scratch buffers, and actually
+            # resolve to this bucket.
+            if (
+                span < 1
+                or span > self.max_num_tokens
+                or min(256, triton.next_power_of_2(span + num_query)) != bucket
+            ):
+                bucket *= 2
+                continue
+            input_batch = cast(
+                InputBatch,
+                SimpleNamespace(
+                    num_reqs=1,
+                    num_scheduled_tokens=torch.tensor(
+                        [span], dtype=torch.int32, device=device
+                    ),
+                    positions=torch.zeros(span, dtype=torch.int64, device=device),
+                    query_start_loc=torch.tensor(
+                        [0, span], dtype=torch.int32, device=device
+                    ),
+                    idx_mapping=torch.zeros(1, dtype=torch.int32, device=device),
+                ),
+            )
+            zeros_i32 = torch.zeros(1, dtype=torch.int32, device=device)
+            zeros_i64 = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device)
+            for i, gid in enumerate(self.draft_kv_cache_group_ids):
+                prepare_dflash_inputs(
+                    self.input_buffers,
+                    self.block_tables.slot_mappings[gid],
+                    self.context_positions,
+                    self._context_slot_mappings[i],
+                    self.sample_indices,
+                    self.sample_pos,
+                    self.sample_idx_mapping,
+                    self.temperature,
+                    self.seeds,
+                    input_batch,
+                    zeros_i32,
+                    zeros_i32,
+                    zeros_i64,
+                    zeros_i64,
+                    torch.zeros(self.max_num_reqs, dtype=torch.float32, device=device),
+                    torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device),
+                    self.block_tables.input_block_tables[gid],
+                    self.block_tables.kernel_block_sizes[gid],
+                    self.block_tables.cp_rank,
+                    self.block_tables.cp_size,
+                    self.block_tables.cp_interleave,
+                    self.parallel_drafting_token_id,
+                    self.num_query_per_req,
+                    self.num_speculative_steps,
+                    self.max_num_reqs,
+                    self.max_num_tokens,
+                    self.max_model_len,
+                    self.sample_from_anchor,
+                    **extra_kwargs,
+                )
+            bucket *= 2
 
     def set_attn(
         self,
