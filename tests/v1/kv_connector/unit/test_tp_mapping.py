@@ -38,7 +38,7 @@ def _compute_mapping(
     group_spec_types: tuple[type, ...] = (FullAttentionSpec,),
     dcp_size: int = 1,
     remote_dcp_size: int = 1,
-    **overrides,
+    head_sharded_kv_heads: int | None = None,
 ) -> TPMapping:
     transfer_topology = object.__new__(TransferTopology)
     transfer_topology.tp_rank = tp_rank
@@ -51,7 +51,7 @@ def _compute_mapping(
         remote_tp_size=remote_tp_size,
         group_spec_types=group_spec_types,
         remote_dcp_size=remote_dcp_size,
-        **overrides,
+        head_sharded_kv_heads=head_sharded_kv_heads,
     )
 
 
