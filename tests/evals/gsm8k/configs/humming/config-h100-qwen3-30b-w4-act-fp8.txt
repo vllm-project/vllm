@@ -1,0 +1,3 @@
+Qwen3-30B-A3B-MXFP4A16-humming-act-fp8.yaml
+Qwen3-30B-A3B-GPTQ-Int4-humming-act-fp8.yaml
+Qwen3-30B-A3B-AWQ-humming.yaml
