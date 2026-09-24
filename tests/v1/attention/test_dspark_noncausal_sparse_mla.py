@@ -669,6 +669,7 @@ def test_dsv41_flashinfer_dspark_window_matches_reference(
         ),
         block_table=torch.arange(48, device=device, dtype=torch.int32).view(3, -1),
         block_size=128,
+        replay_start=torch.zeros(3, device=device, dtype=torch.int32),
         flashinfer_sparse_index_cache={},
         max_decode_query_len=5,
     )

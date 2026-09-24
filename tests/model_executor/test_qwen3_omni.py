@@ -144,6 +144,11 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     # Create a mock context
     mock_ctx = Mock(spec=InputProcessingContext)
     mock_ctx.tokenizer = mock_tokenizer
+    # `model_config` is an instance attribute, so it is not covered by the
+    # spec; the data parser reads it for `allow_missing_mm_embeddings`.
+    mock_ctx.model_config = SimpleNamespace(
+        multimodal_config=SimpleNamespace(allow_missing_mm_embeddings=False)
+    )
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
@@ -369,11 +374,12 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
             draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
             attention_backend=None,
             kv_cache_dtype=None,
+            draft_load_config=None,
         ),
         parallel_config=ParallelConfig(),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
-        load_config=SimpleNamespace(),
+        load_config=SimpleNamespace(load_format="auto"),
         model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
     )
 

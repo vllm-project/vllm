@@ -140,6 +140,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
         cd triton-cpu; \
         git checkout "270e696d"; \
+        if [ ! -f third_party/sleef/CMakeLists.txt ]; then \
+            echo "sleef submodule empty after shallow fetch; retrying unshallow"; \
+            git submodule foreach --recursive 'git fetch --unshallow origin || true'; \
+            git submodule update --init --recursive --force; \
+        fi; \
+        test -f third_party/sleef/CMakeLists.txt || { echo "FATAL: sleef submodule unavailable"; exit 1; }; \
         if [ "$USE_SCCACHE" = "1" ]; then \
             if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
                 unset SCCACHE_BUCKET SCCACHE_REGION; \
@@ -465,6 +471,10 @@ ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
+# tools/ carries repo-tooling code that a few tests exercise directly
+# (e.g. tests/tools/test_check_test_tethering.py imports
+# tools.pre_commit.check_test_tethering).
+ADD ./tools/ ./tools/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \

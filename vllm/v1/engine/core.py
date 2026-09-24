@@ -31,8 +31,10 @@ from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import MultiModalCacheMissError
+from vllm.multimodal.cache import (
+    MultiModalCacheMissError,
+    engine_receiver_cache_from_config,
+)
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -182,10 +184,7 @@ class EngineCore:
         if self.scheduler.ec_connector is not None:  # type: ignore
             self.model_executor.init_ec_output_aggregator()
 
-        mm_registry = MULTIMODAL_REGISTRY
-        self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
-            vllm_config
-        )
+        self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
 
         # If a KV connector is initialized for scheduler, we want to collect
         # handshake metadata from all workers so the connector in the scheduler
@@ -867,10 +866,11 @@ class EngineCore:
         # reset_connector=True so external connectors clear alongside
         # local caches, matching the pause_generation(clear_cache=True)
         # contract. No-op when no connector is configured.
-        self.reset_prefix_cache(
+        if not self.reset_prefix_cache(
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
-        )
+        ):
+            raise RuntimeError("Failed to reset the KV connector cache.")
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
@@ -2001,8 +2001,12 @@ class EngineCoreProc(EngineCore):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            engine._finish_pause(clear_cache)
-            future.set_result(None)
+            try:
+                engine._finish_pause(clear_cache)
+            except Exception as e:
+                future.set_exception(e)
+            else:
+                future.set_result(None)
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(

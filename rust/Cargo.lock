@@ -2290,7 +2290,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.7.1"
-source = "git+https://github.com/smg-project/llm-multimodal?rev=24c676dd49d73f05cb4068aade2e60397a5c0afe#24c676dd49d73f05cb4068aade2e60397a5c0afe"
+source = "git+https://github.com/smg-project/llm-multimodal?rev=f0985ef65967615db2c79279aa07818499301bfd#f0985ef65967615db2c79279aa07818499301bfd"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5735,6 +5735,11 @@ dependencies = [
  "url",
  "uuid",
  "vllm-build-info",
+ "vllm-chat",
+ "vllm-engine-core-client",
+ "vllm-llm",
+ "vllm-managed-engine",
+ "vllm-text",
  "vllm-tracing",
 ]
 
@@ -5784,6 +5789,7 @@ dependencies = [
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
+ "vllm-tracing",
  "xgrammar-structural-tag",
  "zeromq",
 ]
@@ -5931,6 +5937,7 @@ dependencies = [
  "openai-protocol",
  "serde",
  "serde_json",
+ "serde_with",
  "thiserror 2.0.18",
  "thiserror-ext",
  "tool-parser",

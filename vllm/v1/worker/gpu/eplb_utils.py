@@ -77,19 +77,12 @@ class EPLBController:
         assert speculative_config is not None
         assert speculative_config.draft_model_config is not None
         assert self.state is not None
-        self.state.add_model(
-            draft_moe_model,
-            speculative_config.draft_model_config,
-        )
+        self.state.add_model(draft_moe_model, speculative_config.draft_model_config)
         speculator.set_eplb_state(self.state)
         self._has_registered_models = True
         return True
 
-    def maybe_register_model(
-        self,
-        model: nn.Module,
-        model_config: Any,
-    ) -> bool:
+    def maybe_register_model(self, model: nn.Module, model_config: Any) -> bool:
         if not self.parallel_config.enable_eplb:
             return False
 
@@ -115,11 +108,7 @@ class EPLBController:
         if eplb_models_added and self.state is not None and self.state.is_async:
             self.state.start_async_loop()
 
-    def step(
-        self,
-        is_dummy: bool = False,
-        is_profile: bool = False,
-    ) -> None:
+    def step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         if (
             not self.parallel_config.enable_eplb
             or self.suppressed
@@ -128,11 +117,8 @@ class EPLBController:
         ):
             return
 
-        self.state.step(
-            is_dummy,
-            is_profile,
-            log_stats=self.parallel_config.eplb_config.log_balancedness,
-        )
+        log_stats = self.parallel_config.eplb_config.log_balancedness
+        self.state.step(is_dummy, is_profile, log_stats=log_stats)
 
     def prepare_forward(
         self,
