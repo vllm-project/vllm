@@ -6,6 +6,7 @@ from vllm.distributed.device_communicators.pynccl import defer_comm_warmup_on_ro
 from vllm.distributed.parallel_state import (
     _init_stateless_group,
     _node_count,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
     get_world_group,
@@ -72,12 +73,13 @@ def create_standby_groups(
     _STANDBY_WORLD_NODE_COUNT = _node_count(_STANDBY_WORLD.tcp_store_group)
 
     tp_size = get_tp_group().world_size
+    pcp_size = get_pcp_group().world_size
     pp_size = get_pp_group().world_size
 
     all_ranks = torch.arange(new_world_size_across_dp).reshape(
-        -1, new_dp_size, pp_size, tp_size
+        -1, new_dp_size, pp_size, pcp_size, tp_size
     )
-    standby_dp_ranks = all_ranks.transpose(1, 3).reshape(-1, new_dp_size).unbind(0)
+    standby_dp_ranks = all_ranks.transpose(1, 4).reshape(-1, new_dp_size).unbind(0)
     standby_dp_ranks = [x.tolist() for x in standby_dp_ranks]
 
     # Deferred to commit so the warm-up runs while the engine is paused.
@@ -87,7 +89,9 @@ def create_standby_groups(
         )
 
         standby_ep_ranks = (
-            all_ranks.transpose(1, 2).reshape(-1, new_dp_size * tp_size).unbind(0)
+            all_ranks.transpose(1, 2)
+            .reshape(-1, new_dp_size * pcp_size * tp_size)
+            .unbind(0)
         )
         standby_ep_ranks = [x.tolist() for x in standby_ep_ranks]
         _STANDBY_EP = _init_stateless_group(

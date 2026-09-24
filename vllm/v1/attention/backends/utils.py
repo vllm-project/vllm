@@ -828,7 +828,7 @@ def split_decodes_and_prefills(
             (query_lens == query_lens[0]) | (query_lens == 0)
         ):
             return num_reqs, 0, num_tokens, 0  # all decodes
-        is_prefill = query_lens != query_lens[0]
+        is_prefill = (query_lens != query_lens[0]) & (query_lens != 0)
     else:
         is_prefill = query_lens > decode_threshold
 
