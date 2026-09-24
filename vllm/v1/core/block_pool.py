@@ -14,7 +14,6 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    BlockHashList,
     BlockHashWithGroupId,
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
@@ -127,9 +126,6 @@ class BlockHashToBlockMap:
 
     def __len__(self) -> int:
         return len(self._cache)
-
-    def __contains__(self, key: BlockHashWithGroupId) -> bool:
-        return key in self._cache
 
     def _unexpected_blocks_type(self, blocks: Any) -> None:
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
@@ -269,8 +265,9 @@ class BlockPool:
         )
 
         new_block_hashes = block_hashes[num_cached_blocks:]
-        # Offsets of blocks whose hash another block already serves.
-        duplicate_offsets: list[int] = []
+        new_hashes: list[ExternalBlockHash] | None = (
+            [] if self.enable_kv_cache_events else None
+        )
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -293,89 +290,56 @@ class BlockPool:
                 )
                 removed_hashes = self._remove_cached_block_hashes(blk)
                 self._emit_block_removed_events(removed_hashes)
-            if (
-                self.enable_kv_cache_events
-                and block_hash_with_group_id in self.cached_block_hash_to_block
-            ):
-                duplicate_offsets.append(i)
             self._insert_block_hash(
                 block_hash_with_group_id,
                 blk,
                 num_tokens=num_hash_tokens,
             )
+            if new_hashes is not None:
+                new_hashes.append(maybe_convert_block_hash(block_hash))
 
         if self.enable_kv_cache_events:
-            # A duplicate adds no hash that consumers can see, so leave it out.
-            # A BlockStored event is a contiguous chain (one parent hash, one
-            # token range), so split the range around duplicates. Without
-            # duplicates this emits the same single event as before.
-            start = num_cached_blocks
-            for offset in (*duplicate_offsets, len(new_full_blocks)):
-                end = num_cached_blocks + offset
-                if start < end:
-                    self._emit_block_stored_event(
-                        request,
-                        blocks,
-                        block_hashes,
-                        num_cached_blocks,
-                        start,
-                        end,
-                        block_size,
-                        kv_cache_group_id,
-                        block_mask,
-                    )
-                start = end + 1
+            if num_cached_blocks == 0:
+                parent_block_hash: ExternalBlockHash | None = None
+            else:
+                parent_block_hash = maybe_convert_block_hash(
+                    block_hashes[num_cached_blocks - 1]
+                )
 
-    def _emit_block_stored_event(
-        self,
-        request: Request,
-        blocks: list[KVCacheBlock],
-        block_hashes: BlockHashList,
-        num_cached_blocks: int,
-        start_block: int,
-        end_block: int,
-        block_size: int,
-        kv_cache_group_id: int,
-        block_mask: list[bool] | None,
-    ) -> None:
-        """Queue one BlockStored event for ``blocks[start_block:end_block]``,
-        leaving out null and masked-out blocks."""
-        parent_block_hash: ExternalBlockHash | None = None
-        if start_block > 0:
-            parent_block_hash = maybe_convert_block_hash(block_hashes[start_block - 1])
+            # Calculate token range for the blocks being cached
+            start_token_idx = num_cached_blocks * block_size
+            end_token_idx = num_full_blocks * block_size
 
-        # Generate extra keys for each block individually.
-        # Each block may have different extra_keys (e.g., different MM
-        # features, or cache_salt only for the first block).
-        # Skip null/masked-out blocks to match the length of new_hashes.
-        new_hashes: list[ExternalBlockHash] = []
-        extra_keys_list: list[tuple[Any, ...] | None] = []
-        curr_mm_idx = 0
-        for i in range(start_block, end_block):
-            if blocks[i].is_null:
-                continue
-            if block_mask is not None and not block_mask[i - num_cached_blocks]:
-                continue
-            new_hashes.append(maybe_convert_block_hash(block_hashes[i]))
-            block_start = i * block_size
-            block_end = block_start + block_size
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
+            # Generate extra keys for each block individually.
+            # Each block may have different extra_keys (e.g., different MM
+            # features, or cache_salt only for the first block).
+            # Skip null/masked-out blocks to match the length of new_hashes.
+            extra_keys_list: list[tuple[Any, ...] | None] = []
+            curr_mm_idx = 0
+            for i in range(num_cached_blocks, num_full_blocks):
+                if blocks[i].is_null:
+                    continue
+                if block_mask is not None and not block_mask[i - num_cached_blocks]:
+                    continue
+                block_start = i * block_size
+                block_end = block_start + block_size
+                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                    request, block_start, block_end, curr_mm_idx
+                )
+                extra_keys_list.append(extra_keys)
+
+            self.kv_event_queue.append(
+                self._build_block_stored_event(
+                    request,
+                    block_hashes=new_hashes,
+                    parent_block_hash=parent_block_hash,
+                    start_token_idx=start_token_idx,
+                    end_token_idx=end_token_idx,
+                    block_size=block_size,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=extra_keys_list,
+                )
             )
-            extra_keys_list.append(extra_keys)
-
-        self.kv_event_queue.append(
-            self._build_block_stored_event(
-                request,
-                block_hashes=new_hashes,
-                parent_block_hash=parent_block_hash,
-                start_token_idx=start_block * block_size,
-                end_token_idx=end_block * block_size,
-                block_size=block_size,
-                kv_cache_group_id=kv_cache_group_id,
-                extra_keys_list=extra_keys_list,
-            )
-        )
 
     def _build_block_stored_event(
         self,
@@ -541,7 +505,11 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
-        if replace_existing_hashes or (
+        if replace_existing_hashes:
+            removed_hashes = self._remove_cached_block_hashes(block)
+            self._emit_block_removed_events(removed_hashes)
+            already_cached = False
+        elif (
             not already_cached
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
@@ -549,17 +517,12 @@ class BlockPool:
         ):
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
-        # Another block may already serve this entry: then it is no new hash.
-        emit_stored = (
-            self.enable_kv_cache_events
-            and block_hash_with_group_id not in self.cached_block_hash_to_block
-        )
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
         )
-        if emit_stored:
+        if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
             )
@@ -646,10 +609,8 @@ class BlockPool:
         if not self.enable_kv_cache_events:
             return
         for block_hash in block_hashes:
-            # Duplicate blocks are not merged (see BlockHashToBlockMap), so
-            # another block can still serve this hash. Event consumers index
-            # hashes, not blocks: only report the removal of the last copy.
-            if block_hash in self.cached_block_hash_to_block:
+            # Blocks are not de-duplicated: keep the hash while a copy remains.
+            if self.cached_block_hash_to_block.get_one_block(block_hash) is not None:
                 continue
             self.kv_event_queue.append(
                 BlockRemoved(
