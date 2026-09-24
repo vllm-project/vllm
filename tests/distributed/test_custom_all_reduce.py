@@ -25,12 +25,43 @@ for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
 
 
+def _bf16_ulps(a: torch.Tensor, b: torch.Tensor) -> int:
+    """Largest distance between two BF16 tensors in units in the last place."""
+
+    def ordered(t: torch.Tensor) -> torch.Tensor:
+        bits = t.view(torch.int16).int() & 0xFFFF
+        return torch.where(bits >= 0x8000, 0x8000 - bits, bits)
+
+    return int((ordered(a) - ordered(b)).abs().max())
+
+
+def _unfused_all_reduce_mhc(peers, residual, post, comb, pre, weight, eps):
+    """All-reduce, mHC post, collapse and RMSNorm in the fused kernel's FP32
+    order, rounding to BF16 where the unfused path returns BF16."""
+    reduced = peers[0].float()
+    for peer in peers[1:]:
+        reduced = reduced + peer.float()
+    reduced = reduced.bfloat16().float()
+    output = torch.empty_like(residual)
+    collapse = torch.zeros_like(reduced)
+    for target in range(4):
+        mixed = reduced * post[:, target : target + 1]
+        for source in range(4):
+            mixed = torch.addcmul(
+                mixed, residual[:, source].float(), comb[:, source, target, None]
+            )
+        output[:, target] = mixed.bfloat16()
+        collapse = torch.addcmul(
+            collapse, output[:, target].float(), pre[:, target : target + 1]
+        )
+    prenorm = collapse.bfloat16().float()
+    inv_rms = torch.rsqrt(prenorm.square().mean(-1, keepdim=True) + eps)
+    return output, (prenorm * inv_rms * weight.float()).bfloat16()
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
-    from vllm.model_executor.kernels.mhc.tilelang import (
-        mhc_post_tilelang,
-        mhc_pre_delayed_tilelang,
-    )
+    from vllm.models.deepseek_v41.nvidia.ops.cute_dsl import AllReduceMHC
 
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
@@ -38,98 +69,114 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
-        comm = get_tp_group().device_communicator.ca_comm
-        assert comm is not None and comm.mnnvl_lamport_ag_multicast_ptr
-        fn = torch.zeros(24, 20480, device=device)
-        scale = torch.ones(3, device=device)
-        base = torch.zeros(24, device=device)
+        op = AllReduceMHC(
+            hidden_size=5120, hc_mult=4, max_num_tokens=16, top_k=6, device=device
+        )
 
-        # Changing shapes and interleaving all-gather exercise the shared
-        # Lamport stages, including cleanup of a larger previous payload.
-        def run(n):
-            torch.manual_seed(42 + rank)
-            x = torch.randn(n, 5120, device=device, dtype=torch.bfloat16)
-            # Packed +0/-0 pairs collide with the Lamport sentinel.
-            x[:, :16] = 0
-            x[:, 9:16:2] = -0.0
+        def check_eager_and_replayed(fused, check, halved, doubled):
+            check(fused())
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for _ in range(5):
+                    fused()
+                captured = fused()
+            for _ in range(20):
+                graph.replay()
+            check(captured)
+            # Replays must pick up in-place input changes.
+            halved.mul_(0.5)
+            doubled.mul_(2)
+            graph.replay()
+            check(captured)
+
+        def mhc_inputs(n):
             torch.manual_seed(123)
             residual = torch.randn(n, 4, 5120, device=device, dtype=torch.bfloat16)
             post = torch.rand(n, 4, device=device)
             comb = torch.randn(n, 4, 4, device=device) * 0.1
             pre = torch.rand(n, 4, device=device)
             weight = torch.randn(5120, device=device, dtype=torch.bfloat16)
-            output = torch.empty_like(residual)
-            normalized = torch.empty_like(x)
+            return residual, post, comb, pre, weight
+
+        def run(n):
+            torch.manual_seed(42 + rank)
+            x = torch.randn(n, 5120, device=device, dtype=torch.bfloat16)
+            # Packed +0/-0 pairs collide with the Lamport sentinel.
+            x[:, :16] = 0
+            x[:, 9:16:2] = -0.0
+            residual, post, comb, pre, weight = mhc_inputs(n)
 
             def fused():
-                torch.ops._C_custom_ar.all_reduce_mhc(
-                    x,
+                return op(x, residual, post, comb, pre, weight, 1e-6)
+
+            def check(outputs):
+                peers = get_tp_group().all_gather(x, dim=0).view(tp_size, n, 5120)
+                output, normalized = _unfused_all_reduce_mhc(
+                    peers, residual, post, comb, pre, weight, 1e-6
+                )
+                # The mixed hc streams match bit for bit. The RMSNorm sums the
+                # squares in another order and uses an approximate rsqrt.
+                assert torch.equal(outputs[0], output)
+                assert _bf16_ulps(outputs[1], normalized) <= 1
+
+            check_eager_and_replayed(fused, check, x, residual)
+
+        def run_finalize(n):
+            torch.manual_seed(7 + rank)
+            # A padded permuted GEMM2 buffer, like the MoE's.
+            rows = n * 6 + 5
+            gemm2 = torch.randn(rows, 5120, device=device, dtype=torch.bfloat16)
+            permuted = torch.randperm(rows, device=device)[: n * 6].view(n, 6).int()
+            # A route to an expert this rank does not hold.
+            permuted[0, -1] = -1
+            weights = torch.rand(n, 6, device=device)
+            shared = torch.randn(n, 5120, device=device, dtype=torch.bfloat16)
+            residual, post, comb, pre, weight = mhc_inputs(n)
+
+            def fused():
+                return op.finalize(
+                    gemm2,
+                    weights,
+                    permuted,
+                    shared,
                     residual,
                     post,
                     comb,
                     pre,
                     weight,
-                    output,
-                    normalized,
-                    comm.mnnvl_lamport_ag_local_ptr,
-                    comm.mnnvl_lamport_ag_multicast_ptr,
-                    comm.mnnvl_lamport_epochs[0],
-                    rank,
-                    comm.mnnvl_buffer_size,
                     1e-6,
                 )
 
-            def check():
-                gathered = comm.custom_all_gather(x)
-                assert gathered is not None
-                peers = gathered.view(tp_size, n, 5120).float()
-                reduced = peers[0].clone()
-                for peer in peers[1:]:
-                    reduced.add_(peer)
-                expected = mhc_post_tilelang(
-                    reduced.bfloat16(), residual, post.unsqueeze(-1), comb
-                )
-                expected_norm = mhc_pre_delayed_tilelang(
-                    expected,
-                    fn,
-                    scale,
-                    base,
-                    1e-6,
-                    1e-6,
-                    1e-6,
-                    2.0,
-                    20,
-                    pre_mix=pre,
-                    norm_weight=weight,
-                )[2]
-                torch.testing.assert_close(output, expected, rtol=0.008, atol=1e-6)
-                torch.testing.assert_close(
-                    normalized, expected_norm, rtol=0.008, atol=0.008
-                )
+            def check(outputs):
+                # One FP32 FMA per route in route order, the shared add, one
+                # rounding, then the plain path: only the finalize differs.
+                acc = torch.zeros(n, 5120, device=device)
+                for k in range(6):
+                    valid = (permuted[:, k] >= 0).unsqueeze(-1)
+                    rows_k = gemm2[permuted[:, k].clamp_min(0).long()].float()
+                    torch.addcmul(
+                        acc,
+                        torch.where(valid, rows_k, 0.0),
+                        torch.where(valid, weights[:, k : k + 1], 0.0),
+                        out=acc,
+                    )
+                x = (acc + shared.float()).bfloat16()
+                expected = op(x, residual, post, comb, pre, weight, 1e-6)
+                assert torch.equal(outputs[0], expected[0])
+                assert torch.equal(outputs[1], expected[1])
 
-            fused()
-            check()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                for _ in range(6):
-                    fused()
-            for _ in range(20):
-                graph.replay()
-            check()
-            x.mul_(0.5)
-            residual.mul_(2)
-            graph.replay()
-            check()
+            check_eager_and_replayed(fused, check, gemm2, shared)
 
-        # Cover fixed Q6 and shrinking/growing adaptive verification batches.
+        # Changing shapes cover shrinking and growing batches in one mailbox.
         for n in (1, 6, 12, 8, 16, 3, 5, 2, 4, 1):
             run(n)
+            run_finalize(n)
 
 
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
-def test_all_reduce_mhc_preserves_bf16_boundaries_and_graph_replay(monkeypatch):
+def test_all_reduce_mhc_matches_unfused_path(monkeypatch):
     if torch.accelerator.device_count() < 4:
         pytest.skip("Requires four GPUs with NVLink multicast")
     multi_process_parallel(monkeypatch, 4, 1, _all_reduce_mhc)

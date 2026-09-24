@@ -33,6 +33,14 @@ from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+    TrtLlmMxfp4ExpertsModular,
+)
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    MoEOutput,
+    UnfinalizedMoEOutput,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -94,6 +102,7 @@ from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, can_share_engram_tables, gather_engram_hashes
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
+    init_mhc_all_reduce,
     mhc_pre_delayed_overlap,
     mhc_shifted_post_pre,
     supports_mhc_all_reduce,
@@ -134,6 +143,48 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             reduce_results=reduce_results,
             image_sentinel_lo=IMAGE_SENTINEL_BASE_ID,
         )
+
+    def defer_finalize(self) -> None:
+        """Leave the routed top-k reduction to the next fused all-reduce + mHC.
+
+        Only the modular TRTLLM MXFP4 experts can stop after GEMM2; the fused
+        kernel takes as many tokens as the mHC overlap path.
+        """
+        moe_config = self.experts.moe_config
+        experts_cls = getattr(
+            self.experts.routed_experts.quant_method, "experts_cls", None
+        )
+        if (
+            experts_cls is TrtLlmMxfp4ExpertsModular
+            and self.experts.routed_scaling_factor == 1.0
+        ):
+            moe_config.defer_moe_finalize(MHC_OVERLAP_MAX_TOKENS)
+            if moe_config.use_deferred_moe_finalize:
+                logger.info_once(
+                    "DSV4.1 mHC: MoE top-k finalize fused into the all-reduce for "
+                    "up to %d tokens.",
+                    MHC_OVERLAP_MAX_TOKENS,
+                )
+
+    def defers_finalize(self, num_tokens: int) -> bool:
+        return (
+            not self.use_mega_moe
+            and self.experts.moe_config.should_defer_moe_finalize(num_tokens)
+        )
+
+    def forward_unfinalized(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+    ) -> MoEOutput:
+        """``forward`` with the routed top-k reduction and all-reduce left open."""
+        # The runner's custom op returns tensors only, so run its body directly.
+        shared_output, routed = _unpack(
+            self.experts._forward_impl(
+                hidden_states, hidden_states, hidden_states, input_ids
+            )
+        )
+        assert shared_output is not None
+        assert isinstance(routed, UnfinalizedMoEOutput)
+        return MoEOutput(routed=routed, shared_output=shared_output)
 
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
@@ -394,7 +445,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: torch.Tensor | MoEOutput,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
         pre_mix: torch.Tensor | None = None,
@@ -407,7 +458,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         capture_previous_aux: bool = False,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
     ) -> tuple[
-        torch.Tensor,
+        torch.Tensor | MoEOutput,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
@@ -432,6 +483,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
         if residual is None:
+            assert isinstance(x, torch.Tensor)
             if x.dim() == 2:
                 # First layer: the stream is the embedding broadcast to hc
                 # copies and the identity pre-mix selects copy 0.
@@ -471,7 +523,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             # Engram injection happens between the previous sublayer's post
             # and this block's pre, on the full hc stream, so the mix
             # coefficients see the injected stream. The injection also keeps
-            # the post out of the pre-norm GEMM's fused prologue.
+            # the post out of the pre-norm GEMM's fused prologue. The layer
+            # before an engram layer finalizes its own MoE.
+            assert isinstance(x, torch.Tensor)
             if self.fuse_mhc_all_reduce:
                 x = tensor_model_parallel_all_reduce(x)
             previous_post = mhc_post_tilelang(x, residual, post_mix, res_mix)
@@ -552,7 +606,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
         )
-        x = self.ffn(x, input_ids, mega_gate_metadata)
+        if self.ffn.defers_finalize(x.shape[0]):
+            # The next layer's first boundary finalizes it with the all-reduce.
+            x = self.ffn.forward_unfinalized(x, input_ids)
+        else:
+            x = self.ffn(x, input_ids, mega_gate_metadata)
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
@@ -591,6 +649,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.fuse_mhc_all_reduce = mhc_stream is not None and supports_mhc_all_reduce(
             vllm_config
         )
+        if self.fuse_mhc_all_reduce:
+            init_mhc_all_reduce(vllm_config)
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
@@ -670,6 +730,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        if self.fuse_mhc_all_reduce:
+            # A MoE's top-k finalize folds into the next layer's first mHC
+            # boundary, which the last local layer lacks and an engram layer
+            # replaces with its own all-reduce.
+            local_layers = list(islice(self.layers, self.start_layer, self.end_layer))
+            for layer, successor in zip(local_layers, local_layers[1:]):
+                assert isinstance(layer, DeepseekV4DecoderLayer)
+                assert isinstance(successor, DeepseekV4DecoderLayer)
+                if successor.engram is None:
+                    layer.ffn.defer_finalize()
 
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
         # (chunked prefill / decode lookback); key it off the first local
@@ -874,6 +944,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 if self.use_sequence_parallel:
                     previous_aux = sp_all_gather(previous_aux)[:full_num_tokens]
                 aux_hidden_by_layer[idx] = previous_aux
+        # Without a successor boundary, the last layer finalized its own MoE.
+        assert isinstance(hidden_states, torch.Tensor)
         if layer is not None:
             # The last layer has no successor to fold its post into.
             if self.fuse_mhc_all_reduce:
