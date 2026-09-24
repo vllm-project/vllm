@@ -736,6 +736,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
     ),
+    "DistilBertForSequenceClassification": _HfExamplesInfo(
+        "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+    ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
     ),
