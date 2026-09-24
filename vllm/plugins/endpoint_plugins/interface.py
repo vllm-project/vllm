@@ -29,10 +29,13 @@ either exclude `"render"` from `required_tasks` or check for `None` in
 """
 
 from argparse import Namespace
+from copy import copy
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from starlette.datastructures import State
+from starlette.routing import BaseRoute
 
 from vllm.engine.protocol import EngineClient
 
@@ -64,8 +67,8 @@ class EndpointPlugin(Protocol):
         """Register this plugin's routes on `app`.
 
         Called once during `build_app()` after all core routers have been
-        attached. Routes attached here can shadow core routes with the same
-        path. There is currently no conflict enforcement (see RFC #46565 follow ups).
+        attached. HTTP routes registered here replace earlier routes with the
+        same path template and method. Other methods remain available.
         """
         ...
 
@@ -93,15 +96,45 @@ def attach_endpoint_plugins(
 ) -> None:
     """Phase A of endpoint plugin wiring: discover, gate and attach routes.
 
-    Attached last after all core routers. This is so endpoint plugin routes can
-    shadow core routes with the same path (see `EndpointPlugin.attach_router`
-    docstring). No-ops when no plugins are discovered/allowlisted.
+    Hooks run after all core routers have been attached. Plugin HTTP routes
+    replace earlier operations with the same path template and method in both
+    routing and OpenAPI. No-ops when no plugins are discovered/allowlisted.
     """
     from vllm.plugins import load_endpoint_plugins
 
     endpoint_plugins = load_endpoint_plugins(supported_tasks)
+    existing_routes = {id(route): route for route in app.routes}
     for plugin in endpoint_plugins:
         plugin.attach_router(app)
+
+    routes: list[BaseRoute] = []
+    for route in app.routes:
+        if id(route) in existing_routes or not isinstance(route, APIRoute):
+            routes.append(route)
+            continue
+
+        insert_at = len(routes)
+        retained: list[BaseRoute] = []
+        for previous in routes:
+            if (
+                isinstance(previous, APIRoute)
+                and previous.path == route.path
+                and previous.methods & route.methods
+            ):
+                # Keep replacements ahead of mounts, preserving other methods.
+                insert_at = min(insert_at, len(retained))
+                methods = previous.methods - route.methods
+                if not methods:
+                    continue
+                previous = copy(previous)
+                previous.methods = methods
+            retained.append(previous)
+        retained.insert(insert_at, route)
+        routes = retained
+
+    app.router.routes[:] = routes
+    if endpoint_plugins:
+        app.openapi_schema = None
     app.state.endpoint_plugins = endpoint_plugins
 
 
