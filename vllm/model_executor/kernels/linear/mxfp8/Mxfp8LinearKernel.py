@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
 
 @dataclass
 class Mxfp8LinearLayerConfig:
@@ -15,7 +17,7 @@ class Mxfp8LinearLayerConfig:
     uint8 (E8M0) per-block scales at block size 32.
     """
 
-    pass
+    bmm_batch_size: int | None = None
 
 
 class Mxfp8LinearKernel(ABC):
@@ -25,10 +27,20 @@ class Mxfp8LinearKernel(ABC):
     Marlin, emulation).
     """
 
+    supports_pre_processed_weights: bool = False
+    """True if ``process_weights_after_loading`` only rewrites parameters, so
+    weights exported by the weight cache daemon can be used as-is."""
+
     def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
         assert self.can_implement(c)[0]
         assert self.is_supported()[0]
         self.config = c
+
+    def input_quant_key(self) -> QuantKey | None:
+        """Return the input quantization key supported by this kernel. If the kernel
+        does not support input quantization outside of the kernel, return None.
+        """
+        return None
 
     @classmethod
     @abstractmethod

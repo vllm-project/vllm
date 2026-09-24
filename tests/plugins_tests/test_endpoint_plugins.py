@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
 from vllm.entrypoints.launchers.app import build_app
-from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.launchers.cli_args import make_arg_parser
 from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,

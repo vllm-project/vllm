@@ -73,7 +73,7 @@ from vllm.renderers.embed_utils import (
 )
 from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
-from vllm.utils.collection_utils import is_list_of
+from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
@@ -146,12 +146,15 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
     """The type of the content part."""
 
 
+MultiModalEmbedsPayload: TypeAlias = str | dict[str, str | list[int | float]]
+
+
 class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
-    image_embeds: str | dict[str, str] | None
+    image_embeds: MultiModalEmbedsPayload | None
     """
     The image embeddings. It can be either:
     - A single base64 string.
-    - A dictionary where each value is a base64 string.
+    - A dictionary of base64 tensors or numeric JSON metadata arrays.
     """
     type: Required[Literal["image_embeds"]]
     """The type of the content part."""
@@ -163,13 +166,29 @@ class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
 
 
 class ChatCompletionContentPartAudioEmbedsParam(TypedDict, total=False):
-    audio_embeds: str | dict[str, str] | None
+    audio_embeds: MultiModalEmbedsPayload | None
     """
     The audio embeddings. It can be either:
     - A single base64 string representing a serialized torch tensor.
-    - A dictionary where each value is a base64 string.
+    - A dictionary of base64 tensors or numeric JSON metadata arrays.
     """
     type: Required[Literal["audio_embeds"]]
+    """The type of the content part."""
+    uuid: str | None
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
+
+
+class ChatCompletionContentPartVideoEmbedsParam(TypedDict, total=False):
+    video_embeds: MultiModalEmbedsPayload | None
+    """
+    The video embeddings. It can be either:
+    - A single base64 string representing a serialized torch tensor.
+    - A dictionary of base64 tensors or numeric JSON metadata arrays.
+    """
+    type: Required[Literal["video_embeds"]]
     """The type of the content part."""
     uuid: str | None
     """
@@ -204,9 +223,7 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
 
 
 class PILImage(BaseModel):
-    """
-    A PIL.Image.Image object.
-    """
+    """A PIL.Image.Image object."""
 
     image_pil: Image.Image
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -219,6 +236,7 @@ class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
     {
         "image_pil": ImageAsset('cherry_blossom').pil_image
     }
+
     """
 
     image_pil: PILImage | None
@@ -237,6 +255,7 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     {
         "image_url": "https://example.com/image.jpg"
     }
+
     """
 
     image_url: str | None
@@ -254,6 +273,7 @@ class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     {
         "audio_url": "https://example.com/audio.mp3"
     }
+
     """
 
     audio_url: str | None
@@ -266,6 +286,7 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     {
         "video_url": "https://example.com/video.mp4"
     }
+
     """
 
     video_url: str | None
@@ -285,6 +306,7 @@ class CustomThinkCompletionContentParam(TypedDict, total=False):
         "closed": True,
         "type": "thinking"
     }
+
     """
 
     thinking: Required[str]
@@ -305,6 +327,7 @@ class CustomChatCompletionContentToolReferenceParam(TypedDict, total=False):
         "name": "get_weather",
         "type": "tool_reference"
     }
+
     """
 
     name: str
@@ -324,6 +347,7 @@ ChatCompletionContentPartParam: TypeAlias = (
     | CustomChatCompletionContentSimpleImageParam
     | ChatCompletionContentPartImageEmbedsParam
     | ChatCompletionContentPartAudioEmbedsParam
+    | ChatCompletionContentPartVideoEmbedsParam
     | ChatCompletionContentPartPromptEmbedsParam
     | CustomChatCompletionContentSimpleAudioParam
     | CustomChatCompletionContentSimpleVideoParam
@@ -415,6 +439,7 @@ ModalityStr = Literal[
     "video",
     "image_embeds",
     "audio_embeds",
+    "video_embeds",
     "vision_chunk",
     "prompt_embeds",
 ]
@@ -509,6 +534,27 @@ def _merge_embeds(
     return data_merged
 
 
+async def _load_embeds_dict(
+    data: dict[str, str | list[int | float]],
+    fetch: Callable[[str], Awaitable["torch.Tensor"]],
+) -> dict[str, Any]:
+    encoded = {key: value for key, value in data.items() if isinstance(value, str)}
+    tensors = await asyncio.gather(*(fetch(value) for value in encoded.values()))
+    return {**data, **dict(zip(encoded, tensors))}
+
+
+def _parse_metadata_array(key: str, value: list, metadata_fields: set[str]):
+    if key not in metadata_fields:
+        raise VLLMValidationError(f"JSON arrays are only supported for metadata: {key}")
+    if not is_list_of_numbers(value):
+        raise VLLMValidationError(f"Metadata {key} must be a finite numeric array.")
+    dtype = torch.float64 if any(isinstance(v, float) for v in value) else torch.int64
+    try:
+        return torch.tensor(value, dtype=dtype)
+    except (ValueError, TypeError, OverflowError, RuntimeError) as error:
+        raise VLLMValidationError(f"Invalid metadata array: {key}") from error
+
+
 def _get_embeds_data(
     modality: str,
     data_items: list[Any],
@@ -526,14 +572,25 @@ def _get_embeds_data(
         return _merge_embeds(dict_items, mm_processor)[embeds_key]
 
     if is_list_of(data_items, dict):
+        metadata_fields = mm_processor.info.data_parser.placeholder_metadata_fields(
+            modality
+        )
+        data_items = [
+            {
+                key: _parse_metadata_array(key, value, metadata_fields)
+                if isinstance(value, list)
+                else value
+                for key, value in item.items()
+            }
+            for item in data_items
+        ]
         return _merge_embeds(data_items, mm_processor)
 
     raise NotImplementedError(type(data_items))
 
 
 class BaseMultiModalItemTracker(ABC, Generic[_T]):
-    """
-    Tracks multi-modal items in a given request and ensures that the number
+    """Tracks multi-modal items in a given request and ensures that the number
     of multi-modal items in a given request does not exceed the configured
     maximum per prompt.
     """
@@ -597,8 +654,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return get_video_processor_cls_name(self.model_config)
 
     def add(self, modality: ModalityStr, item: _T) -> str | None:
-        """
-        Add a multi-modal item to the current prompt and returns the
+        """Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
 
         An optional uuid can be added which serves as a unique identifier of the
@@ -609,6 +665,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             pre-computed embeddings that do not go through any HF processor, encoder,
             or model-specific placeholder logic. The corresponding placeholder string is
             managed by the parser via `_add_placeholder`, so we return None here.
+
         """
         add_info = self._validate_add(modality)
         if add_info is None:
@@ -737,13 +794,13 @@ def _resolve_items(
     mm_processor: BaseMultiModalProcessor | None,
     modality_order: dict[str, list[str]],
 ) -> tuple[MultiModalDataDict, MultiModalUUIDDict]:
-    """
-    Materialize the tracker's per-modality items into `mm_data` / `mm_uuids`.
+    """Materialize the tracker's per-modality items into `mm_data` / `mm_uuids`.
 
     Note:
         `mm_processor` is `None` for text-only models (no registered HF
         processor) whose only modality is `prompt_embeds`. Every other
         modality requires a processor, enforced by the guard below.
+
     """
     if "image" in items_by_modality and "image_embeds" in items_by_modality:
         raise VLLMValidationError(
@@ -754,6 +811,11 @@ def _resolve_items(
         raise VLLMValidationError(
             "Mixing raw audio and embedding inputs is not allowed",
             parameter="audio_embeds",
+        )
+    if "video" in items_by_modality and "video_embeds" in items_by_modality:
+        raise VLLMValidationError(
+            "Mixing raw video and embedding inputs is not allowed",
+            parameter="video_embeds",
         )
     # `prompt_embeds` bypasses HF MM processors. Every other modality requires one.
     processor_modalities = items_by_modality.keys() - {"prompt_embeds"}
@@ -789,6 +851,14 @@ def _resolve_items(
     if "video" in items_by_modality:
         mm_data["video"] = [data for data, uuid in items_by_modality["video"]]
         mm_uuids["video"] = [uuid for data, uuid in items_by_modality["video"]]
+    if "video_embeds" in items_by_modality:
+        assert mm_processor is not None
+        mm_data["video"] = _get_embeds_data(
+            "video",
+            [data for data, uuid in items_by_modality["video_embeds"]],
+            mm_processor,
+        )
+        mm_uuids["video"] = [uuid for data, uuid in items_by_modality["video_embeds"]]
     if "vision_chunk" in items_by_modality:
         assert mm_processor is not None
         # Process vision_chunk items - extract from (data, modality) tuples
@@ -840,19 +910,30 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
         if not self._items_by_modality:
             return None, None
 
+        # Fetch all modalities together. Each tracked item is already an
+        # independent awaitable, and the async connector offloads blocking
+        # decode work, so waiting for one modality before starting the next
+        # needlessly adds their latency.
+        # Keep the original group and item order when rebuilding the result.
+        item_groups = list(self._items_by_modality.items())
+        items = [item for _, group in item_groups for item in group]
+        results = await asyncio.gather(
+            *(item() for item in items), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                # Gathering with return_exceptions=True lets every task finish
+                # (or itself fail) before we raise, instead of abandoning
+                # still-in-flight fetches (real network/thread-pool work) the
+                # moment the first one fails.
+                raise result
+
         resolved_items_by_modality: dict[str, list[Any]] = {}
-        for modality, items in self._items_by_modality.items():
-            results = await asyncio.gather(
-                *(item() for item in items), return_exceptions=True
-            )
-            for result in results:
-                if isinstance(result, BaseException):
-                    # Gathering with return_exceptions=True lets every task in
-                    # this modality finish (or itself fail) before we raise,
-                    # instead of abandoning still-in-flight fetches (real
-                    # network/thread-pool work) the moment the first one fails.
-                    raise result
-            resolved_items_by_modality[modality] = results
+        result_idx = 0
+        for modality, group in item_groups:
+            next_result_idx = result_idx + len(group)
+            resolved_items_by_modality[modality] = results[result_idx:next_result_idx]
+            result_idx = next_result_idx
 
         mm_processor = (
             self.mm_processor if self._model_config.is_multimodal_model else None
@@ -904,7 +985,7 @@ class BaseMultiModalContentParser(ABC):
     @abstractmethod
     def parse_image_embeds(
         self,
-        image_embeds: str | dict[str, str] | None,
+        image_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         raise NotImplementedError
@@ -928,7 +1009,7 @@ class BaseMultiModalContentParser(ABC):
     @abstractmethod
     def parse_audio_embeds(
         self,
-        audio_embeds: str | dict[str, str] | None,
+        audio_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         raise NotImplementedError
@@ -939,6 +1020,14 @@ class BaseMultiModalContentParser(ABC):
 
     @abstractmethod
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def parse_video_embeds(
+        self,
+        video_embeds: MultiModalEmbedsPayload | None,
+        uuid: str | None = None,
+    ) -> None:
         raise NotImplementedError
 
 
@@ -993,7 +1082,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_image_embeds(
         self,
-        image_embeds: str | dict[str, str] | None,
+        image_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1005,7 +1094,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         if isinstance(image_embeds, dict):
             embeds = {
-                k: self._connector.fetch_image_embedding(v)
+                k: self._connector.fetch_image_embedding(v) if isinstance(v, str) else v
                 for k, v in image_embeds.items()
             }
             placeholder = self._tracker.add("image_embeds", (embeds, uuid))
@@ -1021,7 +1110,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_audio_embeds(
         self,
-        audio_embeds: str | dict[str, str] | None,
+        audio_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1033,7 +1122,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         if isinstance(audio_embeds, dict):
             embeds = {
-                k: self._connector.fetch_audio_embedding(v)
+                k: self._connector.fetch_audio_embedding(v) if isinstance(v, str) else v
                 for k, v in audio_embeds.items()
             }
             placeholder = self._tracker.add("audio_embeds", (embeds, uuid))
@@ -1095,6 +1184,32 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             audio = self._connector.fetch_audio(video_url) if video_url else None
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
+
+    def parse_video_embeds(
+        self,
+        video_embeds: MultiModalEmbedsPayload | None,
+        uuid: str | None = None,
+    ) -> None:
+        mm_config = self.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
+            raise VLLMValidationError(
+                "You must set `--enable-mm-embeds` to input `video_embeds`",
+                parameter="video_embeds",
+            )
+
+        if isinstance(video_embeds, dict):
+            embeds = {
+                k: self._connector.fetch_video_embedding(v) if isinstance(v, str) else v
+                for k, v in video_embeds.items()
+            }
+            placeholder = self._tracker.add("video_embeds", (embeds, uuid))
+        elif isinstance(video_embeds, str):
+            embedding = self._connector.fetch_video_embedding(video_embeds)
+            placeholder = self._tracker.add("video_embeds", (embedding, uuid))
+        else:
+            placeholder = self._tracker.add("video_embeds", (None, uuid))
+
+        self._add_placeholder("video", placeholder)
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -1166,7 +1281,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_image_embeds(
         self,
-        image_embeds: str | dict[str, str] | None,
+        image_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1184,17 +1299,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _image_embeds_with_uuid_async(
         self,
-        image_embeds: str | dict[str, str] | None,
+        image_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None,
     ):
         if isinstance(image_embeds, dict):
-            tensors = await asyncio.gather(
-                *(
-                    self._connector.fetch_image_embedding_async(v)
-                    for v in image_embeds.values()
-                )
+            embeds = await _load_embeds_dict(
+                image_embeds, self._connector.fetch_image_embedding_async
             )
-            embeds = dict(zip(image_embeds, tensors))
         elif isinstance(image_embeds, str):
             embeds = await self._connector.fetch_image_embedding_async(image_embeds)
         else:
@@ -1203,7 +1314,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_audio_embeds(
         self,
-        audio_embeds: str | dict[str, str] | None,
+        audio_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1221,17 +1332,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _audio_embeds_with_uuid_async(
         self,
-        audio_embeds: str | dict[str, str] | None,
+        audio_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None,
     ):
         if isinstance(audio_embeds, dict):
-            tensors = await asyncio.gather(
-                *(
-                    self._connector.fetch_audio_embedding_async(v)
-                    for v in audio_embeds.values()
-                )
+            embeds = await _load_embeds_dict(
+                audio_embeds, self._connector.fetch_audio_embedding_async
             )
-            embeds = dict(zip(audio_embeds, tensors))
         elif isinstance(audio_embeds, str):
             embeds = await self._connector.fetch_audio_embedding_async(audio_embeds)
         else:
@@ -1304,6 +1411,39 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             )
             self._add_placeholder("audio", audio_placeholder)
 
+    def parse_video_embeds(
+        self,
+        video_embeds: MultiModalEmbedsPayload | None,
+        uuid: str | None = None,
+    ) -> None:
+        mm_config = self.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
+            raise VLLMValidationError(
+                "You must set `--enable-mm-embeds` to input `video_embeds`",
+                parameter="video_embeds",
+            )
+
+        placeholder = self._tracker.add(
+            "video_embeds",
+            partial(self._video_embeds_with_uuid_async, video_embeds, uuid),
+        )
+        self._add_placeholder("video", placeholder)
+
+    async def _video_embeds_with_uuid_async(
+        self,
+        video_embeds: MultiModalEmbedsPayload | None,
+        uuid: str | None,
+    ):
+        if isinstance(video_embeds, dict):
+            embeds = await _load_embeds_dict(
+                video_embeds, self._connector.fetch_video_embedding_async
+            )
+        elif isinstance(video_embeds, str):
+            embeds = await self._connector.fetch_video_embedding_async(video_embeds)
+        else:
+            embeds = None
+        return embeds, uuid
+
 
 @dataclass
 class ChatTemplateConfig:
@@ -1333,14 +1473,18 @@ def validate_chat_template(chat_template: Path | str | None):
 
             builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
             if not builtin_template_path.exists():
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The supplied chat template string ({chat_template}) "
                     f"appears path-like, but doesn't exist! "
-                    f"Tried: {chat_template} and {builtin_template_path}"
+                    f"Tried: {chat_template} and {builtin_template_path}",
+                    parameter="chat_template",
                 )
 
     else:
-        raise TypeError(f"{type(chat_template)} is not a valid chat template type")
+        raise VLLMValidationError(
+            f"{type(chat_template)} is not a valid chat template type",
+            parameter="chat_template",
+        )
 
 
 def _load_chat_template(
@@ -1384,7 +1528,7 @@ def _load_chat_template(
                     f"Tried: {chat_template} and {builtin_template_path}. "
                     f"Reason: {e}"
                 )
-                raise ValueError(msg) from e
+                raise VLLMValidationError(msg, parameter="chat_template") from e
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
@@ -1407,7 +1551,13 @@ def _get_interleaved_text_prompt(
 ) -> str:
     for idx, elem in enumerate(texts):
         if elem in placeholder_storage:
-            texts[idx] = placeholder_storage[elem].pop(0)
+            slots = placeholder_storage[elem]
+            if not slots:
+                raise VLLMValidationError(
+                    f"Found more '{elem}' placeholders in input prompt than "
+                    "actual multimodal data items."
+                )
+            texts[idx] = slots.pop(0)
 
     return "\n".join(texts)
 
@@ -1421,7 +1571,6 @@ def _get_full_multimodal_text_prompt(
     multimodal_content_part_separator: str = "\n",
 ) -> str:
     """Combine multimodal prompts for a multimodal language model."""
-
     # flatten storage to make it looks like
     # {
     #   "<|image|>": 2,
@@ -1456,7 +1605,8 @@ def _get_full_multimodal_text_prompt(
             logger.debug("Input prompt: %s", text_prompt)
             raise VLLMValidationError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
-                "actual multimodal data items."
+                "actual multimodal data items.",
+                parameter="messages",
             )
 
         missing_placeholders.extend([placeholder] * placeholder_counts[placeholder])
@@ -1475,6 +1625,7 @@ def _get_full_multimodal_text_prompt(
 _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
 _AudioEmbedsParser = partial(cast, ChatCompletionContentPartAudioEmbedsParam)
+_VideoEmbedsParser = partial(cast, ChatCompletionContentPartVideoEmbedsParam)
 _PromptEmbedsParser = partial(cast, ChatCompletionContentPartPromptEmbedsParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
@@ -1486,7 +1637,9 @@ _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
 _VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
 
 _ResponsesInputImageParser = TypeAdapter(ResponseInputImageParam).validate_python
-_ContentPart: TypeAlias = str | dict[str, str] | InputAudio | PILImage
+_ContentPart: TypeAlias = (
+    MultiModalEmbedsPayload | dict[str, str] | InputAudio | PILImage
+)
 
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: dict[
@@ -1501,6 +1654,7 @@ MM_PARSER_MAP: dict[
     "image_url": lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds": lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
     "audio_embeds": lambda part: _AudioEmbedsParser(part).get("audio_embeds", None),
+    "video_embeds": lambda part: _VideoEmbedsParser(part).get("video_embeds", None),
     "prompt_embeds": lambda part: _PromptEmbedsParser(part).get("data", None),
     "image_pil": lambda part: _PILImageParser(part).get("image_pil", None),
     "audio_url": lambda part: _AudioParser(part).get("audio_url", {}).get("url", None),
@@ -1535,8 +1689,7 @@ def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
 def _parse_chat_message_content_mm_part(
     part: ChatCompletionContentPartParam,
 ) -> tuple[str, _ContentPart]:
-    """
-    Parses a given multi-modal content part based on its type.
+    """Parses a given multi-modal content part based on its type.
 
     Args:
         part: A dict containing the content part, with a potential 'type' field.
@@ -1548,6 +1701,7 @@ def _parse_chat_message_content_mm_part(
 
     Raises:
         ValueError: If the 'type' field is missing and no direct URL is found.
+
     """
     assert isinstance(
         part, dict
@@ -1599,6 +1753,13 @@ def _parse_chat_message_content_mm_part(
             )
             audio_embeds = audio_params.get("audio_embeds", None)
             return "audio_embeds", audio_embeds
+        if "video_embeds" in part:
+            # "video_embeds" could be None if UUID is provided.
+            video_embeds_params = cast(  # type: ignore[assignment]
+                ChatCompletionContentPartVideoEmbedsParam, part
+            )
+            video_embeds = video_embeds_params.get("video_embeds", None)
+            return "video_embeds", video_embeds
         if "prompt_embeds" in part:
             prompt_embeds_params = cast(  # type: ignore[assignment]
                 ChatCompletionContentPartPromptEmbedsParam, part
@@ -1614,7 +1775,7 @@ def _parse_chat_message_content_mm_part(
                 # with url as a dict of {"url": url}
                 audio_url = audio_url.get("url", None)
             return "audio_url", audio_url
-        if part.get("input_audio") is not None:
+        if "input_audio" in part:
             input_audio_params = _InputAudioParser(part).get("input_audio", None)
             return "input_audio", input_audio_params
         if "video_url" in part:
@@ -1705,7 +1866,8 @@ def _reject_reserved_placeholder_in_text(text: str, model_config: ModelConfig) -
         raise VLLMValidationError(
             _RESERVED_PLACEHOLDER_IN_TEXT_ERROR.format(
                 token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN
-            )
+            ),
+            parameter="messages",
         )
 
 
@@ -1767,13 +1929,23 @@ def _parse_chat_message_content_part(
         mm_parser.parse_image(str_content, uuid)
         modality = "image"
     elif part_type == "image_embeds":
-        content = cast(str | dict[str, str], content) if content is not None else None
+        content = (
+            cast(MultiModalEmbedsPayload, content) if content is not None else None
+        )
         mm_parser.parse_image_embeds(content, uuid)
         modality = "image"
     elif part_type == "audio_embeds":
-        content = cast(str | dict[str, str], content) if content is not None else None
+        content = (
+            cast(MultiModalEmbedsPayload, content) if content is not None else None
+        )
         mm_parser.parse_audio_embeds(content, uuid)
         modality = "audio"
+    elif part_type == "video_embeds":
+        content = (
+            cast(MultiModalEmbedsPayload, content) if content is not None else None
+        )
+        mm_parser.parse_video_embeds(content, uuid)
+        modality = "video"
     elif part_type == "prompt_embeds":
         if not content:
             raise VLLMValidationError(
@@ -1944,9 +2116,43 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 
                 # if arguments is None or empty string, set to {}
                 if content := function.get("arguments"):
-                    if not isinstance(content, (dict, list)):
-                        parsed = json.loads(content)
-                        function["arguments"] = parsed if parsed is not None else {}
+                    if isinstance(content, dict):
+                        parsed = content
+                    else:
+                        if isinstance(content, str):
+                            try:
+                                parsed = json.loads(content)
+                            except json.JSONDecodeError:
+                                # A malformed `arguments` string lives in
+                                # conversation history, so failing the request
+                                # here would fail every subsequent turn too and
+                                # leave the conversation unrecoverable. Coerce
+                                # to an empty object so the turn can proceed.
+                                logger.warning(
+                                    "Tool call %r has arguments that are not valid "
+                                    "JSON (%d chars); coercing to an empty object "
+                                    "so the conversation can continue.",
+                                    function.get("name"),
+                                    len(content),
+                                )
+                                parsed = None
+                        else:
+                            parsed = content
+
+                        if not isinstance(parsed, dict):
+                            if parsed is not None:
+                                # Valid JSON, but not an object (e.g. "[]",
+                                # "42", "true").
+                                # Chat templates require a mapping.
+                                logger.warning(
+                                    "Tool call %r arguments decoded to %s, not a "
+                                    "JSON object; coercing to an empty object.",
+                                    function.get("name"),
+                                    type(parsed).__name__,
+                                )
+                            parsed = {}
+
+                    function["arguments"] = parsed
                 else:
                     function["arguments"] = {}
 

@@ -69,6 +69,7 @@ def server(request):
         # Option B: deterministic prefix caching
         # "--enable-prefix-caching",
         # "--deterministic-prefix-caching",
+        "--enable-scale-out",
     ]
 
     extra_args = getattr(request, "param", None)
@@ -112,6 +113,29 @@ async def test_generate_endpoint(client):
 
 
 @pytest.mark.asyncio
+async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
+    """Explicit null max_tokens must not skip the min_tokens bound."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": None, "min_tokens": 2147483648},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "min_tokens" in resp.json()["error"]["message"]
+
+    followup = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 4},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=followup)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="sampling mask output is not supported by the Rust frontend",
@@ -133,6 +157,7 @@ async def test_generate_sampling_mask(client):
             "top_p": 0.9,
             "ignore_eos": True,
             "seed": 0,
+            "logprobs": top_k,
         },
         "stream": False,
     }
@@ -146,11 +171,16 @@ async def test_generate_sampling_mask(client):
     assert len(token_ids) == len(sampling_mask)
 
     vocab_size = get_vocab_size(MODEL_NAME)
-    for token_id, support in zip(token_ids, sampling_mask):
+    logprobs_content = choice["logprobs"]["content"]
+    for token_id, support, entry in zip(token_ids, sampling_mask, logprobs_content):
         assert support
         assert len(support) == len(set(support))
         assert all(0 <= support_token_id < vocab_size for support_token_id in support)
         assert token_id in support
+        # processed_logprobs: exactly the support carries finite probability.
+        for top in entry["top_logprobs"]:
+            in_support = int(top["token"].removeprefix("token_id:")) in support
+            assert in_support == (top["logprob"] > -9999.0)
 
 
 @pytest.mark.asyncio
@@ -181,6 +211,30 @@ async def test_generate_defaults_max_tokens_when_omitted(client):
         f"expected server-side default to exceed the legacy 16-token cap, "
         f"got {completion_tokens}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="parallel sampling (n > 1) is not supported by the Rust frontend",
+)
+async def test_generate_returns_all_choices_when_n_greater_than_one(client):
+    """Regression: ``n > 1`` must return ``n`` choices.
+
+    Non-streaming requests kept ``SamplingParams``' default output kind,
+    ``CUMULATIVE``, so only the sequences updated during the last engine step
+    reached the response and the others were silently dropped.
+    """
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 1.0, "n": 4},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    assert sorted(choice["index"] for choice in data["choices"]) == [0, 1, 2, 3]
 
 
 @pytest.mark.asyncio
@@ -389,6 +443,31 @@ async def test_stop_string_workflow(client, tokenizer, messages):
     completions_data = completions_resp.json()
     completions_res = completions_data["choices"][0]["message"]["content"]
     assert generate_res == completions_res
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="--tokens-only is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
+async def test_stop_strings_rejected_when_tokens_only(client):
+    """--tokens-only forces detokenize=False after request validation, so
+    stop strings must be rejected explicitly rather than silently ignored."""
+    sampling_params = {"max_tokens": 5, "stop": ["never"]}
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": sampling_params,
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "stop strings" in resp.json()["error"]["message"]
+
+    sampling_params["stop"] = None
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
 
 
 @pytest.mark.asyncio

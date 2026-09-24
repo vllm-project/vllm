@@ -7,3 +7,5 @@ server_args: >-
   --max-model-len 8192
   --quantization humming
   --linear-backend humming
+env:
+  VLLM_HUMMING_MOE_GEMM_TYPE: "grouped_contiguous"

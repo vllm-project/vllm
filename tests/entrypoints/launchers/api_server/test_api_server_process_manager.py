@@ -5,6 +5,7 @@ import multiprocessing
 import socket
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,7 @@ from tests.entrypoints.launchers.api_server._api_server_spawn_workers import (
     exit_before_report_worker,
 )
 from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
+from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.utils import (
     APIServerProcessManager,
     get_engine_client_zmq_addr,
@@ -30,6 +32,18 @@ def mock_run_api_server_worker(listen_address, sock, args, client_config=None):
     print(f"Mock worker started with client_config: {client_config}")
     time.sleep(WORKER_RUNTIME_SECONDS)
     print("Mock worker completed successfully")
+
+
+def update_admission_stats_worker(listen_address, sock, args, client_config):
+    stats = SharedAdmissionStats(
+        client_config,
+        client_config["client_count"],
+        client_config["client_index"],
+    )
+    value = client_config["client_index"] + 1
+    stats.set_num_requests(value)
+    args.barrier.wait()
+    args.results.put(stats.get_num_requests())
 
 
 # Module-level stub for the gather_actual_addresses test. Must be
@@ -129,6 +143,31 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
         # Verify all processes were terminated
         for proc in manager.processes:
             assert not proc.is_alive()
+
+
+@pytest.mark.skip_global_cleanup
+def test_api_server_processes_share_admission_stats(api_server_args):
+    args = api_server_args.copy()
+    spawn_context = multiprocessing.get_context("spawn")
+    worker_args = SimpleNamespace(
+        barrier=spawn_context.Barrier(args["num_servers"]),
+        results=spawn_context.Queue(),
+        max_num_queued_reqs=10,
+    )
+    args["args"] = worker_args
+    args["target_server_fn"] = update_admission_stats_worker
+    manager = APIServerProcessManager(**args)
+
+    try:
+        for process in manager.processes:
+            process.join(timeout=30)
+            assert process.exitcode == 0
+
+        assert [worker_args.results.get(timeout=5) for _ in range(3)] == [6] * 3
+    finally:
+        manager.shutdown()
+        worker_args.results.close()
+        worker_args.results.join_thread()
 
 
 @patch("vllm.v1.utils.run_api_server_worker_proc", mock_run_api_server_worker)
@@ -401,3 +440,52 @@ def test_gather_actual_addresses_child_crash_before_report():
         manager.shutdown()
         time.sleep(0.2)
         sock.close()
+
+
+def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
+    """The Rust frontend command carries every non-default arg as JSON.
+    Credentials must not reach the log line."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    hf_token = "hf_TESTTOKEN123"
+    api_key = "sk-TESTKEY456"
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", "--hf-token", hf_token, "--api-key", api_key]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+        with caplog.at_level("INFO", logger="vllm.v1.utils"):
+            RustFrontendProcessManager(
+                binary_path="/nonexistent/vllm-rs",
+                sock=sock,
+                args=args,
+                input_address="ipc:///tmp/in",
+                output_address="ipc:///tmp/out",
+                engine_start_index=0,
+                engine_count=1,
+                data_parallel_size=1,
+            )
+    finally:
+        sock.close()
+
+    message = caplog.text
+    assert "Launching Rust frontend:" in message
+    assert hf_token not in message
+    assert api_key not in message
+    assert '"hf_token": "***"' in message

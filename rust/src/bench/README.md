@@ -18,6 +18,7 @@ vllm-bench --backend vllm --base-url http://127.0.0.1:8000 \
 - **Beyond a single run** — concurrency/rate **sweeps**, **multi-run** stats, **multi-turn** conversations, **LoRA** multi-adapter, and result **comparison**.
 - **Steady-state metrics** — throughput/latency measured over the saturated plateau, excluding ramp-up and drain.
 - **Parity** — JSON output schema and timing semantics match Python `vllm bench serve` exactly.
+- **Multimodal preprocessing** — `mm-processor` subcommand measures per-stage VLM preprocessing latency against a managed headless engine (mirrors `vllm bench mm-processor`).
 
 ### Performance vs. Python
 
@@ -148,7 +149,8 @@ vllm-bench \
   --sonnet-input-len 550 --sonnet-output-len 150 --sonnet-prefix-len 200 \
   --num-prompts 500
 
-# Any public HuggingFace dataset (auto-downloads, auto-detects columns)
+# Any HuggingFace dataset (downloads parquet shards into the standard HF hub
+# cache — shared with `hf download` and Python tooling — auto-detects columns)
 vllm-bench \
   --backend openai-chat --base-url http://127.0.0.1:8000 --model <model-name> \
   --dataset-name hf --dataset-path allenai/WildChat-4.8M \
@@ -160,7 +162,8 @@ vllm-bench \
   --dataset-name hf --dataset-path THUDM/LongBench \
   --hf-subset narrativeqa --hf-split test --hf-output-len 512 --num-prompts 200
 
-# Gated HuggingFace dataset (requires HF_TOKEN)
+# Gated HuggingFace dataset (auth via HF_TOKEN or the `hf auth login` token file).
+# Private datasets work too when the repo stores native parquet/json/jsonl files.
 HF_TOKEN=hf_xxx vllm-bench \
   --backend openai-chat --base-url http://127.0.0.1:8000 --model <model-name> \
   --dataset-name hf --dataset-path lmsys/lmsys-chat-1m \
@@ -402,6 +405,32 @@ vllm-bench \
 
 </details>
 
+<details>
+<summary><b>Multimodal preprocessing (offline)</b></summary>
+
+The `mm-processor` subcommand benchmarks the multimodal preprocessing pipeline
+itself (media fetch → per-modality preprocess → prompt expansion), mirroring
+`vllm bench mm-processor`. It spawns a managed headless Python engine (real
+weights, real encoder) — no serving endpoint needed — and reports per-stage
+timing (mean/median/std/percentiles) plus end-to-end latency.
+
+```bash
+vllm-bench mm-processor \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --num-prompts 100 --num-warmups 5 \
+  --random-input-len 512 --random-output-len 128 \
+  --random-mm-base-items-per-request 1 \
+  --random-mm-limit-mm-per-prompt '{"image": 1, "video": 0}' \
+  --random-mm-bucket-config '{(1024, 800, 1): 1.0}' \
+  --metric-percentiles "50,90,99" \
+  --output-json mm_processor_stats.json
+```
+
+`--max-concurrency` defaults to `1`, matching Python's serial driver; raise it
+to measure a concurrent serving-style workload.
+
+</details>
+
 ## Supported Backends
 
 ### Generation
@@ -417,7 +446,7 @@ vllm-bench \
 | --------- | ------------- | ------------- |
 | `openai-embeddings` | `/v1/embeddings` | Text embedding (accepts text or token IDs) |
 | `openai-embeddings-chat` | `/v1/embeddings` | Chat-format embedding (supports multimodal content) |
-| `vllm-pooling` | `/v1/pooling` | vLLM native pooling endpoint |
+| `vllm-pooling` | `/pooling` | vLLM native pooling endpoint |
 | `vllm-rerank` | `/v1/rerank` | vLLM reranking (query from prompt, documents via `--extra-body`) |
 
 Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Use `--dataset-name sharegpt`, `sonnet`, or `hf` for text-based embedding/rerank benchmarks, or `random` for token-ID-based embedding benchmarks.
@@ -431,7 +460,7 @@ Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Us
 | `sharegpt` | Real conversations from ShareGPT (auto-downloads from HuggingFace, or use `--dataset-path`) |
 | `sonnet` | Built-in Shakespeare sonnets; controllable token length + shared prefix, no dataset file needed |
 | `speed-bench` | NVIDIA SPEED-Bench for speculative decoding evaluation (auto-downloads, 11 categories) |
-| `hf` | Any HuggingFace dataset (auto-downloads via datasets-server API, auto-detects chat/text columns) |
+| `hf` | Any HuggingFace dataset with parquet data (downloads parquet shards via hf-hub into the standard HF hub cache, auto-detects chat/text columns) |
 
 ## Metrics
 
@@ -483,7 +512,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--model` | Auto-detect | Model name (fetched from `/v1/models` if omitted) |
 | `--served-model-name` | — | Model name used in API requests |
 | `--tokenizer` | Same as model | Tokenizer name or path (supports HF, tiktoken, server fallback) |
-| `--tokenizer-mode` | `auto` | Tokenizer mode (`auto`, `hf`, `slow`, `mistral`) |
+| `--tokenizer-mode` | `auto` | Accepted for Python CLI compatibility but ignored (warns on non-`auto`): resolution always follows the HF `tokenizer.json` → tiktoken → server-side `/tokenize` chain, so `mistral_common` (tekken) tokenizers fall back to server-side tokenization |
 | `--trust-remote-code` | `false` | Trust remote code for tokenizer |
 | `--skip-tokenizer-init` | `false` | Skip tokenizer initialization |
 
@@ -507,7 +536,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--random-input-len` | `1024` | Input token length |
 | `--random-output-len` | `128` | Output token length |
 | `--random-prefix-len` | `0` | Shared prefix length |
-| `--random-range-ratio` | `1.0` | Length jitter, range `(0, 1]`. Lengths sampled from `[ratio × target, target]`; `1.0` = fixed length |
+| `--random-range-ratio` | `0.0` | Length jitter `r`, range `[0, 1)`. Lengths sampled uniformly from `[len×(1−r), len×(1+r)]`; `0.0` = exact target lengths. Also accepts `'{"input": r1, "output": r2}'` for independent input/output jitter |
 | `--prompt-token-ids` | `false` | Send prompts as token-ID arrays (skips server-side tokenization, exact counts). Random dataset only |
 | **Random multimodal** | | |
 | `--random-mm-base-items-per-request` | `1` | Base number of multimodal items (images) per request |
@@ -521,7 +550,8 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--sonnet-output-len` | `150` | Output tokens per request |
 | `--sonnet-prefix-len` | `200` | Prefix tokens shared across requests |
 | **SPEED-Bench** | | |
-| `--speed-bench-config` | `qualitative` | Split (`qualitative`, `throughput_1k`/`2k`/`8k`/`16k`/`32k`) |
+| `--speed-bench-config` | `qualitative` | Split (`qualitative`, `throughput_1k`/`2k`/`8k`/`16k`/`32k`); alias: `--speed-bench-dataset-subset` (Python name) |
+| `--speed-bench-output-len` | `4096` | Output tokens per request (matches Python default) |
 | `--speed-bench-category` | — | Filter by category (`low_entropy`, `high_entropy`, `mixed_entropy`, `coding`, `math`, …) |
 | `--speed-bench-max-input-len` | — | Truncate prompts to at most N tokens |
 | **HuggingFace** | | |
@@ -664,6 +694,7 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 
 - `--dataset-name random` — synthetic conversations with controllable per-turn token lengths. Auto-sets `min_tokens` to enforce output length without `ignore_eos`.
 - `--dataset-name sharegpt` — loads all turns (not just the first two); filters for entries with ≥ 2 real turns.
+- `--dataset-name hf` — downloads a ShareGPT-format HuggingFace config, then loads it like `sharegpt`.
 
 **Prefix sharing** (random dataset): when `--multi-turn-prefix-global-ratio` or `--multi-turn-prefix-conversation-ratio` is > 0, each turn sends a fixed-length message (no history accumulation) composed of a global prefix + per-conversation prefix + unique suffix. The two ratios must sum to < 1.0.
 
@@ -701,6 +732,36 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 
 </details>
 
+<details>
+<summary><b><code>mm-processor</code> subcommand</b></summary>
+
+Offline multimodal preprocessing latency benchmark (mirrors `vllm bench mm-processor`). Spawns a managed headless Python engine and drives the full chat preprocessing pipeline.
+
+| Flag | Default | Description |
+| ------ | --------- | ------------- |
+| `--model` | (required) | Model to serve and benchmark (HF id or local path) |
+| `--num-prompts` | `10` | Prompts to process, excluding warmups |
+| `--num-warmups` | `1` | Warmup prompts processed and discarded before timing |
+| `--metric-percentiles` | `99` | Comma-separated percentiles to report |
+| `--output-json` | — | Path to write aggregate stats as JSON (same schema as Python) |
+| `--random-input-len` | `1024` | Text input length per prompt |
+| `--random-output-len` | `128` | Expected output length per prompt |
+| `--random-prefix-len` | `0` | Prefix token length per prompt |
+| `--random-range-ratio` | `0.0` | Input/output length range ratio (float or `{"input": i, "output": o}`) |
+| `--random-mm-base-items-per-request` | `1` | Base number of multimodal items per request |
+| `--random-mm-num-mm-items-range-ratio` | `0.0` | Range ratio (in [0, 1]) for the number of mm items per request |
+| `--random-mm-limit-mm-per-prompt` | `{"image": 255, "video": 1}` | Per-modality item caps |
+| `--random-mm-bucket-config` | `{(256,256,1): 0.5, (720,1280,1): 0.5}` | Bucket config |
+| `--seed` | `0` | Seed for dataset generation |
+| `--request-id-prefix` | `mm-proc-` | Request-id prefix for per-request timing keys |
+| `--max-concurrency` | `1` | Maximum concurrent requests (1 matches Python's serial driver) |
+| `--trust-remote-code` | `false` | Trust remote code for the tokenizer and the managed engine |
+| `--chat-template` | — | Chat-template override (inline text or path) |
+
+Managed headless-engine options (e.g. `--python`, `--data-parallel-address`, `--data-parallel-rpc-port`, `--data-parallel-size`, `--max-model-len`, `--python-args`) are shared with other managed-engine commands; see `vllm-bench mm-processor --help`.
+
+</details>
+
 ## Tokenizer Support
 
 Tokenizers are loaded with a three-tier fallback chain:
@@ -730,10 +791,11 @@ Use `--append-result` to append multiple runs to the same file in JSONL format. 
 
 ```text
 src/
-├── main.rs                  # Entry point, mimalloc, tokio runtime, mode dispatch
+├── main.rs                  # Entry point, mimalloc, tokio runtime, mode/subcommand dispatch
 ├── cli.rs                   # clap CLI argument definitions
 ├── config.rs                # Validated config, goodput/ramp-up parsing
 ├── benchmark.rs             # Core orchestrator (schedule, spawn, collect, verify, profile)
+├── mm_processor.rs          # Offline mm preprocessing benchmark (mm-processor subcommand)
 ├── multi_turn.rs            # Multi-turn conversation orchestrator (channel workers)
 ├── compare.rs               # Result diff (--compare file_a.json file_b.json)
 ├── sweep.rs                 # Parameter sweep (--sweep-max-concurrency, --sweep-request-rate)
@@ -794,13 +856,20 @@ The Rust implementation matches Python `vllm bench serve` in:
 - Rate control (Gamma distribution, normalization, burstiness, linear/exponential ramp-up)
 - Metrics (TTFT/TPOT/ITL/E2EL percentiles, peak tokens/sec, peak concurrency, goodput)
 - Sampling parameters merged into the request body via `extra_body` (same precedence rules)
+- HF dataset prompt construction (token-identical input totals vs. Python on full GSM8k / MT-Bench splits; Python-only per-dataset chat templating is intentionally not applied — prompts are sent raw)
+- CLI flags: a superset of Python's, enforced by `tests/cli_parity.rs` against a
+  snapshot of the Python parser (`tests/python_serve_flags.txt`, regenerated by
+  `tests/benchmarks/test_rust_bench_cli_parity.py` in the repo root) with an
+  explicit allowlist for the Python-only remainder — so `VLLM_USE_RUST_BENCH=1`
+  delegation cannot silently reject documented flags
 
 ## Environment Variables
 
 | Variable | Description |
 | ---------- | ------------- |
 | `OPENAI_API_KEY` | API key for authenticated endpoints (cached, not read per-request) |
-| `HF_TOKEN` | HuggingFace token for gated model tokenizers and gated datasets |
+| `HF_TOKEN` | HuggingFace token for gated/private tokenizers and datasets (falls back to the `hf auth login` token file) |
+| `HF_HOME` | Overrides the HuggingFace cache location (default `~/.cache/huggingface`) used for tokenizers and dataset parquet shards |
 | `TOKIO_WORKER_THREADS` | Override tokio worker thread count (default: physical cores) |
 
 ## License
