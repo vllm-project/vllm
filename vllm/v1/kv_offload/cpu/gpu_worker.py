@@ -27,7 +27,10 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    SharedOffloadRegion,
+    xpu_host_pointer_arg,
+)
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
     swap_blocks_batch,
@@ -199,7 +202,34 @@ MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
 
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register row-aligned chunks, rolling back on failure."""
+    """Register host memory for device transfers."""
+    rank = region.rank
+
+    if current_platform.is_xpu():
+        if not (
+            hasattr(torch.ops._C, "xpu_host_register")
+            and hasattr(torch.ops._C, "xpu_host_unregister")
+        ):
+            logger.warning(
+                "XPU host registration is unavailable on rank=%d; "
+                "the offload region stays pageable",
+                rank,
+            )
+            return
+        op = torch.ops._C.xpu_host_register
+        if op(
+            xpu_host_pointer_arg(region._base.data_ptr(), op),
+            region.total_size_bytes,
+        ):
+            region.is_pinned = True
+        else:
+            logger.warning(
+                "XPU host registration failed on rank=%d; "
+                "the offload region stays pageable",
+                rank,
+            )
+        return
+
     if not current_platform.is_cuda_alike():
         logger.info(
             "Skipping mmap host registration on %s; cudaHostRegister is only "
@@ -208,7 +238,6 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
         )
         return
 
-    rank = region.rank
     try:
         cudart = CudaRTLibrary()
     except (AssertionError, AttributeError, OSError):

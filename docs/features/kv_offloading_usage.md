@@ -12,6 +12,9 @@ Two specs are available, selected by the `spec_name` key in `kv_connector_extra_
 - `CPUOffloadingSpec` (default): single CPU tier. Completed GPU blocks are copied into pinned host memory.
 - `TieringOffloadingSpec`: multi-tier. A CPU primary tier plus one or more secondary tiers.
 
+On XPU, `CPUOffloadingSpec` uses a shared mmap region when the installed XPU
+kernels provide host registration; older kernels retain per-rank pinned tensors.
+
 Only the CPU primary tier has direct GPU access. Secondary tiers cannot read from or write to GPU memory; all GPU↔secondary transfers are staged through the CPU primary tier.
 
 ```mermaid
