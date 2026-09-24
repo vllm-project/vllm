@@ -225,7 +225,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_padded = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
         max_query_len = input_batch.num_scheduled_tokens.max()
-        max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        max_seq_len = int(input_batch.seq_lens_cpu_upper_bound.numpy()[:num_reqs].max())
         self.draft_max_seq_len = min(
             max_seq_len + self.num_speculative_steps, self.max_model_len
         )
