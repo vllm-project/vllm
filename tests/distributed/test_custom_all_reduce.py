@@ -175,6 +175,26 @@ def test_custom_allreduce_size_gate_ignored_under_batch_invariance(
     assert communicator.should_custom_ar(oversized) is batch_invariant
 
 
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_custom_reduce_scatter_disabled_under_batch_invariance(
+    monkeypatch, batch_invariant: bool
+) -> None:
+    """Reduce-scatter stays on one backend under batch invariance."""
+    monkeypatch.setattr(car.current_platform, "is_cuda", lambda: True)
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.fully_connected = True
+    communicator.mnnvl_only = False
+    communicator.mnnvl_multicast_ptr = 0
+    communicator.max_reduce_scatter_size = 1024
+    communicator.max_mnnvl_reduce_scatter_size = 1024
+    communicator.batch_invariant = batch_invariant
+
+    in_range = torch.empty(64, dtype=torch.float16)
+    assert communicator.should_custom_reduce_scatter(in_range) is not batch_invariant
+
+
 @pytest.mark.parametrize(
     ("major", "local_multicast", "expected"),
     [
