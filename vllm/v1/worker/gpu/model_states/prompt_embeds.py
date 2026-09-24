@@ -37,7 +37,6 @@ class PromptEmbedsState:
 
         # Indexed by req_state index. Stale entries after removal are
         # harmless: add_request rewrites all fields for every index it claims.
-        # NOTE: Use uint64 instead of int64 to cover all possible addresses.
         self.embeds_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
         self.mask_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
         self.embeds_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
