@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import pytest
 from packaging.version import Version
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.config.model import ModelDType, TokenizerMode
@@ -127,8 +127,7 @@ class _HfExamplesInfo:
         check_min_version: bool = True,
         check_max_version: bool = True,
     ) -> str | None:
-        """
-        If the installed transformers version does not meet the requirements,
+        """If the installed transformers version does not meet the requirements,
         perform the given action.
         """
         if (
@@ -185,9 +184,7 @@ class _HfExamplesInfo:
         *,
         on_fail: Literal["error", "skip"],
     ) -> None:
-        """
-        If the model is not available online, perform the given action.
-        """
+        """If the model is not available online, perform the given action."""
         if not self.is_available_online:
             msg = "Model is not available online"
 
@@ -450,7 +447,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
-        {"tiny": "TitanML/tiny-mixtral"},
+        {
+            "tiny": "axolotl-ai-co/tiny-mixtral-30m",
+            "tiny-random": "TitanML/tiny-mixtral",
+        },
     ),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "NemotronHForCausalLM": _HfExamplesInfo(
@@ -1233,7 +1233,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # NemotronH layers are constructed via `hybrid_override_pattern`
         use_original_num_layers=True,
         hf_overrides={
-            "vision_config": PretrainedConfig(
+            "vision_config": PreTrainedConfig(
                 args={
                     "min_num_patches": 1,
                     "max_num_patches": 12,

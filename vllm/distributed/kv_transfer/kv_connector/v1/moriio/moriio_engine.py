@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
     MoRIIOTransferAck,
     RemoteAllocInfo,
+    TransferBatchState,
     TransferError,
     TransferId,
     WriteTask,
@@ -58,7 +59,6 @@ try:
 except ImportError:
     logger.error("MoRIIO is not available")
 
-
 """Write task execution logic for MoRIIO connector."""
 
 
@@ -87,6 +87,7 @@ class MoRIIOWriter:
 
         Args:
             worker: Reference to the parent worker
+
         """
         self._worker_ref: weakref_ref[MoRIIOConnectorWorker] = weakref_ref(worker)
         self._write_task_q: Queue[WriteTask] = Queue()
@@ -108,6 +109,7 @@ class MoRIIOWriter:
 
         Raises:
             RuntimeError: If worker has been garbage collected
+
         """
         worker = self._worker_ref()
         if worker is None:
@@ -131,6 +133,7 @@ class MoRIIOWriter:
 
         Args:
             task: The write task to schedule
+
         """
         self.ensure_worker_started()
         if self._is_transfer_terminal(task.transfer_id):
@@ -178,7 +181,6 @@ class MoRIIOWriter:
 
     def _write_worker_loop(self) -> None:
         """Main loop for the write worker thread."""
-
         while True:
             # Process deferred tasks first
             self._process_deferred_tasks()
@@ -275,6 +277,7 @@ class MoRIIOWriter:
 
         Returns:
             True if remote blocks are ready
+
         """
         return (
             task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
@@ -291,6 +294,7 @@ class MoRIIOWriter:
 
         Raises:
             KeyError: If allocation info is missing
+
         """
         try:
             return self.worker.moriio_wrapper.done_remote_allocate_req_dict[transfer_id]
@@ -310,18 +314,27 @@ class MoRIIOWriter:
         request_info = self._get_remote_alloc_info(task.transfer_id)
         with self._write_state_lock:
             request_info.completion_request_id = task.request_id
-            request_info.completion_remote_notify_port = task.remote_notify_port
             # Wide-EP multi-pod: task.remote_ip addresses only the first pod,
             # so resolve the per-rank host from multi_pod_hosts (falls back to
             # task.remote_ip for single-pod or on any indexing miss).
             _remote_ip = task.remote_ip
-            _hosts = list(getattr(self.worker, "multi_pod_hosts", []) or [])
-            _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+            _hosts = task.multi_pod_hosts
+            _dp_local = task.remote_dp_size_local
             if _hosts and _dp_local > 0:
                 _pod_idx = int(request_info.decode_dp_rank) // _dp_local
                 if 0 <= _pod_idx < len(_hosts):
                     _remote_ip = _hosts[_pod_idx]
             request_info.completion_remote_ip = _remote_ip
+            # Resolve the final notify port under the lock so finalize only
+            # reads it. The offset uses the per-pod local rank (% dp_local),
+            # since each pod binds notify sockets only for its local ranks;
+            # single-pod is bit-identical (modulus is a no-op).
+            _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
+            if _dp_local > 0:
+                _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
+            request_info.completion_notify_port = task.remote_notify_port + (
+                get_port_offset(_decode_dp_rank_for_port, self.worker.tp_rank)
+            )
             if task.transfer_id in self._sealed_writes:
                 request_info.writes_expected = self._sealed_writes[task.transfer_id]
 
@@ -372,9 +385,11 @@ class MoRIIOWriter:
         Args:
             task: The write task
             request_info: Remote allocation information
+            remote_moriio_meta: Metadata of the remote MoRIIO agent
 
         Returns:
             The transfer plan
+
         """
         layer_cache = self.worker.kv_caches[task.layer_name]
         key = (task.layer_name, *_get_write_geometry_key(layer_cache))
@@ -389,9 +404,9 @@ class MoRIIOWriter:
             )
             request_info.transfer_offsets[key] = offsets
 
-        # Get session index
-        layer_names = list(self.worker.layer_name_to_local_kv_cache_metadata.keys())
-        sess_idx = layer_names.index(task.layer_name)
+        # One session per registered region; attention layers map to a single
+        # index (see MoRIIOConnectorWorker._region_session_indices).
+        sess_idx = self.worker._region_session_indices(task.layer_name)[0]
 
         local_off, remote_off, sizes = offsets
 
@@ -412,6 +427,7 @@ class MoRIIOWriter:
         Args:
             plan: The transfer plan
             sessions: List of transfer sessions
+
         """
         if plan.use_batch:
             return [
@@ -454,9 +470,9 @@ class MoRIIOWriter:
             if request_info.completion_notified:
                 return
             request_id = request_info.completion_request_id
-            remote_notify_port = request_info.completion_remote_notify_port
+            remote_port = request_info.completion_notify_port
             remote_ip = request_info.completion_remote_ip
-            if request_id is None or remote_notify_port is None or remote_ip is None:
+            if request_id is None or remote_port is None or remote_ip is None:
                 return
             transfer_statuses = list(request_info.transfer_statuses)
             request_info.transfer_statuses.clear()
@@ -465,16 +481,6 @@ class MoRIIOWriter:
         # Wait for this request's transfers to complete.
         self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
 
-        # The notify port offset must use the per-pod local rank
-        # (% dp_local), since each pod binds notify sockets only for its local
-        # ranks. Single-pod is bit-identical (modulus is a no-op).
-        _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
-        _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
-        if _dp_local > 0:
-            _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
-        remote_port = remote_notify_port + get_port_offset(
-            _decode_dp_rank_for_port, self.worker.tp_rank
-        )
         # Consider using RDMA immediate data in decode side
         # to eliminate the need for this notification.
         # Consider including the first gen token from prefill in the notification
@@ -510,6 +516,7 @@ class MoRIIOWrapper:
         moriio_engine:  MoRIIO engine instance
         tp_rank: Tensor parallel rank
         dp_rank: Data parallel rank
+
     """
 
     def __init__(
@@ -654,6 +661,25 @@ class MoRIIOWrapper:
         )
         return transfer_status
 
+    def poll_transfer_batch(self, transfer_statuses: list[Any]) -> TransferBatchState:
+        """Non-blocking verdict over every status of one request.
+
+        Judging a request by its newest status alone calls it done while an
+        earlier layer is unfinished or already failed; failures do land on
+        layers other than the last, because _post_read_with_backoff returns a
+        failed status when the send queue never drains.
+
+        This stays a Python scan so it does not drive the backend's progress
+        callback from the engine thread alongside MoRIIO's own poller.
+        """
+        state = TransferBatchState.DONE
+        for status in transfer_statuses:
+            if status.Failed():
+                return TransferBatchState.FAILED
+            if not status.Succeeded():
+                state = TransferBatchState.PENDING
+        return state
+
     def waiting_for_transfer_complete(self, transfer_statuses: list[Any] | None = None):
         if transfer_statuses is None:
             with self.lock:
@@ -665,6 +691,15 @@ class MoRIIOWrapper:
         if not transfers_to_wait:
             return
 
+        self._poll_transfers_until_done(transfers_to_wait)
+
+    def _poll_transfers_until_done(self, transfers_to_wait: list[Any]) -> None:
+        """Fallback for mori builds without the batched wait.
+
+        Gives failure precedence over pending: once any status has failed the
+        request is lost, so waiting out the remaining ones would only delay the
+        barrier by up to transfer_timeout.
+        """
         timeout = self._transfer_timeout
         deadline = time.monotonic() + timeout
         remaining = list(transfers_to_wait)
@@ -690,6 +725,8 @@ class MoRIIOWrapper:
                     )
                 else:
                     still_waiting.append(status)
+            if errors:
+                break
             remaining = still_waiting
             if remaining:
                 time.sleep(0.001)

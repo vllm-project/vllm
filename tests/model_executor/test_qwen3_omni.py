@@ -8,15 +8,15 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
+from vllm.config import ParallelConfig
 from vllm.multimodal.processing import InputProcessingContext
 
 
 # Helper function to print input IDs with coalesced audio/video tokens.
 def print_input_ids(input_ids):
-    """
-    Print input IDs, compressing consecutive special tokens.
+    """Print input IDs, compressing consecutive special tokens.
     - 151675: <|audio_pad|>
     - 151656: <|video_pad|>
     """
@@ -52,7 +52,7 @@ def print_input_ids(input_ids):
 @pytest.fixture
 def mock_qwen3_omni_config():
     """Create a mock Qwen3OmniMoeThinker config."""
-    config = Mock(spec=PretrainedConfig)
+    config = Mock(spec=PreTrainedConfig)
     # Token IDs from https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct/blob/main/tokenizer_config.json
     config.audio_token_id = 151675  # <|audio_pad|>
     config.video_token_id = 151656  # <|video_pad|>
@@ -136,7 +136,6 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     mock_image_processor,
 ):
     """Test the get_updates_use_audio_in_video method directly."""
-
     from vllm.model_executor.models.qwen3_omni_moe_thinker import (
         Qwen3OmniMoeThinkerMultiModalProcessor,
         Qwen3OmniMoeThinkerProcessingInfo,
@@ -145,6 +144,11 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     # Create a mock context
     mock_ctx = Mock(spec=InputProcessingContext)
     mock_ctx.tokenizer = mock_tokenizer
+    # `model_config` is an instance attribute, so it is not covered by the
+    # spec; the data parser reads it for `allow_missing_mm_embeddings`.
+    mock_ctx.model_config = SimpleNamespace(
+        multimodal_config=SimpleNamespace(allow_missing_mm_embeddings=False)
+    )
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
@@ -370,11 +374,12 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
             draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
             attention_backend=None,
             kv_cache_dtype=None,
+            draft_load_config=None,
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        parallel_config=ParallelConfig(),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
-        load_config=SimpleNamespace(),
+        load_config=SimpleNamespace(load_format="auto"),
         model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
     )
 

@@ -56,18 +56,24 @@ DSML_TOOL_START_VARIANTS: tuple[str, ...] = (
     f"<{_DSML}tool>",
 )
 
-_ESCAPED_DSML = re.escape(_DSML)
-_PARAM_RE = re.compile(
-    rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"(.*?)"
-    rf"(?:</{_ESCAPED_DSML}parameter>|(?=<{_ESCAPED_DSML}parameter\s+name=))",
-    re.DOTALL,
-)
-_PARTIAL_PARAM_RE = re.compile(
-    rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"(.*)$",
-    re.DOTALL,
-)
+
+def _param_patterns(
+    param_start: str, param_close: str
+) -> tuple[re.Pattern, re.Pattern]:
+    """Complete and trailing-partial parameter regexes for one DSML dialect.
+
+    The ``string`` attribute is optional: the model sometimes omits it, and
+    dropping such a parameter hands the client a tool call with no arguments.
+    """
+    start, close = re.escape(param_start), re.escape(param_close)
+    head = rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
+    return (
+        re.compile(rf"{head}(.*?)(?:{close}|(?={start}\s+name=))", re.DOTALL),
+        re.compile(rf"{head}(.*)$", re.DOTALL),
+    )
+
+
+_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
 
 
 def _dsml_arg_converter(
@@ -80,6 +86,8 @@ def _dsml_arg_converter(
     params: dict[str, object] = {}
 
     last_end = 0
+    # A missing ``string`` attribute is treated like ``string="false"``: try
+    # JSON, fall back to the literal text.
     for m in param_re.finditer(raw_args):
         name, is_str, value = m.group(1), m.group(2), m.group(3)
         if is_str == "true":
