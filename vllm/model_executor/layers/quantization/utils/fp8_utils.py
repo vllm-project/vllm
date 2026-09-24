@@ -1500,3 +1500,56 @@ def process_fp8_input_tensor_strategy_moe(
         amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
         amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
     )
+
+def dequantize_fp8_block_weight_to_bf16(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: tuple[int, int],
+) -> torch.Tensor:
+    """Dequantize a block-quantized FP8 weight to bf16 in its original layout.
+
+    Some layers are consumed directly rather than through ``apply_weights``
+    (for example DeepSeek-V4's ``o_proj``, which sets ``layer.is_bmm`` and reads
+    ``layer.weight`` in a fused fp8 einsum). Those consumers need the on-disk
+    ``[N, K]`` weight together with the block scales, so a kernel that repacks
+    the weight or rewrites the scales cannot serve them. This converts such a
+    weight to bf16 so that a plain bf16 fallback can be used instead.
+
+    ``weight_scale`` holds one entry per ``block_size`` tile of ``weight``, laid
+    out as ``[N // block_n, K // block_k]``, and is expanded to the weight's
+    shape before multiplying. Scales may be fp32 or e8m0; anything else is
+    rejected rather than silently misinterpreted.
+    """
+    if weight.dtype != torch.float8_e4m3fn:
+        raise ValueError(f"expected an FP8 E4M3 weight, got {weight.dtype}")
+
+    if weight_scale.dtype == torch.float8_e8m0fnu:
+        float_scale = _upcast_e8m0_to_fp32(weight_scale)
+    elif weight_scale.dtype == torch.float32:
+        float_scale = weight_scale
+    else:
+        raise ValueError(
+            "expected fp32 or e8m0 block scales, got "
+            f"{weight_scale.dtype}; pass fp32 scales or decode them first"
+        )
+
+    block_n, block_k = block_size
+    n, k = weight.shape
+    if n % block_n or k % block_k:
+        raise ValueError(
+            f"weight shape {tuple(weight.shape)} is not a multiple of the "
+            f"quantization block {block_size}"
+        )
+    expected_grid = (n // block_n, k // block_k)
+    if tuple(float_scale.shape) != expected_grid:
+        raise ValueError(
+            f"expected a scale grid of {expected_grid}, "
+            f"got {tuple(float_scale.shape)}"
+        )
+
+    expanded = float_scale.to(torch.float32).repeat_interleave(
+        block_n, dim=0
+    ).repeat_interleave(block_k, dim=1)
+    # Multiply in fp32 and round once, so the result does not depend on the
+    # operand dtypes or on PyTorch's type promotion rules.
+    return (weight.to(torch.float32) * expanded).to(torch.bfloat16)

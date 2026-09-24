@@ -46,6 +46,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
+    dequantize_fp8_block_weight_to_bf16,
+    get_fp8_block_weight_scale,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
@@ -380,6 +382,27 @@ class Fp8LinearMethod(LinearMethodBase):
             # method (not exported with the weights), so restore it here too.
             if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
                 self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+            return
+
+        # Some layers are consumed directly instead of through apply_weights:
+        # DeepSeek-V4's o_proj sets ``layer.is_bmm`` and reads ``layer.weight``
+        # in a fused fp8 einsum, so the weight must keep its on-disk [N, K]
+        # layout and its original block scales. Marlin repacks the weight and
+        # folds an exponent bias into the scales, neither of which that einsum
+        # can read -- and on devices without FP8 hardware Marlin is exactly the
+        # kernel that gets selected. Dequantize such weights to bf16 and skip
+        # kernel processing entirely; the model's bf16 fallback handles them.
+        if self.use_marlin and self.block_quant and getattr(layer, "is_bmm", False):
+            weight_scale = get_fp8_block_weight_scale(layer)
+            assert weight_scale is not None, "block-quantized layer without scales"
+            replace_parameter(
+                layer,
+                "weight",
+                dequantize_fp8_block_weight_to_bf16(
+                    layer.weight, weight_scale, self.weight_block_size
+                ).data,
+            )
+            layer.input_scale = None
             return
 
         if self.use_marlin:
