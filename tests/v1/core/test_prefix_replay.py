@@ -33,6 +33,7 @@ def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
     use_kv_connector: MockKVConfig | None = None,
+    retain_replay_boundary: bool = False,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
@@ -65,6 +66,7 @@ def _replay_scheduler(
                     dtype=torch.bfloat16,
                     sliding_window=WINDOW,
                     bounded_replay=True,
+                    extra_retained_tokens=int(retain_replay_boundary),
                 ),
             ),
         ],
@@ -78,6 +80,7 @@ def _replay_scheduler(
     )
     scheduler.use_v2_model_runner = True
     assert scheduler.prefix_replay_tokens == WINDOW
+    assert scheduler.prefix_replay_boundary_retained is retain_replay_boundary
     return scheduler
 
 
@@ -219,7 +222,7 @@ def test_async_remote_kv_hit_replays_after_load():
     )
 
 
-def test_remote_kv_hit_is_taken_in_whole_blocks():
+def test_remote_kv_hit_is_taken_in_whole_blocks_without_boundary_retention():
     """A hit ending one token short of a block boundary would put the replay
     window's first token in a block the sliding-window group retires, so a
     connector hit is cut back to whole blocks."""
@@ -243,6 +246,34 @@ def test_remote_kv_hit_is_taken_in_whole_blocks():
     swa_manager = scheduler.kv_cache_manager.coordinator.single_type_managers[SWA]
     swa_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[SWA]
     assert swa_blocks[new_req.replay_start // BLOCK_SIZE] is not swa_manager._null_block
+
+
+def test_remote_kv_partial_hit_is_preserved_with_boundary_retention():
+    matched = 4 * BLOCK_SIZE - 1
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=matched, is_async=True),
+        retain_replay_boundary=True,
+    )
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    scheduler.update_from_output(
+        out, create_model_runner_output([], finished_recving={request.request_id})
+    )
+
+    out = scheduler.schedule()
+    new_req = _new_req_data(out, request)
+    replay_start = matched - WINDOW
+    assert new_req.replay_start == replay_start
+    assert new_req.num_computed_tokens == replay_start
+    assert (
+        out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - replay_start
+    )
+    swa_manager = scheduler.kv_cache_manager.coordinator.single_type_managers[SWA]
+    swa_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[SWA]
+    assert swa_blocks[replay_start // BLOCK_SIZE] is not swa_manager._null_block
 
 
 @pytest.mark.parametrize("via_connector", [False, True])
