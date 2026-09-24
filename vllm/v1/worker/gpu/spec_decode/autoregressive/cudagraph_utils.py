@@ -57,6 +57,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
+                max_query_len=desc.max_query_len or desc.uniform_token_count,
             )
 
             return lambda cg_mode: forward_fn(
