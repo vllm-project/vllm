@@ -282,7 +282,9 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
 
         def get_replacement_ultravox(item_idx: int):
             if "audio_num_tokens" in out_mm_data:
-                return [replacement_id] * int(out_mm_data["audio_num_tokens"][item_idx])
+                audio_num_tokens = out_mm_data["audio_num_tokens"]
+                assert isinstance(audio_num_tokens, torch.Tensor)
+                return [replacement_id] * int(audio_num_tokens[item_idx])
             start = chunks_start_idx[item_idx]
             end = chunks_start_idx[item_idx + 1]
             audio_token_lens = out_mm_data["audio_token_len"]
