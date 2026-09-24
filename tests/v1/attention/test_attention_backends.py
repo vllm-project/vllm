@@ -1077,18 +1077,18 @@ def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets(
 @pytest.mark.parametrize(
     "adaptive,decode_kernel,dcp_size,expected_bound",
     [
-        (None, "TRTLLM_GEN", 1, 0),
-        (False, "TRTLLM_GEN", 1, 0),
+        (None, "TRTLLM_GEN", 1, None),
+        (False, "TRTLLM_GEN", 1, None),
         (True, "TRTLLM_GEN", 1, 8),
-        (True, "XQA", 1, 0),
-        (True, "TRTLLM_GEN", 2, 0),
+        (True, "XQA", 1, None),
+        (True, "TRTLLM_GEN", 2, None),
     ],
 )
-def test_flashinfer_varlen_decode_capability(
+def test_flashinfer_varlen_cudagraph_capability(
     monkeypatch, adaptive, decode_kernel, dcp_size, expected_bound
 ):
     """Only the trtllm-gen path that adaptive verification enables replays
-    ragged decode graphs, up to the decode width; the uniform level is fixed."""
+    varlen decode graphs, up to the decode width; the uniform level is fixed."""
     from vllm.model_executor.layers.attention.chunked_local_attention import (
         create_chunked_local_attention_backend,
     )
@@ -1125,13 +1125,13 @@ def test_flashinfer_varlen_decode_capability(
         if dcp_size == 1
         else AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
-    bound = builder_cls.get_varlen_decode_cudagraph_max_query_len(config, spec)
+    bound = builder_cls.get_varlen_cudagraph_max_query_len(config, spec)
     assert bound == expected_bound
-    if bound:
+    if bound is not None:
         # A wrapper forcing NEVER inherits the override but not the bound.
         chunked_local = create_chunked_local_attention_backend(fi.FlashInferBackend, 16)
         wrapped_cls = chunked_local.get_builder_cls()
-        assert wrapped_cls.get_varlen_decode_cudagraph_max_query_len(config, spec) == 0
+        assert wrapped_cls.get_varlen_cudagraph_max_query_len(config, spec) is None
 
 
 @pytest.mark.parametrize(

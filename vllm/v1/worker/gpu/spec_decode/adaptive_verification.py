@@ -20,7 +20,7 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
 from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
-    get_varlen_decode_cudagraph_limit,
+    get_varlen_cudagraph_unsupported_backend,
 )
 
 logger = init_logger(__name__)
@@ -477,26 +477,28 @@ def maybe_create_adaptive_verification_manager(
 
     # The runner's decode_query_len, the width varlen decode graphs capture.
     max_query_len = req_states.num_speculative_steps + num_bonus_tokens
-    limit, limiting_backend = get_varlen_decode_cudagraph_limit(
-        attn_groups,
-        vllm_config,
-        checked_layer_names=target_layer_names,
+    unsupported: tuple[str | None, int | None] | None = (
+        get_varlen_cudagraph_unsupported_backend(
+            attn_groups,
+            vllm_config,
+            max_query_len,
+            checked_layer_names=target_layer_names,
+        )
     )
-    if additional_attn_cg_support is not None:
-        # Groups built outside init_attn_backend follow the builders' default:
-        # only ALWAYS graphs ragged decode batches.
+    if unsupported is None and additional_attn_cg_support is not None:
+        # Groups built outside init_attn_backend report only their support
+        # level, and without a bound only ALWAYS replays varlen batches.
         additional_support, additional_backend = additional_attn_cg_support
         if additional_support != AttentionCGSupport.ALWAYS:
-            limit, limiting_backend = 0, additional_backend
-    if limit < max_query_len:
-        # Without a limiting backend, the step budget itself is too small.
-        allowed = f"at most {limit}" if limit else "none"
+            unsupported = additional_backend, None
+    if unsupported is not None:
+        backend, bound = unsupported
+        allowed = "none" if bound is None else f"at most {bound}"
         raise ValueError(
             "Adaptive verification replays decode cudagraphs whose per-request "
-            f"query lengths vary up to {max_query_len}, but "
-            f"{limiting_backend or 'max_num_batched_tokens'} allows {allowed}. "
-            "Pass enable_adaptive_verification=false in the speculative config, "
-            "or use a backend that does."
+            f"query lengths vary up to {max_query_len}, but {backend} allows "
+            f"{allowed}. Pass enable_adaptive_verification=false in the "
+            "speculative config, or use a backend that does."
         )
 
     return AdaptiveVerificationManager(

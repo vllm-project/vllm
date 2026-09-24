@@ -59,20 +59,17 @@ def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expe
 
 
 @pytest.mark.parametrize(
-    "target_support,target_bound,device_offsets,additional,budget,error",
+    "target_support,target_bound,device_offsets,additional,error",
     [
+        pytest.param(AttentionCGSupport.ALWAYS, None, True, None, None, id="always"),
         pytest.param(
-            AttentionCGSupport.ALWAYS, None, True, None, 256, None, id="always"
-        ),
-        pytest.param(
-            AttentionCGSupport.UNIFORM_BATCH, 8, True, None, 256, None, id="bounded"
+            AttentionCGSupport.UNIFORM_BATCH, 8, True, None, None, id="bounded"
         ),
         pytest.param(
             AttentionCGSupport.UNIFORM_BATCH,
             None,
             True,
             None,
-            256,
             "TargetBackend allows none",
             id="unsupported",
         ),
@@ -81,7 +78,6 @@ def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expe
             7,
             True,
             None,
-            256,
             "up to 8, but TargetBackend allows at most 7",
             id="too-narrow",
         ),
@@ -90,7 +86,6 @@ def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expe
             8,
             False,
             None,
-            256,
             "trims verification requests",
             id="host-query-lens",
         ),
@@ -99,25 +94,15 @@ def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expe
             None,
             True,
             (AttentionCGSupport.UNIFORM_BATCH, "EncoderBackend"),
-            256,
             "EncoderBackend allows none",
             id="additional-group",
         ),
-        pytest.param(
-            AttentionCGSupport.ALWAYS,
-            None,
-            True,
-            None,
-            7,
-            "max_num_batched_tokens allows at most 7",
-            id="step-budget",
-        ),
     ],
 )
-def test_manager_checks_target_varlen_decode_bound(
-    monkeypatch, target_support, target_bound, device_offsets, additional, budget, error
+def test_manager_checks_target_varlen_cudagraph_bound(
+    monkeypatch, target_support, target_bound, device_offsets, additional, error
 ):
-    """Target builders must replay ragged decode graphs of the verification
+    """Target builders must replay varlen decode graphs of the verification
     width; draft-only groups are not checked."""
 
     def group(backend_name, layer_name, support, bound=None, mismatch=True):
@@ -133,7 +118,7 @@ def test_manager_checks_target_varlen_decode_bound(
             if bound is not None:
 
                 @classmethod
-                def get_varlen_decode_cudagraph_max_query_len(cls, *_args):
+                def get_varlen_cudagraph_max_query_len(cls, *_args):
                     return bound
 
         backend = type(
@@ -172,9 +157,7 @@ def test_manager_checks_target_varlen_decode_bound(
             query_start_loc=object(),
             num_bonus_tokens=1,
             max_total_logits=1,
-            vllm_config=SimpleNamespace(
-                scheduler_config=SimpleNamespace(max_num_batched_tokens=budget)
-            ),
+            vllm_config=None,
             target_layer_names={"target"},
             additional_attn_cg_support=additional,
         )

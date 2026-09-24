@@ -1007,18 +1007,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     @override  # type: ignore[misc]
     @classmethod
-    def get_varlen_decode_cudagraph_max_query_len(
+    def get_varlen_cudagraph_max_query_len(
         cls: type["FlashInferMetadataBuilder"],
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
-    ) -> int:
+    ) -> int | None:
         # The uniform gate already covers DCP, head geometry, the XQA head-dim
-        # limit and causality, and yields 0 for subclasses that force NEVER.
+        # limit and causality, and yields None for subclasses that force NEVER.
         if (
             cls.get_cudagraph_support(vllm_config, kv_cache_spec)
             != AttentionCGSupport.UNIFORM_BATCH
         ):
-            return 0
+            return None
         # The kernel selector asserts off the trtllm-capable architectures, so
         # call it only past the gate, as get_cudagraph_support does.
         if not cls._uses_trtllm_gen_varlen_decode(
@@ -1026,7 +1026,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             cls._get_flashinfer_trtllm_api_decode_kernel(),
             use_dcp=vllm_config.parallel_config.decode_context_parallel_size > 1,
         ):
-            return 0
+            return None
         # Longer requests are split off as prefills.
         return max_decode_query_len(vllm_config)
 

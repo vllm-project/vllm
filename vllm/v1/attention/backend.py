@@ -635,36 +635,28 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         return cls._cudagraph_support
 
     @classmethod
-    def get_varlen_decode_cudagraph_max_query_len(
+    def get_varlen_cudagraph_max_query_len(
         cls: type["AttentionMetadataBuilder"],
         vllm_config: "VllmConfig",
         kv_cache_spec: "KVCacheSpec",
-    ) -> int:
-        """Get the largest per-request query length L of the ragged decode
-        batches a FULL cudagraph of this builder class can replay; 0 means none.
+    ) -> int | None:
+        """Get the largest per-request query length L of the variable-length
+        decode batches a FULL cudagraph of this builder class can replay.
 
-        The graph is captured on a pure-decode batch whose requests have at most
-        L tokens. It must replay any pure-decode batch in which every real
-        request has between 1 and L tokens and every padding request has 0.
-        Per-request lengths are read from the device query_start_loc at replay;
-        host metadata supplies only the token count and an upper bound on the
-        per-request length. A builder with no limit of its own returns
-        max_num_batched_tokens, which no request can exceed in one step.
+        The graph must replay any decode batch in which every real request has
+        between 1 and L query tokens and every padding request has 0. Lengths
+        come from the device query_start_loc; host metadata carries only the
+        token count and an upper bound on the per-request length. Batches with
+        a prefill never replay these graphs. Whether host metadata may
+        understate device query lengths at all is a separate backend question;
+        see supports_device_cpu_query_lens_mismatch().
 
-        Independent of get_cudagraph_support(): UNIFORM_BATCH implies nothing
-        about ragged batches, and the reverse. Only ALWAYS, which graphs any
-        batch composition, implies support for every length. Overrides describe
-        the builder as configured by vllm_config and return 0 when
-        get_cudagraph_support() is NEVER. Whether host metadata may understate
-        device query lengths at all is a separate backend question; see
-        supports_device_cpu_query_lens_mismatch().
+        Returns:
+            L, or None for builders reporting ALWAYS, which replay any batch,
+            and for builders that cannot replay variable-length batches.
+
         """
-        if (
-            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
-            == AttentionCGSupport.ALWAYS
-        ):
-            return vllm_config.scheduler_config.max_num_batched_tokens
-        return 0
+        return None
 
     def _init_reorder_batch_threshold(
         self,

@@ -100,15 +100,15 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
 
 
 class _FakeMetadataBuilder:
-    def __init__(self, support: AttentionCGSupport, varlen_decode_bound: int = 0):
+    def __init__(self, support: AttentionCGSupport, varlen_bound: int | None = None):
         self.support = support
-        self.varlen_decode_bound = varlen_decode_bound
+        self.varlen_bound = varlen_bound
 
     def get_cudagraph_support(self, *_args):
         return self.support
 
-    def get_varlen_decode_cudagraph_max_query_len(self, *_args):
-        return self.varlen_decode_bound
+    def get_varlen_cudagraph_max_query_len(self, *_args):
+        return self.varlen_bound
 
 
 class _TargetBackend:
@@ -188,12 +188,10 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
     )
 
 
-def test_varlen_decode_cudagraph_limit_takes_scoped_minimum():
-    """The tightest checked bound wins; a builder at the step budget is not a
-    limit, and NEVER vetoes whatever bound a builder reports."""
-    config: Any = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=256)
-    )
+def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
+    """ALWAYS passes without a bound, other builders need one at least as wide as
+    the requested length, and NEVER fails whatever bound a builder reports."""
+    config: Any = SimpleNamespace()
     spec = FullAttentionSpec(
         block_size=16,
         num_kv_heads=1,
@@ -201,24 +199,29 @@ def test_varlen_decode_cudagraph_limit_takes_scoped_minimum():
         dtype=torch.bfloat16,
     )
 
-    def group(backend: Any, layer_name: str, support: AttentionCGSupport, bound: int):
+    def group(
+        backend: Any,
+        layer_name: str,
+        support: AttentionCGSupport,
+        bound: int | None = None,
+    ):
         builder: Any = _FakeMetadataBuilder(support, bound)
         attn_group = AttentionGroup(backend, [layer_name], spec, 0)
         attn_group.metadata_builders = [builder]
         return attn_group
 
-    target = group(_TargetBackend, "target", AttentionCGSupport.ALWAYS, 256)
+    target = group(_TargetBackend, "target", AttentionCGSupport.ALWAYS)
     draft = group(_DraftBackend, "draft", AttentionCGSupport.UNIFORM_BATCH, 8)
     never = group(_DraftBackend, "never", AttentionCGSupport.NEVER, 8)
 
-    limit = attn_utils.get_varlen_decode_cudagraph_limit
-    assert limit([[target]], config) == (256, None)
-    assert limit([[target, draft]], config) == (8, "_DraftBackend")
-    assert limit([[target, draft]], config, checked_layer_names={"target"}) == (
-        256,
-        None,
+    unsupported = attn_utils.get_varlen_cudagraph_unsupported_backend
+    assert unsupported([[target, draft]], config, 8) is None
+    assert unsupported([[target, draft]], config, 9) == ("_DraftBackend", 8)
+    assert (
+        unsupported([[target, draft]], config, 9, checked_layer_names={"target"})
+        is None
     )
-    assert limit([[target, never]], config) == (0, "_DraftBackend")
+    assert unsupported([[target, never]], config, 1) == ("_DraftBackend", None)
 
 
 def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyPatch):
