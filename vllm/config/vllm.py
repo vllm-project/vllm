@@ -722,11 +722,23 @@ class VllmConfig:
         if model_config is not None and current_platform.is_rocm():
             architectures = getattr(model_config, "architectures", ())
             if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
+                # This default is a speed preference, not a claim that V1 can
+                # serve the config, so it yields where V1 cannot. It yields by
+                # falling through to the checks below, not by selecting V2.
+                v1_unsupported = self._get_v1_model_runner_unsupported_features()
+                if not v1_unsupported:
+                    logger.warning_once(
+                        "Defaulting to V1 model runner on ROCm for model "
+                        "architectures: %s",
+                        ", ".join(architectures),
+                    )
+                    return False
                 logger.warning_once(
-                    "Defaulting to V1 model runner on ROCm for model architectures: %s",
+                    "Skipping the ROCm V1 model runner default for %s: V1 does "
+                    "not support %s.",
                     ", ".join(architectures),
+                    ", ".join(v1_unsupported),
                 )
-                return False
 
         if not HAS_TRITON:
             logger.warning_once(
@@ -1666,15 +1678,24 @@ class VllmConfig:
             )
 
         if self.model_config is not None and self.model_config.enforce_eager:
-            logger.warning_once(
-                "Enforce eager set, disabling torch.compile, CUDAGraphs, and JIT "
-                "kernel warmup. This is equivalent to setting -cc.mode=none "
-                "-cc.cudagraph_mode=none and "
-                "--kernel_config.enable_jit_warmup=False"
-            )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            self.kernel_config.enable_jit_warmup = False
+            if self.parallel_config.enable_fault_tolerance:
+                # Keep JIT warmup: in-inference Triton compilation latency
+                # spikes can delay peer-fault detection past its deadline.
+                logger.warning_once(
+                    "Enforce eager set, disabling torch.compile and CUDAGraphs. "
+                    "This is equivalent to setting -cc.mode=none "
+                    "-cc.cudagraph_mode=none"
+                )
+            else:
+                logger.warning_once(
+                    "Enforce eager set, disabling torch.compile, CUDAGraphs, and "
+                    "JIT kernel warmup. This is equivalent to setting "
+                    "-cc.mode=none -cc.cudagraph_mode=none and "
+                    "--kernel_config.enable_jit_warmup=False"
+                )
+                self.kernel_config.enable_jit_warmup = False
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
