@@ -1724,7 +1724,6 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(prompt_token_ids)
         session.num_computed_tokens = 0
         session.num_output_placeholders = 0
-        session.num_in_flight_tokens = 0
         session.spec_token_ids = []
 
         # Assign mm_features BEFORE recomputing hashes: realtime prompts are
