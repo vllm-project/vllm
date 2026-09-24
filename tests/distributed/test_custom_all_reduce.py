@@ -647,6 +647,10 @@ def chunked_allreduce(
         out = fa.all_reduce(inp, registered=False)
         assert torch.equal(out, ref)
 
+        # Weak-contiguous but not C-contiguous: a transposed matrix.
+        inp_t, ref_t = inp.view(-1, 4096).t(), ref.view(-1, 4096).t()
+        assert torch.equal(fa.all_reduce(inp_t, registered=False), ref_t)
+
         with fa.capture():
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):

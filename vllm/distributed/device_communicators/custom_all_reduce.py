@@ -523,7 +523,9 @@ class CustomAllreduce:
         if inp.numel() <= chunk_numel:
             self._all_reduce_chunk(inp, out, registered)
             return out
-        flat_inp, flat_out = inp.view(-1), out.view(-1)
+        # Storage-order views: the gate only admits one contiguous block.
+        flat_inp = inp.as_strided((inp.numel(),), (1,), inp.storage_offset())
+        flat_out = out.as_strided((out.numel(),), (1,), out.storage_offset())
         for start in range(0, flat_inp.numel(), chunk_numel):
             end = start + chunk_numel
             self._all_reduce_chunk(flat_inp[start:end], flat_out[start:end], registered)
