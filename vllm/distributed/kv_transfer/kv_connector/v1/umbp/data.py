@@ -600,6 +600,7 @@ class LoadSpec:
 
     local_tokens: int
     external_tokens: int
+    block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
     can_load: bool = False
 
     @property
