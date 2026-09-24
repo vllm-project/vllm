@@ -31,6 +31,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from .utils import (
@@ -246,6 +248,114 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     assert scheduler.blocks_per_sw == expected_sw_sizes, (
         f"Expected sw_sizes={expected_sw_sizes}, got {scheduler.blocks_per_sw}"
     )
+
+
+def _wrapped_hybrid_kv_cache_config(
+    block_size: int, sw_size: int = 2048
+) -> KVCacheConfig:
+    """One full-attention group and one sliding-window group, both wrapped.
+
+    UniformTypeKVCacheSpecs carries one spec per layer, which is the shape a
+    merged group takes in a model whose layers reach the same page size.
+    """
+    full_spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=4, head_size=16, dtype=torch.float16
+    )
+    sw_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=4,
+        head_size=16,
+        dtype=torch.float16,
+        sliding_window=sw_size,
+    )
+    return KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0"],
+                UniformTypeKVCacheSpecs(
+                    block_size=block_size, kv_cache_specs={"layer0": full_spec}
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                UniformTypeKVCacheSpecs(
+                    block_size=block_size, kv_cache_specs={"layer1": sw_spec}
+                ),
+            ),
+        ],
+    )
+
+
+@pytest.mark.cpu_test
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
+def test_sw_sizes_wrapped_groups(mock_platform):
+    """A group carrying the wrapper reports the window it actually has.
+
+    The wrapper is not a SlidingWindowSpec, so a wrapped sliding-window group
+    used to report no window and its blocks were never clipped.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+
+    block_size = 16
+    scheduler = NixlConnectorScheduler(
+        vllm_config=create_vllm_config(block_size=block_size),
+        engine_id="test-engine",
+        kv_cache_config=_wrapped_hybrid_kv_cache_config(block_size=block_size),
+    )
+
+    # 2048 tokens / 16 = 128 blocks, plus the boundary block.
+    assert scheduler.blocks_per_sw == [0, 129]
+
+
+@pytest.mark.cpu_test
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
+def test_wrapped_full_attention_group_needs_no_hma(mock_platform):
+    """A wrapped group of pure full attention is fully attended.
+
+    It used to count as hybrid because the wrapper is not a FullAttentionSpec,
+    which turned HMA on for a config that has no window to clip.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+
+    block_size = 16
+    full_spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=4, head_size=16, dtype=torch.float16
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0"],
+                UniformTypeKVCacheSpecs(
+                    block_size=block_size, kv_cache_specs={"layer0": full_spec}
+                ),
+            )
+        ],
+    )
+
+    scheduler = NixlConnectorScheduler(
+        vllm_config=create_vllm_config(block_size=block_size),
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+
+    assert scheduler._is_hma_required is False
+    assert scheduler.blocks_per_sw == [0]
 
 
 @pytest.mark.cpu_test

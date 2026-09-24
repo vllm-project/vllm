@@ -6,13 +6,12 @@ from typing import NamedTuple
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    is_mla_spec,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    KVCacheConfig,
     KVCacheSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
 )
 
 
@@ -29,24 +28,6 @@ class LayerTransferGeometry(NamedTuple):
     split_kv_regions: bool
 
 
-def build_layer_to_spec(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
-    layer_to_spec: dict[str, KVCacheSpec] = {}
-    for group in kv_cache_config.kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        if isinstance(group_spec, UniformTypeKVCacheSpecs):
-            layer_to_spec.update(
-                {
-                    layer_name: group_spec.kv_cache_specs[layer_name]
-                    for layer_name in group.layer_names
-                }
-            )
-        else:
-            layer_to_spec.update(
-                {layer_name: group_spec for layer_name in group.layer_names}
-            )
-    return layer_to_spec
-
-
 def is_mla_cache_layer(
     layer_to_spec: Mapping[str, KVCacheSpec], layer_name: str
 ) -> bool:
@@ -54,7 +35,7 @@ def is_mla_cache_layer(
         spec = layer_to_spec[layer_name]
     except KeyError as e:
         raise ValueError(f"Missing KV cache spec for layer {layer_name}") from e
-    return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+    return is_mla_spec(spec)
 
 
 def _spec_dim_matches(value: int, expected: int | None) -> bool:

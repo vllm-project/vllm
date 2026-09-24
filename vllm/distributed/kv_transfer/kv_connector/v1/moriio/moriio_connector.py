@@ -56,11 +56,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     LayerTransferGeometry,
-    build_layer_to_spec,
     compute_block_transfer_offsets,
     get_layer_transfer_geometry,
     is_mla_cache_layer,
     iter_layer_registration_regions,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    build_layer_to_spec,
 )
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
@@ -77,9 +79,10 @@ from vllm.utils.network_utils import (
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    SlidingWindowSpec,
+    get_kv_cache_spec_sliding_window,
+    is_full_attention_spec,
+    iter_layer_specs,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -403,7 +406,7 @@ class MoRIIOConnectorScheduler:
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not is_full_attention_spec(g.kv_cache_spec)
                 for g in kv_cache_config.kv_cache_groups
             )
         )
@@ -412,8 +415,10 @@ class MoRIIOConnectorScheduler:
             unsupported = [
                 type(g.kv_cache_spec).__name__
                 for g in kv_cache_config.kv_cache_groups
-                if not isinstance(
-                    g.kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)
+                if not all(
+                    is_full_attention_spec(layer_spec)
+                    or get_kv_cache_spec_sliding_window(layer_spec) is not None
+                    for layer_spec in iter_layer_specs(g.kv_cache_spec)
                 )
             ]
             if unsupported:
@@ -431,12 +436,13 @@ class MoRIIOConnectorScheduler:
                     "--disable-hybrid-kv-cache-manager."
                 )
 
-        sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
-            else (0, self.block_size)
-            for g in kv_cache_config.kv_cache_groups
-        ]
+        sw_sizes_tokens: list[tuple[int, int]] = []
+        for g in kv_cache_config.kv_cache_groups:
+            window = get_kv_cache_spec_sliding_window(g.kv_cache_spec)
+            if window is None:
+                sw_sizes_tokens.append((0, self.block_size))
+            else:
+                sw_sizes_tokens.append((window, g.kv_cache_spec.block_size))
         # add 1 to conservatively account for boundary overlap eg window isn't fully
         # aligned with blocks.
         self.blocks_per_sw = [
@@ -451,7 +457,7 @@ class MoRIIOConnectorScheduler:
         self._full_attn_group_idx = 0
         self._full_attn_block_size = self.block_size
         for gi, group in enumerate(kv_cache_config.kv_cache_groups):
-            is_full_attn = self.blocks_per_sw[gi] == 0
+            is_full_attn = get_kv_cache_spec_sliding_window(group.kv_cache_spec) is None
             if is_full_attn:
                 self._full_attn_group_idx = gi
                 self._full_attn_block_size = getattr(

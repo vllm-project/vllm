@@ -44,7 +44,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
 )
 
@@ -807,6 +809,143 @@ def test_non_sliding_window_hybrid_is_rejected():
     )
     with pytest.raises(NotImplementedError, match="sliding-window hybrid"):
         _read_scheduler(config)
+
+
+def _make_wrapped_hybrid_kv_cache_config() -> KVCacheConfig:
+    """One full-attention group and one sliding-window group, both wrapped.
+
+    UniformTypeKVCacheSpecs carries one spec per layer, which is the shape a
+    merged group takes in a model whose layers reach the same page size.
+    """
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    sw_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * num_blocks * page,
+                layers=["full0", "sw0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["full0"],
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs={"full0": full_spec}
+                ),
+            ),
+            KVCacheGroupSpec(
+                layer_names=["sw0"],
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs={"sw0": sw_spec}
+                ),
+            ),
+        ],
+    )
+
+
+def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
+    """Full attention plus Mamba, which HMA pairing cannot serve."""
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    mamba_spec = MambaSpec(
+        block_size=16, shapes=((16,), (16,)), dtypes=(torch.float16,)
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * page,
+                layers=["full0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            ),
+            KVCacheTensor(
+                size=num_blocks * mamba_page,
+                layers=["mamba0"],
+                layer_stride=num_blocks * mamba_page,
+                block_stride=mamba_page,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["mamba0"], kv_cache_spec=mamba_spec),
+        ],
+    )
+
+
+def test_hma_blocks_per_sw_wrapped_groups():
+    """A wrapped sliding-window group reports the window it has.
+
+    The wrapper is not a SlidingWindowSpec, so blocks_per_sw used to be 0 for
+    such a group and its blocks were never clipped.
+    """
+    scheduler = _read_scheduler(_make_wrapped_hybrid_kv_cache_config())
+    assert scheduler._is_hma_required is True
+    # cdiv(32, 16) + 1 == 3 for the wrapped sliding-window group.
+    assert scheduler.blocks_per_sw == [0, 3]
+    assert scheduler._full_attn_group_idx == 0
+
+
+def test_wrapped_full_attention_group_needs_no_hma():
+    """A wrapped group of pure full attention has no window to clip.
+
+    It used to count as hybrid because the wrapper is not a FullAttentionSpec.
+    """
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * page,
+                layers=["full0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["full0"],
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs={"full0": full_spec}
+                ),
+            )
+        ],
+    )
+
+    scheduler = _read_scheduler(config)
+    assert scheduler._is_hma_required is False
+    assert scheduler.blocks_per_sw == [0]
+
+
+def test_mamba_group_still_rejected():
+    """A Mamba group fails closed with the same message it always raised."""
+    with pytest.raises(
+        NotImplementedError, match="MoRIIO only supports sliding-window hybrid"
+    ) as excinfo:
+        _read_scheduler(_make_mamba_hybrid_kv_cache_config())
+
+    assert "MambaSpec" in str(excinfo.value)
 
 
 def test_token_count_basis_uses_full_attention_group():

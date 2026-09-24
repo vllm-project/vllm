@@ -1478,7 +1478,7 @@ class MooncakeConnectorWorker:
                 self._physical_blocks_per_logical_kv_block,
                 block_arange,
             ).tolist()
-            if not is_ssm_spec(type(group_specs[i].kv_cache_spec))
+            if not is_ssm_spec(group_specs[i].kv_cache_spec)
             else group
             for i, group in enumerate(block_ids)
         ]
@@ -1528,9 +1528,7 @@ class MooncakeConnectorWorker:
             for group_index, (local_group, remote_group) in enumerate(
                 zip(send_meta.local_block_ids, remote_block_ids_per_group)
             ):
-                is_mamba_group = is_ssm_spec(
-                    type(group_specs[group_index].kv_cache_spec)
-                )
+                is_mamba_group = is_ssm_spec(group_specs[group_index].kv_cache_spec)
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
                     # align-mode placeholders. They do not carry transferable
@@ -1755,7 +1753,7 @@ class MooncakeConnectorWorker:
 
                 if isinstance(layer_spec, KpoolTailSpec):
                     kv_block_len = layer_spec.unpadded_page_size_bytes // 2
-                elif is_attention_spec(type(layer_spec)) and block_is_contiguous:
+                elif is_attention_spec(layer_spec) and block_is_contiguous:
                     assert (
                         layer_spec.page_size_bytes
                         % self._physical_blocks_per_logical_kv_block

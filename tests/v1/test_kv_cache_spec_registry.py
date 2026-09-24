@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
+    get_kv_cache_spec_kind_for_class,
 )
 from vllm.v1.kv_cache_spec_registry import (
     _REGISTRY_KVCACHESPEC_LIST,
@@ -430,3 +431,23 @@ class TestGetKVCacheSpecKind:
         } == {SlidingWindowSpec}
 
         assert get_kv_cache_spec_kind(group) == KVCacheSpecKind.UNKNOWN
+
+    def test_class_kind_matches_instance_kind(self):
+        """Both lookups answer the same for every spec the registry builds.
+
+        get_kv_cache_spec_kind() delegates to get_kv_cache_spec_kind_for_class()
+        for every non-wrapper spec, so the class-level table has to reproduce the
+        instance walk exactly.
+        """
+        for spec_cls, spec_kwargs in spec_args_map.items():
+            spec = spec_cls(**spec_kwargs)
+            assert get_kv_cache_spec_kind(spec) is get_kv_cache_spec_kind_for_class(
+                spec_cls
+            ), spec_cls.__name__
+
+    def test_wrapper_class_has_no_class_level_kind(self):
+        """A wrapper class describes a group, not one spec, so it has no kind."""
+        assert (
+            get_kv_cache_spec_kind_for_class(UniformTypeKVCacheSpecs)
+            is KVCacheSpecKind.UNKNOWN
+        )

@@ -33,9 +33,9 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     MambaSpec,
-    SlidingWindowSpec,
+    get_kv_cache_spec_sliding_window,
+    is_full_attention_spec,
 )
 
 if TYPE_CHECKING:
@@ -95,7 +95,7 @@ class NixlBaseConnectorScheduler:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not is_full_attention_spec(g.kv_cache_spec)
                 for g in kv_cache_config.transfer_groups
             )
         )
@@ -132,12 +132,13 @@ class NixlBaseConnectorScheduler:
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
-        sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
-            else (0, self.block_size)
-            for g in kv_cache_config.transfer_groups
-        ]
+        sw_sizes_tokens: list[tuple[int, int]] = []
+        for g in kv_cache_config.transfer_groups:
+            window = get_kv_cache_spec_sliding_window(g.kv_cache_spec)
+            if window is None:
+                sw_sizes_tokens.append((0, self.block_size))
+            else:
+                sw_sizes_tokens.append((window, g.kv_cache_spec.block_size))
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
         self.blocks_per_sw = [
