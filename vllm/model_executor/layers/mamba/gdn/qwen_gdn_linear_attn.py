@@ -227,6 +227,7 @@ def fi_chunk_gated_delta_rule(
         initial_state=fi_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        backend="flashinfer",
     )
     # FlashInfer returns (output, state) when output_final_state=True,
     # or just output when output_final_state=False.
