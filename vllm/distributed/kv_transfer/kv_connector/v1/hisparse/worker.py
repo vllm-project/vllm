@@ -341,6 +341,9 @@ class HiSparseConnectorWorker:
         self._metrics_calls = 0
         self._metrics_event = torch.Event()
         self._metrics_pending = False
+        # First poll may return a zero snapshot so payload `_metrics_descriptor`
+        # can register under VLLM_USE_RUST_FRONTEND before interval/traffic.
+        self._metrics_descriptor_bootstrapped = False
         self._init_dma()
         if self.is_host_writer:
             for layer_index, handle in enumerate(cache_handles):
@@ -544,7 +547,21 @@ class HiSparseConnectorWorker:
                     stats.record_snapshot(hits, misses, misses * group.stats_row_bytes)
             self._metrics_pending = False
             if stats.is_empty():
-                stats = None
+                # Still emit once: empty short-circuit would otherwise block
+                # `_metrics_descriptor` when counters stay at zero.
+                if not self._metrics_descriptor_bootstrapped:
+                    stats.record_snapshot(0, 0, 0)
+                else:
+                    stats = None
+
+        if stats is None and not self._metrics_descriptor_bootstrapped:
+            # Before `_METRICS_INTERVAL` fills, return a zero snapshot once so
+            # HiSparseConnector.to_dict can attach `_metrics_descriptor`.
+            stats = HiSparseKVConnectorStats()
+            stats.record_snapshot(0, 0, 0)
+
+        if stats is not None:
+            self._metrics_descriptor_bootstrapped = True
 
         self._metrics_calls += 1
         if (
