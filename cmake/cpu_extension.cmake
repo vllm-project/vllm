@@ -511,6 +511,7 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
         "csrc/cpu/cpu_tanhf_neon.hpp"
         ${VLLM_EXT_SRC})
     if (ARM_BF16_FOUND)
+        set(VLLM_EXT_SRC "csrc/cpu/sgl-kernels/conv.cpp" ${VLLM_EXT_SRC})
         if (ARM_I8MM_FOUND)
             set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe_int8.cpp" ${VLLM_EXT_SRC})
         endif()
