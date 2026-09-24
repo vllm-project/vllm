@@ -555,7 +555,8 @@ fn render_fake_message_content(
         ChatMessage::System { content }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
-        | ChatMessage::ToolResponse { content, .. } => render_fake_content(content, placeholder),
+        | ChatMessage::ToolResponse { content, .. }
+        | ChatMessage::Custom { content, .. } => render_fake_content(content, placeholder),
         ChatMessage::Assistant { .. } => message.text_content(),
     }
 }
