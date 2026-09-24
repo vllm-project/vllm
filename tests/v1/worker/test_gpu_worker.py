@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.startup_memory_debug import StartupMemoryTracker
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
 from vllm.v1.worker.startup_plan import (
@@ -34,6 +35,8 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         ),
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _mem_debug=StartupMemoryTracker(),
+        rank=0,
     )
     original_threads = torch.get_num_threads()
     try:

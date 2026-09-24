@@ -78,6 +78,12 @@ from vllm.utils.mem_utils import (
     format_gib,
     memory_profiling,
 )
+from vllm.utils.startup_memory_debug import (
+    StartupMemoryTracker,
+    log_allocator_stats,
+    log_largest_segments,
+    log_workspace_sizes,
+)
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -488,6 +494,8 @@ class Worker(WorkerBase):
             logger.debug(
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
             )
+            self._mem_debug = StartupMemoryTracker()
+            self._mem_debug.checkpoint("before_create", self.rank)
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
@@ -556,6 +564,8 @@ class Worker(WorkerBase):
         # valid when requests arrive.
         set_torch_threads_for_runtime()
 
+        self._mem_debug.checkpoint("after_load_model", self.rank)
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
@@ -609,7 +619,14 @@ class Worker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
+            self._mem_debug.checkpoint("before_profile", self.rank)
             self.model_runner.profile_run()
+
+        self._mem_debug.checkpoint("after_profile", self.rank)
+        self._mem_debug.log_summary(profile_result, self.rank)
+        log_allocator_stats(self.rank)
+        log_largest_segments(self.rank)
+        log_workspace_sizes(self.rank)
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
@@ -802,6 +819,8 @@ class Worker(WorkerBase):
         ):
             self.model_runner._init_kv_zero_meta()
 
+        self._mem_debug.checkpoint("after_kv_cache", self.rank)
+
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # All warmup phases below run synthetic steps whose sampled outputs are
@@ -862,6 +881,7 @@ class Worker(WorkerBase):
         if not self.model_config.enforce_eager:
             with self._get_cudagraph_capture_context():
                 cuda_graph_memory_bytes = self.model_runner.capture_model()
+        self._mem_debug.checkpoint("after_cudagraph", self.rank)
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -993,6 +1013,8 @@ class Worker(WorkerBase):
 
         if pp_handler is not None:
             pp_handler.set_disabled(False)
+
+        self._mem_debug.checkpoint("after_warmup", self.rank)
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,

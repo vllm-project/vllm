@@ -302,6 +302,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_DEBUG_STARTUP_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
@@ -2077,6 +2078,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
+    ),
+    # Per-stage GPU memory logging during startup.
+    "VLLM_DEBUG_STARTUP_MEMORY": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_STARTUP_MEMORY", "0"))
     ),
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
