@@ -21,6 +21,7 @@ from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
 
+
 class WeightCacheDaemon:
     """Context manager running the real weight cache daemon as a subprocess."""
 
