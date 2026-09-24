@@ -718,6 +718,13 @@ class VllmConfig:
 
         from vllm.platforms import current_platform
 
+        if current_platform.is_cpu():
+            logger.info_once(
+                "Model Runner V2 is experimental on CPU; using the V1 model "
+                "runner by default. Set VLLM_USE_V2_MODEL_RUNNER=1 to enable."
+            )
+            return False
+
         model_config = self.model_config
         if model_config is not None and current_platform.is_rocm():
             architectures = getattr(model_config, "architectures", ())

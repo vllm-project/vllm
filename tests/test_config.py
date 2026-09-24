@@ -577,6 +577,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     default_breakable_cudagraph_architectures.cache_clear()
 
     model_config = SimpleNamespace(
@@ -1176,6 +1177,7 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     config = SimpleNamespace(
         model_config=model_config,
         attention_config=AttentionConfig(),
@@ -1183,6 +1185,29 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     config._get_v2_model_runner_unsupported_features = lambda: []
 
     assert VllmConfig.use_v2_model_runner.fget(config) is expected
+
+
+def test_cpu_defaults_to_mrv1(monkeypatch):
+    from vllm.config.vllm import vllm_config_module
+    from vllm.platforms import current_platform
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+
+    config = SimpleNamespace(
+        attention_config=AttentionConfig(),
+        watermark_config=None,
+        model_config=None,
+    )
+    assert VllmConfig.use_v2_model_runner.fget(config) is False
+
+    # Explicit override to enable experimental MRV2 on CPU still works
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    assert VllmConfig.use_v2_model_runner.fget(config) is True
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    assert VllmConfig.use_v2_model_runner.fget(config) is False
 
 
 def test_v1_model_runner_rejects_v2_only_features():
