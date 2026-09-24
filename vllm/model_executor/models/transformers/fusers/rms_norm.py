@@ -70,7 +70,7 @@ def _is_inverse_sqrt(node: object) -> bool:
 
 
 def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
-    """eps from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
+    """`eps` from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
     add = peel(_operand(rsqrt, 0, "input"))
     if not is_op(add, "add"):
         return None
