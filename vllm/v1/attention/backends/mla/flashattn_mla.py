@@ -367,7 +367,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             if not q.is_contiguous():
                 q = q.contiguous()
 
-            out = flash_attn_varlen_func(
+            attn_out = flash_attn_varlen_func(
                 q,
                 cache,
                 cache.narrow(-1, 0, self.kv_lora_rank),
@@ -379,9 +379,14 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 softmax_scale=self.scale,
                 causal=False,
                 fa_version=2,
-                return_softmax_lse=False,
+                return_softmax_lse=self.need_to_return_lse_for_decode,
             )
-            return out, None
+
+            if self.need_to_return_lse_for_decode:
+                o, lse = attn_out
+                # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
+                return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
+            return attn_out, None
 
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :]
