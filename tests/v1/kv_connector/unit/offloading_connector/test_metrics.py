@@ -897,25 +897,25 @@ def test_prom_metrics_reads_the_info_payload_by_label_name():
     assert gauge.labelvalues == ("model", "0", "1", "2")
 
 
-def test_prom_metrics_reports_one_info_series_for_each_tier():
-    """A manager reports one mapping for each tier, and the tier label tells the
-    series apart. Two tiers of one type agree on every other value, so without
-    that label they collapse into one series."""
-    prom_metrics = _prom_metrics(info_keys=("tier", "root_dir_name"))
+def test_prom_metrics_reports_one_info_series_for_each_mapping():
+    """A manager reports one mapping for each series, and a label of its own
+    tells the series apart. Two mappings of one kind agree on every other value,
+    so without that label they collapse into one series."""
+    prom_metrics = _prom_metrics(info_keys=("source", "root_dir_name"))
 
     prom_metrics.observe(
         {
             _StatsKey.INFO: [
-                {"tier": "1:fs", "root_dir_name": "a"},
-                {"tier": "2:fs", "root_dir_name": "b"},
+                {"source": "1", "root_dir_name": "a"},
+                {"source": "2", "root_dir_name": "b"},
             ]
         }
     )
 
     gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
     assert [child.labelvalues for child in gauge_def.children] == [
-        ("model", "0", "1:fs", "a"),
-        ("model", "0", "2:fs", "b"),
+        ("model", "0", "1", "a"),
+        ("model", "0", "2", "b"),
     ]
     assert [child.set_values for child in gauge_def.children] == [[1], [1]]
 
@@ -968,14 +968,15 @@ def test_prom_metrics_empties_a_declared_info_label_no_manager_fills():
     assert gauge.labelvalues == ("model", "0", "512", "")
 
 
-def test_prom_metrics_keeps_quiet_when_a_name_belongs_to_another_tier():
-    """A name that one tier owns reads empty on the other tiers by design.
+def test_prom_metrics_keeps_quiet_when_a_name_belongs_to_another_series():
+    """A name that one series owns reads empty on the other series by design.
 
-    The declaration holds the names of every tier, so the frontend checks the
-    payload as a whole. A per-tier check would read this normal shape as a
-    disagreement, and warn at every start of a multi-tier server.
+    The declaration holds the names of every series, so the frontend checks the
+    payload as a whole. A per-series check would read this normal shape as a
+    disagreement, and warn at every start of a server that reports several
+    series.
     """
-    prom_metrics = _prom_metrics(info_keys=("tier", "root_dir_name", "bucket"))
+    prom_metrics = _prom_metrics(info_keys=("source", "root_dir_name", "bucket"))
 
     with patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics.logger"
@@ -983,8 +984,8 @@ def test_prom_metrics_keeps_quiet_when_a_name_belongs_to_another_tier():
         prom_metrics.observe(
             {
                 _StatsKey.INFO: [
-                    {"tier": "1:fs", "root_dir_name": "kv_a"},
-                    {"tier": "2:obj", "bucket": "kv_bucket"},
+                    {"source": "1", "root_dir_name": "kv_a"},
+                    {"source": "2", "bucket": "kv_bucket"},
                 ]
             }
         )
@@ -992,8 +993,8 @@ def test_prom_metrics_keeps_quiet_when_a_name_belongs_to_another_tier():
     mock_logger.warning_once.assert_not_called()
     gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
     assert [child.labelvalues for child in gauge_def.children] == [
-        ("model", "0", "1:fs", "kv_a", ""),
-        ("model", "0", "2:obj", "", "kv_bucket"),
+        ("model", "0", "1", "kv_a", ""),
+        ("model", "0", "2", "", "kv_bucket"),
     ]
 
 
@@ -1070,9 +1071,10 @@ def test_aggregate_keeps_the_config_info_of_a_later_payload():
 
 
 def test_metric_sections_leave_out_the_config_info():
-    """A tier accesses its own metrics by a walk over the metric sections, as the
-    kvcr tier does in v1/kv_offload/tiering/kvcr/manager.py. The info section
-    holds label names, not metric names, so it stays out of that walk."""
+    """A manager accesses its own metrics by a walk over the metric sections, as
+    KVCRSecondaryTierManager does in v1/kv_offload/tiering/kvcr/manager.py. The
+    info section holds label names, not metric names, so it stays out of that
+    walk."""
     stats = OffloadingConnectorStats()
     stats.increase_counter(MY_COUNTER, 2, ("remote_deliver",))
     stats.set_info([{"info_label": "local"}])

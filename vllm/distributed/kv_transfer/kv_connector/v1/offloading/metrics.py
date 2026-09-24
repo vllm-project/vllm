@@ -29,9 +29,9 @@ _INFO_METRIC_HELP = (
     "Static configuration of the KV offload managers of this engine instance. "
     "The configured offloading spec declares the label names, and each manager "
     "fills the values, so a series appears from the first scheduler step of its "
-    "engine. One series appears for each offload tier, and the tier label tells "
-    "the series apart. Each engine reports its own configuration, not the "
-    "instance total."
+    "engine. A manager reports one series for each configuration it holds, and "
+    "a label of its own tells the series apart. Each engine reports its own "
+    "configuration, not the instance total."
 )
 
 
@@ -182,8 +182,8 @@ class _StatsKey:
     TYPES = "types"
     # Maps metric name -> {label values tuple -> observed value (number or list)}
     DATA = "data"
-    # One mapping of info metric label name -> label value for each tier. None
-    # until a manager reports it, and one empty mapping for no fact.
+    # One mapping of info metric label name -> label value for each series.
+    # None until a manager reports it, and one empty mapping for no fact.
     INFO = "info"
 
 
@@ -208,10 +208,11 @@ class OffloadingConnectorStats(KVConnectorStats):
     observed samples per-label-tuple. Unlabeled metrics use ``()`` as their
     labelvalues tuple.
 
-    ``INFO`` holds the static config facts of each tier, which the scheduler
-    sends once per process. It stays out of ``DATA``, because its label names
-    are known only when the payload arrives. It holds label names, not metric
-    names, so a tier that accesses its own metrics walks ``metric_sections()``.
+    ``INFO`` holds the static config facts of one series each, which the
+    scheduler sends once per process. It stays out of ``DATA``, because its
+    label names are known only when the payload arrives. It holds label names,
+    not metric names, so a manager that accesses its own metrics walks
+    ``metric_sections()``.
     """
 
     def __post_init__(self):
@@ -236,8 +237,8 @@ class OffloadingConnectorStats(KVConnectorStats):
     def metric_sections(self) -> tuple[dict[str, Any], ...]:
         """Return the type section and the value section, in that order.
 
-        A tier that accesses its own metrics walks these sections. Each one is a
-        mutable reference.
+        A manager that accesses its own metrics walks these sections. Each one
+        is a mutable reference.
         """
         return (self._types, self._values)
 
@@ -252,7 +253,9 @@ class OffloadingConnectorStats(KVConnectorStats):
         # payload with no info must not clear it.
         other_info = other.data.get(_StatsKey.INFO)
         if other_info is not None:
-            self.data[_StatsKey.INFO] = [dict(tier_info) for tier_info in other_info]
+            self.data[_StatsKey.INFO] = [
+                dict(series_info) for series_info in other_info
+            ]
         other_types = other._types
         other_values = other._values
         for key, other_label_values in other_values.items():
@@ -345,12 +348,12 @@ class OffloadingConnectorStats(KVConnectorStats):
 
         Args:
             info: One mapping of info metric label name to label value for each
-                tier, as OffloadingManager.config_info() returns it. An empty
+                series, as OffloadingManager.config_info() returns it. An empty
                 mapping still gives one series, with an empty value on every
                 label the spec declared.
 
         """
-        self.data[_StatsKey.INFO] = [dict(tier_info) for tier_info in info]
+        self.data[_StatsKey.INFO] = [dict(series_info) for series_info in info]
 
     def observe_histogram(
         self,
@@ -544,27 +547,29 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                 )
 
     def _observe_info(self, info: Sequence[dict[str, Any]], engine_idx: int) -> None:
-        """Publish the static config facts of one engine, one series per tier.
+        """Publish the static config facts of one engine, one series per mapping.
 
         The spec declares the label names, so a payload only fills them. A
-        declared name that no tier fills reads empty on every series. A payload
+        declared name that no series fills reads empty on every series. A payload
         name that the spec did not declare is dropped. Either gap logs once.
 
-        The check covers the payload as a whole, and not one tier, because the
-        declaration holds the names of every tier. A name that one tier owns
-        reads empty on the other tiers by design. A tier that leaves a name of
+        The check covers the payload as a whole, and not one series, because the
+        declaration holds the names of every series. A name that one series owns
+        reads empty on the other series by design. A series that leaves a name of
         its own unfilled therefore stays hidden here.
 
         Args:
-            info: One mapping of label name to label value for each tier, as
+            info: One mapping of label name to label value for each series, as
                 OffloadingManager.config_info() returns it.
             engine_idx: Index of the reporting engine.
 
         """
         filled: dict[str, None] = {}
-        for tier_info in info:
-            filled.update(dict.fromkeys(tier_info))
-            labelvalues = tuple(str(tier_info.get(key, "")) for key in self._info_keys)
+        for series_info in info:
+            filled.update(dict.fromkeys(series_info))
+            labelvalues = tuple(
+                str(series_info.get(key, "")) for key in self._info_keys
+            )
             self._set_gauge(KV_OFFLOAD_CONFIG_INFO, 1, labelvalues, engine_idx)
 
         never_filled = tuple(key for key in self._info_keys if key not in filled)
@@ -572,7 +577,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         if never_filled or dropped:
             logger.warning_once(
                 "%s: spec %s and the manager of engine %d disagree on the KV "
-                "offload config labels. Declared, and no tier filled them, so "
+                "offload config labels. Declared, and no series filled them, so "
                 "empty on every series: %s. Filled, and the spec did not "
                 "declare them, so dropped: %s.",
                 KV_OFFLOAD_CONFIG_INFO,
