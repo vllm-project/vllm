@@ -82,15 +82,8 @@ def compute_tp_mapping(
     DCP support is scoped to MLA only, with a side is either fully replicated or fully
     sharded. DCP-branch reuses the same rank set used at handshake selection.
 
-    Args:
-        transfer_topology: The local rank's view of the transfer.
-        remote_tp_size: TP size of the remote engine.
-        group_spec_types: KV cache spec type of each KV cache group.
-        remote_dcp_size: DCP size of the remote engine.
-        head_sharded_kv_heads: If set, map head-sharded KV with this many total
-            KV heads instead of the topology's, e.g. a GQA draft whose regions
-            are sharded under an MLA target that is replicated.
-
+    ``head_sharded_kv_heads`` maps head-sharded KV with that many total KV heads
+    instead of the topology's, e.g. a GQA draft under an MLA target.
     """
     tp_rank = transfer_topology.tp_rank
     tp_size = transfer_topology.tp_size
