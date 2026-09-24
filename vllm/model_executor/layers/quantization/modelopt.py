@@ -2534,7 +2534,7 @@ class ModelOptLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer) -> None:
         if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
             self.kernel = init_mxfp8_linear_kernel(
-                weight_shape=layer.weight.shape,
+                weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
                 bmm_batch_size=layer.bmm_batch_size,
             )
         if is_weights_pre_processed():

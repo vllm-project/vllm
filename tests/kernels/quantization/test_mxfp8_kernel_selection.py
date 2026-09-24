@@ -37,15 +37,20 @@ _MARLIN_ONLY_SHAPES = [(32, 256), (64, 256), (96, 256), (256, 64)]
 # (N, K): N <= 0, K <= 0, K % 32 != 0.
 _MARLIN_UNSUPPORTED_SHAPES = [(0, 256), (256, 0), (256, 100)]
 
-_SM100_SELECTION = [
-    ((128, 128), FlashInferCutedslMxfp8LinearKernel),
-    ((130, 256), FlashInferCutedslMxfp8LinearKernel),
-    *[(shape, MarlinMxfp8LinearKernel) for shape in _MARLIN_ONLY_SHAPES],
-]
-_SM12X_SELECTION = [
-    ((128, 128), FlashInferCutlassMxfp8LinearKernel),
-    ((130, 256), MarlinMxfp8LinearKernel),
-    *[(shape, MarlinMxfp8LinearKernel) for shape in _MARLIN_ONLY_SHAPES],
+_SELECTION_CASES = [
+    (100, (128, 128), FlashInferCutedslMxfp8LinearKernel),
+    (100, (130, 256), FlashInferCutedslMxfp8LinearKernel),
+    (103, (128, 128), FlashInferCutedslMxfp8LinearKernel),
+    (103, (130, 256), FlashInferCutedslMxfp8LinearKernel),
+    (120, (128, 128), FlashInferCutlassMxfp8LinearKernel),
+    (120, (130, 256), MarlinMxfp8LinearKernel),
+    (121, (128, 128), FlashInferCutlassMxfp8LinearKernel),
+    (121, (130, 256), MarlinMxfp8LinearKernel),
+    *[
+        (capability, shape, MarlinMxfp8LinearKernel)
+        for capability in (100, 103, 120, 121)
+        for shape in _MARLIN_ONLY_SHAPES
+    ],
 ]
 
 
@@ -116,28 +121,13 @@ def test_cutlass_mxfp8_requires_aligned_n_only_on_sm12x(capability, expected):
     assert can_implement == expected
 
 
-@pytest.mark.parametrize("capability", [100, 103])
-@pytest.mark.parametrize(("weight_shape", "expected_kernel_cls"), _SM100_SELECTION)
-def test_init_mxfp8_linear_kernel_on_sm100(
-    capability, weight_shape, expected_kernel_cls
-):
+@pytest.mark.parametrize(
+    ("capability", "weight_shape", "expected_kernel_cls"), _SELECTION_CASES
+)
+def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls):
     """A layer that mm_mxfp8 cannot handle must fall through to the next
     kernel in the CUDA priority list instead of being selected and failing
     in apply_weights."""
-    with _patch_cuda_platform(capability):
-        kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
-
-    assert isinstance(kernel, expected_kernel_cls)
-    assert kernel.config == Mxfp8LinearLayerConfig(weight_shape=weight_shape)
-
-
-@pytest.mark.parametrize("capability", [120, 121])
-@pytest.mark.parametrize(("weight_shape", "expected_kernel_cls"), _SM12X_SELECTION)
-def test_init_mxfp8_linear_kernel_on_sm12x(
-    capability, weight_shape, expected_kernel_cls
-):
-    """On SM12x, CuTe-DSL is unavailable and CUTLASS also rejects
-    N % 32 != 0, so those layers fall back to Marlin."""
     with _patch_cuda_platform(capability):
         kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
 

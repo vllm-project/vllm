@@ -885,16 +885,12 @@ def choose_mp_linear_kernel(
 
 
 def init_mxfp8_linear_kernel(
-    *, weight_shape: tuple[int, ...], bmm_batch_size: int | None = None
+    *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform and layer shape.
-
-    `weight_shape` may be `[batch, N, K]` for a BMM layer; only the
-    trailing `(N, K)` is checked against the kernel shape limits.
-    """
+    current platform and `(N, K)` weight shape."""
     config = Mxfp8LinearLayerConfig(
-        weight_shape=(weight_shape[-2], weight_shape[-1]),
+        weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
     )
 

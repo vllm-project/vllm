@@ -24,6 +24,20 @@ from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 
+def _check_mm_mxfp8_shape(weight_shape: tuple[int, int]) -> tuple[bool, str | None]:
+    N, K = weight_shape
+    if K < 128:
+        return False, f"mm_mxfp8 requires K >= 128, got K={K}."
+    if K % MXFP8_BLOCK_SIZE != 0:
+        return (
+            False,
+            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}.",
+        )
+    if N < 128:
+        return False, f"mm_mxfp8 requires N >= 128, got N={N}."
+    return True, None
+
+
 class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 W8A8 GEMM via FlashInfer CUTLASS (SM100+)."""
 
@@ -43,25 +57,10 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        N, K = c.weight_shape
-        if K < 128:
-            return (
-                False,
-                f"mm_mxfp8 requires K >= 128, got K={K}. "
-                f"in_features is too small for mm_mxfp8.",
-            )
-        if K % MXFP8_BLOCK_SIZE != 0:
-            return (
-                False,
-                f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, "
-                f"got K={K}.",
-            )
-        if N < 128:
-            return (
-                False,
-                f"mm_mxfp8 requires N >= 128, got N={N}. "
-                f"out_features is too small for mm_mxfp8.",
-            )
+        can_implement, reason = _check_mm_mxfp8_shape(c.weight_shape)
+        if not can_implement:
+            return False, reason
+        N, _ = c.weight_shape
         if current_platform.is_device_capability_family(120) and N % 32 != 0:
             return (
                 False,
@@ -146,26 +145,7 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        N, K = c.weight_shape
-        if K < 128:
-            return (
-                False,
-                f"mm_mxfp8 requires K >= 128, got K={K}. "
-                f"in_features is too small for mm_mxfp8.",
-            )
-        if K % MXFP8_BLOCK_SIZE != 0:
-            return (
-                False,
-                f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, "
-                f"got K={K}.",
-            )
-        if N < 128:
-            return (
-                False,
-                f"mm_mxfp8 requires N >= 128, got N={N}. "
-                f"out_features is too small for mm_mxfp8.",
-            )
-        return True, None
+        return _check_mm_mxfp8_shape(c.weight_shape)
 
     def input_quant_key(self) -> QuantKey:
         # Activations use FlashInfer's F8_128x4 swizzled scale layout.
