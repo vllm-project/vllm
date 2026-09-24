@@ -1094,7 +1094,13 @@ class ParserEngine(Parser):
             if prev and not final_json.startswith(prev):
                 return self._close_streamed_json(slot, prev)
             diff = final_json[len(prev) :]
-            slot.streamed_json = final_json
+            try:
+                json.loads(final_json)
+            except (json.JSONDecodeError, ValueError):
+                # A converter that returns its input span verbatim (inkling)
+                # can extend the prefix with a value that EOS cut off.
+                diff += self._json_prefix_terminator(final_json)
+            slot.streamed_json = prev + diff
             return diff
         if prev:
             return self._close_streamed_json(slot, prev)

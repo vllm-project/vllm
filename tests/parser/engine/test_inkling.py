@@ -146,12 +146,14 @@ def _collect_reasoning(results) -> str:
     return "".join(d.reasoning for d, _ in results if d and d.reasoning)
 
 
-def _function_tool(name: str = "get_weather") -> ChatCompletionToolsParam:
+def _function_tool(
+    name: str = "get_weather", properties: dict | None = None
+) -> ChatCompletionToolsParam:
     """A real function-tool definition, as a request would carry it."""
     return ChatCompletionToolsParam(
         function=FunctionDefinition(
             name=name,
-            parameters={"type": "object", "properties": {}},
+            parameters={"type": "object", "properties": properties or {}},
         ),
     )
 
@@ -465,6 +467,41 @@ class TestStreaming:
         assert indexed[1]["name"] == "b"
         assert json.loads(indexed[0]["args"]) == {"i": 1}
         assert json.loads(indexed[1]["args"]) == {"i": 2}
+
+
+class TestTruncatedArgsFlush:
+    """Generation that stops inside the args object must still stream valid JSON.
+
+    The converter returns the args span verbatim, so the flush extends the
+    streamed prefix with a span that was cut off mid-value.
+    """
+
+    @pytest.mark.parametrize(
+        "args, expected",
+        [
+            ('{"s": "hello", "n": 4', {"s": "hello", "n": 4}),
+            ('{"s": "hello", "n": ', {"s": "hello", "n": None}),
+            ('{"s": "hello", "xs": [1, 2', {"s": "hello", "xs": [1, 2]}),
+        ],
+        ids=["number", "separator", "array"],
+    )
+    @pytest.mark.parametrize("end", ["", END_MESSAGE], ids=["eos", "end_message"])
+    def test_truncated_args_still_stream_valid_json(
+        self, mock_tokenizer, mock_request, args, expected, end
+    ):
+        """EOS, or a block end, inside a trailing value that could not stream."""
+        tool = _function_tool(
+            "f",
+            {
+                "s": {"type": "string"},
+                "n": {"type": "integer"},
+                "xs": {"type": "array", "items": {"type": "integer"}},
+            },
+        )
+        parser = InklingParser(mock_tokenizer, [tool])
+        text = f'{TOOL_JSON}{{"name":"f","args":{args}{end}'
+        results = _stream(parser, mock_request, text, 1)
+        assert json.loads(collect_tool_arguments(results)) == expected
 
 
 class TestPromptSeededState:
