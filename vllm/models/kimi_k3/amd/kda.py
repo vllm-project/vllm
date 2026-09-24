@@ -161,13 +161,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
         conv_state_dtype, _ = self.get_state_dtype()
-        use_hip_decode = is_fused_kda_decode_supported(
-            self.local_num_heads,
-            self.head_dim,
-            self.conv_size,
-            self.num_spec,
-            vllm_config.model_config.dtype,
-            conv_state_dtype,
+        use_hip_decode = (
+            not rocm_aiter_ops.is_enabled()
+            and is_fused_kda_decode_supported(
+                self.local_num_heads,
+                self.head_dim,
+                self.conv_size,
+                self.num_spec,
+                vllm_config.model_config.dtype,
+                conv_state_dtype,
+            )
         )
         if use_hip_decode:
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
@@ -619,7 +622,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     )
 
             else:
-                # pure-decode non-spec batch 
+                # pure-decode non-spec batch
                 assert non_spec_state_indices_tensor is not None
                 decode_conv_indices = non_spec_state_indices_tensor[
                     : mixed_qkv_ns.size(0)
