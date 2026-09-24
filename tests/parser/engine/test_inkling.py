@@ -473,7 +473,9 @@ class TestTruncatedArgsFlush:
     """Generation that stops inside the args object must still stream valid JSON.
 
     The converter returns the args span verbatim, so the flush extends the
-    streamed prefix with a span that was cut off mid-value.
+    streamed prefix with a span that was cut off mid-value. A span with no
+    completion (a key, a comma, a partial literal or escape) is dropped, and the
+    prefix already streamed is closed instead.
     """
 
     @pytest.mark.parametrize(
@@ -482,20 +484,37 @@ class TestTruncatedArgsFlush:
             ('{"s": "hello", "n": 4', {"s": "hello", "n": 4}),
             ('{"s": "hello", "n": ', {"s": "hello", "n": None}),
             ('{"s": "hello", "xs": [1, 2', {"s": "hello", "xs": [1, 2]}),
+            ('{"s": "hello", "n', {"s": "hello"}),
+            ('{"s": "hello", "n"', {"s": "hello"}),
+            ('{"s": "hello", ', {"s": "hello"}),
+            ('{"s": "hello", "ok": tr', {"s": "hello"}),
+            ('{"s": "hello", "n": -', {"s": "hello"}),
+            ('{"s": "hello \\u00e', {"s": "hello "}),
         ],
-        ids=["number", "separator", "array"],
+        ids=[
+            "number",
+            "separator",
+            "array",
+            "key",
+            "after_key",
+            "comma",
+            "literal",
+            "sign",
+            "unicode_escape",
+        ],
     )
     @pytest.mark.parametrize("end", ["", END_MESSAGE], ids=["eos", "end_message"])
     def test_truncated_args_still_stream_valid_json(
         self, mock_tokenizer, mock_request, args, expected, end
     ):
-        """EOS, or a block end, inside a trailing value that could not stream."""
+        """EOS, or a block end, inside the part of the args that could not stream."""
         tool = _function_tool(
             "f",
             {
                 "s": {"type": "string"},
                 "n": {"type": "integer"},
                 "xs": {"type": "array", "items": {"type": "integer"}},
+                "ok": {"type": "boolean"},
             },
         )
         parser = InklingParser(mock_tokenizer, [tool])

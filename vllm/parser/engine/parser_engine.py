@@ -1098,8 +1098,13 @@ class ParserEngine(Parser):
                 json.loads(final_json)
             except (json.JSONDecodeError, ValueError):
                 # A converter that returns its input span verbatim (inkling)
-                # can extend the prefix with a value that EOS cut off.
-                diff += self._json_prefix_terminator(final_json)
+                # can extend the prefix with a value that EOS cut off. If that
+                # span has no completion (a key, a comma, a partial literal or
+                # escape), drop it and close what was already streamed.
+                suffix = self._json_prefix_terminator(final_json)
+                if not suffix:
+                    return self._close_streamed_json(slot, prev)
+                diff += suffix
             slot.streamed_json = prev + diff
             return diff
         if prev:
