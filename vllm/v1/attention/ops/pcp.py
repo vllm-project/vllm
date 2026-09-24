@@ -18,8 +18,15 @@ def _gather_prefill_cache_inputs(
     assert all(tensor.shape[0] == local_num_tokens for tensor in tensors)
     assert 0 <= num_decode_tokens <= local_num_tokens
 
-    if num_decode_tokens == local_num_tokens:
-        return tensors, slot_mapping[:num_decode_tokens]
+    # Replicated draft decodes use unexpanded slot mappings, even with DP padding.
+    if (
+        num_decode_tokens == local_num_tokens
+        or slot_mapping.shape[0] <= local_num_tokens
+    ):
+        return (
+            tuple(tensor[:num_decode_tokens] for tensor in tensors),
+            slot_mapping[:num_decode_tokens],
+        )
 
     pcp_group = get_pcp_group()
     gathered_prefills = tuple(

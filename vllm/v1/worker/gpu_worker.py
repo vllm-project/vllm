@@ -406,13 +406,14 @@ class Worker(WorkerBase):
                 if dp_local_rank is None:
                     dp_local_rank = self.parallel_config.data_parallel_index
 
-                tp_pp_world_size = (
+                tp_pcp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
+                    * self.parallel_config.prefill_context_parallel_size
                     * self.parallel_config.tensor_parallel_size
                 )
 
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pp_world_size
+                # DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK
+                self.local_rank += dp_local_rank * tp_pcp_pp_world_size
 
             # Publish the logical-to-physical mapping for topology queries
             # such as NIC affinity and P2P checks.
@@ -549,6 +550,11 @@ class Worker(WorkerBase):
                 self.device,
                 self.model_runner.get_model(),
             )
+
+        # Preserve parallel weight loading, then use serving's thread count
+        # for profiling and compilation so Dynamo's global-state guards remain
+        # valid when requests arrive.
+        set_torch_threads_for_runtime()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -800,6 +806,15 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        # All warmup phases below run synthetic steps whose sampled outputs are
+        # discarded. The PP sampled-token broadcast would carry no payload, and
+        # its side-stream NCCL ops can overlap the next step's activation p2p
+        # and deadlock the pipeline, so keep it disabled for the whole warmup
+        # window and restore it before serving.
+        pp_handler = getattr(self.model_runner, "pp_handler", None)
+        if pp_handler is not None:
+            pp_handler.set_disabled(True)
+
         warmup_sizes: list[int] = []
 
         if (
@@ -838,9 +853,12 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner:
-            # A workspace resize after capture frees what the graphs point at.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        if self.use_v2_model_runner:  # noqa: SIM102
+            if self.vllm_config.kernel_config.enable_jit_warmup:
+                # A workspace resize after capture frees what the graphs point at.
+                warmup_kernels(
+                    self.model_runner, self.execute_model, self.sample_tokens
+                )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -975,9 +993,8 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
-        # Startup is done; steady-state serving gets no benefit from torch
-        # intra-op parallelism.
-        set_torch_threads_for_runtime()
+        if pp_handler is not None:
+            pp_handler.set_disabled(False)
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
