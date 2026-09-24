@@ -409,41 +409,22 @@ def _dense_prefill(
     if candidate_write:
         nblocks = triton.cdiv(plan.width, layer.block)
         scores = layer.q.new_empty((t1 - t0, nblocks), dtype=torch.float32)
-    if plan.query_start_loc is not None:
-        # Ragged requests go in packed, one launch for the whole chunk: the
-        # kernel finds each row's request from query_start_loc on its own grid.
-        pa.paged_mxfp4_mqa_logits(
-            layer.q[t0:t1],
-            layer.q_scale[t0:t1],
-            layer.kv,
-            layer.weights[t0:t1],
-            plan.context_lens,
-            chunk.block_table,
-            plan.width,
-            out_logits=logits,
-            clean_logits=False,
-            row_ends=plan.row_ends,
-            query_start_loc=plan.query_start_loc,
-            **_block_scores(layer, scores),
-        )
-    else:
-        # A request's rows go in as one sequence's next_n, which is what lets a
-        # workgroup share a KV tile; requests with equal rows share a launch.
-        for lo, hi, req, seqs in plan.launches:
-            q, q_scale, weights = layer.rows(t0 + lo, t0 + hi, seqs)
-            pa.paged_mxfp4_mqa_logits(
-                q,
-                q_scale,
-                layer.kv,
-                weights,
-                plan.context_lens[req : req + seqs],
-                chunk.block_table[req : req + seqs],
-                plan.width,
-                out_logits=logits[lo:hi],
-                clean_logits=False,
-                row_ends=plan.row_ends[lo:hi],
-                **_block_scores(layer, None if scores is None else scores[lo:hi]),
-            )
+    # One launch for the chunk: the kernel finds each row's request from
+    # query_start_loc on its own grid.
+    pa.paged_mxfp4_mqa_logits(
+        layer.q[t0:t1],
+        layer.q_scale[t0:t1],
+        layer.kv,
+        layer.weights[t0:t1],
+        plan.context_lens,
+        chunk.block_table,
+        plan.width,
+        out_logits=logits,
+        clean_logits=False,
+        row_ends=plan.row_ends,
+        query_start_loc=plan.query_start_loc,
+        **_block_scores(layer, scores),
+    )
     candidates = None if layer.candidates is None else layer.candidates[t0:t1]
     if scores is not None:
         assert candidates is not None and plan.block_ends is not None

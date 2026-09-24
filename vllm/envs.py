@@ -59,7 +59,6 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
-    VLLM_ROCM_MXFP4_INDEXER_VARLEN: bool = True
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -1088,12 +1087,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
-    ),
-    # ROCm paged MXFP4 indexer: launch a prefill chunk whose requests have
-    # different query lengths once, packed through query_start_loc, instead of
-    # once per run of equal-length requests. Set to 0 to launch per run.
-    "VLLM_ROCM_MXFP4_INDEXER_VARLEN": lambda: (
-        os.getenv("VLLM_ROCM_MXFP4_INDEXER_VARLEN", "1").lower() in ("true", "1")
     ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.

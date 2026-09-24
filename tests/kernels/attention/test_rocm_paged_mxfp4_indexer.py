@@ -229,7 +229,7 @@ def _decode_metadata(case, rows, ratio, query_lens):
 
 
 def _prefill_metadata(
-    case, rows, ratio, chunk_bounds, query_start_loc, varlen, gather_rows, gather
+    case, rows, ratio, chunk_bounds, query_start_loc, gather_rows, gather
 ):
     chunks = []
     for req_lo, req_hi, t0, t1 in chunk_bounds:
@@ -259,9 +259,7 @@ def _prefill_metadata(
         ratio,
         CAND_BLOCK,
         0.0 if gather else None,
-        torch.tensor(query_start_loc, dtype=torch.int32, device=DEVICE)
-        if varlen
-        else None,
+        torch.tensor(query_start_loc, dtype=torch.int32, device=DEVICE),
     )
     return DeepseekV41RocmMxfp4IndexerMetadata(
         seq_lens=None,
@@ -427,22 +425,19 @@ def test_decode_layers_match_reference(monkeypatch, block, query_lens):
     [
         # one request past a cached prefix, then one sliced into two chunks
         ([760, 500], [300, 500], [(0, 1, 0, 300), (1, 2, 300, 560), (1, 2, 560, 800)]),
-        # three requests in one chunk; the first two share a launch
+        # three requests in one chunk, the first two with equal rows
         ([600, 450, 900], [200, 200, 120], [(0, 3, 0, 520)]),
         # four requests with four different query lengths in one chunk
         ([900, 600, 450, 700], [150, 90, 200, 60], [(0, 4, 0, 500)]),
     ],
     ids=["sliced", "batched", "ragged"],
 )
-# Varlen packs a chunk whose requests' rows differ into one launch; off, the
-# chunk launches once per run of equal-row requests.
-@pytest.mark.parametrize("varlen", [True, False], ids=["varlen", "per_run"])
 # The consumers rejoin a request's rows across chunks, then cut them at most
 # gather_rows a launch.
 @pytest.mark.parametrize("gather_rows", [1 << 20, 128], ids=["joined", "cut"])
 @BLOCKS
 def test_prefill_layers_match_reference(
-    monkeypatch, seq_lens, new_tokens, chunks, varlen, gather_rows, block
+    monkeypatch, seq_lens, new_tokens, chunks, gather_rows, block
 ):
     case = _Case(seq_lens, block)
     rows = [
@@ -456,6 +451,6 @@ def test_prefill_layers_match_reference(
         case,
         rows,
         lambda r, gather=True: _prefill_metadata(
-            case, rows, r, chunks, query_start_loc, varlen, gather_rows, gather
+            case, rows, r, chunks, query_start_loc, gather_rows, gather
         ),
     )

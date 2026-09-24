@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The ROCm MXFP4 indexer reads the paged cache in place, so each prefill
-chunk is split back into its requests' rows. The kernel's sequences share one
-row count, so a launch takes a run of consecutive requests with equal query
-rows. A chunk is whole requests or one query slice of a long request, and both
-have to come back with the right rows and the right block-table rows.
+chunk is split back into its requests' rows, which one launch finds through
+the chunk's query_start_loc. A chunk is whole requests or one query slice of a
+long request, and both have to come back with the right rows and the right
+block-table rows.
 """
 
 import types
@@ -51,7 +51,7 @@ CHUNKS = [
 ]
 
 
-def _plans(min_gather_width, query_start_loc_device=None):
+def _plans(min_gather_width):
     return plan_prefill_chunks(
         CHUNKS,
         QUERY_START_LOC,
@@ -60,11 +60,11 @@ def _plans(min_gather_width, query_start_loc_device=None):
         2,
         8,
         min_gather_width,
-        query_start_loc_device,
+        torch.tensor(QUERY_START_LOC, dtype=torch.int32),
     )
 
 
-def test_chunks_split_into_requests_and_launches():
+def test_chunks_split_into_requests():
     plans = _plans(20.0)
 
     assert [p.requests for p in plans] == [
@@ -72,11 +72,11 @@ def test_chunks_split_into_requests_and_launches():
         [(0, 3, 0)],
         [(0, 3, 0)],
     ]
-    # the two 3-row requests share a launch, the 5-row one gets its own
-    assert [p.launches for p in plans] == [
-        [(0, 6, 0, 2), (6, 11, 2, 1)],
-        [(0, 3, 0, 1)],
-        [(0, 3, 0, 1)],
+    # every chunk launches once, with offsets local to the chunk
+    assert [p.query_start_loc.tolist() for p in plans] == [
+        [0, 3, 6, 11],
+        [0, 3],
+        [0, 3],
     ]
     # the logits are as wide as the longest compressed context in the chunk
     assert [p.width for p in plans] == [10, 32, 32]
@@ -85,14 +85,6 @@ def test_chunks_split_into_requests_and_launches():
     torch.testing.assert_close(plans[2].block_ends, torch.tensor([4, 4, 4]).int())
     assert [p.use_gather for p in plans] == [False, True, True]
     assert [p.first_request for p in plans] == [1, 4, 4]
-    # Without the device query_start_loc (varlen off) every chunk launches per run.
-    assert all(p.query_start_loc is None for p in plans)
-
-    packed = _plans(20.0, torch.tensor(QUERY_START_LOC, dtype=torch.int32))
-    # Only the ragged chunk packs, with offsets local to the chunk; the
-    # single-request slices keep their one uniform launch.
-    assert packed[0].query_start_loc.tolist() == [0, 3, 6, 11]
-    assert packed[1].query_start_loc is None and packed[2].query_start_loc is None
 
 
 def test_dense_split_budgets_the_widest_row():
@@ -168,6 +160,7 @@ def test_no_gather_without_candidates():
         1,
         0,
         None,
+        torch.tensor([0, 2], dtype=torch.int32),
     )
     assert plan.block_ends is None and not plan.use_gather
 

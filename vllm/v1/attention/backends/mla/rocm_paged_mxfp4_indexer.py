@@ -3,9 +3,9 @@
 """DeepSeek V4.1 indexer backend for the ROCm paged MXFP4 path.
 
 Extends the dense indexer metadata with what aiter's paged MXFP4 MQA-logits
-kernel needs to read the cache in place: each prefill chunk split into its
-requests (or packed through query_start_loc when their rows differ), the decode
-rows as next_n-row sequences on uniform steps, and, with
+kernel needs to read the cache in place: each prefill chunk as its requests,
+packed through query_start_loc into one launch, the decode rows as next_n-row
+sequences on uniform steps, and, with
 ``AttentionConfig.indexer_sparse_logits``, the per-step state the candidate
 consumers share. Selected for every V4.1 indexer cache when
 ``indexer_kv_dtype="mxfp4"`` on ROCm.
@@ -16,7 +16,6 @@ from dataclasses import dataclass, field, fields
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import (
@@ -51,30 +50,27 @@ _GATHER_MIN_CUT_PREFILL = 1.5
 
 @dataclass
 class RocmMxfp4PrefillPlan:
-    """One prefill chunk as the requests the kernel launches on. A request's
-    rows are one sequence's query chunk, which is the kernel's next_n."""
+    """One prefill chunk as the requests the kernel launches on, all in one
+    launch: the kernel finds each row's request through query_start_loc, and
+    a request's rows share its KV tiles."""
 
     requests: list[tuple[int, int, int]]
     """(first row, end row, request) per request with rows in the chunk; rows
     count from ``chunk.token_start``, requests index ``chunk.block_table``."""
-    launches: list[tuple[int, int, int, int]]
-    """(first row, end row, first request, requests) per dense launch. The
-    kernel's sequences all have next_n rows, so a launch takes a run of
-    consecutive requests with equal query rows."""
     width: int
     """Logits columns: an upper bound on the chunk's compressed contexts."""
     row_ends: torch.Tensor
     """[rows] int32 exclusive compressed key bound of each row."""
     context_lens: torch.Tensor
     """[chunk.num_reqs] int32 compressed context of each request."""
+    query_start_loc: torch.Tensor
+    """[chunk.num_reqs + 1] int32 row offsets of the chunk's requests, local to
+    the chunk."""
     first_request: int
     """The step's index of the chunk's first request."""
     block_ends: torch.Tensor | None = None
     """[rows] int32 candidate blocks each row sees, for the source's pool."""
     use_gather: bool = False
-    query_start_loc: torch.Tensor | None = None
-    """[chunk.num_reqs + 1] int32 row offsets of the chunk's requests when they
-    launch packed, as one varlen launch; None launches per run instead."""
 
 
 @dataclass
@@ -160,15 +156,15 @@ def plan_prefill_chunks(
     compress_ratio: int,
     candidate_block_size: int,
     min_gather_width: float | None,
-    query_start_loc_device: torch.Tensor | None = None,
+    query_start_loc_device: torch.Tensor,
 ) -> list[RocmMxfp4PrefillPlan]:
     """Split each chunk into its requests.
 
     ``query_start_loc`` and ``seq_lens_cpu`` are the step's host copies (the
     latter an upper bound), ``context_lens`` the device compressed lengths.
-    A chunk covers whole requests, or a query slice of one request. Given the
-    device ``query_start_loc``, a chunk whose requests do not all share one
-    query length launches once, packed, instead of once per run.
+    A chunk covers whole requests, or a query slice of one request; either
+    way it launches once, packed through the chunk's part of the device
+    ``query_start_loc``.
     """
     block = candidate_block_size
     plans = []
@@ -176,37 +172,26 @@ def plan_prefill_chunks(
         t0, t1 = chunk.token_start, chunk.token_end
         first = bisect.bisect_right(query_start_loc, t0) - 1
         requests = []
-        launches: list[tuple[int, int, int, int]] = []
         for req in range(chunk.num_reqs):
             lo = max(query_start_loc[first + req], t0) - t0
             hi = min(query_start_loc[first + req + 1], t1) - t0
-            if hi <= lo:
-                continue
-            requests.append((lo, hi, req))
-            if launches:
-                run_lo, run_hi, run_req, seqs = launches[-1]
-                if run_req + seqs == req and run_hi - run_lo == seqs * (hi - lo):
-                    launches[-1] = (run_lo, hi, run_req, seqs + 1)
-                    continue
-            launches.append((lo, hi, req, 1))
+            if hi > lo:
+                requests.append((lo, hi, req))
         reqs = slice(first, first + chunk.num_reqs)
-        packed = None
-        if query_start_loc_device is not None and len(launches) > 1:
-            packed = torch.clamp(query_start_loc_device[first : reqs.stop + 1], t0, t1)
-            packed -= t0
+        packed = torch.clamp(query_start_loc_device[first : reqs.stop + 1], t0, t1)
+        packed -= t0
         width = int(seq_lens_cpu[reqs].max()) // compress_ratio
         row_ends = chunk.cu_seqlen_ke - chunk.cu_seqlen_ks
         plans.append(
             RocmMxfp4PrefillPlan(
                 requests=requests,
-                launches=launches,
                 width=width,
                 row_ends=row_ends,
                 context_lens=context_lens[reqs],
+                query_start_loc=packed,
                 first_request=first,
                 block_ends=(row_ends + block - 1) // block if block else None,
                 use_gather=min_gather_width is not None and width >= min_gather_width,
-                query_start_loc=packed,
             )
         )
     return plans
@@ -482,7 +467,7 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuild
                 self.num_candidate_cols * _GATHER_MIN_CUT_PREFILL
                 if self.num_candidate_cols
                 else None,
-                cm.query_start_loc if envs.VLLM_ROCM_MXFP4_INDEXER_VARLEN else None,
+                cm.query_start_loc,
             )
             if self.num_candidate_cols:
                 metadata.gather_launches = plan_gather_launches(
