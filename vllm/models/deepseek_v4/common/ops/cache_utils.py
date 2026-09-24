@@ -1234,7 +1234,7 @@ def build_flashinfer_mixed_sparse_indices(
 def _remap_flashinfer_index(values, block_size, block_span):
     # FlashInfer's DSv4 kernel indexes sparse KV by physical token stride, so
     # packed pages (#44577) need block*block_size+off -> block*block_span+off.
-    # TODO: remove once flashinfer-ai/flashinfer#3856 is fixed.
+    # The launcher declares these indices with sparse_indices_are_storage_offsets=True.
     is_valid = values >= 0
     safe_values = tl.where(is_valid, values, 0)
     values = (safe_values // block_size) * block_span
