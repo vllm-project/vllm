@@ -1369,6 +1369,32 @@ class TestNixlHandshake:
             with pytest.raises(AssertionError):
                 worker2.add_remote_agent(bad_meta, remote_tp_size=1)
 
+    @pytest.mark.parametrize(
+        "target_mla,draft_mla,has_draft,expected",
+        [
+            (True, False, True, 8),  # GQA draft under an MLA target
+            (True, True, True, None),  # MLA draft (e.g. MTP) is replicated too
+            (True, False, False, None),  # no speculative decoding
+            (False, False, True, None),  # GQA target maps the draft already
+        ],
+    )
+    def test_resolve_head_sharded_draft_kv_heads(
+        self, target_mla, draft_mla, has_draft, expected
+    ):
+        draft = SimpleNamespace(use_mla=draft_mla, get_total_num_kv_heads=lambda: 8)
+        worker = SimpleNamespace(
+            use_mla=target_mla,
+            _has_mamba=False,
+            _is_csa_linear=False,
+            vllm_config=SimpleNamespace(
+                speculative_config=(
+                    SimpleNamespace(draft_model_config=draft) if has_draft else None
+                )
+            ),
+        )
+        resolve = NixlConnectorWorker._resolve_head_sharded_draft_kv_heads
+        assert resolve(worker) == expected
+
     @staticmethod
     def _mla_target_with_gqa_draft(tp_size: int, tp_rank: int, remote_tp_size: int):
         """Worker for an MLA target (REPLICATE region) plus a GQA draft with
