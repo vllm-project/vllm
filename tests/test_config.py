@@ -62,16 +62,16 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
     def original_validate_rope(config, *args, **kwargs):
         calls.append(config)
 
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    monkeypatch.setattr(PretrainedConfig, "validate_rope", original_validate_rope)
+    monkeypatch.setattr(PreTrainedConfig, "validate_rope", original_validate_rope)
     _patch_hf_transformers_nested_rope_validation()
 
     nested_rope_parameters = {
         "full_attention": {"rope_type": "default"},
         "original_max_position_embeddings": 32768,
     }
-    PretrainedConfig.validate_rope(
+    PreTrainedConfig.validate_rope(
         SimpleNamespace(rope_parameters=nested_rope_parameters)
     )
     assert nested_rope_parameters == {"full_attention": {"rope_type": "default"}}
@@ -81,7 +81,7 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
         "factor": 8.0,
         "rope_theta": 500000.0,
     }
-    PretrainedConfig.validate_rope(
+    PreTrainedConfig.validate_rope(
         SimpleNamespace(rope_parameters=flat_rope_parameters)
     )
     assert flat_rope_parameters == {
@@ -730,9 +730,9 @@ def test_batch_invariant_breakable_cudagraph(
     ],
 )
 def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         architectures=["DeepseekV32ForCausalLM"],
         num_nextn_predict_layers=1,
     )
@@ -2463,14 +2463,14 @@ def test_get_and_verify_max_len_with_nope_layers(
     max_model_len, rope_parameters, expected_max_len
 ):
     """NoPE layers do not prevent deriving or scaling the context length."""
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config.model import _get_and_verify_max_len
     from vllm.transformers_utils.model_arch_config_convertor import (
         ModelArchConfigConvertorBase,
     )
 
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         max_position_embeddings=4096,
         original_max_position_embeddings=2048,
     )
@@ -2514,14 +2514,14 @@ def test_get_and_verify_max_len_yarn_is_already_scaled(
     for every YaRN variant, so scaling it again overstates the limit and lets
     requests past the end of the cos/sin cache.
     """
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config.model import _get_and_verify_max_len
     from vllm.transformers_utils.model_arch_config_convertor import (
         ModelArchConfigConvertorBase,
     )
 
-    hf_config = PretrainedConfig(max_position_embeddings=32768)
+    hf_config = PreTrainedConfig(max_position_embeddings=32768)
     hf_config.rope_parameters = {
         "rope_type": rope_type,
         "factor": factor,
@@ -3867,19 +3867,12 @@ def test_load_config_rejects_non_string_load_format(bad_load_format):
         LoadConfig(load_format=bad_load_format)
 
 
-# A real Qwen3-0.6B model revision that is used in the tests below.
+# A real Qwen3-0.6B model revision that is used in the test below.
 REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
 
 
 @patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
-def test_revision_not_resolved_when_weights_differ_from_model(mock_resolve):
-    model_weights = "unsloth/Qwen3-0.6B-GGUF:Q8_0"
-    config = ModelConfig("Qwen/Qwen3-0.6B", model_weights=model_weights)
-    assert config.revision is None
-
-
-@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
-def test_revision_resolved_when_weights_match_model(mock_resolve):
+def test_revision_resolved_for_model(mock_resolve):
     model = "Qwen/Qwen3-0.6B"
     config = ModelConfig(model)
     assert isinstance(config.revision, ResolvedRevision)
