@@ -14,7 +14,10 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
-from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
+from vllm.v1.attention.backends.mla import (
+    rocm_aiter_mla,  # noqa: E402
+    triton_mla,  # noqa: E402
+)
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAHelper,
     AiterMLAImpl,
@@ -23,6 +26,12 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (  # noqa: E402
     merge_mla_segments_triton,
 )
+
+
+@pytest.fixture(autouse=True)
+def default_to_non_gfx942(monkeypatch):
+    """Keep architecture-neutral routing tests independent of the test host."""
+    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: False)
 
 
 class _NoOpTritonKernel:
@@ -87,6 +96,7 @@ def _builder(
     kv_cache_dtype: str = "auto",
     dcp_world_size: int = 1,
     dcp_rank: int = 0,
+    supports_triton_dcp_verify: bool = False,
 ):
     stub = SimpleNamespace(
         device=torch.device("cpu"),
@@ -102,6 +112,7 @@ def _builder(
         _supports_segmented_dcp_verify=rocm_aiter_mla._segmented_dcp_verify_supported(
             dcp_world_size, 1
         ),
+        _supports_triton_dcp_verify=supports_triton_dcp_verify,
         # Derived once in the real constructor, so derive it once here too.
         _segmented_page_size=rocm_aiter_mla._segmented_mla_page_size(kernel_block_size),
         _dcp_verify_buffers=None,
@@ -230,6 +241,25 @@ def test_dcp_verify_rows_sum_to_the_global_window_across_ranks():
     assert [sum(lens) for lens in zip(*per_rank)] == expected
 
 
+def test_triton_dcp_verify_uses_physical_blocks():
+    qlen = 3
+    builder = _builder(
+        mtp_decode_qlen=qlen,
+        dcp_world_size=8,
+        kernel_block_size=768,
+        supports_triton_dcp_verify=True,
+    )
+    view = builder._build_dcp_verify_row_view(
+        qlen,
+        torch.tensor([[7, 8], [10, 11]], dtype=torch.int32),
+        torch.tensor([1000, 2000], dtype=torch.int32),
+    )
+
+    assert view.use_triton_decode
+    assert view.page_size == 768
+    assert view.block_table.tolist() == [[7]] * qlen + [[10]] * qlen
+
+
 def test_dcp_verify_row_view_uses_static_graph_bound():
     """Under full graphs the bound comes from the buffers, not the batch."""
     qlen = 3
@@ -282,6 +312,101 @@ def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
     )
 
     assert metadata.dcp_verify is not None
+
+
+def test_gfx942_dcp_verify_build_uses_triton_fallback(monkeypatch):
+    qlen = 4
+    monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
+    builder = _builder(
+        mtp_decode_qlen=qlen,
+        dcp_world_size=2,
+        kernel_block_size=2,
+        supports_triton_dcp_verify=True,
+    )
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.tensor([[0, 1, 2], [10, 11, 12]], dtype=torch.int32),
+        seq_lens_device=torch.tensor([5, 6], dtype=torch.int32),
+        max_seq_len=6,
+        query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        num_decode_tokens=2 * qlen,
+        dcp_tot_seq_lens_device=torch.tensor([10, 12], dtype=torch.int32),
+    )
+
+    assert metadata.dcp_verify is not None
+    assert metadata.dcp_verify.use_triton_decode
+    assert metadata.paged_kv_indices is None
+    assert not metadata.has_persistent_metadata
+
+
+def test_gfx942_causal_verify_without_dcp_keeps_aiter(monkeypatch):
+    """Independent DSpark on gfx942 already served causal qlen>1 on ASM."""
+    qlen = 4
+    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: True)
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(mtp_decode_qlen=qlen, dcp_world_size=1, kernel_block_size=2),
+        block_table_tensor=torch.tensor([[0, 1, 2]], dtype=torch.int32),
+        seq_lens_device=torch.tensor([6], dtype=torch.int32),
+        max_seq_len=6,
+        query_start_loc_cpu=torch.tensor([0, qlen], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, qlen], dtype=torch.int32),
+        num_decode_tokens=qlen,
+        dcp_tot_seq_lens_device=None,
+    )
+
+    assert metadata.paged_kv_indices is not None
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.called
+
+
+@pytest.mark.parametrize("mtp_decode_qlen", [1, 4])
+def test_gfx942_single_token_dcp_decode_keeps_aiter(monkeypatch, mtp_decode_qlen):
+    """qlen==1 DCP decode stays on asm whether or not a drafter is configured.
+
+    The persistent schedule is rebuilt per batch at this batch's qlen, and the
+    buffers a drafting config sized are an upper bound on gfx942, so the
+    speculative server's qlen==1 step is the same asm call as a plain DCP
+    server's.
+    """
+    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: True)
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(
+            mtp_decode_qlen=mtp_decode_qlen,
+            dcp_world_size=2,
+            kernel_block_size=2,
+        ),
+        block_table_tensor=torch.tensor([[0, 1, 2]], dtype=torch.int32),
+        seq_lens_device=torch.tensor([6], dtype=torch.int32),
+        max_seq_len=6,
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, 1], dtype=torch.int32),
+        num_decode_tokens=1,
+        dcp_tot_seq_lens_device=torch.tensor([12], dtype=torch.int32),
+    )
+
+    assert metadata.paged_kv_indices is not None
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == 1
+    assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == 1
 
 
 def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
@@ -384,6 +509,50 @@ def test_segmented_verify_reduce_returns_natural_lse_and_masks_empty_rows():
     assert lse[1].item() == float("-inf")
 
 
+def test_triton_verify_masks_empty_rows(monkeypatch):
+    def fake_decode_attention_fwd(*args, **kwargs):
+        output, lse = args[3], args[4]
+        output.fill_(99)
+        lse.fill_(99)
+
+    monkeypatch.setattr(triton_mla, "decode_attention_fwd", fake_decode_attention_fwd)
+    q = torch.zeros(2, 1, 576, dtype=torch.bfloat16, device="cuda")
+    output, lse = triton_mla.triton_mla_decode_forward(
+        q,
+        torch.zeros(1, 16, 576, dtype=torch.bfloat16, device="cuda"),
+        torch.zeros(2, 1, dtype=torch.int32, device="cuda"),
+        torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
+        1,
+        576**-0.5,
+        512,
+        torch.tensor(1.0, device="cuda"),
+    )
+
+    assert output[0, 0, 0].item() == 99
+    assert lse[0, 0].item() == 99
+    assert output[1].count_nonzero().item() == 0
+    assert lse[1, 0].item() == float("-inf")
+
+
+def test_triton_verify_kernel_accepts_empty_local_shard():
+    q = torch.randn(2, 16, 576, dtype=torch.bfloat16, device="cuda")
+    output, lse = triton_mla.triton_mla_decode_forward(
+        q,
+        torch.randn(1, 32, 576, dtype=torch.bfloat16, device="cuda"),
+        torch.zeros(2, 1, dtype=torch.int32, device="cuda"),
+        torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
+        1,
+        576**-0.5,
+        512,
+        torch.tensor(1.0, device="cuda"),
+    )
+
+    assert torch.isfinite(output[0]).all()
+    assert torch.isfinite(lse[0]).all()
+    assert output[1].count_nonzero().item() == 0
+    assert torch.isneginf(lse[1]).all()
+
+
 def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
     """Exercise the target qlen>1 path and merge two rank-local results."""
     monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
@@ -398,17 +567,21 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
     head_dim = kv_lora_rank + rope_dim
     global_seq_len = 259
     block_size = 128
+    q_scale = 0.04
     kv_scale = 0.02
     sm_scale = head_dim**-0.5
+    fp8 = current_platform.fp8_dtype()
 
     q_nope = torch.randn(
         qlen, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
     )
     q_pe = torch.randn(qlen, num_heads, rope_dim, dtype=torch.bfloat16, device=device)
+    q_nope_fp32 = q_nope.float()
+    q_pe_fp32 = q_pe.float()
     kv_source = torch.randn(
         global_seq_len, head_dim, dtype=torch.float32, device=device
     )
-    kv_fp8 = (kv_source / kv_scale).to(torch.float8_e4m3fn)
+    kv_fp8 = (kv_source / kv_scale).to(fp8)
     kv_dequant = kv_fp8.float() * kv_scale
 
     partials = []
@@ -419,7 +592,7 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             num_blocks,
             block_size,
             head_dim,
-            dtype=torch.float8_e4m3fn,
+            dtype=fp8,
             device=device,
         )
         kv_cache.view(-1, head_dim)[: local_kv.shape[0]].copy_(local_kv)
@@ -461,7 +634,10 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
         impl.kv_lora_rank = kv_lora_rank
         impl.qk_rope_head_dim = rope_dim
         impl.scale = sm_scale
-        layer = SimpleNamespace(_k_scale=torch.tensor(kv_scale, device=device))
+        layer = SimpleNamespace(
+            _q_scale=torch.tensor(q_scale, device=device),
+            _k_scale=torch.tensor(kv_scale, device=device),
+        )
 
         partials.append(
             impl.forward_mqa((q_nope, q_pe), kv_cache, attn_metadata, layer)
@@ -476,8 +652,6 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
         )
 
     reference = torch.empty_like(output)
-    q_nope_fp32 = q_nope.float()
-    q_pe_fp32 = q_pe.float()
     for query_pos in range(qlen):
         visible = global_seq_len - qlen + query_pos + 1
         keys = kv_dequant[:visible]
@@ -491,6 +665,100 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
         reference[query_pos] = probs @ keys[:, :kv_lora_rank]
 
     torch.testing.assert_close(output, reference, rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_gfx942_triton_dcp_verify_matches_causal_attention(kv_dtype):
+    """Exercise the LDS-safe gfx942 target-verify fallback for BF16 and FP8."""
+    torch.manual_seed(1)
+    device = torch.device("cuda")
+    dcp_world_size = 2
+    qlen = 3
+    num_heads = 16
+    kv_lora_rank = 512
+    rope_dim = 64
+    head_dim = kv_lora_rank + rope_dim
+    global_seq_len = 67
+    block_size = 32
+    kv_scale = 0.02
+    sm_scale = head_dim**-0.5
+
+    q_nope = torch.randn(
+        qlen, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+    )
+    q_pe = torch.randn(qlen, num_heads, rope_dim, dtype=torch.bfloat16, device=device)
+    kv_source = torch.randn(
+        global_seq_len, head_dim, dtype=torch.float32, device=device
+    )
+    if kv_dtype == torch.float8_e4m3fn:
+        kv_data = (kv_source / kv_scale).to(kv_dtype)
+        kv_reference = kv_data.float() * kv_scale
+    else:
+        kv_data = kv_source.to(kv_dtype)
+        kv_reference = kv_data.float()
+        kv_scale = 1.0
+
+    partials = []
+    for dcp_rank in range(dcp_world_size):
+        local_kv = kv_data[dcp_rank::dcp_world_size]
+        num_blocks = math.ceil(local_kv.shape[0] / block_size)
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            head_dim,
+            dtype=kv_dtype,
+            device=device,
+        )
+        kv_cache.view(-1, head_dim)[: local_kv.shape[0]].copy_(local_kv)
+        builder = _builder(
+            mtp_decode_qlen=qlen,
+            kernel_block_size=block_size,
+            num_heads=num_heads // dcp_world_size,
+            kv_cache_dtype="fp8" if kv_dtype == torch.float8_e4m3fn else "auto",
+            dcp_world_size=dcp_world_size,
+            dcp_rank=dcp_rank,
+            supports_triton_dcp_verify=True,
+        )
+        view = builder._build_dcp_verify_row_view(
+            qlen,
+            torch.arange(num_blocks, dtype=torch.int32, device=device).unsqueeze(0),
+            torch.tensor([global_seq_len], dtype=torch.int32, device=device),
+        )
+        impl = object.__new__(AiterMLAImpl)
+        impl.scale = sm_scale
+        impl.kv_lora_rank = kv_lora_rank
+        partials.append(
+            impl._forward_triton_dcp_verify(
+                q_nope,
+                q_pe,
+                view,
+                kv_cache,
+                SimpleNamespace(_k_scale=torch.tensor(kv_scale, device=device)),
+            )
+        )
+
+    output, lse = partials[0]
+    for rank_output, rank_lse in partials[1:]:
+        output, lse = _lse_combine_natural(
+            output.float(), lse, rank_output.float(), rank_lse, torch.float32
+        )
+
+    reference = torch.empty_like(output)
+    for query_pos in range(qlen):
+        visible = global_seq_len - qlen + query_pos + 1
+        keys = kv_reference[:visible]
+        scores = torch.einsum(
+            "hd,nd->hn", q_nope[query_pos].float(), keys[:, :kv_lora_rank]
+        )
+        scores += torch.einsum(
+            "hd,nd->hn", q_pe[query_pos].float(), keys[:, kv_lora_rank:]
+        )
+        reference[query_pos] = (
+            torch.softmax(scores * sm_scale, dim=-1) @ keys[:, :kv_lora_rank]
+        )
+
+    tolerance = 3e-2 if kv_dtype == torch.float8_e4m3fn else 1e-2
+    torch.testing.assert_close(output, reference, rtol=tolerance, atol=tolerance)
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 24, 32, 64, 128])
