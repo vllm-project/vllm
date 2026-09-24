@@ -167,9 +167,7 @@ class _HealthState:
                 "status": status,
                 "expected": len(expected),
                 "ready": len(ready),
-                "ready_ranks": [
-                    {"role": role, "rank": rank} for role, rank in ready
-                ],
+                "ready_ranks": [{"role": role, "rank": rank} for role, rank in ready],
             },
         )
 
