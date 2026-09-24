@@ -196,7 +196,12 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         # read by its redo.
         span = self._index_kpool + vllm_config.num_speculative_tokens
         ring = self._index_kpool * next_power_of_2(cdiv(span, self._index_kpool))
-        assert self.cache_config.block_size % ring == 0
+        # ring must divide the attention block size (a multiple of 128).
+        assert self.cache_config.block_size % ring == 0, (
+            f"Glm5NextTailCache: cache_config.block_size "
+            f"({self.cache_config.block_size}) must be a multiple of the "
+            f"tail ring ({ring})"
+        )
         return KpoolTailSpec(
             block_size=ring,
             num_kv_heads=2,
