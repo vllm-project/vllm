@@ -158,7 +158,7 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
         # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
         ("KimiLinearForCausalLM", not current_platform.is_rocm()),
-        ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
+        ("KimiK3ForConditionalGeneration", True),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
     ],

@@ -159,6 +159,10 @@ def test_kda_recoverssm_derivation_is_revalidated():
 
     VllmConfig.validate_mamba_cached_kernel(config)
     assert config.cache_config.use_replayssm
+    if current_platform.is_rocm():
+        # ATOM ReplaySSM on ROCm; RecoverSSM stays off.
+        assert not config.cache_config.use_kda_recoverssm
+        return
     assert config.cache_config.use_kda_recoverssm
 
     config.cache_config.mamba_cache_mode = "align"
