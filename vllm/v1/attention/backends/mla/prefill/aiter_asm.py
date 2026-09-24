@@ -197,12 +197,10 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         ):
             return
 
-        # Realistic estimate of max number of partial tiles.
         # The reduce_partial_map_size from get_ps_metadata_info_v1 is a much looser
-        # upper bound that reach TB scale at large context sizes, so it's unusable.
-        # The PS scheduler can emit one partial tile per QO tile OR per CU. Where
-        #  1. the QO tiles can be spread either over the max num batched tokens
-        #  2. the CU count is a property of gfx950.
+        # upper bound, so it's currently leads to OOM.
+        # TODO: use value from get_ps_metadata_info_v1 once
+        # https://github.com/ROCm/aiter/pull/5759 is merged.
         qo_tile_cnt = (
             cdiv(self._max_num_batched_tokens, _FP8_PREFILL_TILE_Q) + max_num_seqs - 1
         )
