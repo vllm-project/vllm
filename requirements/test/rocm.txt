@@ -703,7 +703,7 @@ orjson==3.11.7
     # via
     #   genai-perf
     #   kaleido
-oss-harmony==0.0.9
+oss-harmony==0.0.11
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
