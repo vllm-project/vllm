@@ -55,6 +55,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -439,14 +440,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config, self.req_states, self.is_pooling_model, config_processors
         )
         if self.is_last_pp_rank and not self.is_pooling_model:
-            from vllm.v1.sample.ops.topk_topp_sampler import (
-                register_top_k_top_p_warmups,
-            )
-
             # V2 bypasses TopKTopPSampler, which registers native warmups.
-            # CUDA also needs these for its FlashInfer fallback paths.
-            with self.jit_warmup_registry.activate():
-                register_top_k_top_p_warmups()
+            # ROCm only: on CUDA these warmups add ~2 min to every engine start.
+            if current_platform.is_rocm():
+                from vllm.v1.sample.ops.topk_topp_sampler import (
+                    register_top_k_top_p_warmups,
+                )
+
+                with self.jit_warmup_registry.activate():
+                    register_top_k_top_p_warmups()
 
             sampler_kwargs: dict[str, Any] = {
                 "vllm_config": self.vllm_config,
