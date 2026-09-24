@@ -12,6 +12,7 @@ from torch import nn
 from vllm.config import (
     CompilationConfig,
     DeviceConfig,
+    LoadConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -104,6 +105,7 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA or ROCm")
 @pytest.mark.parametrize(
     "head_width,slots,dtype",
     [
@@ -113,12 +115,16 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
     ],
 )
 def test_lilicorr_matches_exported_head(head_width, slots, dtype):
+    device = torch.device("cuda")
     torch.manual_seed(7)
-    with set_current_vllm_config(
-        VllmConfig(
-            device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
-        )
+    with (
+        torch.device(device),
+        set_current_vllm_config(
+            VllmConfig(
+                device_config=DeviceConfig("cuda"),
+                compilation_config=CompilationConfig(mode=0),
+            )
+        ),
     ):
         head = LiLiCorrHead(
             model_hidden_size=16,
@@ -127,7 +133,7 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
             config=_config(hidden_size=head_width),
         ).to(dtype)
     # vLLM linear parameters are initialized by the checkpoint loader.
-    with torch.no_grad():
+    with torch.no_grad(), torch.device(device):
         for module in head.modules():
             if isinstance(module, LinearBase):
                 for parameter in module.parameters():
@@ -141,7 +147,7 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
         head.same_slot_bias.normal_(std=0.1)
         head.slot_embedding.normal_(std=0.1)
         head.rank_embedding.normal_(std=0.1)
-        head.materialize_inference_buffers(torch.device("cpu"), dtype)
+        head.materialize_inference_buffers(device, dtype)
         inputs = (
             torch.randn(2, slots, 4, 16, dtype=dtype),
             torch.randn(2, slots, 23).log_softmax(-1).topk(4).values,
@@ -594,6 +600,7 @@ def owned_head_model(monkeypatch):
         vllm_config = SimpleNamespace(
             speculative_config=SimpleNamespace(
                 draft_model_config=SimpleNamespace(hf_config=config),
+                draft_load_config=None,
                 attention_backend=None,
                 kv_cache_dtype=None,
             ),
@@ -603,7 +610,7 @@ def owned_head_model(monkeypatch):
             ),
             attention_config=SimpleNamespace(),
             cache_config=SimpleNamespace(),
-            load_config=SimpleNamespace(),
+            load_config=LoadConfig(),
         )
         with set_current_vllm_config(
             VllmConfig(

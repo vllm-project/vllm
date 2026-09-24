@@ -582,7 +582,7 @@ def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
         speculative_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
     config._get_v2_model_runner_unsupported_features = lambda: []
     # The real predicate, so the test also pins where dspark lands in it.
     config._get_v1_model_runner_unsupported_features = lambda: (
@@ -1435,7 +1435,7 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
 
     assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 
