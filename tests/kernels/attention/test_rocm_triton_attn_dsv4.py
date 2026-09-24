@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from types import SimpleNamespace
 
 import pytest
@@ -259,13 +260,21 @@ def _launch_sparse_decode_reduce(
     part_l: torch.Tensor,
     part_acc: torch.Tensor,
     adaptive_splits: bool,
+    positions: torch.Tensor | None = None,
+    cos_sin_cache: torch.Tensor | None = None,
+    out_dtype: torch.dtype = torch.bfloat16,
+    out_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Run the reduce kernel, with the inverse-RoPE epilogue if given positions.
+
+    Passing ``out_scale`` selects the MXFP8 epilogue (``out_dtype`` e4m3).
+    """
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     num_queries, num_splits, num_heads = part_m.shape
     out = torch.empty(
         (num_queries, num_heads, HEAD_DIM),
-        dtype=torch.bfloat16,
+        dtype=out_dtype,
         device=part_m.device,
     )
     attn_sink = torch.empty(1, dtype=torch.float32, device=part_m.device)
@@ -275,13 +284,19 @@ def _launch_sparse_decode_reduce(
         part_acc,
         attn_sink,
         out,
+        positions,
+        cos_sin_cache,
+        out_scale,
         out.stride(0),
         out.stride(1),
+        out_scale.stride(0) if out_scale is not None else 0,
+        HEAD_DIM // 32,
         part_m.stride(0),
         part_m.stride(1),
         part_acc.stride(0),
         part_acc.stride(1),
         part_acc.stride(2),
+        cos_sin_cache.stride(0) if cos_sin_cache is not None else 0,
         num_heads,
         HAS_ATTN_SINK=False,
         ADAPTIVE_SPLITS=adaptive_splits,
@@ -289,6 +304,10 @@ def _launch_sparse_decode_reduce(
         BLOCK_H=1,
         NUM_SPLITS=num_splits,
         SPLITS_PAD=1 << (num_splits - 1).bit_length(),
+        FUSE_INV_ROPE=positions is not None,
+        NOPE=NOPE_HEAD_DIM,
+        HALF=ROPE_HEAD_DIM // 2,
+        QUANT_OUT=out_scale is not None,
         num_warps=4,
     )
     return out
@@ -1037,6 +1056,211 @@ def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> No
 
     assert torch.isfinite(actual).all()
     assert torch.equal(actual, torch.full_like(actual, 2))
+
+
+@requires_gfx950
+@pytest.mark.parametrize("adaptive_splits", [False, True])
+@torch.inference_mode()
+def test_sparse_attn_decode_reduce_inverse_rope_epilogue(adaptive_splits: bool) -> None:
+    """FUSE_INV_ROPE must land where the standalone rotation would.
+
+    The epilogue rotates a whole [H, nope + rope] row with one expression by
+    feeding cos=1/sin=0 to the NoPE lanes, which only holds if the pair split
+    lands on ``nope_head_dim // 2``; the NoPE lanes therefore have to come
+    back untouched, not merely close.
+    """
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
+
+    device = torch.device("cuda")
+    torch.manual_seed(7)
+    num_queries, num_splits, num_heads, max_pos = 5, 4, 8, 64
+    shape = (num_queries, num_splits, num_heads)
+    part_m = torch.randn(shape, dtype=torch.float32, device=device)
+    part_l = torch.rand(shape, dtype=torch.float32, device=device) + 0.5
+    part_acc = torch.randn((*shape, HEAD_DIM), dtype=torch.float32, device=device)
+    positions = torch.randint(
+        0, max_pos, (num_queries,), dtype=torch.int64, device=device
+    )
+    angle = torch.randn(max_pos, ROPE_HEAD_DIM // 2, device=device)
+    cos_sin_cache = torch.cat((angle.cos(), angle.sin()), dim=-1).contiguous()
+
+    unfused = _launch_sparse_decode_reduce(part_m, part_l, part_acc, adaptive_splits)
+    expected = _fused_inverse_rope_gptj(
+        unfused, positions, cos_sin_cache, ROPE_HEAD_DIM
+    )
+    actual = _launch_sparse_decode_reduce(
+        part_m, part_l, part_acc, adaptive_splits, positions, cos_sin_cache
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    assert torch.equal(actual[..., :NOPE_HEAD_DIM], unfused[..., :NOPE_HEAD_DIM])
+    # An epilogue that quietly did nothing would satisfy everything above.
+    assert not torch.equal(actual[..., NOPE_HEAD_DIM:], unfused[..., NOPE_HEAD_DIM:])
+
+
+def _mxfp8_dequant(data: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    blocks = data.float().view(*data.shape[:-1], -1, 32)
+    return (blocks * torch.exp2(scale.float() - 127.0)[..., None]).view(data.shape)
+
+
+def _random_cos_sin_cache(max_pos: int, device: torch.device) -> torch.Tensor:
+    angle = torch.randn(max_pos, ROPE_HEAD_DIM // 2, device=device)
+    return torch.cat((angle.cos(), angle.sin()), dim=-1).contiguous()
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_attn_decode_reduce_mxfp8_epilogue() -> None:
+    """QUANT_OUT must equal MXFP8-quantizing the reduce's fp32 output."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(7)
+    num_queries, num_splits, num_heads = 5, 4, 8
+    shape = (num_queries, num_splits, num_heads)
+    part_m = torch.randn(shape, device=device)
+    part_l = torch.rand(shape, device=device) + 0.5
+    part_acc = torch.randn((*shape, HEAD_DIM), device=device)
+    positions = torch.randint(0, 64, (num_queries,), device=device)
+    cos_sin_cache = _random_cos_sin_cache(64, device)
+    args = (part_m, part_l, part_acc, False, positions, cos_sin_cache)
+
+    rotated = _launch_sparse_decode_reduce(*args, out_dtype=torch.float32)
+    expected_data, expected_scale = _mxfp8_e4m3_quantize_torch(
+        rotated.view(num_queries, -1)
+    )
+    scale = torch.empty_like(expected_scale)
+    data = _launch_sparse_decode_reduce(
+        *args, out_dtype=torch.float8_e4m3fn, out_scale=scale
+    )
+
+    assert torch.equal(scale, expected_scale)
+    assert torch.equal(
+        data.view(num_queries, -1).view(torch.uint8), expected_data.view(torch.uint8)
+    )
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_inverse_rope_mxfp8_rows() -> None:
+    """Prefill rows get the same inverse RoPE + MXFP8 as the decode epilogue."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_inverse_rope_mxfp8_rows,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(5)
+    num_tokens, num_heads = 7, 4
+    o = torch.randn(num_tokens, num_heads, HEAD_DIM, device=device).bfloat16()
+    positions = torch.randint(0, 64, (num_tokens,), device=device)
+    cos_sin_cache = _random_cos_sin_cache(64, device)
+
+    ref = o.float()
+    cos, sin = cos_sin_cache[positions, None].chunk(2, dim=-1)
+    even, odd = ref[..., NOPE_HEAD_DIM::2].clone(), ref[..., NOPE_HEAD_DIM + 1 :: 2]
+    ref[..., NOPE_HEAD_DIM::2] = even * cos + odd * sin
+    ref[..., NOPE_HEAD_DIM + 1 :: 2] = odd * cos - even * sin
+    ref = ref.view(num_tokens, -1)
+    _, expected_scale = _mxfp8_e4m3_quantize_torch(ref)
+
+    data = torch.empty_like(ref, dtype=torch.float8_e4m3fn)
+    scale = torch.empty_like(expected_scale)
+    rocm_inverse_rope_mxfp8_rows(
+        o, positions, cos_sin_cache, ROPE_HEAD_DIM, data, scale
+    )
+
+    assert torch.equal(scale, expected_scale)
+    # Within half an e4m3 step at the top of each block's range.
+    half_step = 16.0 * torch.exp2(scale.float() - 127.0).repeat_interleave(32, -1)
+    assert bool(((_mxfp8_dequant(data, scale) - ref).abs() <= half_step).all())
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_attn_decode_mxfp8_output() -> None:
+    """``out_mxfp8`` routes the real decode through the MXFP8 epilogue."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_triton,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(1)
+    num_heads = 16
+    q = torch.randn(2, num_heads, HEAD_DIM, device=device).bfloat16() * 0.125
+    kv = torch.randn(6, HEAD_DIM, device=device).bfloat16() * 0.125
+    decode = functools.partial(
+        _rocm_sparse_attn_decode_ragged_triton,
+        q=q,
+        main_cache=_pack_fp8_ds_mla_cache(kv, 4, current_platform.is_fp8_fnuz()),
+        main_indices=torch.tensor([0, 2, 4, 1], dtype=torch.int32, device=device),
+        main_indptr=torch.tensor([0, 2, 4], dtype=torch.int32, device=device),
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        inv_rope_positions=torch.tensor([3, 9], device=device),
+        inv_rope_cos_sin_cache=_random_cos_sin_cache(16, device),
+    )
+
+    expected = decode().float().view(2, -1)
+    data = torch.empty(
+        2, num_heads * HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
+    scale = torch.empty(2, num_heads * HEAD_DIM // 32, dtype=torch.uint8, device=device)
+    decode(out_mxfp8=(data, scale))
+
+    torch.testing.assert_close(
+        _mxfp8_dequant(data, scale), expected, atol=1e-3, rtol=2**-4
+    )
+
+
+@requires_gfx950
+@pytest.mark.parametrize(
+    "num_tokens, n_groups",
+    # One case per tile tier of _mxfp8_wo_a_bmm_config, with partial M tiles.
+    [
+        (1, 4),
+        (20, 4),
+        (48, 4),
+        (77, 4),
+        (130, 4),
+        (300, 4),
+        (700, 4),
+        (1000, 4),
+        (1100, 8),
+    ],
+)
+@torch.inference_mode()
+def test_rocm_mxfp8_wo_a_bmm(num_tokens: int, n_groups: int) -> None:
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_mxfp8_wo_a_bmm
+
+    device = torch.device("cuda")
+    torch.manual_seed(3)
+    o_lora_rank, group_dim = 128, 2048
+    a, a_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(num_tokens, n_groups * group_dim, device=device)
+    )
+    w, w_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(n_groups * o_lora_rank, group_dim, device=device)
+    )
+    wo_a = SimpleNamespace(weight=w, weight_scale=w_scale)
+
+    out = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, o_lora_rank)
+
+    expected = torch.einsum(
+        "tgd,grd->tgr",
+        _mxfp8_dequant(a, a_scale).view(num_tokens, n_groups, group_dim),
+        _mxfp8_dequant(w, w_scale).view(n_groups, o_lora_rank, group_dim),
+    )
+    torch.testing.assert_close(out.float(), expected.flatten(1), atol=5e-2, rtol=1e-2)
 
 
 @requires_gfx950
