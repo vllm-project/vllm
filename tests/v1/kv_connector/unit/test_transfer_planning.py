@@ -9,11 +9,9 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
     TransferClass,
-    build_layer_to_spec,
     get_representative_spec,
     get_representative_spec_type,
     is_attention_spec,
-    is_mla_spec,
     is_ssm_spec,
     transfer_class,
 )
@@ -28,8 +26,6 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KpoolTailSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -40,7 +36,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_sliding_window,
     is_full_attention_spec,
-    iter_layer_specs,
 )
 
 # Arguments mirror the specs the existing unit tests construct.
@@ -114,30 +109,26 @@ def test_transfer_class_agrees_with_spec_hierarchy(spec_cls: type[KVCacheSpec]):
     assert transfer_class(spec_cls) is expected
     assert is_attention_spec(spec_cls) is (expected is TransferClass.ATTENTION)
     assert is_ssm_spec(spec_cls) is (expected is TransferClass.SSM)
-    assert is_mla_spec(spec_cls) is issubclass(
-        spec_cls, (MLAAttentionSpec, SlidingWindowMLASpec)
-    )
 
 
 @pytest.mark.parametrize(
-    "spec_cls,expected_class,expected_mla",
+    "spec_cls,expected_class",
     [
         # A circular buffer is attention state even though the kind table does
         # not name its class.
-        (CircularBufferSpec, TransferClass.ATTENTION, False),
-        (KpoolTailSpec, TransferClass.ATTENTION, False),
-        (HiSparseHotSpec, TransferClass.OTHER, False),
-        (HiSparseResidentSpec, TransferClass.OTHER, False),
-        (MambaSpec, TransferClass.SSM, False),
-        (MLAAttentionSpec, TransferClass.ATTENTION, True),
-        (SlidingWindowMLASpec, TransferClass.ATTENTION, True),
-        (HiddenStateCacheSpec, TransferClass.ATTENTION, True),
+        (CircularBufferSpec, TransferClass.ATTENTION),
+        (KpoolTailSpec, TransferClass.ATTENTION),
+        (HiSparseHotSpec, TransferClass.OTHER),
+        (HiSparseResidentSpec, TransferClass.OTHER),
+        (MambaSpec, TransferClass.SSM),
+        (MLAAttentionSpec, TransferClass.ATTENTION),
+        (SlidingWindowMLASpec, TransferClass.ATTENTION),
+        (HiddenStateCacheSpec, TransferClass.ATTENTION),
     ],
 )
-def test_named_spec_classes(spec_cls, expected_class, expected_mla):
+def test_named_spec_classes(spec_cls, expected_class):
     """Pin the classes the two deliberate answers in the table cover."""
     assert transfer_class(spec_cls) is expected_class
-    assert is_mla_spec(spec_cls) is expected_mla
 
 
 @pytest.mark.parametrize("spec", SPEC_INSTANCES, ids=lambda spec: type(spec).__name__)
@@ -146,7 +137,6 @@ def test_instance_classifies_like_its_class(spec: KVCacheSpec):
     assert transfer_class(spec) is transfer_class(type(spec))
     assert is_attention_spec(spec) is is_attention_spec(type(spec))
     assert is_ssm_spec(spec) is is_ssm_spec(type(spec))
-    assert is_mla_spec(spec) is is_mla_spec(type(spec))
 
 
 def _group(specs: dict[str, KVCacheSpec]) -> UniformTypeKVCacheSpecs:
@@ -174,25 +164,17 @@ def test_group_class_is_stable_across_layer_order():
 
 
 def test_representative_spec_answers_for_a_group():
-    """The representative spec stands for the group, not for one layer."""
+    """The representative spec stands for the group, not for one layer.
+
+    That holds because layers only merge into a group when they share one
+    registered base spec, which the group builder checks.
+    """
     full = FullAttentionSpec(**ATTENTION_KWARGS)
     group = _group({"layer_0": full})
 
     assert get_representative_spec(group) is full
     assert get_representative_spec_type(group) is FullAttentionSpec
     assert transfer_class(group) is TransferClass.ATTENTION
-
-
-def test_mla_is_a_per_layer_answer():
-    """MLA is per layer, so a group has to be asked layer by layer."""
-    full = FullAttentionSpec(**ATTENTION_KWARGS)
-    mla = MLAAttentionSpec(**MLA_KWARGS)
-    group = _group({"full": full, "mla": mla})
-
-    with pytest.raises(ValueError, match="per-layer"):
-        is_mla_spec(group)
-
-    assert [is_mla_spec(layer) for layer in iter_layer_specs(group)] == [False, True]
 
 
 def test_group_with_mixed_transfer_classes_is_rejected():
@@ -223,15 +205,13 @@ def test_wrapper_class_has_no_class_level_answer():
         transfer_class(UniformTypeKVCacheSpecs)
     with pytest.raises(ValueError, match="UniformTypeKVCacheSpecs"):
         is_attention_spec(UniformTypeKVCacheSpecs)
-    with pytest.raises(ValueError, match="UniformTypeKVCacheSpecs"):
-        is_mla_spec(UniformTypeKVCacheSpecs)
 
 
 def test_wrapped_group_answers_the_scheduler_questions():
     """The wrapper-aware framework helpers see through the group spec.
 
-    This is the input the sliding-window budget and the MoRIIO hybrid whitelist
-    read, so a wrapped group now reports the window and the kind it actually has.
+    This is the input the sliding-window budget reads, so a wrapped group
+    reports the window and the kind it actually has.
     """
     full_spec = FullAttentionSpec(**ATTENTION_KWARGS)
     sw_spec = SlidingWindowSpec(**ATTENTION_KWARGS, sliding_window=2048)
@@ -246,26 +226,3 @@ def test_wrapped_group_answers_the_scheduler_questions():
     assert get_kv_cache_spec_sliding_window(sw_wrapper) == 2048
     assert is_full_attention_spec(sw_wrapper) is False
     assert transfer_class(sw_wrapper) is TransferClass.ATTENTION
-
-
-def test_build_layer_to_spec_unwraps_groups():
-    """Every layer name maps to its own spec, wrapped or not."""
-    full_spec = FullAttentionSpec(**ATTENTION_KWARGS)
-    sw_spec = SlidingWindowSpec(**ATTENTION_KWARGS, sliding_window=32)
-    kv_cache_config = KVCacheConfig(
-        num_blocks=4,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["full_0", "full_1"], kv_cache_spec=full_spec),
-            KVCacheGroupSpec(
-                layer_names=["sw_0"],
-                kv_cache_spec=_group({"sw_0": sw_spec}),
-            ),
-        ],
-    )
-
-    assert build_layer_to_spec(kv_cache_config) == {
-        "full_0": full_spec,
-        "full_1": full_spec,
-        "sw_0": sw_spec,
-    }

@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -433,6 +434,62 @@ def test_wrapped_full_attention_group_needs_no_hma(mock_platform):
 
     assert scheduler._is_hma_required is False
     assert scheduler.blocks_per_sw == [0]
+
+
+def _wrapped_mamba_kv_cache_config(num_speculative_blocks: int = 2) -> KVCacheConfig:
+    """One full-attention group and one wrapped Mamba group with scratch slots."""
+    block_size = 16
+    full_spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=4, head_size=16, dtype=torch.float16
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((16,), (16,)),
+        dtypes=(torch.float16,),
+        num_speculative_blocks=num_speculative_blocks,
+    )
+    wrapped_mamba = UniformTypeKVCacheSpecs.from_specs({"mamba0": mamba_spec})
+    assert wrapped_mamba is not None, "a mamba group is a valid uniform-type group"
+    return KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full0"], full_spec),
+            KVCacheGroupSpec(["mamba0"], wrapped_mamba),
+        ],
+    )
+
+
+@pytest.mark.cpu_test
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
+def test_ssm_spec_blocks_from_wrapped_mamba_group(mock_platform):
+    """A wrapped Mamba group keeps its speculative scratch slots.
+
+    The wrapper is not a MambaSpec, so those slots were dropped and the
+    scheduler handed speculative state blocks to the peer as ordinary ones.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+
+    scheduler = NixlConnectorScheduler(
+        vllm_config=create_vllm_config(block_size=16),
+        engine_id="test-engine",
+        kv_cache_config=_wrapped_mamba_kv_cache_config(),
+    )
+
+    assert scheduler._is_hma_required is True
+    assert scheduler.blocks_per_sw == [0, 0]
+    assert scheduler._ssm_spec_blocks == [None, 2]
+    # The two trailing scratch slots go, the state slot stays.
+    assert scheduler.get_exchange_clipped_blocks(([1, 2, 3], [7, 8, 9])) == (
+        [1, 2, 3],
+        [7],
+    )
 
 
 @pytest.mark.cpu_test

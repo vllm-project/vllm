@@ -7,12 +7,9 @@ from enum import Enum
 
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    KVCacheConfig,
     KVCacheSpec,
     KVCacheSpecKind,
     MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind_for_class,
     iter_layer_specs,
@@ -39,8 +36,6 @@ _KIND_TO_TRANSFER_CLASS: dict[KVCacheSpecKind, TransferClass] = {
     KVCacheSpecKind.MAMBA: TransferClass.SSM,
 }
 
-_MLA_KINDS = (KVCacheSpecKind.MLA_ATTENTION, KVCacheSpecKind.SLIDING_WINDOW_MLA)
-
 
 def get_representative_spec(spec: KVCacheSpec) -> KVCacheSpec:
     """Return the spec that stands for a cache group.
@@ -66,7 +61,13 @@ def get_representative_spec(spec: KVCacheSpec) -> KVCacheSpec:
 
 
 def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
-    """Return the concrete spec type behind ``spec``, unwrapping uniform-type groups."""
+    """Return the concrete spec type behind ``spec``, unwrapping uniform-type groups.
+
+    Only the concrete type of the representative spec is returned, which is the
+    answer a group-level question needs: layers merge into a group only when
+    they share one registered base spec, so any wrapped spec stands for the
+    group. Ask a per-layer question through ``iter_layer_specs`` instead.
+    """
     return type(get_representative_spec(spec))
 
 
@@ -153,52 +154,3 @@ def is_attention_spec(spec: type[KVCacheSpec] | KVCacheSpec) -> bool:
 def is_ssm_spec(spec: type[KVCacheSpec] | KVCacheSpec) -> bool:
     """Whether a spec, group spec or spec class transfers as SSM state."""
     return transfer_class(spec) is TransferClass.SSM
-
-
-def is_mla_spec(spec: type[KVCacheSpec] | KVCacheSpec) -> bool:
-    """Whether one spec or spec class is MLA, including its sliding-window form.
-
-    MLA is a per-layer property: a group carrying ``UniformTypeKVCacheSpecs``
-    can hold MLA and non-MLA layers, so ask each layer through
-    ``iter_layer_specs`` instead of the group.
-
-    Args:
-        spec: a spec instance or a spec class.
-
-    Returns:
-        Whether the spec is MLA.
-
-    Raises:
-        ValueError: If ``spec`` is a group spec or the wrapper class.
-
-    """
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        raise ValueError(
-            "MLA is a per-layer property; ask each spec from iter_layer_specs"
-        )
-    spec_cls = _spec_class(spec)
-    kind = get_kv_cache_spec_kind_for_class(spec_cls)
-    if kind in _MLA_KINDS:
-        return True
-    if kind is KVCacheSpecKind.UNKNOWN:
-        return issubclass(spec_cls, (MLAAttentionSpec, SlidingWindowMLASpec))
-    return False
-
-
-def build_layer_to_spec(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
-    """Map every layer name to its own spec, unwrapping uniform-type groups."""
-    layer_to_spec: dict[str, KVCacheSpec] = {}
-    for group in kv_cache_config.kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        if isinstance(group_spec, UniformTypeKVCacheSpecs):
-            layer_to_spec.update(
-                {
-                    layer_name: group_spec.kv_cache_specs[layer_name]
-                    for layer_name in group.layer_names
-                }
-            )
-        else:
-            layer_to_spec.update(
-                {layer_name: group_spec for layer_name in group.layer_names}
-            )
-    return layer_to_spec
