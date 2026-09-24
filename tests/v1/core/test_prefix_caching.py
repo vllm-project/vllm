@@ -3294,6 +3294,24 @@ def test_block_removed_last_copy_is_scoped_by_group():
     assert removed_event.group_idx == 0
 
 
+def test_move_block_hashes_does_not_emit_block_removed():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        enable_kv_cache_events=True,
+    )
+    src_block, dst_block = pool.get_new_blocks(2)
+    block_hash = make_block_hash_with_group_id(BlockHash(b"hash"), 0)
+    src_block.set_block_hash(block_hash, num_tokens=16)
+    pool.cached_block_hash_to_block.insert(block_hash, src_block)
+
+    pool.move_block_hashes(src_block, dst_block)
+
+    assert pool.cached_block_hash_to_block.get_one_block(block_hash) is dst_block
+    assert pool.take_events() == []
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events(blocks_to_cache: int):
     block_size = 16
