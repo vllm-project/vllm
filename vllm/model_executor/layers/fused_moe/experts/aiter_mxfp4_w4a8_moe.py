@@ -695,6 +695,8 @@ def aiter_triton_kernel_w4a4_moe_forward(
     e_score_correction_bias: torch.Tensor | None = None,
     routed_scaling_factor: float | None = None,
     score_mode: str | None = None,
+    input_ids: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
 ):
     assert quant_config is not None and rocm_aiter_ops.is_enabled()
 
@@ -711,7 +713,26 @@ def aiter_triton_kernel_w4a4_moe_forward(
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
 
-    if score_mode is not None:
+    if hash_indices_table is not None:
+        assert input_ids is not None, "hash routing requires input_ids"
+        n_tokens, n_expts_tot = gating_output.shape
+        tokens_per_expt = max(1, n_tokens * topk // n_expts_tot)
+        block_m = max(16, min(1 << (tokens_per_expt - 1).bit_length(), 128))
+        routing_data, gather_idx, scatter_idx = _routing_mod.routing_from_hash(
+            gating_output,
+            hash_indices_table,
+            input_ids.to(hash_indices_table.dtype),
+            topk,
+            block_m,
+            score_mode=score_mode or "sqrtsoftplus",
+            renorm=renormalize,
+            routed_scaling_factor=(
+                routed_scaling_factor
+                if routed_scaling_factor is not None
+                else 1.0
+            ),
+        )
+    elif score_mode is not None:
         use_grouped_topk = (
             num_expert_group is not None and num_expert_group > 1
         )
@@ -868,6 +889,10 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
+    def _supports_hash_routing() -> bool:
+        return True
+
+    @staticmethod
     def _supports_current_device() -> bool:
         if not rocm_aiter_ops.is_enabled():
             return False
@@ -944,6 +969,8 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.moe_config.intermediate_size_per_partition_unpadded is not None
         assert self.moe_config.hidden_dim_unpadded is not None
@@ -984,4 +1011,6 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             score_mode=score_mode,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )

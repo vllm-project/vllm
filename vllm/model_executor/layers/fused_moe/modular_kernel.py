@@ -567,7 +567,11 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
             )
-        elif moe_config.has_hash_routing and cls.is_monolithic():
+        elif (
+            moe_config.has_hash_routing
+            and cls.is_monolithic()
+            and not cls._supports_hash_routing()
+        ):
             return False, _make_reason("hash routing")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
@@ -644,6 +648,15 @@ class FusedMoEExperts(ABC):
         in addition to the experts if certain routers are not supported.
         """
         return True
+
+    @staticmethod
+    def _supports_hash_routing() -> bool:
+        """Whether a monolithic kernel implements hash routing itself.
+
+        Kernels that return True receive `input_ids` and `hash_indices_table`
+        in `apply()` for layers with a hash-routing table.
+        """
+        return False
 
     @staticmethod
     def _supports_router_logits_dtype(
@@ -1558,6 +1571,8 @@ class FusedMoEKernelMonolithicImpl:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1579,6 +1594,11 @@ class FusedMoEKernelMonolithicImpl:
                     f"kernel {type(self.fused_experts).__name__}."
                 )
             routing_replay_out = routing_sink.buffer[: len(a1q)]
+        hash_kwargs = (
+            {"input_ids": input_ids, "hash_indices_table": hash_indices_table}
+            if hash_indices_table is not None
+            else {}
+        )
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
@@ -1595,6 +1615,7 @@ class FusedMoEKernelMonolithicImpl:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_replay_out=routing_replay_out,
+            **hash_kwargs,
         )
         if routing_sink is not None:
             routing_sink.capture_fn(routing_replay_out)
@@ -1707,6 +1728,8 @@ class FusedMoEKernel:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1723,6 +1746,8 @@ class FusedMoEKernel:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_sink=routing_sink,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )
 
     def apply(
